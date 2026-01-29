@@ -424,76 +424,49 @@ export class TelegramBotService implements OnModuleInit {
         ),
       ]);
 
-      if (positions.length === 0) {
-        await this.bot.sendMessage(
-          chatId,
-          `📊 *Account Summary*\n\n` +
-            `💰 Total Balance: $${balance.totalBalance.toFixed(2)}\n` +
-            `💵 Available Balance: $${balance.availableBalance.toFixed(2)}\n\n` +
-            `No open positions.`,
-          { parse_mode: "Markdown" },
-        );
-        return;
-      }
-
-      let message = `📊 *Open Positions*\n\n`;
-
-      positions.forEach((pos, index) => {
-        const pnlEmoji = pos.unrealizedPnl >= 0 ? "🟢" : "🔴";
-        const pnlPercent = ((pos.unrealizedPnl / pos.margin) * 100).toFixed(2);
-
-        message += `*${index + 1}. ${pos.symbol}* ${pos.side === "LONG" ? "📈" : "📉"}\n`;
-        message += `├ Entry: $${pos.entryPrice.toFixed(4)}\n`;
-        message += `├ Current: $${pos.currentPrice.toFixed(4)}\n`;
-        message += `├ Quantity: ${pos.quantity}\n`;
-        message += `├ Leverage: ${pos.leverage}x\n`;
-        message += `├ Margin: $${pos.margin.toFixed(2)}\n`;
-        message += `├ Volume: $${pos.volume.toFixed(2)}\n`;
-        message += `├ PnL: ${pnlEmoji} $${pos.unrealizedPnl.toFixed(2)} (${pnlPercent}%)\n`;
-
-        if (pos.takeProfit) {
-          message += `├ TP: $${parseFloat(pos.takeProfit).toFixed(4)}\n`;
-        } else {
-          message += `├ TP: Not set\n`;
-        }
-
-        if (pos.stopLoss) {
-          message += `├ SL: $${parseFloat(pos.stopLoss).toFixed(4)}\n`;
-        } else {
-          message += `├ SL: Not set\n`;
-        }
-
-        message += `└ Liq. Price: $${pos.liquidationPrice.toFixed(4)}\n\n`;
-      });
-
       const totalPnl = positions.reduce(
         (sum, pos) => sum + pos.unrealizedPnl,
         0,
       );
-      const totalPnlEmoji = totalPnl >= 0 ? "🟢" : "🔴";
 
-      message += `💰 *Account Summary*\n`;
-      message += `├ Total Balance: $${balance.totalBalance.toFixed(2)}\n`;
-      message += `├ Available: $${balance.availableBalance.toFixed(2)}\n`;
-      message += `└ Total Unrealized PnL: ${totalPnlEmoji} $${totalPnl.toFixed(2)}\n`;
+      let message = `#babywatermelon đang có các vị thế:\n`;
 
-      // Check if TP is set
-      const tpData = await this.redisService.get<{
-        percentage: number;
-        initialBalance: number;
-      }>(`user:${telegramId}:tp`);
-      if (tpData) {
-        const unrealizedPnl = balance.totalUnrealizedProfit;
-        const targetProfit = (tpData.initialBalance * tpData.percentage) / 100;
-        const currentPercentage = (unrealizedPnl / tpData.initialBalance) * 100;
-        const progressEmoji = unrealizedPnl >= targetProfit ? "🎯" : "📊";
+      if (positions.length === 0) {
+        message += `\nKhông có vị thế nào.\n\n`;
+        message += `Lãi/lỗ chưa ghi nhận: ${totalPnl.toFixed(2)}\n`;
+        message += `Balance hiện tại: ${balance.totalBalance.toFixed(2)}`;
 
-        message += `\n${progressEmoji} *TP Target*\n`;
-        message += `├ Target: ${tpData.percentage}% of $${tpData.initialBalance.toFixed(2)}\n`;
-        message += `├ Target Profit: $${targetProfit.toFixed(2)}\n`;
-        message += `├ Unrealized PnL: $${unrealizedPnl.toFixed(2)}\n`;
-        message += `└ Progress: ${currentPercentage.toFixed(2)}%\n`;
+        await this.bot.sendMessage(chatId, message, { parse_mode: "Markdown" });
+        return;
       }
+
+      positions.forEach((pos) => {
+        const sideText = pos.side === "LONG" ? "Long" : "Short";
+        const volume = pos.margin * pos.leverage;
+
+        // Format TP/SL
+        const tpValue = pos.takeProfit
+          ? parseFloat(pos.takeProfit).toLocaleString("en-US", {
+              minimumFractionDigits: 0,
+              maximumFractionDigits: 4,
+            })
+          : "--";
+        const slValue = pos.stopLoss
+          ? parseFloat(pos.stopLoss).toLocaleString("en-US", {
+              minimumFractionDigits: 0,
+              maximumFractionDigits: 4,
+            })
+          : "--";
+
+        message += `🔴 ${sideText} #${pos.symbol} x ${pos.leverage}\n`;
+        message += `Entry: ${pos.entryPrice.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 4 })}\n`;
+        message += `TP/SL: ${tpValue}/${slValue}\n`;
+        message += `Volume: ${volume.toLocaleString("en-US", { minimumFractionDigits: 4, maximumFractionDigits: 4 })} USDT\n`;
+        message += `Profit: ${pos.unrealizedPnl.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDT\n\n`;
+      });
+
+      message += `Lãi/lỗ chưa ghi nhận: ${totalPnl.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}\n`;
+      message += `Balance hiện tại: ${balance.totalBalance.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
       await this.bot.sendMessage(chatId, message, { parse_mode: "Markdown" });
     } catch (error) {
