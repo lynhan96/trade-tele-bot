@@ -4,6 +4,7 @@ import { ScheduleModule } from "@nestjs/schedule";
 import { TelegramModule } from "./telegram/telegram.module";
 import { RedisModule } from "./redis/redis.module";
 import { BinanceModule } from "./binance/binance.module";
+import { OkxModule } from "./okx/okx.module";
 
 @Module({
   imports: [
@@ -13,6 +14,7 @@ import { BinanceModule } from "./binance/binance.module";
     ScheduleModule.forRoot(),
     RedisModule,
     BinanceModule,
+    OkxModule,
     TelegramModule,
   ],
 })

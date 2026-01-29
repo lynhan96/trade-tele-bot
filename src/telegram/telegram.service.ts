@@ -4,7 +4,8 @@ import { Cron, CronExpression } from "@nestjs/schedule";
 import TelegramBot = require("node-telegram-bot-api");
 import { RedisService } from "../redis/redis.service";
 import { BinanceService } from "../binance/binance.service";
-import { UserApiKeys } from "../interfaces/user.interface";
+import { OkxService } from "../okx/okx.service";
+import { UserApiKeys, UserActiveExchange } from "../interfaces/user.interface";
 
 @Injectable()
 export class TelegramBotService implements OnModuleInit {
@@ -15,6 +16,7 @@ export class TelegramBotService implements OnModuleInit {
     private configService: ConfigService,
     private redisService: RedisService,
     private binanceService: BinanceService,
+    private okxService: OkxService,
   ) {}
 
   async onModuleInit() {
@@ -40,10 +42,22 @@ export class TelegramBotService implements OnModuleInit {
       await this.handleStart(msg);
     });
 
-    // Command: /setkeys
+    // Command: /setkeys - now with exchange type
     this.bot.onText(/\/setkeys[\s\S]+/, async (msg, match) => {
       this.logger.debug(`Command /setkeys from user ${msg.from.id}`);
       await this.handleSetKeys(msg, match);
+    });
+
+    // Command: /accounts - list all connected accounts
+    this.bot.onText(/\/accounts/, async (msg) => {
+      this.logger.debug(`Command /accounts from user ${msg.from.id}`);
+      await this.handleListAccounts(msg);
+    });
+
+    // Command: /switch [exchange] - switch active exchange
+    this.bot.onText(/\/switch (.+)/, async (msg, match) => {
+      this.logger.debug(`Command /switch from user ${msg.from.id}`);
+      await this.handleSwitchExchange(msg, match);
     });
 
     // Command: /position
@@ -52,8 +66,8 @@ export class TelegramBotService implements OnModuleInit {
       await this.handlePosition(msg);
     });
 
-    // Command: /set-account <tp_percentage> <initial_balance>
-    this.bot.onText(/\/set-account (.+)/, async (msg, match) => {
+    // Command: /set-account [tp_percentage] [initial_balance]
+    this.bot.onText(/\/setaccount (.+)/, async (msg, match) => {
       this.logger.debug(`Command /set-account from user ${msg.from.id}`);
       await this.handleSetAccount(msg, match);
     });
@@ -69,6 +83,60 @@ export class TelegramBotService implements OnModuleInit {
       this.logger.debug(`Command /update from user ${msg.from.id}`);
       await this.handleManualUpdate(msg);
     });
+  }
+
+  // Helper: Get active exchange for a user (defaults to first found if not set)
+  private async getActiveExchange(
+    telegramId: number,
+  ): Promise<"binance" | "okx" | null> {
+    const activeData = await this.redisService.get<UserActiveExchange>(
+      `user:${telegramId}:active`,
+    );
+
+    if (activeData) {
+      return activeData.exchange;
+    }
+
+    // If no active exchange is set, check which accounts exist
+    const binanceExists = await this.redisService.exists(
+      `user:${telegramId}:binance`,
+    );
+    const okxExists = await this.redisService.exists(`user:${telegramId}:okx`);
+
+    // Default to binance if it exists, otherwise okx
+    if (binanceExists) return "binance";
+    if (okxExists) return "okx";
+    return null;
+  }
+
+  // Helper: Set active exchange for a user
+  private async setActiveExchange(
+    telegramId: number,
+    exchange: "binance" | "okx",
+  ): Promise<void> {
+    await this.redisService.set(`user:${telegramId}:active`, {
+      exchange,
+      setAt: new Date().toISOString(),
+    });
+  }
+
+  // Helper: Get user data for a specific exchange
+  private async getUserData(
+    telegramId: number,
+    exchange: "binance" | "okx",
+  ): Promise<UserApiKeys | null> {
+    return await this.redisService.get<UserApiKeys>(
+      `user:${telegramId}:${exchange}`,
+    );
+  }
+
+  // Helper: Get user data for active exchange
+  private async getActiveUserData(
+    telegramId: number,
+  ): Promise<UserApiKeys | null> {
+    const activeExchange = await this.getActiveExchange(telegramId);
+    if (!activeExchange) return null;
+    return await this.getUserData(telegramId, activeExchange);
   }
 
   @Cron(CronExpression.EVERY_30_SECONDS)
@@ -88,69 +156,116 @@ export class TelegramBotService implements OnModuleInit {
 
         if (!tpData) continue;
 
-        const userData = await this.redisService.get<UserApiKeys>(
-          `user:${telegramId}`,
+        const binanceData = await this.getUserData(
+          parseInt(telegramId),
+          "binance",
         );
-        if (!userData) continue;
+        const okxData = await this.getUserData(parseInt(telegramId), "okx");
 
-        try {
-          // First, check account balance to get unrealized PnL
-          const balance = await this.binanceService.getAccountBalance(
-            userData.apiKey,
-            userData.apiSecret,
-          );
+        if (!binanceData && !okxData) continue;
 
-          const unrealizedPnl = balance.totalUnrealizedProfit;
-          const targetProfit =
-            (tpData.initialBalance * tpData.percentage) / 100;
-          const profitPercentage =
-            (unrealizedPnl / tpData.initialBalance) * 100;
-
-          this.logger.debug(
-            `User ${telegramId}: Unrealized PnL $${unrealizedPnl.toFixed(2)} / Target $${targetProfit.toFixed(2)} (${profitPercentage.toFixed(2)}% / ${tpData.percentage}%)`,
-          );
-
-          // If unrealized PnL reaches target, get positions and close them
-          if (unrealizedPnl >= targetProfit) {
-            this.logger.log(
-              `TP Target reached for user ${telegramId}: Unrealized PnL $${unrealizedPnl.toFixed(2)}`,
+        // Check Binance account
+        if (binanceData) {
+          try {
+            const balance = await this.binanceService.getAccountBalance(
+              binanceData.apiKey,
+              binanceData.apiSecret,
             );
 
-            // Now get positions to close them
-            const positions = await this.binanceService.getOpenPositions(
-              userData.apiKey,
-              userData.apiSecret,
+            const unrealizedPnl = balance.totalUnrealizedProfit;
+            const targetProfit =
+              (tpData.initialBalance * tpData.percentage) / 100;
+            const profitPercentage =
+              (unrealizedPnl / tpData.initialBalance) * 100;
+
+            this.logger.debug(
+              `User ${telegramId} (BINANCE): Unrealized PnL $${unrealizedPnl.toFixed(2)} / Target $${targetProfit.toFixed(2)} (${profitPercentage.toFixed(2)}% / ${tpData.percentage}%)`,
             );
 
-            if (positions.length > 0) {
-              // Close all positions
-              await this.closeAllPositions(
-                userData.apiKey,
-                userData.apiSecret,
-                positions,
+            if (unrealizedPnl >= targetProfit) {
+              this.logger.log(
+                `TP Target reached for user ${telegramId} (BINANCE): Unrealized PnL $${unrealizedPnl.toFixed(2)}`,
+              );
+
+              const positions = await this.binanceService.getOpenPositions(
+                binanceData.apiKey,
+                binanceData.apiSecret,
+              );
+
+              if (positions.length > 0) {
+                await this.closeAllPositions(binanceData, positions);
+              }
+
+              await this.bot.sendMessage(
+                binanceData.chatId,
+                `🎯 *Take Profit Target Reached! (BINANCE)*\n\n` +
+                  `Target: ${tpData.percentage}% of $${tpData.initialBalance.toFixed(2)}\n` +
+                  `Target Profit: $${targetProfit.toFixed(2)}\n` +
+                  `Unrealized PnL: $${unrealizedPnl.toFixed(2)}\n` +
+                  `Total Balance: $${balance.totalBalance.toFixed(2)}\n\n` +
+                  `✅ All positions have been closed!`,
+                { parse_mode: "Markdown" },
               );
             }
-
-            // Notify user using stored chatId
-            this.logger.log(
-              `Sending TP notification to user ${telegramId} (chatId: ${userData.chatId})`,
-            );
-            await this.bot.sendMessage(
-              userData.chatId,
-              `🎯 *Take Profit Target Reached!*\n\n` +
-                `Target: ${tpData.percentage}% of $${tpData.initialBalance.toFixed(2)}\n` +
-                `Target Profit: $${targetProfit.toFixed(2)}\n` +
-                `Unrealized PnL: $${unrealizedPnl.toFixed(2)}\n` +
-                `Total Balance: $${balance.totalBalance.toFixed(2)}\n\n` +
-                `✅ All positions have been closed!`,
-              { parse_mode: "Markdown" },
+          } catch (error) {
+            this.logger.error(
+              `Error checking TP for user ${telegramId} (BINANCE):`,
+              error.message,
             );
           }
-        } catch (error) {
-          this.logger.error(
-            `Error checking TP for user ${telegramId}:`,
-            error.message,
-          );
+        }
+
+        // Check OKX account
+        if (okxData) {
+          try {
+            const balance = await this.okxService.getAccountBalance(
+              okxData.apiKey,
+              okxData.apiSecret,
+              okxData.passphrase,
+            );
+
+            const unrealizedPnl = balance.totalUnrealizedProfit;
+            const targetProfit =
+              (tpData.initialBalance * tpData.percentage) / 100;
+            const profitPercentage =
+              (unrealizedPnl / tpData.initialBalance) * 100;
+
+            this.logger.debug(
+              `User ${telegramId} (OKX): Unrealized PnL $${unrealizedPnl.toFixed(2)} / Target $${targetProfit.toFixed(2)} (${profitPercentage.toFixed(2)}% / ${tpData.percentage}%)`,
+            );
+
+            if (unrealizedPnl >= targetProfit) {
+              this.logger.log(
+                `TP Target reached for user ${telegramId} (OKX): Unrealized PnL $${unrealizedPnl.toFixed(2)}`,
+              );
+
+              const positions = await this.okxService.getOpenPositions(
+                okxData.apiKey,
+                okxData.apiSecret,
+                okxData.passphrase,
+              );
+
+              if (positions.length > 0) {
+                await this.closeAllPositions(okxData, positions);
+              }
+
+              await this.bot.sendMessage(
+                okxData.chatId,
+                `🎯 *Take Profit Target Reached! (OKX)*\n\n` +
+                  `Target: ${tpData.percentage}% of $${tpData.initialBalance.toFixed(2)}\n` +
+                  `Target Profit: $${targetProfit.toFixed(2)}\n` +
+                  `Unrealized PnL: $${unrealizedPnl.toFixed(2)}\n` +
+                  `Total Balance: $${balance.totalBalance.toFixed(2)}\n\n` +
+                  `✅ All positions have been closed!`,
+                { parse_mode: "Markdown" },
+              );
+            }
+          } catch (error) {
+            this.logger.error(
+              `Error checking TP for user ${telegramId} (OKX):`,
+              error.message,
+            );
+          }
         }
       }
     } catch (error) {
@@ -187,57 +302,104 @@ export class TelegramBotService implements OnModuleInit {
           continue;
         }
 
-        const userData = await this.redisService.get<UserApiKeys>(
-          `user:${telegramId}`,
+        const binanceData = await this.getUserData(
+          parseInt(telegramId),
+          "binance",
         );
-        if (!userData) {
+        const okxData = await this.getUserData(parseInt(telegramId), "okx");
+
+        if (!binanceData && !okxData) {
           this.logger.warn(`No user data found for user ${telegramId}`);
           continue;
         }
 
-        this.logger.debug(`User ${telegramId} has chatId: ${userData.chatId}`);
+        // Send update for Binance if connected
+        if (binanceData) {
+          try {
+            this.logger.debug(
+              `Fetching balance for user ${telegramId} (BINANCE)`,
+            );
+            const balance = await this.binanceService.getAccountBalance(
+              binanceData.apiKey,
+              binanceData.apiSecret,
+            );
 
-        try {
-          // Get account balance
-          this.logger.debug(`Fetching balance for user ${telegramId}`);
-          const balance = await this.binanceService.getAccountBalance(
-            userData.apiKey,
-            userData.apiSecret,
-          );
+            const unrealizedPnl = balance.totalUnrealizedProfit;
+            const targetProfit =
+              (tpData.initialBalance * tpData.percentage) / 100;
+            const currentPercentage =
+              (unrealizedPnl / tpData.initialBalance) * 100;
+            const progressEmoji = unrealizedPnl >= targetProfit ? "🎯" : "📊";
 
-          const unrealizedPnl = balance.totalUnrealizedProfit;
-          const targetProfit =
-            (tpData.initialBalance * tpData.percentage) / 100;
-          const currentPercentage =
-            (unrealizedPnl / tpData.initialBalance) * 100;
-          const progressEmoji = unrealizedPnl >= targetProfit ? "🎯" : "📊";
+            this.logger.log(
+              `User ${telegramId} (BINANCE): PnL=$${unrealizedPnl.toFixed(2)}, Target=$${targetProfit.toFixed(2)}, Progress=${currentPercentage.toFixed(2)}%`,
+            );
 
-          this.logger.log(
-            `User ${telegramId}: PnL=$${unrealizedPnl.toFixed(2)}, Target=$${targetProfit.toFixed(2)}, Progress=${currentPercentage.toFixed(2)}%`,
-          );
+            await this.bot.sendMessage(
+              binanceData.chatId,
+              `${progressEmoji} *10-Minute Update (BINANCE)*\n\n` +
+                `💰 Current Balance: $${balance.totalBalance.toFixed(2)}\n` +
+                `📈 Unrealized PnL: $${unrealizedPnl.toFixed(2)}\n\n` +
+                `🎯 TP Target Progress:\n` +
+                `├ Target: ${tpData.percentage}% ($${targetProfit.toFixed(2)})\n` +
+                `├ Current: ${currentPercentage.toFixed(2)}%\n` +
+                `└ Remaining: ${(tpData.percentage - currentPercentage).toFixed(2)}%`,
+              { parse_mode: "Markdown" },
+            );
 
-          // Send periodic update using stored chatId
-          this.logger.debug(`Sending message to chatId ${userData.chatId}`);
-          await this.bot.sendMessage(
-            userData.chatId,
-            `${progressEmoji} *30-Minute Update*\n\n` +
-              `💰 Current Balance: $${balance.totalBalance.toFixed(2)}\n` +
-              `📈 Unrealized PnL: $${unrealizedPnl.toFixed(2)}\n\n` +
-              `🎯 TP Target Progress:\n` +
-              `├ Target: ${tpData.percentage}% ($${targetProfit.toFixed(2)})\n` +
-              `├ Current: ${currentPercentage.toFixed(2)}%\n` +
-              `└ Remaining: ${(tpData.percentage - currentPercentage).toFixed(2)}%`,
-            { parse_mode: "Markdown" },
-          );
+            this.logger.log(
+              `✅ Successfully sent periodic update to user ${telegramId} (BINANCE)`,
+            );
+          } catch (error) {
+            this.logger.error(
+              `Error sending periodic update to user ${telegramId} (BINANCE):`,
+              error.message,
+            );
+          }
+        }
 
-          this.logger.log(
-            `✅ Successfully sent periodic update to user ${telegramId} (chatId: ${userData.chatId})`,
-          );
-        } catch (error) {
-          this.logger.error(
-            `Error sending periodic update to user ${telegramId}:`,
-            error.message,
-          );
+        // Send update for OKX if connected
+        if (okxData) {
+          try {
+            this.logger.debug(`Fetching balance for user ${telegramId} (OKX)`);
+            const balance = await this.okxService.getAccountBalance(
+              okxData.apiKey,
+              okxData.apiSecret,
+              okxData.passphrase,
+            );
+
+            const unrealizedPnl = balance.totalUnrealizedProfit;
+            const targetProfit =
+              (tpData.initialBalance * tpData.percentage) / 100;
+            const currentPercentage =
+              (unrealizedPnl / tpData.initialBalance) * 100;
+            const progressEmoji = unrealizedPnl >= targetProfit ? "🎯" : "📊";
+
+            this.logger.log(
+              `User ${telegramId} (OKX): PnL=$${unrealizedPnl.toFixed(2)}, Target=$${targetProfit.toFixed(2)}, Progress=${currentPercentage.toFixed(2)}%`,
+            );
+
+            await this.bot.sendMessage(
+              okxData.chatId,
+              `${progressEmoji} *10-Minute Update (OKX)*\n\n` +
+                `💰 Current Balance: $${balance.totalBalance.toFixed(2)}\n` +
+                `📈 Unrealized PnL: $${unrealizedPnl.toFixed(2)}\n\n` +
+                `🎯 TP Target Progress:\n` +
+                `├ Target: ${tpData.percentage}% ($${targetProfit.toFixed(2)})\n` +
+                `├ Current: ${currentPercentage.toFixed(2)}%\n` +
+                `└ Remaining: ${(tpData.percentage - currentPercentage).toFixed(2)}%`,
+              { parse_mode: "Markdown" },
+            );
+
+            this.logger.log(
+              `✅ Successfully sent periodic update to user ${telegramId} (OKX)`,
+            );
+          } catch (error) {
+            this.logger.error(
+              `Error sending periodic update to user ${telegramId} (OKX):`,
+              error.message,
+            );
+          }
         }
       }
     } catch (error) {
@@ -245,22 +407,29 @@ export class TelegramBotService implements OnModuleInit {
     }
   }
 
-  private async closeAllPositions(
-    apiKey: string,
-    apiSecret: string,
-    positions: any[],
-  ) {
+  private async closeAllPositions(userData: UserApiKeys, positions: any[]) {
     this.logger.log(`Closing ${positions.length} positions`);
 
     for (const position of positions) {
       try {
-        await this.binanceService.closePosition(
-          apiKey,
-          apiSecret,
-          position.symbol,
-          position.quantity,
-          position.side,
-        );
+        if (userData.exchange === "okx") {
+          await this.okxService.closePosition(
+            userData.apiKey,
+            userData.apiSecret,
+            userData.passphrase,
+            position.symbol,
+            position.quantity,
+            position.side,
+          );
+        } else {
+          await this.binanceService.closePosition(
+            userData.apiKey,
+            userData.apiSecret,
+            position.symbol,
+            position.quantity,
+            position.side,
+          );
+        }
         this.logger.log(`Closed position: ${position.symbol}`);
       } catch (error) {
         this.logger.error(`Error closing ${position.symbol}:`, error.message);
@@ -273,17 +442,24 @@ export class TelegramBotService implements OnModuleInit {
     chatId: number,
   ): Promise<void> {
     try {
-      const userData = await this.redisService.get<UserApiKeys>(
-        `user:${telegramId}`,
-      );
+      // Update chatId for all exchange accounts
+      const binanceData = await this.getUserData(telegramId, "binance");
+      const okxData = await this.getUserData(telegramId, "okx");
 
-      if (userData && !userData.chatId) {
+      if (binanceData && !binanceData.chatId) {
         this.logger.log(
-          `Updating user ${telegramId} with missing chatId: ${chatId}`,
+          `Updating Binance account for user ${telegramId} with chatId: ${chatId}`,
         );
-        userData.chatId = chatId;
-        await this.redisService.set(`user:${telegramId}`, userData);
-        this.logger.log(`✅ ChatId stored for user ${telegramId}`);
+        binanceData.chatId = chatId;
+        await this.redisService.set(`user:${telegramId}:binance`, binanceData);
+      }
+
+      if (okxData && !okxData.chatId) {
+        this.logger.log(
+          `Updating OKX account for user ${telegramId} with chatId: ${chatId}`,
+        );
+        okxData.chatId = chatId;
+        await this.redisService.set(`user:${telegramId}:okx`, okxData);
       }
     } catch (error) {
       this.logger.error(
@@ -297,28 +473,44 @@ export class TelegramBotService implements OnModuleInit {
     const chatId = msg.chat.id;
     const telegramId = msg.from.id;
 
-    const userExists = await this.redisService.exists(`user:${telegramId}`);
+    const binanceExists = await this.redisService.exists(
+      `user:${telegramId}:binance`,
+    );
+    const okxExists = await this.redisService.exists(`user:${telegramId}:okx`);
 
-    if (userExists) {
+    if (binanceExists || okxExists) {
       // Ensure chatId is stored for existing users
       await this.ensureChatIdStored(telegramId, chatId);
 
+      let accountInfo = "📊 *Your Accounts*\n\n";
+      if (binanceExists) accountInfo += "✅ Binance connected\n";
+      if (okxExists) accountInfo += "✅ OKX connected\n";
+
       await this.bot.sendMessage(
         chatId,
-        "✅ You are already registered!\n\n" +
-          "Available commands:\n" +
-          "/position - View all open positions and balance\n" +
-          "/set-account <tp_%> <initial_balance> - Set TP target\n" +
+        "👋 Welcome back!\n\n" +
+          accountInfo +
+          "\n*Available Commands:*\n" +
+          "/accounts - List all connected accounts\n" +
+          "/switch [exchange] - Switch active exchange\n" +
+          "/position - View positions (all accounts)\n" +
+          "/set-account [tp_%] [balance] - Set TP target\n" +
           "/cleartp - Clear take profit target\n" +
-          "/setkeys <api_key> <api_secret> - Update API keys",
+          "/update - Manual update (all accounts)\n" +
+          "/setkeys [exchange] ... - Add/update API keys",
+        { parse_mode: "Markdown" },
       );
     } else {
       await this.bot.sendMessage(
         chatId,
-        "👋 Welcome to Binance Trading Bot!\n\n" +
-          "To get started, please set your Binance API keys:\n" +
-          "/setkeys <your_api_key> <your_api_secret>\n\n" +
+        "👋 Welcome to Crypto Trading Bot!\n\n" +
+          "To get started, please set your API keys:\n\n" +
+          "*For Binance:*\n" +
+          "/setkeys binance [api_key] [api_secret]\n\n" +
+          "*For OKX:*\n" +
+          "/setkeys okx [api_key] [api_secret] [passphrase]\n\n" +
           "⚠️ Make sure your API key has Futures trading permissions enabled.",
+        { parse_mode: "Markdown" },
       );
     }
   }
@@ -337,21 +529,52 @@ export class TelegramBotService implements OnModuleInit {
       .trim()
       .split(/[\s\n]+/);
 
-    if (parts.length < 2) {
+    if (parts.length < 3) {
       await this.bot.sendMessage(
         chatId,
-        "❌ Invalid format. Use:\n/setkeys <api_key> <api_secret>\n\nYou can put them on the same line or separate lines.",
+        "❌ Invalid format.\n\n" +
+          "*For Binance:*\n" +
+          "/setkeys binance <api_key> <api_secret>\n\n" +
+          "*For OKX:*\n" +
+          "/setkeys okx <api_key> <api_secret> <passphrase>\n\n" +
+          "You can put them on the same line or separate lines.",
+        { parse_mode: "Markdown" },
       );
       return;
     }
 
-    const apiKey = parts[0];
-    const apiSecret = parts[1];
+    const exchange = parts[0].toLowerCase() as "binance" | "okx";
+    const apiKey = parts[1];
+    const apiSecret = parts[2];
+    const passphrase = parts[3]; // Only for OKX
+
+    if (exchange !== "binance" && exchange !== "okx") {
+      await this.bot.sendMessage(
+        chatId,
+        "❌ Invalid exchange. Please use 'binance' or 'okx'.",
+      );
+      return;
+    }
+
+    if (exchange === "okx" && !passphrase) {
+      await this.bot.sendMessage(
+        chatId,
+        "❌ OKX requires a passphrase. Use:\n/setkeys okx <api_key> <api_secret> <passphrase>",
+      );
+      return;
+    }
 
     try {
       // Test the API keys
-      this.logger.log(`Validating API keys for user ${telegramId}`);
-      await this.binanceService.getAccountBalance(apiKey, apiSecret);
+      this.logger.log(
+        `Validating ${exchange.toUpperCase()} API keys for user ${telegramId}`,
+      );
+
+      if (exchange === "okx") {
+        await this.okxService.getAccountBalance(apiKey, apiSecret, passphrase);
+      } else {
+        await this.binanceService.getAccountBalance(apiKey, apiSecret);
+      }
 
       // Store in Redis
       const userData: UserApiKeys = {
@@ -359,33 +582,46 @@ export class TelegramBotService implements OnModuleInit {
         chatId,
         apiKey,
         apiSecret,
+        passphrase: exchange === "okx" ? passphrase : undefined,
+        exchange,
         createdAt: new Date().toISOString(),
       };
 
-      await this.redisService.set(`user:${telegramId}`, userData);
+      await this.redisService.set(`user:${telegramId}:${exchange}`, userData);
       this.logger.log(
-        `Stored user data for ${telegramId} with chatId ${chatId}`,
+        `Stored ${exchange.toUpperCase()} user data for ${telegramId} with chatId ${chatId}`,
       );
+
+      // Set as active exchange if it's the first or if switching
+      const currentActive = await this.getActiveExchange(telegramId);
+      if (!currentActive) {
+        await this.setActiveExchange(telegramId, exchange);
+        this.logger.log(
+          `Set ${exchange.toUpperCase()} as active exchange for user ${telegramId}`,
+        );
+      }
 
       // Delete the message containing API keys for security
       await this.bot.deleteMessage(chatId, msg.message_id);
 
       await this.bot.sendMessage(
         chatId,
-        "✅ API keys saved successfully!\n\n" +
+        `✅ ${exchange.toUpperCase()} API keys saved successfully!\n\n` +
           "Your message has been deleted for security.\n\n" +
           "Available commands:\n" +
-          "/position - View all open positions\n" +
-          "/set-account <tp_%> <initial_balance> - Set TP target",
+          "/accounts - List all accounts\n" +
+          "/switch [exchange] - Switch active exchange\n" +
+          "/position - View positions\n" +
+          "/set-account [tp_%] [initial_balance] - Set TP target",
       );
     } catch (error) {
       await this.bot.sendMessage(
         chatId,
-        "❌ Invalid API keys or insufficient permissions.\n" +
+        `❌ Invalid ${exchange.toUpperCase()} API keys or insufficient permissions.\n` +
           "Please check your keys and try again.",
       );
       this.logger.error(
-        `Error validating API keys for user ${telegramId}:`,
+        `Error validating ${exchange.toUpperCase()} API keys for user ${telegramId}:`,
         error.message,
       );
     }
@@ -399,83 +635,268 @@ export class TelegramBotService implements OnModuleInit {
     await this.ensureChatIdStored(telegramId, chatId);
 
     try {
-      const userData = await this.redisService.get<UserApiKeys>(
-        `user:${telegramId}`,
-      );
+      const binanceData = await this.getUserData(telegramId, "binance");
+      const okxData = await this.getUserData(telegramId, "okx");
 
-      if (!userData) {
+      if (!binanceData && !okxData) {
         await this.bot.sendMessage(
           chatId,
-          "❌ You need to register first.\nUse /start to begin.",
+          "❌ No accounts connected.\nUse /setkeys to connect an exchange.",
         );
         return;
       }
 
       await this.bot.sendMessage(chatId, "⏳ Fetching your positions...");
 
-      const [positions, balance] = await Promise.all([
-        this.binanceService.getOpenPositions(
-          userData.apiKey,
-          userData.apiSecret,
-        ),
-        this.binanceService.getAccountBalance(
-          userData.apiKey,
-          userData.apiSecret,
-        ),
-      ]);
+      let allMessages = [];
 
-      const totalPnl = positions.reduce(
-        (sum, pos) => sum + pos.unrealizedPnl,
-        0,
-      );
+      // Fetch Binance positions if connected
+      if (binanceData) {
+        try {
+          const [positions, balance] = await Promise.all([
+            this.binanceService.getOpenPositions(
+              binanceData.apiKey,
+              binanceData.apiSecret,
+            ),
+            this.binanceService.getAccountBalance(
+              binanceData.apiKey,
+              binanceData.apiSecret,
+            ),
+          ]);
 
-      let message = `#babywatermelon đang có các vị thế:\n`;
+          const totalPnl = positions.reduce(
+            (sum, pos) => sum + pos.unrealizedPnl,
+            0,
+          );
 
-      if (positions.length === 0) {
-        message += `\nKhông có vị thế nào.\n\n`;
-        message += `Lãi/lỗ chưa ghi nhận: ${totalPnl.toFixed(2)}\n`;
-        message += `Balance hiện tại: ${balance.totalBalance.toFixed(2)}`;
+          let message = `🟢 *BINANCE*\nbabywatermelon đang có các vị thế:\n`;
 
+          if (positions.length === 0) {
+            message += `\nKhông có vị thế nào.\n\n`;
+          } else {
+            positions.forEach((pos) => {
+              const sideText = pos.side === "LONG" ? "Long" : "Short";
+              const volume = pos.margin * pos.leverage;
+
+              const tpValue = pos.takeProfit
+                ? parseFloat(pos.takeProfit).toLocaleString("en-US", {
+                    minimumFractionDigits: 0,
+                    maximumFractionDigits: 4,
+                  })
+                : "--";
+              const slValue = pos.stopLoss
+                ? parseFloat(pos.stopLoss).toLocaleString("en-US", {
+                    minimumFractionDigits: 0,
+                    maximumFractionDigits: 4,
+                  })
+                : "--";
+
+              message += `🔴 ${sideText} ${pos.symbol} x ${pos.leverage}\n`;
+              message += `Entry: ${pos.entryPrice.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 4 })}\n`;
+              message += `TP/SL: ${tpValue}/${slValue}\n`;
+              message += `Volume: ${volume.toLocaleString("en-US", { minimumFractionDigits: 4, maximumFractionDigits: 4 })} USDT\n`;
+              message += `Profit: ${pos.unrealizedPnl.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDT\n\n`;
+            });
+          }
+
+          message += `Lãi/lỗ chưa ghi nhận: ${totalPnl.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}\n`;
+          message += `Balance hiện tại: ${balance.totalBalance.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+          allMessages.push(message);
+        } catch (error) {
+          allMessages.push(
+            `🟢 *BINANCE*\n❌ Error fetching positions: ${error.message}`,
+          );
+          this.logger.error(
+            `Error fetching Binance positions for user ${telegramId}:`,
+            error.message,
+          );
+        }
+      }
+
+      // Fetch OKX positions if connected
+      if (okxData) {
+        try {
+          const [positions, balance] = await Promise.all([
+            this.okxService.getOpenPositions(
+              okxData.apiKey,
+              okxData.apiSecret,
+              okxData.passphrase,
+            ),
+            this.okxService.getAccountBalance(
+              okxData.apiKey,
+              okxData.apiSecret,
+              okxData.passphrase,
+            ),
+          ]);
+
+          const totalPnl = positions.reduce(
+            (sum, pos) => sum + pos.unrealizedPnl,
+            0,
+          );
+
+          let message = `🟠 *OKX*\nbabywatermelon đang có các vị thế:\n`;
+
+          if (positions.length === 0) {
+            message += `\nKhông có vị thế nào.\n\n`;
+          } else {
+            positions.forEach((pos) => {
+              const sideText = pos.side === "LONG" ? "Long" : "Short";
+              const volume = pos.margin * pos.leverage;
+
+              const tpValue = pos.takeProfit
+                ? parseFloat(pos.takeProfit).toLocaleString("en-US", {
+                    minimumFractionDigits: 0,
+                    maximumFractionDigits: 4,
+                  })
+                : "--";
+              const slValue = pos.stopLoss
+                ? parseFloat(pos.stopLoss).toLocaleString("en-US", {
+                    minimumFractionDigits: 0,
+                    maximumFractionDigits: 4,
+                  })
+                : "--";
+
+              message += `🔴 ${sideText} ${pos.symbol} x ${pos.leverage}\n`;
+              message += `Entry: ${pos.entryPrice.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 4 })}\n`;
+              message += `TP/SL: ${tpValue}/${slValue}\n`;
+              message += `Volume: ${volume.toLocaleString("en-US", { minimumFractionDigits: 4, maximumFractionDigits: 4 })} USDT\n`;
+              message += `Profit: ${pos.unrealizedPnl.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDT\n\n`;
+            });
+          }
+
+          message += `Lãi/lỗ chưa ghi nhận: ${totalPnl.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}\n`;
+          message += `Balance hiện tại: ${balance.totalBalance.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+          allMessages.push(message);
+        } catch (error) {
+          allMessages.push(
+            `🟠 *OKX*\n❌ Error fetching positions: ${error.message}`,
+          );
+          this.logger.error(
+            `Error fetching OKX positions for user ${telegramId}:`,
+            error.message,
+          );
+        }
+      }
+
+      // Send all messages
+      for (const message of allMessages) {
         await this.bot.sendMessage(chatId, message, { parse_mode: "Markdown" });
+      }
+    } catch (error) {
+      await this.bot.sendMessage(
+        chatId,
+        "❌ Error fetching positions. Please try again.",
+      );
+      this.logger.error(
+        `Error in handlePosition for user ${telegramId}:`,
+        error.message,
+      );
+    }
+  }
+
+  private async handleListAccounts(msg: TelegramBot.Message) {
+    const chatId = msg.chat.id;
+    const telegramId = msg.from.id;
+
+    try {
+      const binanceData = await this.getUserData(telegramId, "binance");
+      const okxData = await this.getUserData(telegramId, "okx");
+      const activeExchange = await this.getActiveExchange(telegramId);
+
+      if (!binanceData && !okxData) {
+        await this.bot.sendMessage(
+          chatId,
+          "❌ No accounts connected.\nUse /setkeys to connect an exchange.",
+        );
         return;
       }
 
-      positions.forEach((pos) => {
-        const sideText = pos.side === "LONG" ? "Long" : "Short";
-        const volume = pos.margin * pos.leverage;
+      let message = "📋 *Your Connected Accounts*\n\n";
 
-        // Format TP/SL
-        const tpValue = pos.takeProfit
-          ? parseFloat(pos.takeProfit).toLocaleString("en-US", {
-              minimumFractionDigits: 0,
-              maximumFractionDigits: 4,
-            })
-          : "--";
-        const slValue = pos.stopLoss
-          ? parseFloat(pos.stopLoss).toLocaleString("en-US", {
-              minimumFractionDigits: 0,
-              maximumFractionDigits: 4,
-            })
-          : "--";
+      if (binanceData) {
+        const isActive = activeExchange === "binance";
+        message += `${isActive ? "🟢" : "⚪"} *Binance*\n`;
+        message += `└ Created: ${new Date(binanceData.createdAt).toLocaleDateString()}\n\n`;
+      }
 
-        message += `🔴 ${sideText} #${pos.symbol} x ${pos.leverage}\n`;
-        message += `Entry: ${pos.entryPrice.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 4 })}\n`;
-        message += `TP/SL: ${tpValue}/${slValue}\n`;
-        message += `Volume: ${volume.toLocaleString("en-US", { minimumFractionDigits: 4, maximumFractionDigits: 4 })} USDT\n`;
-        message += `Profit: ${pos.unrealizedPnl.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDT\n\n`;
-      });
+      if (okxData) {
+        const isActive = activeExchange === "okx";
+        message += `${isActive ? "🟢" : "⚪"} *OKX*\n`;
+        message += `└ Created: ${new Date(okxData.createdAt).toLocaleDateString()}\n\n`;
+      }
 
-      message += `Lãi/lỗ chưa ghi nhận: ${totalPnl.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}\n`;
-      message += `Balance hiện tại: ${balance.totalBalance.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+      message += `Active Exchange: *${activeExchange?.toUpperCase() || "None"}*\n\n`;
+      message += "Use /switch [exchange] to change active exchange.";
 
       await this.bot.sendMessage(chatId, message, { parse_mode: "Markdown" });
     } catch (error) {
       await this.bot.sendMessage(
         chatId,
-        "❌ Error fetching positions. Please check your API keys.",
+        "❌ Error fetching accounts information.",
       );
       this.logger.error(
-        `Error fetching positions for user ${telegramId}:`,
+        `Error listing accounts for user ${telegramId}:`,
+        error.message,
+      );
+    }
+  }
+
+  private async handleSwitchExchange(
+    msg: TelegramBot.Message,
+    match: RegExpExecArray,
+  ) {
+    const chatId = msg.chat.id;
+    const telegramId = msg.from.id;
+
+    if (!match || match.length < 2) {
+      await this.bot.sendMessage(
+        chatId,
+        "❌ Invalid format. Use:\n/switch [exchange]\n\nExample:\n/switch binance\n/switch okx",
+      );
+      return;
+    }
+
+    const exchange = match[1].toLowerCase() as "binance" | "okx";
+
+    if (exchange !== "binance" && exchange !== "okx") {
+      await this.bot.sendMessage(
+        chatId,
+        "❌ Invalid exchange. Please use 'binance' or 'okx'.",
+      );
+      return;
+    }
+
+    try {
+      const userData = await this.getUserData(telegramId, exchange);
+
+      if (!userData) {
+        await this.bot.sendMessage(
+          chatId,
+          `❌ ${exchange.toUpperCase()} account not found.\nUse /setkeys ${exchange} to connect.`,
+        );
+        return;
+      }
+
+      await this.setActiveExchange(telegramId, exchange);
+
+      await this.bot.sendMessage(
+        chatId,
+        `✅ Switched to *${exchange.toUpperCase()}*\n\nAll commands will now use this exchange.`,
+        { parse_mode: "Markdown" },
+      );
+
+      this.logger.log(
+        `User ${telegramId} switched to ${exchange.toUpperCase()}`,
+      );
+    } catch (error) {
+      await this.bot.sendMessage(
+        chatId,
+        `❌ Error switching to ${exchange.toUpperCase()}.`,
+      );
+      this.logger.error(
+        `Error switching exchange for user ${telegramId}:`,
         error.message,
       );
     }
@@ -492,14 +913,13 @@ export class TelegramBotService implements OnModuleInit {
     await this.ensureChatIdStored(telegramId, chatId);
 
     try {
-      const userData = await this.redisService.get<UserApiKeys>(
-        `user:${telegramId}`,
-      );
+      const binanceData = await this.getUserData(telegramId, "binance");
+      const okxData = await this.getUserData(telegramId, "okx");
 
-      if (!userData) {
+      if (!binanceData && !okxData) {
         await this.bot.sendMessage(
           chatId,
-          "❌ You need to register first.\nUse /start to begin.",
+          "❌ No accounts connected.\nUse /setkeys to connect an exchange first.",
         );
         return;
       }
@@ -507,7 +927,7 @@ export class TelegramBotService implements OnModuleInit {
       if (!match || match.length < 2) {
         await this.bot.sendMessage(
           chatId,
-          "❌ Invalid format. Use:\n/set-account <tp_percentage> <initial_balance>\n\n" +
+          "❌ Invalid format. Use:\n/set-account [tp_percentage] [initial_balance]\n\n" +
             "Example:\n/set-account 5 1000\n\n" +
             "This will close ALL positions when unrealized PnL reaches 5% of $1000",
         );
@@ -553,7 +973,8 @@ export class TelegramBotService implements OnModuleInit {
           `TP Percentage: ${percentage}%\n` +
           `Initial Balance: $${initialBalance.toFixed(2)}\n` +
           `Target Profit: $${targetProfit.toFixed(2)}\n\n` +
-          `🤖 Bot will monitor unrealized PnL and close ALL positions when it reaches $${targetProfit.toFixed(2)}.\n\n` +
+          `🤖 Bot will monitor unrealized PnL on ALL connected exchanges.\n` +
+          `Positions will be closed when each exchange reaches $${targetProfit.toFixed(2)}.\n\n` +
           `Use /cleartp to remove the target.`,
         { parse_mode: "Markdown" },
       );
@@ -577,14 +998,12 @@ export class TelegramBotService implements OnModuleInit {
     await this.ensureChatIdStored(telegramId, chatId);
 
     try {
-      const userData = await this.redisService.get<UserApiKeys>(
-        `user:${telegramId}`,
-      );
+      const userData = await this.getActiveUserData(telegramId);
 
       if (!userData) {
         await this.bot.sendMessage(
           chatId,
-          "❌ You need to register first.\nUse /start to begin.",
+          "❌ No active account found.\nUse /setkeys to connect an exchange.",
         );
         return;
       }
@@ -622,14 +1041,13 @@ export class TelegramBotService implements OnModuleInit {
     await this.ensureChatIdStored(telegramId, chatId);
 
     try {
-      const userData = await this.redisService.get<UserApiKeys>(
-        `user:${telegramId}`,
-      );
+      const binanceData = await this.getUserData(telegramId, "binance");
+      const okxData = await this.getUserData(telegramId, "okx");
 
-      if (!userData) {
+      if (!binanceData && !okxData) {
         await this.bot.sendMessage(
           chatId,
-          "❌ You need to register first.\nUse /start to begin.",
+          "❌ No accounts connected.\nUse /setkeys to connect an exchange.",
         );
         return;
       }
@@ -647,28 +1065,85 @@ export class TelegramBotService implements OnModuleInit {
         return;
       }
 
-      // Get account balance
-      const balance = await this.binanceService.getAccountBalance(
-        userData.apiKey,
-        userData.apiSecret,
-      );
+      let allMessages = [];
 
-      const unrealizedPnl = balance.totalUnrealizedProfit;
-      const targetProfit = (tpData.initialBalance * tpData.percentage) / 100;
-      const currentPercentage = (unrealizedPnl / tpData.initialBalance) * 100;
-      const progressEmoji = unrealizedPnl >= targetProfit ? "🎯" : "📊";
+      // Get Binance balance if connected
+      if (binanceData) {
+        try {
+          const balance = await this.binanceService.getAccountBalance(
+            binanceData.apiKey,
+            binanceData.apiSecret,
+          );
 
-      await this.bot.sendMessage(
-        chatId,
-        `${progressEmoji} *Manual Update*\n\n` +
-          `💰 Current Balance: $${balance.totalBalance.toFixed(2)}\n` +
-          `📈 Unrealized PnL: $${unrealizedPnl.toFixed(2)}\n\n` +
-          `🎯 TP Target Progress:\n` +
-          `├ Target: ${tpData.percentage}% ($${targetProfit.toFixed(2)})\n` +
-          `├ Current: ${currentPercentage.toFixed(2)}%\n` +
-          `└ Remaining: ${(tpData.percentage - currentPercentage).toFixed(2)}%`,
-        { parse_mode: "Markdown" },
-      );
+          const unrealizedPnl = balance.totalUnrealizedProfit;
+          const targetProfit =
+            (tpData.initialBalance * tpData.percentage) / 100;
+          const currentPercentage =
+            (unrealizedPnl / tpData.initialBalance) * 100;
+          const progressEmoji = unrealizedPnl >= targetProfit ? "🎯" : "📊";
+
+          const message =
+            `${progressEmoji} *Manual Update (BINANCE)*\n\n` +
+            `💰 Current Balance: $${balance.totalBalance.toFixed(2)}\n` +
+            `📈 Unrealized PnL: $${unrealizedPnl.toFixed(2)}\n\n` +
+            `🎯 TP Target Progress:\n` +
+            `├ Target: ${tpData.percentage}% ($${targetProfit.toFixed(2)})\n` +
+            `├ Current: ${currentPercentage.toFixed(2)}%\n` +
+            `└ Remaining: ${(tpData.percentage - currentPercentage).toFixed(2)}%`;
+
+          allMessages.push(message);
+        } catch (error) {
+          allMessages.push(
+            `📊 *BINANCE*\n❌ Error fetching balance: ${error.message}`,
+          );
+          this.logger.error(
+            `Error fetching Binance balance for user ${telegramId}:`,
+            error.message,
+          );
+        }
+      }
+
+      // Get OKX balance if connected
+      if (okxData) {
+        try {
+          const balance = await this.okxService.getAccountBalance(
+            okxData.apiKey,
+            okxData.apiSecret,
+            okxData.passphrase,
+          );
+
+          const unrealizedPnl = balance.totalUnrealizedProfit;
+          const targetProfit =
+            (tpData.initialBalance * tpData.percentage) / 100;
+          const currentPercentage =
+            (unrealizedPnl / tpData.initialBalance) * 100;
+          const progressEmoji = unrealizedPnl >= targetProfit ? "🎯" : "📊";
+
+          const message =
+            `${progressEmoji} *Manual Update (OKX)*\n\n` +
+            `💰 Current Balance: $${balance.totalBalance.toFixed(2)}\n` +
+            `📈 Unrealized PnL: $${unrealizedPnl.toFixed(2)}\n\n` +
+            `🎯 TP Target Progress:\n` +
+            `├ Target: ${tpData.percentage}% ($${targetProfit.toFixed(2)})\n` +
+            `├ Current: ${currentPercentage.toFixed(2)}%\n` +
+            `└ Remaining: ${(tpData.percentage - currentPercentage).toFixed(2)}%`;
+
+          allMessages.push(message);
+        } catch (error) {
+          allMessages.push(
+            `📊 *OKX*\n❌ Error fetching balance: ${error.message}`,
+          );
+          this.logger.error(
+            `Error fetching OKX balance for user ${telegramId}:`,
+            error.message,
+          );
+        }
+      }
+
+      // Send all messages
+      for (const message of allMessages) {
+        await this.bot.sendMessage(chatId, message, { parse_mode: "Markdown" });
+      }
     } catch (error) {
       await this.bot.sendMessage(
         chatId,
