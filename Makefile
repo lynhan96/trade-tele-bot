@@ -17,7 +17,7 @@ deploy_backend:
 	@ssh ubuntu@${SERVER_IP} -t "source .nvm/nvm.sh \
 		&& source .profile \
 		&& source .bashrc \
-		&& cd ~/project/tele-bot  \
+		&& cd ~/projects/tele-bot  \
 		&& git pull origin ${DEPLOY_BRANCH} \
 		&& yarn install \
 		&& yarn build \
