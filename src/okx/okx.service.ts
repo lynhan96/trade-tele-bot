@@ -55,7 +55,16 @@ export class OkxService {
     client.interceptors.request.use((config) => {
       const timestamp = new Date().toISOString();
       const method = config.method?.toUpperCase() || "GET";
-      const path = config.url || "";
+      let path = config.url || "";
+
+      // Include query parameters in the path for signature
+      if (config.params) {
+        const queryString = new URLSearchParams(config.params).toString();
+        if (queryString) {
+          path = `${path}?${queryString}`;
+        }
+      }
+
       const body = config.data ? JSON.stringify(config.data) : "";
 
       const prehash = timestamp + method + path + body;
@@ -70,8 +79,24 @@ export class OkxService {
       config.headers["OK-ACCESS-PASSPHRASE"] = passphrase;
       config.headers["Content-Type"] = "application/json";
 
+      this.logger.debug(`OKX Request: ${method} ${path}`);
+      this.logger.debug(`Timestamp: ${timestamp}`);
+      this.logger.debug(`Prehash: ${prehash}`);
+
       return config;
     });
+
+    client.interceptors.response.use(
+      (response) => response,
+      (error) => {
+        this.logger.error(`OKX API Error: ${error.message}`);
+        if (error.response) {
+          this.logger.error(`Status: ${error.response.status}`);
+          this.logger.error(`Data: ${JSON.stringify(error.response.data)}`);
+        }
+        throw error;
+      },
+    );
 
     return client;
   }
@@ -85,7 +110,14 @@ export class OkxService {
       const client = this.createClient(apiKey, apiSecret, passphrase);
       const response = await client.get("/api/v5/account/balance");
 
+      this.logger.debug(
+        `OKX Balance Response: ${JSON.stringify(response.data)}`,
+      );
+
       if (response.data.code !== "0") {
+        this.logger.error(
+          `OKX API Error - Code: ${response.data.code}, Message: ${response.data.msg}`,
+        );
         throw new Error(`OKX API Error: ${response.data.msg}`);
       }
 
@@ -148,8 +180,8 @@ export class OkxService {
         const leverage = parseFloat(pos.lever);
         const margin = parseFloat(pos.margin);
 
-        // Volume calculation
-        const volume = margin * quantity;
+        // Volume calculation: quantity * entry price (notional value)
+        const volume = quantity * entryPrice;
 
         const positionInfo: PositionInfo = {
           symbol: pos.instId,
@@ -167,31 +199,34 @@ export class OkxService {
           liquidationPrice: parseFloat(pos.liqPx || "0"),
         };
 
-        // Get open orders for TP/SL
+        // Fetch TP/SL from algo orders
         try {
-          const ordersResponse = await client.get(
+          const algoResponse = await client.get(
             "/api/v5/trade/orders-algo-pending",
             {
               params: {
                 instType: "SWAP",
                 instId: pos.instId,
+                ordType: "conditional",
               },
             },
           );
 
-          if (ordersResponse.data.code === "0") {
-            const orders = ordersResponse.data.data;
-            for (const order of orders) {
-              if (order.ordType === "conditional" && order.slTriggerPx) {
-                positionInfo.stopLoss = order.slTriggerPx;
+          if (algoResponse.data.code === "0" && algoResponse.data.data) {
+            for (const order of algoResponse.data.data) {
+              // TP order: side opposite to position
+              if (order.ordType === "conditional" && order.slOrdPx) {
+                positionInfo.stopLoss = order.slOrdPx;
               }
-              if (order.ordType === "conditional" && order.tpTriggerPx) {
-                positionInfo.takeProfit = order.tpTriggerPx;
+              if (order.ordType === "conditional" && order.tpOrdPx) {
+                positionInfo.takeProfit = order.tpOrdPx;
               }
             }
           }
-        } catch (err) {
-          this.logger.warn(`Could not fetch orders for ${pos.instId}`);
+        } catch (algoError) {
+          this.logger.debug(
+            `Could not fetch algo orders for ${pos.instId}: ${algoError.message}`,
+          );
         }
 
         positionInfos.push(positionInfo);
