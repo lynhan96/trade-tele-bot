@@ -79,10 +79,6 @@ export class OkxService {
       config.headers["OK-ACCESS-PASSPHRASE"] = passphrase;
       config.headers["Content-Type"] = "application/json";
 
-      this.logger.debug(`OKX Request: ${method} ${path}`);
-      this.logger.debug(`Timestamp: ${timestamp}`);
-      this.logger.debug(`Prehash: ${prehash}`);
-
       return config;
     });
 
@@ -109,10 +105,6 @@ export class OkxService {
     try {
       const client = this.createClient(apiKey, apiSecret, passphrase);
       const response = await client.get("/api/v5/account/balance");
-
-      this.logger.debug(
-        `OKX Balance Response: ${JSON.stringify(response.data)}`,
-      );
 
       if (response.data.code !== "0") {
         this.logger.error(
@@ -224,9 +216,7 @@ export class OkxService {
             }
           }
         } catch (algoError) {
-          this.logger.debug(
-            `Could not fetch algo orders for ${pos.instId}: ${algoError.message}`,
-          );
+          // Silently continue if algo orders cannot be fetched
         }
 
         positionInfos.push(positionInfo);
