@@ -319,4 +319,36 @@ export class BinanceService {
       throw error;
     }
   }
+
+  async setStopLoss(
+    apiKey: string,
+    apiSecret: string,
+    symbol: string,
+    stopPrice: number,
+    side: "LONG" | "SHORT",
+    quantity: number,
+  ): Promise<any> {
+    try {
+      const client = this.createClient(apiKey, apiSecret);
+
+      // Set stop loss order
+      const order = await client.futuresOrder({
+        symbol,
+        side: side === "LONG" ? "SELL" : "BUY",
+        type: "STOP_MARKET",
+        stopPrice: stopPrice.toString(),
+        quantity: quantity.toString(),
+        closePosition: "true",
+      });
+
+      this.logger.log(`Set stop loss for ${symbol} at $${stopPrice} (${side})`);
+      return order;
+    } catch (error) {
+      this.logger.error(
+        `Error setting stop loss for ${symbol}:`,
+        error.message,
+      );
+      throw error;
+    }
+  }
 }

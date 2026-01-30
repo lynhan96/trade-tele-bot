@@ -5,6 +5,7 @@ import TelegramBot = require("node-telegram-bot-api");
 import { RedisService } from "../redis/redis.service";
 import { BinanceService } from "../binance/binance.service";
 import { OkxService } from "../okx/okx.service";
+import { FileLoggerService } from "../logger/logger.service";
 import { UserApiKeys, UserActiveExchange } from "../interfaces/user.interface";
 
 @Injectable()
@@ -17,7 +18,10 @@ export class TelegramBotService implements OnModuleInit {
     private redisService: RedisService,
     private binanceService: BinanceService,
     private okxService: OkxService,
-  ) {}
+    private fileLogger: FileLoggerService,
+  ) {
+    this.fileLogger.setContext(TelegramBotService.name);
+  }
 
   async onModuleInit() {
     const token = this.configService.get<string>("TELEGRAM_BOT_TOKEN");
@@ -26,79 +30,69 @@ export class TelegramBotService implements OnModuleInit {
       this.logger.error(
         "TELEGRAM_BOT_TOKEN is not set in environment variables",
       );
+      this.fileLogger.error(
+        "TELEGRAM_BOT_TOKEN is not set in environment variables",
+      );
       return;
     }
 
     this.bot = new TelegramBot(token, { polling: true });
-    this.logger.debug("Telegram bot initialized");
-
     this.setupCommands();
   }
 
   private setupCommands() {
     // Command: /start
     this.bot.onText(/\/start/, async (msg) => {
-      this.logger.debug(`Command /start from user ${msg.from.id}`);
       await this.handleStart(msg);
     });
 
     // Command: /setkeys - now with exchange type
     this.bot.onText(/\/setkeys[\s\S]+/, async (msg, match) => {
-      this.logger.debug(`Command /setkeys from user ${msg.from.id}`);
       await this.handleSetKeys(msg, match);
     });
 
     // Command: /accounts - list all connected accounts
     this.bot.onText(/\/accounts/, async (msg) => {
-      this.logger.debug(`Command /accounts from user ${msg.from.id}`);
       await this.handleListAccounts(msg);
     });
 
     // Command: /position
     this.bot.onText(/\/position/, async (msg) => {
-      this.logger.debug(`Command /position from user ${msg.from.id}`);
       await this.handlePosition(msg);
     });
 
     // Command: /setaccount [exchange] [tp_percentage] [initial_balance]
     this.bot.onText(/\/setaccount (.+)/, async (msg, match) => {
-      this.logger.debug(`Command /setaccount from user ${msg.from.id}`);
       await this.handleSetAccount(msg, match);
     });
 
     // Command: /cleartp [exchange]
     this.bot.onText(/\/cleartp(.*)/, async (msg, match) => {
-      this.logger.debug(`Command /cleartp from user ${msg.from.id}`);
       await this.handleClearTakeProfit(msg, match);
     });
 
     // Command: /update [exchange] (manual trigger for testing)
     this.bot.onText(/\/update(.*)/, async (msg, match) => {
-      this.logger.debug(`Command /update from user ${msg.from.id}`);
       await this.handleManualUpdate(msg, match);
     });
 
     // Command: /closeall [exchange] - close all positions
     this.bot.onText(/\/closeall(.*)/, async (msg, match) => {
-      this.logger.debug(`Command /closeall from user ${msg.from.id}`);
       await this.handleCloseAllPositions(msg, match);
     });
 
     // Command: /close [exchange] [symbol] - close specific position
     this.bot.onText(/\/close (.+)/, async (msg, match) => {
-      this.logger.debug(`Command /close from user ${msg.from.id}`);
       await this.handleClosePosition(msg, match);
     });
 
     // Command: /setretry [exchange] [max_retry] [volume_reduction%]
     this.bot.onText(/\/setretry (.+)/, async (msg, match) => {
-      this.logger.debug(`Command /setretry from user ${msg.from.id}`);
       await this.handleSetRetry(msg, match);
     });
 
     // Command: /clearretry [exchange]
     this.bot.onText(/\/clearretry (.+)/, async (msg, match) => {
-      this.logger.debug(`Command /clearretry from user ${msg.from.id}`);
       await this.handleClearRetry(msg, match);
     });
   }
@@ -229,6 +223,13 @@ export class TelegramBotService implements OnModuleInit {
                     const nextQuantity =
                       position.quantity * (1 - volumeReduction / 100);
 
+                    // Calculate the TP price for this position
+                    const isLong = position.side === "LONG";
+                    const tpPrice = isLong
+                      ? position.entryPrice * (1 + tpData.percentage / 100)
+                      : position.entryPrice * (1 - tpData.percentage / 100);
+                    const stopLossPrice = parseFloat(tpPrice.toFixed(4));
+
                     await this.redisService.set(
                       `user:${telegramId}:reentry:binance:${position.symbol}`,
                       {
@@ -243,6 +244,7 @@ export class TelegramBotService implements OnModuleInit {
                         originalVolume: position.quantity * position.entryPrice,
                         closedAt: new Date().toISOString(),
                         tpPercentage: tpData.percentage,
+                        stopLossPrice: stopLossPrice, // Store actual TP price as SL for retry
                         currentRetry: 1,
                         remainingRetries: retryConfig.currentRetryCount - 1,
                         volumeReductionPercent: volumeReduction,
@@ -282,9 +284,11 @@ export class TelegramBotService implements OnModuleInit {
               });
             }
           } catch (error) {
-            this.logger.error(
-              `Error checking TP for user ${telegramId} (BINANCE):`,
-              error.message,
+            this.fileLogger.logApiError(
+              "binance",
+              "checkTakeProfitTargets",
+              error,
+              parseInt(telegramId),
             );
           }
         }
@@ -341,6 +345,13 @@ export class TelegramBotService implements OnModuleInit {
                     const nextQuantity =
                       position.quantity * (1 - volumeReduction / 100);
 
+                    // Calculate the TP price for this position
+                    const isLong = position.side === "LONG";
+                    const tpPrice = isLong
+                      ? position.entryPrice * (1 + tpData.percentage / 100)
+                      : position.entryPrice * (1 - tpData.percentage / 100);
+                    const stopLossPrice = parseFloat(tpPrice.toFixed(4));
+
                     await this.redisService.set(
                       `user:${telegramId}:reentry:okx:${position.symbol}`,
                       {
@@ -355,6 +366,7 @@ export class TelegramBotService implements OnModuleInit {
                         originalVolume: position.quantity * position.entryPrice,
                         closedAt: new Date().toISOString(),
                         tpPercentage: tpData.percentage,
+                        stopLossPrice: stopLossPrice, // Store actual TP price as SL for retry
                         currentRetry: 1,
                         remainingRetries: retryConfig.currentRetryCount - 1,
                         volumeReductionPercent: volumeReduction,
@@ -394,15 +406,20 @@ export class TelegramBotService implements OnModuleInit {
               });
             }
           } catch (error) {
-            this.logger.error(
-              `Error checking TP for user ${telegramId} (OKX):`,
-              error.message,
+            this.fileLogger.logApiError(
+              "okx",
+              "checkTakeProfitTargets",
+              error,
+              parseInt(telegramId),
             );
           }
         }
       }
     } catch (error) {
-      this.logger.error("Error in checkTakeProfitTargets:", error.message);
+      this.fileLogger.logError(error, {
+        operation: "checkTakeProfitTargets",
+        type: "CRON_ERROR",
+      });
     }
   }
 
@@ -462,14 +479,20 @@ export class TelegramBotService implements OnModuleInit {
             );
           }
         } catch (error) {
-          this.logger.error(
-            `Error checking reentry for user ${telegramId} ${exchange} ${symbol}:`,
-            error.message,
+          this.fileLogger.logApiError(
+            exchange,
+            "checkReentryOpportunities",
+            error,
+            telegramId,
+            symbol,
           );
         }
       }
     } catch (error) {
-      this.logger.error("Error in checkReentryOpportunities:", error.message);
+      this.fileLogger.logError(error, {
+        operation: "checkReentryOpportunities",
+        type: "CRON_ERROR",
+      });
     }
   }
 
@@ -511,6 +534,53 @@ export class TelegramBotService implements OnModuleInit {
         );
       }
 
+      // Use stored Stop Loss price (from previous TP) to protect profits
+      // If not stored (old data), calculate it
+      const stopLossPrice =
+        reentryData.stopLossPrice ||
+        (() => {
+          const isLong = reentryData.side === "LONG";
+          const tpPrice = isLong
+            ? reentryData.entryPrice * (1 + reentryData.tpPercentage / 100)
+            : reentryData.entryPrice * (1 - reentryData.tpPercentage / 100);
+          return parseFloat(tpPrice.toFixed(4));
+        })();
+
+      try {
+        if (exchange === "binance") {
+          await this.binanceService.setStopLoss(
+            userData.apiKey,
+            userData.apiSecret,
+            reentryData.symbol,
+            stopLossPrice,
+            reentryData.side,
+            reentryData.quantity,
+          );
+        } else {
+          await this.okxService.setStopLoss(
+            userData.apiKey,
+            userData.apiSecret,
+            userData.passphrase,
+            reentryData.symbol,
+            stopLossPrice,
+            reentryData.side,
+            reentryData.quantity,
+          );
+        }
+        this.logger.log(
+          `Set SL at previous TP price $${stopLossPrice} for ${reentryData.symbol}`,
+        );
+      } catch (slError) {
+        this.fileLogger.logApiError(
+          exchange,
+          "setStopLoss",
+          slError,
+          telegramId,
+          reentryData.symbol,
+        );
+        // Continue even if SL setting fails
+      }
+
       // Calculate next quantity with volume reduction
       const volumeReduction = reentryData.volumeReductionPercent || 15;
       const nextQuantity = reentryData.quantity * (1 - volumeReduction / 100);
@@ -533,10 +603,44 @@ export class TelegramBotService implements OnModuleInit {
           },
         );
       } else {
-        // No more retries, remove from queue
+        // No more retries, clean up all retry information
+        this.logger.log(
+          `Max retries reached for user ${telegramId} ${exchange} ${reentryData.symbol}. Cleaning up retry data.`,
+        );
+
+        // Remove this symbol's reentry data
         await this.redisService.delete(
           `user:${telegramId}:reentry:${exchange}:${reentryData.symbol}`,
         );
+
+        // Check if there are any other pending re-entries for this exchange
+        const remainingReentries = await this.redisService.keys(
+          `user:${telegramId}:reentry:${exchange}:*`,
+        );
+
+        // If no more re-entries pending, reset retry count in config
+        if (remainingReentries.length === 0) {
+          const retryConfig = await this.redisService.get<{
+            maxRetry: number;
+            currentRetryCount: number;
+            volumeReductionPercent: number;
+            enabled: boolean;
+          }>(`user:${telegramId}:retry:${exchange}`);
+
+          if (retryConfig) {
+            // Reset retry count to max for next time
+            await this.redisService.set(
+              `user:${telegramId}:retry:${exchange}`,
+              {
+                ...retryConfig,
+                currentRetryCount: retryConfig.maxRetry,
+              },
+            );
+            this.logger.log(
+              `Reset retry count to ${retryConfig.maxRetry} for user ${telegramId} ${exchange}`,
+            );
+          }
+        }
       }
 
       // Notify user
@@ -552,7 +656,8 @@ export class TelegramBotService implements OnModuleInit {
           `Entry: $${reentryData.entryPrice.toLocaleString()}\n` +
           `Quantity: ${reentryData.quantity.toFixed(4)} (-${volumeReductionAmount.toFixed(1)}% from original)\n` +
           `Volume: $${currentVolume.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}\n` +
-          `Leverage: ${reentryData.leverage}x\n\n` +
+          `Leverage: ${reentryData.leverage}x\n` +
+          `🛡️ Stop Loss: $${stopLossPrice.toLocaleString()} (Previous TP - No loss risk!)\n\n` +
           `${retryText}\n` +
           (reentryData.remainingRetries > 0
             ? `Retries remaining: ${reentryData.remainingRetries}`
@@ -564,9 +669,12 @@ export class TelegramBotService implements OnModuleInit {
         `Re-entry successful for user ${telegramId}: ${reentryData.symbol}`,
       );
     } catch (error) {
-      this.logger.error(
-        `Failed to execute re-entry for user ${telegramId}:`,
-        error.message,
+      this.fileLogger.logApiError(
+        exchange,
+        "executeReentry",
+        error,
+        telegramId,
+        reentryData.symbol,
       );
 
       // Notify user of failure
@@ -710,7 +818,10 @@ export class TelegramBotService implements OnModuleInit {
         }
       }
     } catch (error) {
-      this.logger.error("Error in sendPeriodicUpdates:", error.message);
+      this.fileLogger.logError(error, {
+        operation: "sendPeriodicUpdates",
+        type: "CRON_ERROR",
+      });
     }
   }
 
@@ -739,7 +850,13 @@ export class TelegramBotService implements OnModuleInit {
         }
         this.logger.log(`Closed position: ${position.symbol}`);
       } catch (error) {
-        this.logger.error(`Error closing ${position.symbol}:`, error.message);
+        this.fileLogger.logApiError(
+          userData.exchange,
+          "closeAllOpenPositions",
+          error,
+          userData.telegramId,
+          position.symbol,
+        );
       }
     }
   }
@@ -950,6 +1067,7 @@ export class TelegramBotService implements OnModuleInit {
         `Error validating ${exchange.toUpperCase()} API keys for user ${telegramId}:`,
         error.message,
       );
+      this.fileLogger.logApiError(exchange, "setKeys", error, telegramId);
     }
   }
 
@@ -1033,9 +1151,11 @@ export class TelegramBotService implements OnModuleInit {
           allMessages.push(
             `🟢 *BINANCE*\n❌ Error fetching positions: ${error.message}`,
           );
-          this.logger.error(
-            `Error fetching Binance positions for user ${telegramId}:`,
-            error.message,
+          this.fileLogger.logApiError(
+            "binance",
+            "getPositions",
+            error,
+            telegramId,
           );
         }
       }
@@ -1103,6 +1223,7 @@ export class TelegramBotService implements OnModuleInit {
             `Error fetching OKX positions for user ${telegramId}:`,
             error.message,
           );
+          this.fileLogger.logApiError("okx", "getPositions", error, telegramId);
         }
       }
 
@@ -1119,6 +1240,7 @@ export class TelegramBotService implements OnModuleInit {
         `Error in handlePosition for user ${telegramId}:`,
         error.message,
       );
+      this.fileLogger.logBusinessError("handlePosition", error, telegramId);
     }
   }
 
@@ -1225,70 +1347,7 @@ export class TelegramBotService implements OnModuleInit {
         `Error listing accounts for user ${telegramId}:`,
         error.message,
       );
-    }
-  }
-
-  private async handleSwitchExchange(
-    msg: TelegramBot.Message,
-    match: RegExpExecArray,
-  ) {
-    const chatId = msg.chat.id;
-    const telegramId = msg.from.id;
-
-    if (!match || match.length < 2) {
-      await this.bot.sendMessage(
-        chatId,
-        "❌ Invalid format. Use:\n/switch [exchange]\n\nExample:\n/switch binance\n/switch okx",
-      );
-      return;
-    }
-
-    const exchange = match[1].toLowerCase() as "binance" | "okx";
-
-    if (exchange !== "binance" && exchange !== "okx") {
-      await this.bot.sendMessage(
-        chatId,
-        "❌ Invalid exchange. Please use 'binance' or 'okx'.",
-      );
-      return;
-    }
-
-    try {
-      const userData = await this.getUserData(telegramId, exchange);
-
-      if (!userData) {
-        await this.bot.sendMessage(
-          chatId,
-          `❌ ${exchange.toUpperCase()} account not found.\nUse /setkeys ${exchange} to connect.`,
-        );
-        return;
-      }
-
-      await this.setActiveExchange(telegramId, exchange);
-
-      await this.bot.sendMessage(
-        chatId,
-        `✅ Switched to *${exchange.toUpperCase()}*\n\n` +
-          `All commands now operate on this exchange.\n\n` +
-          `*What you can do:*\n` +
-          `/position - View ${exchange.toUpperCase()} positions\n` +
-          `/set-account % balance - Set ${exchange.toUpperCase()} TP target\n` +
-          `/accounts - See all exchange configs`,
-        { parse_mode: "Markdown" },
-      );
-
-      this.logger.log(
-        `User ${telegramId} switched to ${exchange.toUpperCase()}`,
-      );
-    } catch (error) {
-      await this.bot.sendMessage(
-        chatId,
-        `❌ Error switching to ${exchange.toUpperCase()}.`,
-      );
-      this.logger.error(
-        `Error switching exchange for user ${telegramId}:`,
-        error.message,
-      );
+      this.fileLogger.logBusinessError("handleListAccounts", error, telegramId);
     }
   }
 
@@ -1301,6 +1360,8 @@ export class TelegramBotService implements OnModuleInit {
 
     // Ensure chatId is stored
     await this.ensureChatIdStored(telegramId, chatId);
+
+    let exchange: "binance" | "okx" | undefined;
 
     try {
       if (!match || match.length < 2) {
@@ -1325,7 +1386,7 @@ export class TelegramBotService implements OnModuleInit {
         return;
       }
 
-      const exchange = args[0].toLowerCase() as "binance" | "okx";
+      exchange = args[0].toLowerCase() as "binance" | "okx";
       const percentage = parseFloat(args[1]);
       const initialBalance = parseFloat(args[2]);
 
@@ -1385,6 +1446,9 @@ export class TelegramBotService implements OnModuleInit {
         `Error setting account TP for user ${telegramId}:`,
         error.message,
       );
+      this.fileLogger.logBusinessError("handleSetAccount", error, telegramId, {
+        exchange,
+      });
     }
   }
 
@@ -1458,6 +1522,8 @@ export class TelegramBotService implements OnModuleInit {
     // Ensure chatId is stored
     await this.ensureChatIdStored(telegramId, chatId);
 
+    let exchange: "binance" | "okx" | undefined;
+
     try {
       const args = match[1]?.trim();
 
@@ -1469,7 +1535,7 @@ export class TelegramBotService implements OnModuleInit {
         return;
       }
 
-      const exchange = args.toLowerCase() as "binance" | "okx";
+      exchange = args.toLowerCase() as "binance" | "okx";
 
       if (exchange !== "binance" && exchange !== "okx") {
         await this.bot.sendMessage(
@@ -1581,9 +1647,11 @@ export class TelegramBotService implements OnModuleInit {
         chatId,
         `❌ Error getting update: ${error.message}`,
       );
-      this.logger.error(
-        `Error in manual update for user ${telegramId}:`,
-        error.message,
+      this.fileLogger.logBusinessError(
+        "handleManualUpdate",
+        error,
+        telegramId,
+        { exchange },
       );
     }
   }
@@ -1597,6 +1665,8 @@ export class TelegramBotService implements OnModuleInit {
 
     await this.ensureChatIdStored(telegramId, chatId);
 
+    let exchange: "binance" | "okx" | undefined;
+
     try {
       const args = match[1]?.trim();
 
@@ -1608,7 +1678,7 @@ export class TelegramBotService implements OnModuleInit {
         return;
       }
 
-      const exchange = args.toLowerCase() as "binance" | "okx";
+      exchange = args.toLowerCase() as "binance" | "okx";
 
       if (exchange !== "binance" && exchange !== "okx") {
         await this.bot.sendMessage(
@@ -1670,9 +1740,11 @@ export class TelegramBotService implements OnModuleInit {
         chatId,
         `❌ Error closing positions: ${error.message}`,
       );
-      this.logger.error(
-        `Error in handleCloseAllPositions for user ${telegramId}:`,
-        error.message,
+      this.fileLogger.logApiError(
+        exchange,
+        "handleCloseAllPositions",
+        error,
+        telegramId,
       );
     }
   }
@@ -1685,6 +1757,9 @@ export class TelegramBotService implements OnModuleInit {
     const telegramId = msg.from.id;
 
     await this.ensureChatIdStored(telegramId, chatId);
+
+    let exchange: "binance" | "okx" | undefined;
+    let symbol: string | undefined;
 
     try {
       if (!match || match.length < 2) {
@@ -1707,8 +1782,8 @@ export class TelegramBotService implements OnModuleInit {
         return;
       }
 
-      const exchange = args[0].toLowerCase() as "binance" | "okx";
-      const symbol = args[1].toUpperCase();
+      exchange = args[0].toLowerCase() as "binance" | "okx";
+      symbol = args[1].toUpperCase();
 
       if (exchange !== "binance" && exchange !== "okx") {
         await this.bot.sendMessage(
@@ -1793,9 +1868,12 @@ export class TelegramBotService implements OnModuleInit {
         chatId,
         `❌ Error closing position: ${error.message}`,
       );
-      this.logger.error(
-        `Error in handleClosePosition for user ${telegramId}:`,
-        error.message,
+      this.fileLogger.logApiError(
+        exchange,
+        "handleClosePosition",
+        error,
+        telegramId,
+        symbol,
       );
     }
   }
@@ -1808,6 +1886,10 @@ export class TelegramBotService implements OnModuleInit {
     const telegramId = msg.from.id;
 
     await this.ensureChatIdStored(telegramId, chatId);
+
+    let exchange: "binance" | "okx" | undefined;
+    let maxRetry: number | undefined;
+    let volumeReductionPercent: number | undefined;
 
     try {
       if (!match || match.length < 2) {
@@ -1830,9 +1912,9 @@ export class TelegramBotService implements OnModuleInit {
         return;
       }
 
-      const exchange = args[0].toLowerCase() as "binance" | "okx";
-      const maxRetry = parseInt(args[1]);
-      const volumeReductionPercent = args[2] ? parseFloat(args[2]) : 15;
+      exchange = args[0].toLowerCase() as "binance" | "okx";
+      maxRetry = parseInt(args[1]);
+      volumeReductionPercent = args[2] ? parseFloat(args[2]) : 15;
 
       if (exchange !== "binance" && exchange !== "okx") {
         await this.bot.sendMessage(
@@ -1904,6 +1986,11 @@ export class TelegramBotService implements OnModuleInit {
         `Error in handleSetRetry for user ${telegramId}:`,
         error.message,
       );
+      this.fileLogger.logBusinessError("handleSetRetry", error, telegramId, {
+        exchange,
+        maxRetry,
+        volumeReductionPercent,
+      });
     }
   }
 
@@ -1916,6 +2003,8 @@ export class TelegramBotService implements OnModuleInit {
 
     await this.ensureChatIdStored(telegramId, chatId);
 
+    let exchange: "binance" | "okx" | undefined;
+
     try {
       if (!match || match.length < 2) {
         await this.bot.sendMessage(
@@ -1925,7 +2014,7 @@ export class TelegramBotService implements OnModuleInit {
         return;
       }
 
-      const exchange = match[1].trim().toLowerCase() as "binance" | "okx";
+      exchange = match[1].trim().toLowerCase() as "binance" | "okx";
 
       if (exchange !== "binance" && exchange !== "okx") {
         await this.bot.sendMessage(
@@ -1982,6 +2071,9 @@ export class TelegramBotService implements OnModuleInit {
         `Error in handleClearRetry for user ${telegramId}:`,
         error.message,
       );
+      this.fileLogger.logBusinessError("handleClearRetry", error, telegramId, {
+        exchange,
+      });
     }
   }
 }

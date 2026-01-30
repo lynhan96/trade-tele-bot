@@ -442,4 +442,42 @@ export class OkxService {
       throw error;
     }
   }
+
+  async setStopLoss(
+    apiKey: string,
+    apiSecret: string,
+    passphrase: string,
+    symbol: string,
+    stopPrice: number,
+    side: "LONG" | "SHORT",
+    quantity: number,
+  ): Promise<any> {
+    try {
+      const client = this.createClient(apiKey, apiSecret, passphrase);
+
+      // Set stop loss order using conditional order
+      const order = await client.post("/api/v5/trade/order-algo", {
+        instId: symbol,
+        tdMode: "cross",
+        side: side === "LONG" ? "sell" : "buy",
+        ordType: "conditional",
+        sz: quantity.toString(),
+        slTriggerPx: stopPrice.toString(),
+        slOrdPx: "-1", // Market order when triggered
+      });
+
+      if (order.data.code !== "0") {
+        throw new Error(`OKX API Error: ${order.data.msg}`);
+      }
+
+      this.logger.log(`Set stop loss for ${symbol} at $${stopPrice} (${side})`);
+      return order.data.data[0];
+    } catch (error) {
+      this.logger.error(
+        `Error setting stop loss for ${symbol}:`,
+        error.message,
+      );
+      throw error;
+    }
+  }
 }
