@@ -60,9 +60,9 @@ export class TelegramBotService implements OnModuleInit {
       await this.handlePosition(msg);
     });
 
-    // Command: /set-account [exchange] [tp_percentage] [initial_balance]
+    // Command: /setaccount [exchange] [tp_percentage] [initial_balance]
     this.bot.onText(/\/setaccount (.+)/, async (msg, match) => {
-      this.logger.debug(`Command /set-account from user ${msg.from.id}`);
+      this.logger.debug(`Command /setaccount from user ${msg.from.id}`);
       await this.handleSetAccount(msg, match);
     });
 
@@ -632,7 +632,7 @@ export class TelegramBotService implements OnModuleInit {
           "Your message has been deleted for security.\n\n" +
           "*Quick Start:*\n" +
           "/position - View your positions\n" +
-          `/set-account ${exchange} % balance - Set TP target\n` +
+          `/setaccount ${exchange} % balance - Set TP target\n` +
           `/close ${exchange} symbol - Close specific position\n` +
           "/accounts - View all settings\n\n" +
           `💡 Tip: Use /closeall ${exchange} to close all positions`,
@@ -883,7 +883,7 @@ export class TelegramBotService implements OnModuleInit {
 
       message += `Active Exchange: *${activeExchange?.toUpperCase() || "None"}*\n\n`;
       message +=
-        "Use /set-account [exchange] to configure TP for each exchange.";
+        "Use /setaccount [exchange] to configure TP for each exchange.";
 
       await this.bot.sendMessage(chatId, message, { parse_mode: "Markdown" });
     } catch (error) {
@@ -976,8 +976,8 @@ export class TelegramBotService implements OnModuleInit {
       if (!match || match.length < 2) {
         await this.bot.sendMessage(
           chatId,
-          "❌ Invalid format. Use:\n/set-account exchange % balance\n\n" +
-            "Examples:\n/set-account binance 5 1000\n/set-account okx 10 2000\n\n" +
+          "❌ Invalid format. Use:\n/setaccount exchange % balance\n\n" +
+            "Examples:\n/setaccount binance 5 1000\n/setaccount okx 10 2000\n\n" +
             "This will set TP target for the specified exchange.",
           { parse_mode: "Markdown" },
         );
@@ -990,7 +990,7 @@ export class TelegramBotService implements OnModuleInit {
         await this.bot.sendMessage(
           chatId,
           "❌ Please provide exchange, TP percentage and initial balance.\n" +
-            "Example: /set-account binance 5 1000",
+            "Example: /setaccount binance 5 1000",
         );
         return;
       }
@@ -1157,7 +1157,7 @@ export class TelegramBotService implements OnModuleInit {
       if (!tpData) {
         await this.bot.sendMessage(
           chatId,
-          `❌ No take profit target set for ${exchange.toUpperCase()}. Use /set-account first.`,
+          `❌ No take profit target set for ${exchange.toUpperCase()}. Use /setaccount first.`,
         );
         return;
       }

@@ -1,5 +1,47 @@
 # Changelog
 
+## 2026-01-30 - Command Name Standardization
+
+### Changes
+
+#### Unified Command Naming: /set-account → /setaccount
+
+**Reason**: Standardize all commands to use single-word format without hyphens for consistency and easier typing.
+
+**Changes Made**:
+
+- Command pattern: `/setaccount` (no change in regex, already was `/setaccount`)
+- All help text updated from `/set-account` to `/setaccount`
+- Error messages updated to show `/setaccount`
+- Quick start guides updated
+
+**Command Format**:
+
+```
+/setaccount exchange % balance
+```
+
+**Examples**:
+
+```
+/setaccount binance 5 1000
+/setaccount okx 10 2000
+```
+
+**Files Modified**:
+
+- `src/telegram/telegram.service.ts` - Lines 63, 65, 517, 635, 886, 979-980, 993, 1160
+  - Updated all instances of `/set-account` text to `/setaccount`
+  - Logger message, help text, error messages, footer text
+
+**User Impact**:
+
+- No breaking change - command was already `/setaccount` in code
+- Only help text/documentation updated for consistency
+- Users typing `/set-account` will get "unknown command" (as before)
+
+---
+
 ## 2026-01-30 - Command Architecture Redesign & Position Management
 
 ### Breaking Changes
