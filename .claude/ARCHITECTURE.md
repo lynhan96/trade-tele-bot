@@ -50,6 +50,7 @@ AppModule
 ## Data Flow
 
 ### 1. User Command Flow
+
 ```
 User → Telegram → Bot API → TelegramBotService
                               ↓
@@ -67,6 +68,7 @@ User → Telegram → Bot API → TelegramBotService
 ```
 
 ### 2. Take Profit Monitoring Flow
+
 ```
 Cron (30s) → checkTakeProfitTargets()
                 ↓
@@ -89,6 +91,7 @@ Cron (30s) → checkTakeProfitTargets()
 ```
 
 ### 3. Re-entry System Flow
+
 ```
 Cron (15s) → checkReentryOpportunities()
                 ↓
@@ -118,7 +121,9 @@ Cron (15s) → checkReentryOpportunities()
 ## Key Services
 
 ### TelegramBotService
+
 **Responsibilities:**
+
 - Handle Telegram commands
 - Execute cron jobs
 - Orchestrate business logic
@@ -126,6 +131,7 @@ Cron (15s) → checkReentryOpportunities()
 - Error handling & logging
 
 **Key Methods:**
+
 - `checkTakeProfitTargets()` - Monitor TP
 - `checkReentryOpportunities()` - Check re-entry
 - `executeReentry()` - Execute re-entry
@@ -133,13 +139,16 @@ Cron (15s) → checkReentryOpportunities()
 - Command handlers (handleXxx methods)
 
 ### BinanceService
+
 **Responsibilities:**
+
 - Binance Futures API integration
 - Account balance queries
 - Position management
 - Order execution
 
 **Key Methods:**
+
 - `getAccountBalance()`
 - `getAllPositions()`
 - `closePosition()`
@@ -148,13 +157,16 @@ Cron (15s) → checkReentryOpportunities()
 - `getCurrentPrice()`
 
 ### OkxService
+
 **Responsibilities:**
+
 - OKX API v5 integration
 - Account queries
 - Position management
 - Order execution
 
 **Key Methods:**
+
 - `getAccountBalance()`
 - `getAllPositions()`
 - `closePosition()`
@@ -163,12 +175,15 @@ Cron (15s) → checkReentryOpportunities()
 - `getCurrentPrice()`
 
 ### RedisService
+
 **Responsibilities:**
+
 - State persistence
 - Cache management
 - Key-value operations
 
 **Key Data Structures:**
+
 ```
 user:{id}:api:{exchange}          → API credentials
 user:{id}:tp:{exchange}           → TP config
@@ -179,13 +194,16 @@ user:{id}:chatId                  → Telegram chat ID
 ```
 
 ### FileLoggerService
+
 **Responsibilities:**
+
 - File-based error logging
 - Daily log rotation
 - Structured JSON logs
 - Console output
 
 **Log Types:**
+
 - `logApiError()` - Exchange API errors
 - `logBusinessError()` - Business logic errors
 - `logError()` - General errors
@@ -193,6 +211,7 @@ user:{id}:chatId                  → Telegram chat ID
 ## Configuration
 
 ### Environment Variables
+
 ```env
 TELEGRAM_BOT_TOKEN=xxx          # Telegram Bot API token
 REDIS_HOST=localhost            # Redis connection
@@ -202,6 +221,7 @@ LOG_LEVEL=info                  # Logging level
 ```
 
 ### Retry System Configuration
+
 ```typescript
 {
   maxRetry: 1-10,              // Number of retries
@@ -213,6 +233,7 @@ LOG_LEVEL=info                  # Logging level
 ```
 
 ### Re-entry Data Structure
+
 ```typescript
 {
   symbol: string,
@@ -236,6 +257,7 @@ LOG_LEVEL=info                  # Logging level
 ## Cron Jobs
 
 ### checkTakeProfitTargets
+
 - **Frequency:** Every 30 seconds
 - **Purpose:** Monitor unrealized PnL vs TP target
 - **Actions:**
@@ -244,6 +266,7 @@ LOG_LEVEL=info                  # Logging level
   - Send notifications
 
 ### checkReentryOpportunities
+
 - **Frequency:** Every 15 seconds
 - **Purpose:** Check for price return to entry
 - **Actions:**
@@ -253,6 +276,7 @@ LOG_LEVEL=info                  # Logging level
   - Set stop loss at previous TP
 
 ### sendPeriodicUpdates
+
 - **Frequency:** Every 5 minutes
 - **Purpose:** Send balance updates to users
 - **Actions:**
@@ -263,6 +287,7 @@ LOG_LEVEL=info                  # Logging level
 ## Error Handling
 
 ### Error Logging Strategy
+
 1. **File Logging Only:** All errors logged to files
 2. **Structured Data:** JSON format with context
 3. **Daily Rotation:** Auto-rotate and cleanup
@@ -272,6 +297,7 @@ LOG_LEVEL=info                  # Logging level
    - Cron Errors (Job failures)
 
 ### Error Recovery
+
 - **Transient Failures:** Retry on next cron run
 - **Configuration Errors:** User notification
 - **Critical Errors:** Logged to file for investigation
@@ -280,16 +306,19 @@ LOG_LEVEL=info                  # Logging level
 ## Security Considerations
 
 ### API Key Storage
+
 - Stored in Redis with encryption support
 - Never logged to files
 - Transmitted only to exchange APIs
 
 ### User Data
+
 - Only Telegram ID stored in logs
 - No personal information
 - No trading balances in logs
 
 ### Redis Security
+
 - Password-protected connection
 - Local network only
 - Key prefixing for namespace isolation
@@ -297,17 +326,20 @@ LOG_LEVEL=info                  # Logging level
 ## Performance Optimization
 
 ### Caching Strategy
+
 - User data cached in Redis
 - API credentials cached
 - Configuration cached
 - TTL not implemented (manual cleanup)
 
 ### Rate Limiting
+
 - Binance: Handled by SDK
 - OKX: Handled by API
 - Bot: No internal rate limiting
 
 ### Async Operations
+
 - All file I/O is async
 - Non-blocking logging
 - Parallel API calls where possible
@@ -315,6 +347,7 @@ LOG_LEVEL=info                  # Logging level
 ## Deployment Considerations
 
 ### Dependencies
+
 ```json
 {
   "@nestjs/core": "^10.x",
@@ -327,12 +360,14 @@ LOG_LEVEL=info                  # Logging level
 ```
 
 ### System Requirements
+
 - Node.js 18+
 - Redis 6+
 - 512MB RAM minimum
 - 1GB disk space for logs
 
 ### Scaling
+
 - Single instance (Telegram bot polling)
 - Horizontal scaling not supported
 - Redis can be clustered
@@ -341,17 +376,20 @@ LOG_LEVEL=info                  # Logging level
 ## Monitoring
 
 ### Health Checks
+
 - Redis connection
 - Telegram API connection
 - Exchange API health
 
 ### Metrics to Monitor
+
 - Error rate per exchange
 - Re-entry success rate
 - Average TP achievement time
 - Cron job execution time
 
 ### Log Analysis
+
 - Search by user ID
 - Search by exchange
 - Search by operation
@@ -360,6 +398,7 @@ LOG_LEVEL=info                  # Logging level
 ## Future Enhancements
 
 ### Planned Features
+
 1. Multi-account support per exchange
 2. Advanced TP strategies (trailing, multiple levels)
 3. Position size calculator
@@ -367,6 +406,7 @@ LOG_LEVEL=info                  # Logging level
 5. Performance analytics dashboard
 
 ### Technical Improvements
+
 1. Database migration from Redis
 2. WebSocket for real-time updates
 3. Horizontal scaling support

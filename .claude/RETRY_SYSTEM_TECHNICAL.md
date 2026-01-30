@@ -7,47 +7,49 @@ The retry/re-entry system automatically re-opens positions when the price return
 ## Core Concepts
 
 ### 1. Retry Configuration
+
 Each user can configure retry behavior per exchange (Binance/OKX):
 
 ```typescript
 interface RetryConfig {
-  maxRetry: number;              // 1-10 retries allowed
-  currentRetryCount: number;     // Remaining retries
-  volumeReductionPercent: number;// 1-50% (default 15%)
+  maxRetry: number; // 1-10 retries allowed
+  currentRetryCount: number; // Remaining retries
+  volumeReductionPercent: number; // 1-50% (default 15%)
   enabled: boolean;
-  setAt: number;                 // Timestamp
+  setAt: number; // Timestamp
 }
 ```
 
 **Storage Key:** `user:{telegramId}:retry:{exchange}`
 
 ### 2. Re-entry Data
+
 When TP is reached, position data is stored for potential re-entry:
 
 ```typescript
 interface ReentryData {
   // Position Info
-  symbol: string;               // e.g., BTCUSDT
-  entryPrice: number;           // Original entry price
+  symbol: string; // e.g., BTCUSDT
+  entryPrice: number; // Original entry price
   side: "LONG" | "SHORT";
   leverage: number;
-  
+
   // Volume Management
-  quantity: number;             // Current quantity
-  originalQuantity: number;     // Initial quantity
-  volume: number;               // Current volume (USDT)
-  originalVolume: number;       // Initial volume
+  quantity: number; // Current quantity
+  originalQuantity: number; // Initial quantity
+  volume: number; // Current volume (USDT)
+  originalVolume: number; // Initial volume
   margin: number;
-  
+
   // Retry Management
-  currentRetry: number;         // Current retry iteration
-  remainingRetries: number;     // Retries left
+  currentRetry: number; // Current retry iteration
+  remainingRetries: number; // Retries left
   volumeReductionPercent: number;
-  
+
   // Risk Management
-  tpPercentage: number;         // TP % used
-  stopLossPrice: number;        // Previous TP price (SL level)
-  closedAt: number;             // Timestamp
+  tpPercentage: number; // TP % used
+  stopLossPrice: number; // Previous TP price (SL level)
+  closedAt: number; // Timestamp
 }
 ```
 
@@ -63,33 +65,33 @@ interface ReentryData {
 // 1. Check unrealized PnL vs target
 const targetProfit = (initialBalance * tpPercentage) / 100;
 if (unrealizedPnl >= targetProfit) {
-  
   // 2. Close all positions
   await closeAllPositions(userData, positions);
-  
+
   // 3. For each position closed, calculate TP price
   for (const position of positions) {
     const isLong = position.side === "LONG";
-    const tpPrice = isLong 
+    const tpPrice = isLong
       ? entryPrice * (1 + tpPercentage / 100)
       : entryPrice * (1 - tpPercentage / 100);
-    
+
     // 4. Store re-entry data with stopLossPrice = tpPrice
     await storeReentryData({
       ...position,
-      stopLossPrice: tpPrice,  // Critical: Previous TP = Future SL
+      stopLossPrice: tpPrice, // Critical: Previous TP = Future SL
       currentRetry: 0,
       remainingRetries: maxRetry,
-      volumeReductionPercent: config.volumeReductionPercent
+      volumeReductionPercent: config.volumeReductionPercent,
     });
   }
-  
+
   // 5. Notify user
   sendNotification("TP reached, re-entry enabled");
 }
 ```
 
 **Key Points:**
+
 - All positions closed simultaneously
 - TP price calculated **once** and stored
 - No recalculation in future re-entries
@@ -106,11 +108,11 @@ const reentries = await getAllReentries();
 for (const reentry of reentries) {
   // 2. Get current market price
   const currentPrice = await getCurrentPrice(symbol);
-  
+
   // 3. Calculate tolerance (±0.5%)
   const tolerance = reentry.entryPrice * 0.005;
   const priceDiff = Math.abs(currentPrice - reentry.entryPrice);
-  
+
   // 4. Check if within tolerance
   if (priceDiff <= tolerance) {
     await executeReentry(reentry);
@@ -119,6 +121,7 @@ for (const reentry of reentries) {
 ```
 
 **Tolerance Logic:**
+
 - Entry at $100: Re-enter between $99.50 - $100.50
 - Entry at $50,000: Re-enter between $49,750 - $50,250
 - Prevents immediate re-entry on small fluctuations
@@ -135,21 +138,21 @@ async function executeReentry(reentryData) {
     symbol: reentryData.symbol,
     side: reentryData.side,
     quantity: reentryData.quantity,
-    leverage: reentryData.leverage
+    leverage: reentryData.leverage,
   });
-  
+
   // 2. Set stop loss at PREVIOUS TP price (stored)
   await setStopLoss({
     symbol: reentryData.symbol,
-    stopPrice: reentryData.stopLossPrice,  // No recalculation!
+    stopPrice: reentryData.stopLossPrice, // No recalculation!
     side: reentryData.side,
-    quantity: reentryData.quantity
+    quantity: reentryData.quantity,
   });
-  
+
   // 3. Calculate next quantity (volume reduction)
-  const nextQuantity = reentryData.quantity * 
-    (1 - reentryData.volumeReductionPercent / 100);
-  
+  const nextQuantity =
+    reentryData.quantity * (1 - reentryData.volumeReductionPercent / 100);
+
   // 4. Update or cleanup
   if (reentryData.remainingRetries > 0) {
     // Store for next retry
@@ -158,12 +161,12 @@ async function executeReentry(reentryData) {
       quantity: nextQuantity,
       volume: nextQuantity * reentryData.entryPrice,
       currentRetry: reentryData.currentRetry + 1,
-      remainingRetries: reentryData.remainingRetries - 1
+      remainingRetries: reentryData.remainingRetries - 1,
     });
   } else {
     // Last retry - cleanup
     await deleteReentryData();
-    
+
     // Check if all symbols done
     const remaining = await getRemainingReentries();
     if (remaining.length === 0) {
@@ -171,7 +174,7 @@ async function executeReentry(reentryData) {
       await resetRetryCount();
     }
   }
-  
+
   // 5. Notify user
   sendNotification("Re-entered position");
 }
@@ -183,14 +186,14 @@ async function executeReentry(reentryData) {
 
 **Initial Position:** 1.0 BTC
 
-| Retry | Formula | Quantity | Reduction from Original |
-|-------|---------|----------|------------------------|
-| 0 (TP) | Original | 1.0000 | 0% |
-| 1 | 1.0 × 0.85 | 0.8500 | 15% |
-| 2 | 0.85 × 0.85 | 0.7225 | 27.75% |
-| 3 | 0.7225 × 0.85 | 0.6141 | 38.59% |
-| 4 | 0.6141 × 0.85 | 0.5220 | 47.80% |
-| 5 | 0.5220 × 0.85 | 0.4437 | 55.63% |
+| Retry  | Formula       | Quantity | Reduction from Original |
+| ------ | ------------- | -------- | ----------------------- |
+| 0 (TP) | Original      | 1.0000   | 0%                      |
+| 1      | 1.0 × 0.85    | 0.8500   | 15%                     |
+| 2      | 0.85 × 0.85   | 0.7225   | 27.75%                  |
+| 3      | 0.7225 × 0.85 | 0.6141   | 38.59%                  |
+| 4      | 0.6141 × 0.85 | 0.5220   | 47.80%                  |
+| 5      | 0.5220 × 0.85 | 0.4437   | 55.63%                  |
 
 **Formula:** `quantity(n) = quantity(n-1) × (1 - reductionPercent/100)`
 
@@ -224,15 +227,16 @@ Result: If SL hit, still made 5% profit!
 
 ```typescript
 // WRONG: Recalculate SL each time
-const slPrice = isLong 
+const slPrice = isLong
   ? entryPrice * (1 + tpPercentage / 100)
   : entryPrice * (1 - tpPercentage / 100);
 
 // RIGHT: Use stored stopLossPrice
-const slPrice = reentryData.stopLossPrice;  // Set once at TP
+const slPrice = reentryData.stopLossPrice; // Set once at TP
 ```
 
 **Why?**
+
 - Consistency across retries
 - No calculation errors
 - Maintains original profit protection
@@ -242,6 +246,7 @@ const slPrice = reentryData.stopLossPrice;  // Set once at TP
 ### Per-Symbol Tracking
 
 Each symbol has its own retry data:
+
 ```
 user:123:reentry:binance:BTCUSDT  → { remainingRetries: 3 }
 user:123:reentry:binance:ETHUSDT  → { remainingRetries: 5 }
@@ -255,21 +260,22 @@ user:123:reentry:binance:BNBUSDT  → { remainingRetries: 2 }
 if (remainingRetries === 0) {
   // Delete this symbol's data
   await deleteReentryData(symbol);
-  
+
   // Check if ALL symbols are done
   const allReentries = await getAllReentries(exchange);
-  
+
   if (allReentries.length === 0) {
     // No more pending re-entries, reset global counter
     await updateRetryConfig({
       ...retryConfig,
-      currentRetryCount: retryConfig.maxRetry  // Reset
+      currentRetryCount: retryConfig.maxRetry, // Reset
     });
   }
 }
 ```
 
 **Logic:**
+
 - Each symbol decrements independently
 - Global counter resets only when ALL symbols exhausted
 - Allows user to add new positions without manual reset
@@ -279,6 +285,7 @@ if (remainingRetries === 0) {
 ### /setretry [exchange] [max_retry] [volume_reduction%]
 
 **Examples:**
+
 ```
 /setretry binance 5
 → 5 retries, 15% reduction (default)
@@ -291,11 +298,13 @@ if (remainingRetries === 0) {
 ```
 
 **Validations:**
+
 - exchange: binance | okx
 - max_retry: 1-10
 - volume_reduction: 1-50% (default 15%)
 
 **Effect:**
+
 - Enables retry system for exchange
 - Stores configuration
 - Applies to future TP closures
@@ -303,6 +312,7 @@ if (remainingRetries === 0) {
 ### /clearretry [exchange]
 
 **Examples:**
+
 ```
 /clearretry binance
 → Disables retries, clears pending re-entries
@@ -312,6 +322,7 @@ if (remainingRetries === 0) {
 ```
 
 **Effect:**
+
 - Deletes retry configuration
 - Deletes all pending re-entries
 - No more automatic re-entries
@@ -320,40 +331,51 @@ if (remainingRetries === 0) {
 ## Edge Cases & Handling
 
 ### 1. Rapid Price Oscillation
+
 **Problem:** Price oscillates rapidly around entry
 **Solution:** ±0.5% tolerance prevents immediate retriggering
 
 ### 2. Stop Loss Failure
+
 **Problem:** SL order fails to place
-**Solution:** 
+**Solution:**
+
 - Log error to file
 - Continue execution (don't block)
 - Position still opened (user can close manually)
 
 ### 3. Insufficient Balance
+
 **Problem:** Not enough margin for reduced quantity
 **Solution:**
+
 - Exchange API rejects order
 - Error logged
 - Re-entry skipped this cycle
 - Will retry on next price trigger
 
 ### 4. Symbol Price Format
+
 **Problem:** Different decimal places per symbol
 **Solution:**
+
 - Use exchange API defaults
 - Binance: 4 decimals for prices
 - OKX: Varies by instrument
 
 ### 5. Leverage Changes
+
 **Problem:** Leverage changed between TP and re-entry
 **Solution:**
+
 - Use stored leverage from original position
 - Maintain consistency across retries
 
 ### 6. Exchange Downtime
+
 **Problem:** API unavailable during re-entry window
 **Solution:**
+
 - Error logged
 - Retry on next cron run (15s later)
 - No data lost
@@ -361,6 +383,7 @@ if (remainingRetries === 0) {
 ## Performance Considerations
 
 ### Redis Operations
+
 - **Read:** O(1) per key
 - **Scan:** O(N) for all re-entries
 - **Write:** O(1) per update
@@ -369,6 +392,7 @@ if (remainingRetries === 0) {
 **Optimization:** Re-entries scanned every 15s, limited by active positions
 
 ### API Calls
+
 - **Per Re-entry Check:** 1 API call (get price)
 - **Per Re-entry Execution:** 2-3 API calls (open position + set SL)
 - **Rate Limits:** Handled by exchange SDKs
@@ -376,6 +400,7 @@ if (remainingRetries === 0) {
 **Optimization:** Parallel checks for multiple symbols
 
 ### Memory Usage
+
 - **Per Re-entry:** ~500 bytes (JSON data)
 - **100 Re-entries:** ~50 KB
 - **Negligible Impact**
@@ -383,6 +408,7 @@ if (remainingRetries === 0) {
 ## Monitoring & Debugging
 
 ### Log Search
+
 ```bash
 # Find re-entry errors
 grep '"operation":"executeReentry"' logs/error-*.log
@@ -395,6 +421,7 @@ grep "retry reset" logs/combined-*.log
 ```
 
 ### Redis Inspection
+
 ```bash
 # List all re-entries for user
 redis-cli keys "binance-bot:user:123456789:reentry:*"
@@ -407,6 +434,7 @@ redis-cli get "binance-bot:user:123456789:retry:binance"
 ```
 
 ### Health Checks
+
 - Verify cron jobs running (check logs)
 - Check Redis connectivity
 - Monitor error rates
@@ -415,6 +443,7 @@ redis-cli get "binance-bot:user:123456789:retry:binance"
 ## Testing Scenarios
 
 ### Scenario 1: Successful Re-entry
+
 1. Set TP target 5%, balance $1000
 2. Open position: 1 BTC at $100
 3. Price goes to $105 → TP hit
@@ -422,6 +451,7 @@ redis-cli get "binance-bot:user:123456789:retry:binance"
 5. SL at $105 protects profit
 
 ### Scenario 2: Multiple Retries
+
 1. Configure 3 retries, 15% reduction
 2. TP at $105
 3. Retry 1: $100 → 0.85 BTC, SL $105
@@ -432,6 +462,7 @@ redis-cli get "binance-bot:user:123456789:retry:binance"
 8. Cleanup + reset counter
 
 ### Scenario 3: Stop Loss Hit
+
 1. Re-enter at $100, SL $105
 2. Price goes to $105
 3. SL triggered → Position closed
@@ -440,6 +471,7 @@ redis-cli get "binance-bot:user:123456789:retry:binance"
 ## Conclusion
 
 The retry system provides automated profit maximization while maintaining:
+
 - **Risk Control:** Volume reduction
 - **Profit Protection:** SL at previous TP
 - **Flexibility:** Configurable retries

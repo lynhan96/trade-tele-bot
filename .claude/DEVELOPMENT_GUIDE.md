@@ -3,6 +3,7 @@
 ## Getting Started
 
 ### Prerequisites
+
 ```bash
 Node.js >= 18.0.0
 Redis >= 6.0.0
@@ -10,6 +11,7 @@ npm >= 9.0.0
 ```
 
 ### Installation
+
 ```bash
 # Clone repository
 git clone <repo-url>
@@ -24,6 +26,7 @@ cp .env.example .env
 ```
 
 ### Environment Configuration
+
 ```env
 # Required
 TELEGRAM_BOT_TOKEN=your_bot_token_here
@@ -38,17 +41,20 @@ LOG_LEVEL=info
 ### Running the Bot
 
 **Development Mode:**
+
 ```bash
 npm run start:dev
 ```
 
 **Production Mode:**
+
 ```bash
 npm run build
 npm run start:prod
 ```
 
 **Debug Mode:**
+
 ```bash
 npm run start:debug
 ```
@@ -93,7 +99,7 @@ src/
 ```typescript
 private setupCommands() {
   // ... existing commands ...
-  
+
   // Add your new command
   this.bot.onText(/\/mycommand (.+)/, async (msg, match) => {
     await this.handleMyCommand(msg, match);
@@ -110,14 +116,14 @@ private async handleMyCommand(
 ) {
   const chatId = msg.chat.id;
   const telegramId = msg.from.id;
-  
+
   // Ensure chat ID is stored
   await this.ensureChatIdStored(telegramId, chatId);
-  
+
   try {
     // Parse arguments
     const args = match[1]?.trim().split(/\s+/);
-    
+
     if (!args || args.length < 1) {
       await this.bot.sendMessage(
         chatId,
@@ -125,7 +131,7 @@ private async handleMyCommand(
       );
       return;
     }
-    
+
     // Get user data
     const userData = await this.getActiveUserData(telegramId);
     if (!userData) {
@@ -135,23 +141,23 @@ private async handleMyCommand(
       );
       return;
     }
-    
+
     // Your logic here
     const result = await this.doSomething(userData, args[0]);
-    
+
     // Respond to user
     await this.bot.sendMessage(
       chatId,
       `✅ Success: ${result}`,
       { parse_mode: "Markdown" }
     );
-    
+
   } catch (error) {
     await this.bot.sendMessage(
       chatId,
       `❌ Error: ${error.message}`,
     );
-    
+
     // Log error to file
     this.fileLogger.logBusinessError(
       'handleMyCommand',
@@ -179,8 +185,9 @@ private async doSomething(
 ### 4. Update Command List
 
 Add to `/start` command response:
+
 ```typescript
-"/mycommand - Description of my command\n"
+"/mycommand - Description of my command\n";
 ```
 
 ## Adding Exchange Integration
@@ -190,8 +197,8 @@ Add to `/start` command response:
 **File:** `src/myexchange/myexchange.module.ts`
 
 ```typescript
-import { Module } from '@nestjs/common';
-import { MyExchangeService } from './myexchange.service';
+import { Module } from "@nestjs/common";
+import { MyExchangeService } from "./myexchange.service";
 
 @Module({
   providers: [MyExchangeService],
@@ -205,13 +212,13 @@ export class MyExchangeModule {}
 **File:** `src/myexchange/myexchange.service.ts`
 
 ```typescript
-import { Injectable } from '@nestjs/common';
-import axios from 'axios';
+import { Injectable } from "@nestjs/common";
+import axios from "axios";
 
 @Injectable()
 export class MyExchangeService {
-  private readonly baseUrl = 'https://api.myexchange.com';
-  
+  private readonly baseUrl = "https://api.myexchange.com";
+
   async getAccountBalance(
     apiKey: string,
     apiSecret: string,
@@ -219,24 +226,21 @@ export class MyExchangeService {
     // Implement API call
     const response = await axios.get(`${this.baseUrl}/account`, {
       headers: {
-        'API-KEY': apiKey,
+        "API-KEY": apiKey,
         // Add authentication
-      }
+      },
     });
-    
+
     return {
       totalBalance: response.data.balance,
-      totalUnrealizedProfit: response.data.unrealizedPnl
+      totalUnrealizedProfit: response.data.unrealizedPnl,
     };
   }
-  
-  async getAllPositions(
-    apiKey: string,
-    apiSecret: string,
-  ): Promise<any[]> {
+
+  async getAllPositions(apiKey: string, apiSecret: string): Promise<any[]> {
     // Implement position fetching
   }
-  
+
   async closePosition(
     apiKey: string,
     apiSecret: string,
@@ -246,7 +250,7 @@ export class MyExchangeService {
   ): Promise<void> {
     // Implement position closing
   }
-  
+
   async getCurrentPrice(
     apiKey: string,
     apiSecret: string,
@@ -254,7 +258,7 @@ export class MyExchangeService {
   ): Promise<number> {
     // Implement price fetching
   }
-  
+
   async openPosition(
     apiKey: string,
     apiSecret: string,
@@ -267,7 +271,7 @@ export class MyExchangeService {
   ): Promise<any> {
     // Implement position opening
   }
-  
+
   async setStopLoss(
     apiKey: string,
     apiSecret: string,
@@ -286,7 +290,7 @@ export class MyExchangeService {
 **File:** `src/app.module.ts`
 
 ```typescript
-import { MyExchangeModule } from './myexchange/myexchange.module';
+import { MyExchangeModule } from "./myexchange/myexchange.module";
 
 @Module({
   imports: [
@@ -318,7 +322,7 @@ constructor(
 private async myScheduledTask() {
   try {
     // Your logic here
-    
+
   } catch (error) {
     this.fileLogger.logError(error, {
       operation: 'myScheduledTask',
@@ -329,6 +333,7 @@ private async myScheduledTask() {
 ```
 
 ### Cron Syntax
+
 ```
 * * * * * *
 │ │ │ │ │ │
@@ -341,12 +346,14 @@ private async myScheduledTask() {
 ```
 
 **Examples:**
+
 - `'*/15 * * * * *'` - Every 15 seconds
 - `'0 */5 * * * *'` - Every 5 minutes
 - `'0 0 * * * *'` - Every hour
 - `'0 0 0 * * *'` - Every day at midnight
 
 ### Pre-defined Expressions
+
 ```typescript
 import { CronExpression } from '@nestjs/schedule';
 
@@ -360,82 +367,81 @@ import { CronExpression } from '@nestjs/schedule';
 ## Redis Operations
 
 ### Storing Data
+
 ```typescript
-await this.redisService.set(
-  `user:${telegramId}:mydata`,
-  { key: 'value' }
-);
+await this.redisService.set(`user:${telegramId}:mydata`, { key: "value" });
 ```
 
 ### Retrieving Data
+
 ```typescript
-const data = await this.redisService.get<MyType>(
-  `user:${telegramId}:mydata`
-);
+const data = await this.redisService.get<MyType>(`user:${telegramId}:mydata`);
 ```
 
 ### Deleting Data
+
 ```typescript
-await this.redisService.delete(
-  `user:${telegramId}:mydata`
-);
+await this.redisService.delete(`user:${telegramId}:mydata`);
 ```
 
 ### Pattern Matching
+
 ```typescript
-const keys = await this.redisService.keys(
-  `user:${telegramId}:*`
-);
+const keys = await this.redisService.keys(`user:${telegramId}:*`);
 ```
 
 ### Checking Existence
+
 ```typescript
-const exists = await this.redisService.exists(
-  `user:${telegramId}:mydata`
-);
+const exists = await this.redisService.exists(`user:${telegramId}:mydata`);
 ```
 
 ## Error Logging
 
 ### API Error
+
 ```typescript
 this.fileLogger.logApiError(
-  'binance',                    // exchange
-  'closePosition',              // operation
-  error,                        // error object
-  telegramId,                   // user ID
-  'BTCUSDT',                    // symbol (optional)
+  "binance", // exchange
+  "closePosition", // operation
+  error, // error object
+  telegramId, // user ID
+  "BTCUSDT", // symbol (optional)
 );
 ```
 
 ### Business Error
+
 ```typescript
 this.fileLogger.logBusinessError(
-  'handleSetAccount',           // operation
-  error,                        // error object
-  telegramId,                   // user ID
-  { exchange, percentage },     // additional data
+  "handleSetAccount", // operation
+  error, // error object
+  telegramId, // user ID
+  { exchange, percentage }, // additional data
 );
 ```
 
 ### General Error
+
 ```typescript
 this.fileLogger.logError(error, {
-  operation: 'myOperation',
-  type: 'CUSTOM_ERROR',
-  customField: 'value',
+  operation: "myOperation",
+  type: "CUSTOM_ERROR",
+  customField: "value",
 });
 ```
 
 ## Testing
 
 ### Manual Testing
+
 1. Set up test account on exchange testnet
 2. Configure bot with test API keys
 3. Run bot in development mode
 4. Test commands via Telegram
 
 ### Testing Commands
+
 ```bash
 # In Telegram, send:
 /start
@@ -446,6 +452,7 @@ this.fileLogger.logError(error, {
 ```
 
 ### Checking Logs
+
 ```bash
 # Terminal 1: Run bot
 npm run start:dev
@@ -455,6 +462,7 @@ tail -f logs/combined-$(date +%Y-%m-%d).log
 ```
 
 ### Redis Inspection
+
 ```bash
 # Connect to Redis
 redis-cli
@@ -472,6 +480,7 @@ del binance-bot:user:123456789:api:binance
 ## Debugging
 
 ### Enable Debug Logs
+
 ```env
 LOG_LEVEL=debug
 ```
@@ -510,21 +519,25 @@ LOG_LEVEL=debug
 ### Common Issues
 
 **Issue:** Bot not responding
+
 - Check `TELEGRAM_BOT_TOKEN` in .env
 - Verify bot is running
 - Check logs for errors
 
 **Issue:** Redis connection failed
+
 - Verify Redis is running: `redis-cli ping`
 - Check `REDIS_HOST` and `REDIS_PORT`
 - Verify Redis password if set
 
 **Issue:** Exchange API errors
+
 - Verify API keys are valid
 - Check API permissions (futures trading enabled)
 - Review rate limits
 
 **Issue:** Cron jobs not running
+
 - Check logs for cron execution
 - Verify `ScheduleModule` imported
 - Check system time/timezone
@@ -532,12 +545,14 @@ LOG_LEVEL=debug
 ## Code Style
 
 ### TypeScript Guidelines
+
 - Use strict mode
 - Define interfaces for all data structures
 - Use async/await (not callbacks)
 - Handle all errors explicitly
 
 ### Naming Conventions
+
 - **Services:** `MyService`
 - **Modules:** `MyModule`
 - **Interfaces:** `MyInterface`
@@ -546,6 +561,7 @@ LOG_LEVEL=debug
 - **Private methods:** `_privateMethod` or just `private`
 
 ### Comments
+
 ```typescript
 // Use comments for complex logic
 // Explain WHY, not WHAT
@@ -563,16 +579,19 @@ async getUserData(telegramId: number): Promise<UserData> {
 ## Deployment
 
 ### Build for Production
+
 ```bash
 npm run build
 ```
 
 ### Run Production
+
 ```bash
 npm run start:prod
 ```
 
 ### Using PM2 (Process Manager)
+
 ```bash
 # Install PM2
 npm install -g pm2
@@ -591,6 +610,7 @@ pm2 stop binance-bot
 ```
 
 ### Environment-specific Configs
+
 ```bash
 # Development
 cp .env.development .env

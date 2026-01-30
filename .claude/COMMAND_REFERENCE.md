@@ -5,9 +5,11 @@
 ### Account Setup
 
 #### /start
+
 **Description:** Welcome message and command list
 
 **Usage:**
+
 ```
 /start
 ```
@@ -17,9 +19,11 @@
 ---
 
 #### /setkeys [exchange] [api_key] [api_secret] [passphrase]
+
 **Description:** Configure API keys for an exchange
 
 **Usage:**
+
 ```
 Binance:
 /setkeys binance YOUR_API_KEY YOUR_API_SECRET
@@ -29,11 +33,13 @@ OKX:
 ```
 
 **Notes:**
+
 - Message is deleted after processing for security
 - Validates API keys before storing
 - Overwrites existing keys
 
 **Errors:**
+
 - ❌ Invalid API keys or insufficient permissions
 - ❌ Invalid exchange name
 
@@ -42,14 +48,17 @@ OKX:
 ### Account Management
 
 #### /accounts
+
 **Description:** List all connected exchanges and their configurations
 
 **Usage:**
+
 ```
 /accounts
 ```
 
 **Shows:**
+
 - Connected exchanges (Binance, OKX)
 - Balance for each exchange
 - TP configuration
@@ -57,6 +66,7 @@ OKX:
 - Active exchange
 
 **Example Response:**
+
 ```
 🟢 BINANCE
 ├ Balance: $10,523.45
@@ -70,25 +80,30 @@ Active Exchange: BINANCE
 ---
 
 #### /setaccount [exchange] [tp_percentage] [initial_balance]
+
 **Description:** Configure Take Profit target for an exchange
 
 **Usage:**
+
 ```
 /setaccount binance 5 10000
 /setaccount okx 3 5000
 ```
 
 **Parameters:**
+
 - `exchange`: binance or okx
 - `tp_percentage`: Target profit percentage (e.g., 5 = 5%)
 - `initial_balance`: Starting balance in USDT
 
 **Effect:**
+
 - Enables automatic TP monitoring
 - Bot checks every 30 seconds
 - Closes all positions when target reached
 
 **Example Response:**
+
 ```
 ✅ BINANCE TP target set!
 
@@ -104,15 +119,18 @@ Bot will monitor and close positions automatically.
 ---
 
 #### /cleartp [exchange]
+
 **Description:** Remove Take Profit configuration
 
 **Usage:**
+
 ```
 /cleartp binance
 /cleartp okx
 ```
 
 **Effect:**
+
 - Disables TP monitoring
 - Keeps positions open
 - Can reconfigure with /setaccount
@@ -122,14 +140,17 @@ Bot will monitor and close positions automatically.
 ### Position Management
 
 #### /position
+
 **Description:** View all open positions across exchanges
 
 **Usage:**
+
 ```
 /position
 ```
 
 **Shows:**
+
 - All open positions per exchange
 - Entry price, leverage, volume
 - Current PnL
@@ -138,6 +159,7 @@ Bot will monitor and close positions automatically.
 - Current balance
 
 **Example Response:**
+
 ```
 🟢 BINANCE
 
@@ -154,19 +176,23 @@ Balance hiện tại: 10,225.50
 ---
 
 #### /close [exchange] [symbol]
+
 **Description:** Close a specific position
 
 **Usage:**
+
 ```
 /close binance BTCUSDT
 /close okx BTC-USDT-SWAP
 ```
 
 **Effect:**
+
 - Market order to close position
 - Shows final PnL
 
 **Example Response:**
+
 ```
 ✅ Successfully closed BTCUSDT position on BINANCE!
 
@@ -178,20 +204,24 @@ PnL: 225.50 USDT
 ---
 
 #### /closeall [exchange]
+
 **Description:** Close all positions on an exchange
 
 **Usage:**
+
 ```
 /closeall binance
 /closeall okx
 ```
 
 **Effect:**
+
 - Closes all open positions
 - Market orders
 - Shows count closed
 
 **Example Response:**
+
 ```
 🔄 Closing 3 position(s) on BINANCE...
 ✅ Successfully closed all positions on BINANCE!
@@ -202,9 +232,11 @@ PnL: 225.50 USDT
 ### Retry System
 
 #### /setretry [exchange] [max_retry] [volume_reduction%]
+
 **Description:** Enable automatic re-entry after TP
 
 **Usage:**
+
 ```
 /setretry binance 5
 → 5 retries with 15% volume reduction (default)
@@ -217,11 +249,13 @@ PnL: 225.50 USDT
 ```
 
 **Parameters:**
+
 - `exchange`: binance or okx
 - `max_retry`: 1-10 retries
 - `volume_reduction`: 1-50% (optional, default 15%)
 
 **How It Works:**
+
 1. TP target reached → Close all positions
 2. Store position data with entry prices
 3. When price returns to entry (±0.5%) → Re-enter
@@ -229,6 +263,7 @@ PnL: 225.50 USDT
 5. Stop loss set at previous TP price (risk-free!)
 
 **Example Response:**
+
 ```
 ✅ Retry enabled for BINANCE!
 
@@ -244,20 +279,24 @@ automatically when price returns to entry level.
 ---
 
 #### /clearretry [exchange]
+
 **Description:** Disable retry system and clear pending re-entries
 
 **Usage:**
+
 ```
 /clearretry binance
 /clearretry okx
 ```
 
 **Effect:**
+
 - Disables automatic re-entry
 - Deletes all pending re-entries
 - Shows count of cleared entries
 
 **Example Response:**
+
 ```
 ✅ Retry disabled for BINANCE
 
@@ -270,21 +309,25 @@ Use /setretry binance to re-enable.
 ### Manual Updates
 
 #### /update [exchange]
+
 **Description:** Manually trigger balance and TP progress update
 
 **Usage:**
+
 ```
 /update binance
 /update okx
 ```
 
 **Shows:**
+
 - Current balance
 - Unrealized PnL
 - TP target progress
 - Percentage to target
 
 **Example Response:**
+
 ```
 📊 Manual Update (BINANCE)
 
@@ -302,6 +345,7 @@ Use /setretry binance to re-enable.
 ## Command Examples by Workflow
 
 ### Initial Setup
+
 ```
 1. /start
 2. /setkeys binance YOUR_KEY YOUR_SECRET
@@ -310,6 +354,7 @@ Use /setretry binance to re-enable.
 ```
 
 ### Check Status
+
 ```
 /accounts     → See all configurations
 /position     → View open positions
@@ -317,6 +362,7 @@ Use /setretry binance to re-enable.
 ```
 
 ### Modify Settings
+
 ```
 /setaccount binance 10 15000  → Change TP target
 /setretry binance 3 20        → Change retry config
@@ -325,6 +371,7 @@ Use /setretry binance to re-enable.
 ```
 
 ### Position Management
+
 ```
 /close binance BTCUSDT    → Close one position
 /closeall binance         → Close all positions
@@ -335,12 +382,14 @@ Use /setretry binance to re-enable.
 ## Automatic Operations
 
 ### TP Monitoring (Every 30s)
+
 - Checks unrealized PnL vs target
 - Closes all positions when reached
 - Stores re-entry data if retry enabled
 - Sends notification
 
 ### Re-entry Check (Every 15s)
+
 - Monitors price vs stored entry
 - Re-enters when within ±0.5%
 - Sets stop loss at previous TP
@@ -348,6 +397,7 @@ Use /setretry binance to re-enable.
 - Sends notification
 
 ### Periodic Updates (Every 5 min)
+
 - Sends balance update
 - Shows TP progress
 - Only if TP configured
@@ -359,27 +409,34 @@ Use /setretry binance to re-enable.
 ### Common Errors
 
 **❌ Please set up your account first with /setkeys**
+
 - Need to configure API keys
 
 **❌ Invalid [EXCHANGE] API keys or insufficient permissions**
+
 - Wrong API key/secret
 - Missing trading permissions
 - API keys need Futures/Margin enabled
 
 **❌ [EXCHANGE] account not found**
+
 - Use /setkeys first
 
 **❌ No take profit target is set**
+
 - Use /setaccount to set TP
 
 **❌ Invalid exchange. Please use 'binance' or 'okx'**
+
 - Typo in exchange name
 - Only binance and okx supported
 
 **❌ Max retry must be between 1 and 10**
+
 - Invalid retry count
 
 **❌ Volume reduction must be between 1% and 50%**
+
 - Invalid reduction percentage
 
 ---
@@ -387,30 +444,35 @@ Use /setretry binance to re-enable.
 ## Tips & Best Practices
 
 ### API Key Setup
+
 1. Create API key with Futures/Margin trading enabled
 2. Restrict to your IP if possible
 3. Enable only necessary permissions
 4. Never share your API keys
 
 ### Take Profit Strategy
+
 1. Start with 3-5% target
 2. Adjust based on market conditions
 3. Higher % = longer to reach
 4. Lower % = frequent closes
 
 ### Retry Configuration
+
 1. Start with 3-5 retries
 2. 15-20% volume reduction recommended
 3. More retries = more opportunities
 4. Higher reduction = lower risk
 
 ### Risk Management
+
 1. Monitor positions regularly
 2. Use stop losses (auto-set with retries)
 3. Don't over-leverage
 4. Close positions manually if needed
 
 ### Performance
+
 1. Commands respond immediately
 2. Cron jobs run automatically
 3. Check logs if issues occur
@@ -423,6 +485,7 @@ Use /setretry binance to re-enable.
 ### Automatic Notifications
 
 **TP Reached:**
+
 ```
 🎯 Take Profit Target Reached! (BINANCE)
 
@@ -436,6 +499,7 @@ Retries remaining: 5/5
 ```
 
 **Re-entry Executed:**
+
 ```
 🔄 Re-entered Position! (BINANCE)
 
@@ -451,6 +515,7 @@ Retries remaining: 4
 ```
 
 **Retry Exhausted:**
+
 ```
 🔄 Re-entered Position! (BINANCE)
 
@@ -470,6 +535,7 @@ Retry 5/5
 ## Command Permissions
 
 All commands require:
+
 - Valid Telegram user ID
 - For trading commands: Configured API keys
 - For TP/retry: Active exchange account
@@ -481,11 +547,13 @@ No admin/special permissions needed.
 ## Rate Limits
 
 ### Bot Limitations
+
 - No internal rate limiting
 - Exchange rate limits apply
 - Cron jobs have fixed intervals
 
 ### Best Practices
+
 - Don't spam commands
 - Wait for responses
 - Check /accounts for status
@@ -496,23 +564,27 @@ No admin/special permissions needed.
 ## Troubleshooting
 
 **Bot not responding:**
+
 1. Check bot is running
 2. Verify TELEGRAM_BOT_TOKEN
 3. Check logs for errors
 
 **Commands fail:**
+
 1. Check API keys valid (/setkeys)
 2. Verify exchange permissions
 3. Check account balance
 4. Review /accounts status
 
 **TP not triggering:**
+
 1. Verify TP configured (/setaccount)
 2. Check balance vs target
 3. Wait for next cron cycle (30s)
 4. Review logs
 
 **Re-entry not working:**
+
 1. Check retry enabled (/setretry)
 2. Verify price at entry level
 3. Wait for next cron cycle (15s)
@@ -523,6 +595,7 @@ No admin/special permissions needed.
 ## Support
 
 For issues or questions:
+
 1. Check logs: `logs/error-YYYY-MM-DD.log`
 2. Review documentation
 3. Test commands manually
