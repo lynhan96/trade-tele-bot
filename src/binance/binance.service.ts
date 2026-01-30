@@ -255,4 +255,68 @@ export class BinanceService {
       throw error;
     }
   }
+
+  async getCurrentPrice(
+    apiKey: string,
+    apiSecret: string,
+    symbol: string,
+  ): Promise<number> {
+    try {
+      const client = this.createClient(apiKey, apiSecret);
+      const prices = await client.futuresMarkPrice();
+      const ticker = prices.find((p) => p.symbol === symbol);
+
+      if (!ticker) {
+        throw new Error(`Symbol ${symbol} not found`);
+      }
+
+      return parseFloat(ticker.markPrice);
+    } catch (error) {
+      this.logger.error(
+        `Error fetching current price for ${symbol}:`,
+        error.message,
+      );
+      throw error;
+    }
+  }
+
+  async openPosition(
+    apiKey: string,
+    apiSecret: string,
+    params: {
+      symbol: string;
+      side: "LONG" | "SHORT";
+      quantity: number;
+      leverage: number;
+    },
+  ): Promise<any> {
+    try {
+      const client = this.createClient(apiKey, apiSecret);
+
+      // Set leverage first
+      await client.futuresLeverage({
+        symbol: params.symbol,
+        leverage: params.leverage,
+      });
+
+      // Open position with market order
+      const order = await client.futuresOrder({
+        symbol: params.symbol,
+        side: params.side === "LONG" ? "BUY" : "SELL",
+        type: "MARKET",
+        quantity: params.quantity.toString(),
+      });
+
+      this.logger.log(
+        `Opened Binance position ${params.symbol}: ${params.side} ${params.quantity} @ ${params.leverage}x`,
+      );
+      return order;
+    } catch (error) {
+      this.logger.error(
+        `Error opening Binance position ${params.symbol}:`,
+        error.message,
+      );
+      throw error;
+    }
+  }
 }

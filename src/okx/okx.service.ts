@@ -368,4 +368,78 @@ export class OkxService {
       throw error;
     }
   }
+
+  async getCurrentPrice(
+    apiKey: string,
+    apiSecret: string,
+    passphrase: string,
+    symbol: string,
+  ): Promise<number> {
+    try {
+      const client = this.createClient(apiKey, apiSecret, passphrase);
+      const response = await client.get("/api/v5/market/ticker", {
+        params: { instId: symbol },
+      });
+
+      if (response.data.code !== "0") {
+        throw new Error(`OKX API Error: ${response.data.msg}`);
+      }
+
+      const ticker = response.data.data[0];
+      return parseFloat(ticker.last);
+    } catch (error) {
+      this.logger.error(
+        `Error fetching current price for ${symbol}:`,
+        error.message,
+      );
+      throw error;
+    }
+  }
+
+  async openPosition(
+    apiKey: string,
+    apiSecret: string,
+    passphrase: string,
+    params: {
+      symbol: string;
+      side: "LONG" | "SHORT";
+      quantity: number;
+      leverage: number;
+    },
+  ): Promise<any> {
+    try {
+      const client = this.createClient(apiKey, apiSecret, passphrase);
+
+      // Set leverage first
+      await client.post("/api/v5/account/set-leverage", {
+        instId: params.symbol,
+        lever: params.leverage.toString(),
+        mgnMode: "cross",
+      });
+
+      // Open position with market order
+      const order = await client.post("/api/v5/trade/order", {
+        instId: params.symbol,
+        tdMode: "cross",
+        side: params.side === "LONG" ? "buy" : "sell",
+        ordType: "market",
+        sz: params.quantity.toString(),
+      });
+
+      if (order.data.code !== "0") {
+        throw new Error(`OKX API Error: ${order.data.msg}`);
+      }
+
+      this.logger.log(
+        `Opened OKX position ${params.symbol}: ${params.side} ${params.quantity} @ ${params.leverage}x`,
+      );
+      return order.data.data[0];
+    } catch (error) {
+      this.logger.error(
+        `Error opening OKX position ${params.symbol}:`,
+        error.message,
+      );
+      throw error;
+    }
+  }
 }

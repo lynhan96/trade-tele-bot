@@ -89,6 +89,18 @@ export class TelegramBotService implements OnModuleInit {
       this.logger.debug(`Command /close from user ${msg.from.id}`);
       await this.handleClosePosition(msg, match);
     });
+
+    // Command: /setretry [exchange] [max_retry] [volume_reduction%]
+    this.bot.onText(/\/setretry (.+)/, async (msg, match) => {
+      this.logger.debug(`Command /setretry from user ${msg.from.id}`);
+      await this.handleSetRetry(msg, match);
+    });
+
+    // Command: /clearretry [exchange]
+    this.bot.onText(/\/clearretry (.+)/, async (msg, match) => {
+      this.logger.debug(`Command /clearretry from user ${msg.from.id}`);
+      await this.handleClearRetry(msg, match);
+    });
   }
 
   // Helper: Get active exchange for a user (defaults to first found if not set)
@@ -196,19 +208,78 @@ export class TelegramBotService implements OnModuleInit {
               );
 
               if (positions.length > 0) {
+                // Check if retry is enabled
+                const retryConfig = await this.redisService.get<{
+                  maxRetry: number;
+                  currentRetryCount: number;
+                  volumeReductionPercent: number;
+                  enabled: boolean;
+                }>(`user:${telegramId}:retry:binance`);
+
+                // Store positions for re-entry if retry is enabled
+                if (
+                  retryConfig &&
+                  retryConfig.enabled &&
+                  retryConfig.currentRetryCount > 0
+                ) {
+                  const volumeReduction =
+                    retryConfig.volumeReductionPercent || 15;
+
+                  for (const position of positions) {
+                    const nextQuantity =
+                      position.quantity * (1 - volumeReduction / 100);
+
+                    await this.redisService.set(
+                      `user:${telegramId}:reentry:binance:${position.symbol}`,
+                      {
+                        symbol: position.symbol,
+                        entryPrice: position.entryPrice,
+                        side: position.side,
+                        quantity: nextQuantity,
+                        originalQuantity: position.quantity,
+                        leverage: position.leverage,
+                        margin: position.margin,
+                        volume: nextQuantity * position.entryPrice,
+                        originalVolume: position.quantity * position.entryPrice,
+                        closedAt: new Date().toISOString(),
+                        tpPercentage: tpData.percentage,
+                        currentRetry: 1,
+                        remainingRetries: retryConfig.currentRetryCount - 1,
+                        volumeReductionPercent: volumeReduction,
+                      },
+                    );
+                  }
+                }
+
                 await this.closeAllPositions(userData, positions);
               }
 
-              await this.bot.sendMessage(
-                userData.chatId,
+              // Prepare message
+              let message =
                 `🎯 *Take Profit Target Reached! (BINANCE)*\n\n` +
-                  `Target: ${tpData.percentage}% of $${tpData.initialBalance.toFixed(2)}\n` +
-                  `Target Profit: $${targetProfit.toFixed(2)}\n` +
-                  `Unrealized PnL: $${unrealizedPnl.toFixed(2)}\n` +
-                  `Total Balance: $${balance.totalBalance.toFixed(2)}\n\n` +
-                  `✅ All positions have been closed!`,
-                { parse_mode: "Markdown" },
-              );
+                `Target: ${tpData.percentage}% of $${tpData.initialBalance.toFixed(2)}\n` +
+                `Target Profit: $${targetProfit.toFixed(2)}\n` +
+                `Unrealized PnL: $${unrealizedPnl.toFixed(2)}\n` +
+                `Total Balance: $${balance.totalBalance.toFixed(2)}\n\n` +
+                `✅ All positions have been closed!`;
+
+              // Add retry info if enabled
+              const retryConfig = await this.redisService.get<{
+                maxRetry: number;
+                currentRetryCount: number;
+                volumeReductionPercent: number;
+              }>(`user:${telegramId}:retry:binance`);
+
+              if (retryConfig && retryConfig.currentRetryCount > 0) {
+                message +=
+                  `\n\n🔄 *Auto Re-entry Enabled*\n` +
+                  `Will re-enter when price returns (${retryConfig.volumeReductionPercent}% volume reduction)\n` +
+                  `Retries remaining: ${retryConfig.currentRetryCount}/${retryConfig.maxRetry}`;
+              }
+
+              await this.bot.sendMessage(userData.chatId, message, {
+                parse_mode: "Markdown",
+              });
             }
           } catch (error) {
             this.logger.error(
@@ -249,19 +320,78 @@ export class TelegramBotService implements OnModuleInit {
               );
 
               if (positions.length > 0) {
+                // Check if retry is enabled
+                const retryConfig = await this.redisService.get<{
+                  maxRetry: number;
+                  currentRetryCount: number;
+                  volumeReductionPercent: number;
+                  enabled: boolean;
+                }>(`user:${telegramId}:retry:okx`);
+
+                // Store positions for re-entry if retry is enabled
+                if (
+                  retryConfig &&
+                  retryConfig.enabled &&
+                  retryConfig.currentRetryCount > 0
+                ) {
+                  const volumeReduction =
+                    retryConfig.volumeReductionPercent || 15;
+
+                  for (const position of positions) {
+                    const nextQuantity =
+                      position.quantity * (1 - volumeReduction / 100);
+
+                    await this.redisService.set(
+                      `user:${telegramId}:reentry:okx:${position.symbol}`,
+                      {
+                        symbol: position.symbol,
+                        entryPrice: position.entryPrice,
+                        side: position.side,
+                        quantity: nextQuantity,
+                        originalQuantity: position.quantity,
+                        leverage: position.leverage,
+                        margin: position.margin,
+                        volume: nextQuantity * position.entryPrice,
+                        originalVolume: position.quantity * position.entryPrice,
+                        closedAt: new Date().toISOString(),
+                        tpPercentage: tpData.percentage,
+                        currentRetry: 1,
+                        remainingRetries: retryConfig.currentRetryCount - 1,
+                        volumeReductionPercent: volumeReduction,
+                      },
+                    );
+                  }
+                }
+
                 await this.closeAllPositions(userData, positions);
               }
 
-              await this.bot.sendMessage(
-                userData.chatId,
+              // Prepare message
+              let message =
                 `🎯 *Take Profit Target Reached! (OKX)*\n\n` +
-                  `Target: ${tpData.percentage}% of $${tpData.initialBalance.toFixed(2)}\n` +
-                  `Target Profit: $${targetProfit.toFixed(2)}\n` +
-                  `Unrealized PnL: $${unrealizedPnl.toFixed(2)}\n` +
-                  `Total Balance: $${balance.totalBalance.toFixed(2)}\n\n` +
-                  `✅ All positions have been closed!`,
-                { parse_mode: "Markdown" },
-              );
+                `Target: ${tpData.percentage}% of $${tpData.initialBalance.toFixed(2)}\n` +
+                `Target Profit: $${targetProfit.toFixed(2)}\n` +
+                `Unrealized PnL: $${unrealizedPnl.toFixed(2)}\n` +
+                `Total Balance: $${balance.totalBalance.toFixed(2)}\n\n` +
+                `✅ All positions have been closed!`;
+
+              // Add retry info if enabled
+              const retryConfig = await this.redisService.get<{
+                maxRetry: number;
+                currentRetryCount: number;
+                volumeReductionPercent: number;
+              }>(`user:${telegramId}:retry:okx`);
+
+              if (retryConfig && retryConfig.currentRetryCount > 0) {
+                message +=
+                  `\n\n🔄 *Auto Re-entry Enabled*\n` +
+                  `Will re-enter when price returns (${retryConfig.volumeReductionPercent}% volume reduction)\n` +
+                  `Retries remaining: ${retryConfig.currentRetryCount}/${retryConfig.maxRetry}`;
+              }
+
+              await this.bot.sendMessage(userData.chatId, message, {
+                parse_mode: "Markdown",
+              });
             }
           } catch (error) {
             this.logger.error(
@@ -276,7 +406,179 @@ export class TelegramBotService implements OnModuleInit {
     }
   }
 
-  @Cron(CronExpression.EVERY_10_MINUTES)
+  @Cron("*/15 * * * * *")
+  private async checkReentryOpportunities() {
+    try {
+      // Get all pending re-entries
+      const keys = await this.redisService.keys("user:*:reentry:*:*");
+
+      for (const key of keys) {
+        // Key format: binance-bot:user:{telegramId}:reentry:{exchange}:{symbol}
+        const parts = key.split(":");
+        const telegramId = parseInt(parts[2]);
+        const exchange = parts[4] as "binance" | "okx";
+        const symbol = parts[5];
+
+        const reentryData = await this.redisService.get<any>(
+          `user:${telegramId}:reentry:${exchange}:${symbol}`,
+        );
+        if (!reentryData) continue;
+
+        const userData = await this.getUserData(telegramId, exchange);
+        if (!userData) continue;
+
+        try {
+          // Get current market price
+          let currentPrice: number;
+          if (exchange === "binance") {
+            currentPrice = await this.binanceService.getCurrentPrice(
+              userData.apiKey,
+              userData.apiSecret,
+              symbol,
+            );
+          } else {
+            currentPrice = await this.okxService.getCurrentPrice(
+              userData.apiKey,
+              userData.apiSecret,
+              userData.passphrase,
+              symbol,
+            );
+          }
+
+          // Check if price is within tolerance (±0.5%)
+          const priceDiff = Math.abs(currentPrice - reentryData.entryPrice);
+          const tolerance = reentryData.entryPrice * 0.005; // 0.5%
+
+          this.logger.debug(
+            `Reentry check ${symbol} for user ${telegramId}: current=${currentPrice}, target=${reentryData.entryPrice}, diff=${priceDiff}, tolerance=${tolerance}`,
+          );
+
+          if (priceDiff <= tolerance) {
+            await this.executeReentry(
+              telegramId,
+              exchange,
+              userData,
+              reentryData,
+            );
+          }
+        } catch (error) {
+          this.logger.error(
+            `Error checking reentry for user ${telegramId} ${exchange} ${symbol}:`,
+            error.message,
+          );
+        }
+      }
+    } catch (error) {
+      this.logger.error("Error in checkReentryOpportunities:", error.message);
+    }
+  }
+
+  private async executeReentry(
+    telegramId: number,
+    exchange: "binance" | "okx",
+    userData: UserApiKeys,
+    reentryData: any,
+  ) {
+    try {
+      this.logger.log(
+        `Executing re-entry for user ${telegramId}: ${reentryData.symbol} ${reentryData.side} ${reentryData.quantity}`,
+      );
+
+      // Open position
+      let orderResult: any;
+      if (exchange === "binance") {
+        orderResult = await this.binanceService.openPosition(
+          userData.apiKey,
+          userData.apiSecret,
+          {
+            symbol: reentryData.symbol,
+            side: reentryData.side,
+            quantity: reentryData.quantity,
+            leverage: reentryData.leverage,
+          },
+        );
+      } else {
+        orderResult = await this.okxService.openPosition(
+          userData.apiKey,
+          userData.apiSecret,
+          userData.passphrase,
+          {
+            symbol: reentryData.symbol,
+            side: reentryData.side,
+            quantity: reentryData.quantity,
+            leverage: reentryData.leverage,
+          },
+        );
+      }
+
+      // Calculate next quantity with volume reduction
+      const volumeReduction = reentryData.volumeReductionPercent || 15;
+      const nextQuantity = reentryData.quantity * (1 - volumeReduction / 100);
+      const currentVolume = reentryData.quantity * reentryData.entryPrice;
+      const volumeReductionAmount =
+        ((reentryData.originalQuantity - reentryData.quantity) /
+          reentryData.originalQuantity) *
+        100;
+
+      // Update re-entry data with reduced quantity for next time
+      if (reentryData.remainingRetries > 0) {
+        await this.redisService.set(
+          `user:${telegramId}:reentry:${exchange}:${reentryData.symbol}`,
+          {
+            ...reentryData,
+            quantity: nextQuantity,
+            volume: nextQuantity * reentryData.entryPrice,
+            currentRetry: reentryData.currentRetry + 1,
+            remainingRetries: reentryData.remainingRetries - 1,
+          },
+        );
+      } else {
+        // No more retries, remove from queue
+        await this.redisService.delete(
+          `user:${telegramId}:reentry:${exchange}:${reentryData.symbol}`,
+        );
+      }
+
+      // Notify user
+      const retryText =
+        reentryData.remainingRetries > 0
+          ? `Retry ${reentryData.currentRetry}/${reentryData.currentRetry + reentryData.remainingRetries}`
+          : `Final Retry ${reentryData.currentRetry}/${reentryData.currentRetry}`;
+
+      await this.bot.sendMessage(
+        userData.chatId,
+        `🔄 *Re-entered Position!* (${exchange.toUpperCase()})\n\n` +
+          `${reentryData.side === "LONG" ? "📈" : "📉"} ${reentryData.symbol} ${reentryData.side}\n` +
+          `Entry: $${reentryData.entryPrice.toLocaleString()}\n` +
+          `Quantity: ${reentryData.quantity.toFixed(4)} (-${volumeReductionAmount.toFixed(1)}% from original)\n` +
+          `Volume: $${currentVolume.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}\n` +
+          `Leverage: ${reentryData.leverage}x\n\n` +
+          `${retryText}\n` +
+          (reentryData.remainingRetries > 0
+            ? `Retries remaining: ${reentryData.remainingRetries}`
+            : `⚠️ This was the last retry!`),
+        { parse_mode: "Markdown" },
+      );
+
+      this.logger.log(
+        `Re-entry successful for user ${telegramId}: ${reentryData.symbol}`,
+      );
+    } catch (error) {
+      this.logger.error(
+        `Failed to execute re-entry for user ${telegramId}:`,
+        error.message,
+      );
+
+      // Notify user of failure
+      await this.bot.sendMessage(
+        userData.chatId,
+        `❌ Failed to re-enter ${reentryData.symbol}: ${error.message}\n\n` +
+          `Will retry on next check.`,
+      );
+    }
+  }
+
+  @Cron(CronExpression.EVERY_5_MINUTES)
   private async sendPeriodicUpdates() {
     this.logger.log(
       "========== Running sendPeriodicUpdates cron job ==========",
@@ -847,6 +1149,13 @@ export class TelegramBotService implements OnModuleInit {
           setAt: string;
         }>(`user:${telegramId}:tp:binance`);
 
+        const retryConfig = await this.redisService.get<{
+          maxRetry: number;
+          currentRetryCount: number;
+          volumeReductionPercent: number;
+          enabled: boolean;
+        }>(`user:${telegramId}:retry:binance`);
+
         message += `${isActive ? "🟢" : "⚪"} *Binance*\n`;
         message += `├ Created: ${new Date(binanceData.createdAt).toLocaleDateString()}\n`;
 
@@ -854,10 +1163,17 @@ export class TelegramBotService implements OnModuleInit {
           const targetProfit =
             (tpData.initialBalance * tpData.percentage) / 100;
           message += `├ TP Config: ${tpData.percentage}% of $${tpData.initialBalance.toFixed(2)}\n`;
-          message += `└ TP Target: $${targetProfit.toFixed(2)}\n\n`;
+          message += `├ TP Target: $${targetProfit.toFixed(2)}\n`;
         } else {
-          message += `└ TP Config: Not set\n\n`;
+          message += `├ TP Config: Not set\n`;
         }
+
+        if (retryConfig && retryConfig.enabled) {
+          message += `├ 🔄 Retry: ${retryConfig.currentRetryCount}/${retryConfig.maxRetry} (-${retryConfig.volumeReductionPercent}% vol)\n`;
+        } else {
+          message += `├ 🔄 Retry: Disabled\n`;
+        }
+        message += `└\n\n`;
       }
 
       if (okxData) {
@@ -868,6 +1184,13 @@ export class TelegramBotService implements OnModuleInit {
           setAt: string;
         }>(`user:${telegramId}:tp:okx`);
 
+        const retryConfig = await this.redisService.get<{
+          maxRetry: number;
+          currentRetryCount: number;
+          volumeReductionPercent: number;
+          enabled: boolean;
+        }>(`user:${telegramId}:retry:okx`);
+
         message += `${isActive ? "🟢" : "⚪"} *OKX*\n`;
         message += `├ Created: ${new Date(okxData.createdAt).toLocaleDateString()}\n`;
 
@@ -875,10 +1198,17 @@ export class TelegramBotService implements OnModuleInit {
           const targetProfit =
             (tpData.initialBalance * tpData.percentage) / 100;
           message += `├ TP Config: ${tpData.percentage}% of $${tpData.initialBalance.toFixed(2)}\n`;
-          message += `└ TP Target: $${targetProfit.toFixed(2)}\n\n`;
+          message += `├ TP Target: $${targetProfit.toFixed(2)}\n`;
         } else {
-          message += `└ TP Config: Not set\n\n`;
+          message += `├ TP Config: Not set\n`;
         }
+
+        if (retryConfig && retryConfig.enabled) {
+          message += `├ 🔄 Retry: ${retryConfig.currentRetryCount}/${retryConfig.maxRetry} (-${retryConfig.volumeReductionPercent}% vol)\n`;
+        } else {
+          message += `├ 🔄 Retry: Disabled\n`;
+        }
+        message += `└\n\n`;
       }
 
       message += `Active Exchange: *${activeExchange?.toUpperCase() || "None"}*\n\n`;
@@ -1465,6 +1795,191 @@ export class TelegramBotService implements OnModuleInit {
       );
       this.logger.error(
         `Error in handleClosePosition for user ${telegramId}:`,
+        error.message,
+      );
+    }
+  }
+
+  private async handleSetRetry(
+    msg: TelegramBot.Message,
+    match: RegExpExecArray,
+  ) {
+    const chatId = msg.chat.id;
+    const telegramId = msg.from.id;
+
+    await this.ensureChatIdStored(telegramId, chatId);
+
+    try {
+      if (!match || match.length < 2) {
+        await this.bot.sendMessage(
+          chatId,
+          "❌ Invalid format. Use:\n/setretry exchange max_retry [volume_reduction%]\n\n" +
+            "Examples:\n/setretry binance 5\n/setretry okx 3 20\n\n" +
+            "• max_retry: 1-10 (number of re-entries)\n" +
+            "• volume_reduction: 1-50% (default 15%)",
+        );
+        return;
+      }
+
+      const args = match[1].trim().split(/\s+/);
+      if (args.length < 2) {
+        await this.bot.sendMessage(
+          chatId,
+          "❌ Please provide exchange and max retry count.\nExample: /setretry binance 5",
+        );
+        return;
+      }
+
+      const exchange = args[0].toLowerCase() as "binance" | "okx";
+      const maxRetry = parseInt(args[1]);
+      const volumeReductionPercent = args[2] ? parseFloat(args[2]) : 15;
+
+      if (exchange !== "binance" && exchange !== "okx") {
+        await this.bot.sendMessage(
+          chatId,
+          "❌ Invalid exchange. Please use 'binance' or 'okx'.",
+        );
+        return;
+      }
+
+      if (isNaN(maxRetry) || maxRetry < 1 || maxRetry > 10) {
+        await this.bot.sendMessage(
+          chatId,
+          "❌ Max retry must be between 1 and 10.",
+        );
+        return;
+      }
+
+      if (
+        isNaN(volumeReductionPercent) ||
+        volumeReductionPercent < 1 ||
+        volumeReductionPercent > 50
+      ) {
+        await this.bot.sendMessage(
+          chatId,
+          "❌ Volume reduction must be between 1% and 50%.",
+        );
+        return;
+      }
+
+      const userData = await this.getUserData(telegramId, exchange);
+      if (!userData) {
+        await this.bot.sendMessage(
+          chatId,
+          `❌ ${exchange.toUpperCase()} account not found.\nUse /setkeys ${exchange} to connect.`,
+        );
+        return;
+      }
+
+      // Store retry configuration
+      await this.redisService.set(`user:${telegramId}:retry:${exchange}`, {
+        maxRetry,
+        currentRetryCount: maxRetry,
+        volumeReductionPercent,
+        enabled: true,
+        setAt: new Date().toISOString(),
+      });
+
+      await this.bot.sendMessage(
+        chatId,
+        `✅ *Retry Enabled for ${exchange.toUpperCase()}*\n\n` +
+          `📊 Configuration:\n` +
+          `├ Max Retries: ${maxRetry}\n` +
+          `├ Volume Reduction: ${volumeReductionPercent}% per retry\n` +
+          `└ Status: Active\n\n` +
+          `When TP is reached, positions will be re-entered automatically when price returns to entry level.\n\n` +
+          `Use /clearretry ${exchange} to disable.`,
+        { parse_mode: "Markdown" },
+      );
+
+      this.logger.log(
+        `Retry enabled for user ${telegramId} (${exchange}): maxRetry=${maxRetry}, volumeReduction=${volumeReductionPercent}%`,
+      );
+    } catch (error) {
+      await this.bot.sendMessage(
+        chatId,
+        `❌ Error setting retry: ${error.message}`,
+      );
+      this.logger.error(
+        `Error in handleSetRetry for user ${telegramId}:`,
+        error.message,
+      );
+    }
+  }
+
+  private async handleClearRetry(
+    msg: TelegramBot.Message,
+    match: RegExpExecArray,
+  ) {
+    const chatId = msg.chat.id;
+    const telegramId = msg.from.id;
+
+    await this.ensureChatIdStored(telegramId, chatId);
+
+    try {
+      if (!match || match.length < 2) {
+        await this.bot.sendMessage(
+          chatId,
+          "❌ Invalid format. Use:\n/clearretry exchange\n\nExamples:\n/clearretry binance\n/clearretry okx",
+        );
+        return;
+      }
+
+      const exchange = match[1].trim().toLowerCase() as "binance" | "okx";
+
+      if (exchange !== "binance" && exchange !== "okx") {
+        await this.bot.sendMessage(
+          chatId,
+          "❌ Invalid exchange. Please use 'binance' or 'okx'.",
+        );
+        return;
+      }
+
+      // Check if retry config exists
+      const retryConfig = await this.redisService.get(
+        `user:${telegramId}:retry:${exchange}`,
+      );
+
+      if (!retryConfig) {
+        await this.bot.sendMessage(
+          chatId,
+          `ℹ️ No retry configuration found for ${exchange.toUpperCase()}.`,
+        );
+        return;
+      }
+
+      // Delete retry configuration
+      await this.redisService.delete(`user:${telegramId}:retry:${exchange}`);
+
+      // Clear all pending re-entries for this exchange
+      const reentryKeys = await this.redisService.keys(
+        `user:${telegramId}:reentry:${exchange}:*`,
+      );
+      let clearedCount = 0;
+      for (const key of reentryKeys) {
+        const simplifiedKey = key.replace("binance-bot:", "");
+        await this.redisService.delete(simplifiedKey);
+        clearedCount++;
+      }
+
+      await this.bot.sendMessage(
+        chatId,
+        `✅ *Retry Disabled for ${exchange.toUpperCase()}*\n\n` +
+          `Cleared ${clearedCount} pending re-entry position(s).\n\n` +
+          `Use /setretry ${exchange} to re-enable.`,
+        { parse_mode: "Markdown" },
+      );
+
+      this.logger.log(
+        `Retry disabled for user ${telegramId} (${exchange}), cleared ${clearedCount} pending re-entries`,
+      );
+    } catch (error) {
+      await this.bot.sendMessage(
+        chatId,
+        `❌ Error clearing retry: ${error.message}`,
+      );
+      this.logger.error(
+        `Error in handleClearRetry for user ${telegramId}:`,
         error.message,
       );
     }
