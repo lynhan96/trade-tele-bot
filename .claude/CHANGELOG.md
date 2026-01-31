@@ -1,5 +1,121 @@
 # Changelog
 
+## 2026-01-31 - Entry Price Optimization & Documentation Organization
+
+### Entry Price Optimization (NEW FEATURE)
+
+**Problem**: When re-entering positions, the system was using the ORIGINAL entry price for all calculations, not the actual execution price. This could lead to inaccurate TP/SL calculations and missed optimization opportunities.
+
+**Solution**: Updated re-entry logic to use ACTUAL execution price from order results.
+
+**Implementation**:
+
+```typescript
+// Extract actual execution price from order result
+const actualEntryPrice = orderResult?.avgPrice
+  ? parseFloat(orderResult.avgPrice)
+  : reentryData.entryPrice; // Fallback
+
+// Calculate TP based on NEW entry (not original)
+const takeProfitPrice = isLong
+  ? parseFloat(
+      (actualEntryPrice * (1 + reentryData.tpPercentage / 100)).toFixed(4),
+    )
+  : parseFloat(
+      (actualEntryPrice * (1 - reentryData.tpPercentage / 100)).toFixed(4),
+    );
+
+// Calculate next stop loss based on NEW entry price
+const potentialNextProfit =
+  Math.abs(takeProfitPrice - actualEntryPrice) * nextQuantity;
+const nextStopLossPrice = isLong
+  ? parseFloat(
+      (actualEntryPrice - potentialNextProfit / nextQuantity).toFixed(4),
+    )
+  : parseFloat(
+      (actualEntryPrice + potentialNextProfit / nextQuantity).toFixed(4),
+    );
+
+// Store NEW entry price for next retry
+await this.redisService.set(
+  `user:${telegramId}:reentry:${exchange}:${symbol}`,
+  {
+    ...reentryData,
+    entryPrice: actualEntryPrice, // 🔥 Use actual execution price
+    stopLossPrice: nextStopLossPrice, // 🔥 SL based on new entry
+    quantity: nextQuantity,
+    // ...
+  },
+);
+```
+
+**Benefits**:
+
+1. **Better Risk/Reward**: Entry adapts to market conditions (e.g., $100k → $95k → $92k)
+2. **Accurate Stop Loss**: SL calculated from actual entry, not original
+3. **Market Adaptation**: System uses real execution prices, no slippage accumulation
+4. **Price Improvement Tracking**: Notifications show entry improvement percentage
+
+**Files Modified**:
+
+- `src/telegram/telegram.service.ts` - Lines 740-950: Re-entry execution logic
+- `src/binance/binance.service.ts` - Lines 283-320: Return avgPrice in order result
+- `src/okx/okx.service.ts` - Lines 389-445: Fetch and return avgPrice
+- `src/simulator/complete-system.simulator.ts` - Lines 703-789: New Scenario 6 test
+
+**Testing**:
+
+- Added Scenario 6: Entry Price Optimization
+- Tests entry adaptation: $100k → $95k → $92k
+- Tests SL calculation based on actual entries
+- Result: ✅ 100% pass (6/6 complete system tests)
+- Overall: 20/24 tests passing (83.3%)
+
+### Documentation Organization (IMPROVEMENT)
+
+**Problem**: Technical documentation files were scattered in root directory instead of organized in `.claude/` folder.
+
+**Solution**: Moved all technical docs to `.claude/` and updated documentation-workflow skill to remember this pattern.
+
+**Changes**:
+
+- Moved `TEST_FAILURES_ANALYSIS.md` → `.claude/TEST_FAILURES_ANALYSIS.md`
+- Moved `TEST_SUITE_OVERVIEW.md` → `.claude/TEST_SUITE_OVERVIEW.md`
+- Moved `TESTING_IMPLEMENTATION_SUMMARY.md` → `.claude/TESTING_IMPLEMENTATION_SUMMARY.md`
+- Updated all file references in skill guides
+
+**Organization Rules**:
+
+```
+Root directory:
+  - README.md, TESTS_README.md, TESTING_GUIDE.md (user-facing)
+  - package.json, tsconfig.json (config only)
+
+.claude/ directory:
+  - All technical documentation
+  - CHANGELOG.md, ARCHITECTURE.md, *_TECHNICAL.md
+  - *_IMPLEMENTATION_SUMMARY.md, *_ANALYSIS.md
+
+.claude/skills/ directory:
+  - Individual SKILL.md files
+  - One folder per skill domain
+```
+
+**Files Modified**:
+
+- `.claude/skills/documentation-workflow/SKILL.md` - Added file organization section
+- `.claude/skills/testing-simulator/SKILL.md` - Updated file paths
+- `.claude/skills/retry-reentry-system/SKILL.md` - Updated file paths
+
+**Benefits**:
+
+- Clear separation: user-facing vs technical docs
+- Easier navigation and maintenance
+- AI assistant knows where to place new docs
+- Consistent project structure
+
+---
+
 ## 2026-01-31 - Added 2% Minimum Profit Filter
 
 ### Enhancement

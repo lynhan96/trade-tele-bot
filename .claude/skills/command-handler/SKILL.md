@@ -406,3 +406,87 @@ const value = data?.property || "default";
 8. ✅ Keep command handlers focused and small
 9. ✅ Extract complex logic into separate methods
 10. ✅ Document expected command format in help text
+11. ✅ **Write a simulator test for every new command!**
+
+## Testing Your Command
+
+**IMPORTANT**: After implementing a command, add a test to the simulator!
+
+### Add to Skills Simulator
+
+File: `src/simulator/skills.simulator.ts`
+
+```typescript
+private testYourCommand(): TestResult {
+  console.log("\n📊 TEST: Your Command");
+  console.log("━".repeat(60));
+
+  try {
+    // Test 1: Valid command parsing
+    const validCmd = "/yourcommand arg1 arg2";
+    const match = validCmd.match(/\/yourcommand\s+(\S+)\s+(\S+)/);
+
+    if (!match || match[1] !== "arg1") {
+      throw new Error("Command parsing failed");
+    }
+
+    // Test 2: Invalid command (missing args)
+    const invalidCmd = "/yourcommand";
+    const invalidMatch = invalidCmd.match(/\/yourcommand\s+(\S+)\s+(\S+)/);
+
+    if (invalidMatch) {
+      throw new Error("Should reject incomplete command");
+    }
+
+    // Test 3: Validation logic
+    const arg1 = parseInt(match[1]);
+    if (arg1 < 1 || arg1 > 100) {
+      throw new Error("Validation should reject out of range");
+    }
+
+    console.log("✅ Command parsing works");
+    console.log("✅ Validation works");
+    console.log("✅ Error cases handled");
+
+    return {
+      scenario: "Your Command",
+      passed: true,
+      details: "Command implementation validated",
+    };
+  } catch (error) {
+    console.log(`❌ Error: ${error.message}`);
+    return {
+      scenario: "Your Command",
+      passed: false,
+      details: error.message,
+    };
+  }
+}
+```
+
+### Add to Test Suite
+
+In `runAllTests()` method:
+
+```typescript
+const results: TestResult[] = [
+  this.testCommandParsing(),
+  // ... other tests ...
+  this.testYourCommand(), // 👈 Add here
+];
+```
+
+### Run Tests
+
+```bash
+npm run test:skills
+```
+
+You should see:
+
+```
+✅ PASS - Your Command
+   Command implementation validated
+```
+
+**See**: [Testing & Simulation Skill Guide](../testing-simulator/SKILL.md) for complete testing guide

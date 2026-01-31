@@ -519,7 +519,7 @@ export class TelegramBotService implements OnModuleInit {
     }
   }
 
-  @Cron("*/15 * * * * *")
+  @Cron("*/30 * * * * *")
   private async checkReentryOpportunities() {
     try {
       // Get all pending re-entries
@@ -558,22 +558,29 @@ export class TelegramBotService implements OnModuleInit {
             );
           }
 
-          // Check if price is within tolerance (±0.5%)
-          const priceDiff = Math.abs(currentPrice - reentryData.entryPrice);
-          const tolerance = reentryData.entryPrice * 0.005; // 0.5%
-
-          this.logger.debug(
-            `Reentry check ${symbol} for user ${telegramId}: current=${currentPrice}, target=${reentryData.entryPrice}, diff=${priceDiff}, tolerance=${tolerance}`,
+          // Safety checks before re-entry
+          const safetyChecks = await this.checkReentrySafety(
+            exchange,
+            userData,
+            symbol,
+            currentPrice,
+            reentryData,
           );
 
-          if (priceDiff <= tolerance) {
-            await this.executeReentry(
-              telegramId,
-              exchange,
-              userData,
-              reentryData,
+          if (!safetyChecks.safe) {
+            this.logger.debug(
+              `Re-entry blocked for ${symbol}: ${safetyChecks.reason}`,
             );
+            continue;
           }
+
+          // All safety checks passed, execute re-entry
+          await this.executeReentry(
+            telegramId,
+            exchange,
+            userData,
+            reentryData,
+          );
         } catch (error) {
           this.fileLogger.logApiError(
             exchange,
@@ -590,6 +597,138 @@ export class TelegramBotService implements OnModuleInit {
         type: "CRON_ERROR",
       });
     }
+  }
+
+  private async checkReentrySafety(
+    exchange: "binance" | "okx",
+    userData: UserApiKeys,
+    symbol: string,
+    currentPrice: number,
+    reentryData: any,
+  ): Promise<{ safe: boolean; reason?: string }> {
+    try {
+      const isLong = reentryData.side === "LONG";
+
+      // 1. Cooldown Check (30 minutes minimum)
+      const timeSinceClose =
+        Date.now() - new Date(reentryData.closedAt).getTime();
+      const cooldownMinutes = 30;
+      if (timeSinceClose < cooldownMinutes * 60 * 1000) {
+        return {
+          safe: false,
+          reason: `Cooldown active (${Math.floor(timeSinceClose / 60000)}/${cooldownMinutes} min)`,
+        };
+      }
+
+      // 2. Price Range Check (5-25% below original entry for LONG, 5-25% above for SHORT)
+      const priceChange = isLong
+        ? ((reentryData.entryPrice - currentPrice) / reentryData.entryPrice) *
+          100
+        : ((currentPrice - reentryData.entryPrice) / reentryData.entryPrice) *
+          100;
+
+      if (priceChange < 5 || priceChange > 25) {
+        return {
+          safe: false,
+          reason: `Price ${priceChange.toFixed(2)}% from entry (need 5-25%)`,
+        };
+      }
+
+      // 3. Get klines for technical analysis
+      let klines: any[];
+      if (exchange === "binance") {
+        klines = await this.binanceService.getKlines(
+          userData.apiKey,
+          userData.apiSecret,
+          symbol,
+          "15m",
+          30, // Get 30 candles for EMA calculation
+        );
+      } else {
+        klines = await this.okxService.getKlines(
+          userData.apiKey,
+          userData.apiSecret,
+          userData.passphrase,
+          symbol,
+          "15m",
+          30,
+        );
+      }
+
+      if (!klines || klines.length < 21) {
+        return { safe: false, reason: "Insufficient data for analysis" };
+      }
+
+      // 4. EMA Crossover Check (EMA9 > EMA21 for LONG, EMA9 < EMA21 for SHORT)
+      const closes = klines.map((k) => parseFloat(k.close || k[4]));
+      const ema9 = this.calculateEMA(closes, 9);
+      const ema21 = this.calculateEMA(closes, 21);
+
+      const emaConditionMet = isLong ? ema9 > ema21 : ema9 < ema21;
+      if (!emaConditionMet) {
+        return {
+          safe: false,
+          reason: `EMA not aligned (EMA9: ${ema9.toFixed(2)}, EMA21: ${ema21.toFixed(2)})`,
+        };
+      }
+
+      // 5. Buy/Sell Volume Pressure Check (>55% buy for LONG, >55% sell for SHORT)
+      const last20Candles = klines.slice(-20);
+      let totalBuyVolume = 0;
+      let totalSellVolume = 0;
+
+      for (const candle of last20Candles) {
+        const open = parseFloat(candle.open || candle[1]);
+        const close = parseFloat(candle.close || candle[4]);
+        const volume = parseFloat(candle.volume || candle[5]);
+
+        if (close > open) {
+          // Bullish candle - assume buy pressure
+          totalBuyVolume += volume;
+        } else {
+          // Bearish candle - assume sell pressure
+          totalSellVolume += volume;
+        }
+      }
+
+      const buyPressure = totalBuyVolume / (totalBuyVolume + totalSellVolume);
+      const volumeConditionMet = isLong
+        ? buyPressure > 0.55
+        : buyPressure < 0.45;
+
+      if (!volumeConditionMet) {
+        return {
+          safe: false,
+          reason: `Volume pressure not favorable (${(buyPressure * 100).toFixed(1)}% buy)`,
+        };
+      }
+
+      // All checks passed
+      this.logger.log(
+        `✅ Re-entry safety checks passed for ${symbol}: ` +
+          `Price change: ${priceChange.toFixed(2)}%, ` +
+          `EMA9: ${ema9.toFixed(2)}, EMA21: ${ema21.toFixed(2)}, ` +
+          `Buy pressure: ${(buyPressure * 100).toFixed(1)}%`,
+      );
+
+      return { safe: true };
+    } catch (error) {
+      this.logger.error(`Error in safety check: ${error.message}`);
+      return { safe: false, reason: `Analysis error: ${error.message}` };
+    }
+  }
+
+  private calculateEMA(prices: number[], period: number): number {
+    if (prices.length < period) return prices[prices.length - 1];
+
+    const multiplier = 2 / (period + 1);
+    let ema = prices.slice(0, period).reduce((a, b) => a + b) / period;
+
+    for (let i = period; i < prices.length; i++) {
+      ema = (prices[i] - ema) * multiplier + ema;
+    }
+
+    return ema;
   }
 
   private async executeReentry(
@@ -630,8 +769,18 @@ export class TelegramBotService implements OnModuleInit {
         );
       }
 
+      // Get ACTUAL execution price from order result
+      // This is the real entry price for this retry
+      const actualEntryPrice = orderResult?.avgPrice
+        ? parseFloat(orderResult.avgPrice)
+        : reentryData.entryPrice; // Fallback to stored if not available
+
+      this.logger.log(
+        `Re-entry executed at $${actualEntryPrice} (original was $${reentryData.entryPrice})`,
+      );
+
       // Use stored Stop Loss price (from previous TP) to protect profits
-      // If not stored (old data), calculate it
+      // If not stored (old data), calculate it based on ORIGINAL entry
       const isLong = reentryData.side === "LONG";
       const stopLossPrice =
         reentryData.stopLossPrice ||
@@ -642,19 +791,17 @@ export class TelegramBotService implements OnModuleInit {
           return parseFloat(tpPrice.toFixed(4));
         })();
 
-      // Calculate Take Profit price
+      // Calculate Take Profit price based on NEW entry (actual execution price)
       const takeProfitPrice = isLong
         ? parseFloat(
-            (
-              reentryData.entryPrice *
-              (1 + reentryData.tpPercentage / 100)
-            ).toFixed(4),
+            (actualEntryPrice * (1 + reentryData.tpPercentage / 100)).toFixed(
+              4,
+            ),
           )
         : parseFloat(
-            (
-              reentryData.entryPrice *
-              (1 - reentryData.tpPercentage / 100)
-            ).toFixed(4),
+            (actualEntryPrice * (1 - reentryData.tpPercentage / 100)).toFixed(
+              4,
+            ),
           );
 
       // Set Stop Loss on exchange
@@ -728,11 +875,23 @@ export class TelegramBotService implements OnModuleInit {
       // Calculate next quantity with volume reduction
       const volumeReduction = reentryData.volumeReductionPercent || 15;
       const nextQuantity = reentryData.quantity * (1 - volumeReduction / 100);
-      const currentVolume = reentryData.quantity * reentryData.entryPrice;
+      const currentVolume = reentryData.quantity * actualEntryPrice; // Use actual entry price
       const volumeReductionAmount =
         ((reentryData.originalQuantity - reentryData.quantity) /
           reentryData.originalQuantity) *
         100;
+
+      // Calculate next stop loss based on NEW entry price
+      // This protects profits from THIS entry, not the original
+      const potentialNextProfit =
+        Math.abs(takeProfitPrice - actualEntryPrice) * nextQuantity;
+      const nextStopLossPrice = isLong
+        ? parseFloat(
+            (actualEntryPrice - potentialNextProfit / nextQuantity).toFixed(4),
+          )
+        : parseFloat(
+            (actualEntryPrice + potentialNextProfit / nextQuantity).toFixed(4),
+          );
 
       // Update re-entry data with reduced quantity for next time
       if (reentryData.remainingRetries > 0) {
@@ -740,11 +899,17 @@ export class TelegramBotService implements OnModuleInit {
           `user:${telegramId}:reentry:${exchange}:${reentryData.symbol}`,
           {
             ...reentryData,
+            entryPrice: actualEntryPrice, // 🔥 NEW: Use actual execution price for next retry
+            stopLossPrice: nextStopLossPrice, // 🔥 NEW: Calculate SL based on new entry
             quantity: nextQuantity,
-            volume: nextQuantity * reentryData.entryPrice,
+            volume: nextQuantity * actualEntryPrice,
             currentRetry: reentryData.currentRetry + 1,
             remainingRetries: reentryData.remainingRetries - 1,
           },
+        );
+
+        this.logger.log(
+          `Updated re-entry data: Entry $${actualEntryPrice}, Next Qty ${nextQuantity.toFixed(4)}, Next SL $${nextStopLossPrice}`,
         );
       } else {
         // No more retries, clean up all retry information
@@ -793,11 +958,27 @@ export class TelegramBotService implements OnModuleInit {
           ? `Retry ${reentryData.currentRetry}/${reentryData.currentRetry + reentryData.remainingRetries}`
           : `Final Retry ${reentryData.currentRetry}/${reentryData.currentRetry}`;
 
+      // Calculate price improvement
+      const priceImprovement = isLong
+        ? ((reentryData.entryPrice - actualEntryPrice) /
+            reentryData.entryPrice) *
+          100
+        : ((actualEntryPrice - reentryData.entryPrice) /
+            reentryData.entryPrice) *
+          100;
+
+      const improvementText =
+        priceImprovement !== 0
+          ? priceImprovement > 0
+            ? `\n💚 Entry improved by ${priceImprovement.toFixed(2)}% (from $${reentryData.entryPrice.toLocaleString()})`
+            : `\n⚠️ Entry slipped by ${Math.abs(priceImprovement).toFixed(2)}% (from $${reentryData.entryPrice.toLocaleString()})`
+          : "";
+
       await this.bot.sendMessage(
         userData.chatId,
         `🔄 *Re-entered Position!* (${exchange.toUpperCase()})\n\n` +
           `${reentryData.side === "LONG" ? "📈" : "📉"} ${reentryData.symbol} ${reentryData.side}\n` +
-          `Entry: $${reentryData.entryPrice.toLocaleString()}\n` +
+          `Entry: $${actualEntryPrice.toLocaleString()}${improvementText}\n` +
           `Quantity: ${reentryData.quantity.toFixed(4)} (-${volumeReductionAmount.toFixed(1)}% from original)\n` +
           `Volume: $${currentVolume.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}\n` +
           `Leverage: ${reentryData.leverage}x\n\n` +
@@ -805,7 +986,8 @@ export class TelegramBotService implements OnModuleInit {
           `🛡️ Stop Loss: $${stopLossPrice.toLocaleString()} (Profit Protected)\n\n` +
           `${retryText}\n` +
           (reentryData.remainingRetries > 0
-            ? `Retries remaining: ${reentryData.remainingRetries}`
+            ? `Retries remaining: ${reentryData.remainingRetries}\n` +
+              `Next entry: $${actualEntryPrice.toLocaleString()}, Next SL: $${nextStopLossPrice.toLocaleString()}`
             : `⚠️ This was the last retry!`),
         { parse_mode: "Markdown" },
       );

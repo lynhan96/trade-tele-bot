@@ -9,7 +9,11 @@
     "start": "nest start",
     "start:dev": "nest start --watch",
     "start:debug": "nest start --debug --watch",
-    "start:prod": "node dist/main"
+    "start:prod": "node dist/main",
+    "test:safety": "npx ts-node run-simulator.ts",
+    "test:complete": "npx ts-node run-complete-simulator.ts",
+    "test:skills": "npx ts-node run-skills-simulator.ts",
+    "test:all": "npx ts-node run-all-simulators.ts"
   },
   "dependencies": {
     "@nestjs/common": "^10.3.0",

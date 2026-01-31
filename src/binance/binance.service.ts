@@ -1,5 +1,5 @@
 import { Injectable, Logger } from "@nestjs/common";
-import Binance from "binance-api-node";
+import Binance, { CandleChartInterval_LT } from "binance-api-node";
 
 export interface Position {
   symbol: string;
@@ -308,14 +308,39 @@ export class BinanceService {
       });
 
       this.logger.log(
-        `Opened Binance position ${params.symbol}: ${params.side} ${params.quantity} @ ${params.leverage}x`,
+        `Opened Binance position ${params.symbol}: ${params.side} ${params.quantity} @ ${params.leverage}x, Avg Price: ${order.avgPrice || "N/A"}`,
       );
+
+      // Return order with avgPrice for re-entry optimization
       return order;
     } catch (error) {
       this.logger.error(
         `Error opening Binance position ${params.symbol}:`,
         error.message,
       );
+      throw error;
+    }
+  }
+
+  async getKlines(
+    apiKey: string,
+    apiSecret: string,
+    symbol: string,
+    interval: CandleChartInterval_LT,
+    limit: number,
+  ): Promise<any[]> {
+    try {
+      const client = this.createClient(apiKey, apiSecret);
+
+      const klines = await client.futuresCandles({
+        symbol,
+        interval,
+        limit,
+      });
+
+      return klines;
+    } catch (error) {
+      this.logger.error(`Error fetching klines for ${symbol}:`, error.message);
       throw error;
     }
   }

@@ -338,3 +338,92 @@ Opens position: BTC LONG @ $100, 1 BTC, TP 10%
 4. **Exchange Protection:** Orders on exchange even if bot offline
 5. **Profit Multiplication:** Capture multiple profits from oscillations
 6. **Smart Filtering:** Only profitable positions trigger re-entry
+
+## Testing
+
+The retry/re-entry system has comprehensive test coverage:
+
+### Complete System Tests (100% Pass)
+
+File: `src/simulator/complete-system.simulator.ts`
+
+**Scenarios Tested:**
+
+1. ✅ TP Target with Mixed Positions - Tests profit filtering (>2% rule)
+2. ✅ Stop Loss Calculation - Verifies profit-protected SL formula
+3. ✅ Re-entry Data Storage - Validates all required fields
+4. ✅ Complete Flow - Tests TP → Filter → Calculate → Store → Close
+5. ✅ Multiple Retry Cycles - Tests position size reduction (3 cycles)
+
+**Run Tests:**
+
+```bash
+npm run test:complete
+```
+
+**Expected Output:**
+
+```
+================================================================================
+Total Tests: 5
+✅ Passed: 5
+❌ Failed: 0
+Success Rate: 100.0%
+================================================================================
+```
+
+### Re-entry Safety Tests (60% Pass - Tuning Needed)
+
+File: `src/simulator/reentry-safety.simulator.ts`
+
+**Market Conditions Tested:**
+
+1. ✅ Market crash continuing → BLOCK
+2. ⚠️ Healthy pullback → EMA needs tuning
+3. ✅ Cooldown active → BLOCK
+4. ✅ Price too far (30%) → BLOCK
+5. ✅ Price too close (3%) → BLOCK
+6. ✅ Weak bounce → BLOCK
+7. ⚠️ Strong recovery → EMA needs tuning
+8. ⚠️ SHORT pump → Needs momentum detection
+9. ✅ SHORT reversal → ALLOW
+10. ✅ Sideways market → BLOCK
+
+**Run Tests:**
+
+```bash
+npm run test:safety
+```
+
+**Note**: Some "failures" are actually correct blocks. See [TEST_FAILURES_ANALYSIS.md](../../TEST_FAILURES_ANALYSIS.md) for details.
+
+### Adding New Tests
+
+When you modify the retry system logic:
+
+1. **Update existing scenarios** in the simulators
+2. **Add new scenarios** for new features
+3. **Run all tests** before deploying: `npm run test:all`
+
+**Example**: Adding a new safety check
+
+```typescript
+// In reentry-safety.simulator.ts
+results.push(
+  this.runScenario(
+    "Your New Safety Check",
+    "Description of what this tests",
+    {
+      symbol: "BTCUSDT",
+      side: "LONG",
+      entryPrice: 100000,
+      closedAt: new Date(now - 45 * 60 * 1000).toISOString(),
+    },
+    currentPrice,
+    "YOUR_SCENARIO_TYPE",
+    expectedResult, // true/false
+  ),
+);
+```
+
+**See**: [Testing & Simulation Skill Guide](../testing-simulator/SKILL.md) for complete guide

@@ -4,6 +4,38 @@
 
 This skill ensures all code changes are properly documented in `.claude/CHANGELOG.md` immediately after implementation. Documentation should be treated as part of the development process, not an afterthought.
 
+## Documentation File Organization
+
+**CRITICAL**: Documentation files belong in specific locations:
+
+### Root Directory (Project Root)
+
+- `README.md` - Main project overview (user-facing)
+- `TESTS_README.md` - Quick test guide (user-facing)
+- `TESTING_GUIDE.md` - Detailed test scenarios (user-facing)
+- `SIMULATOR_README.md` - Simulator usage (user-facing)
+- `package.json`, `tsconfig.json` - Config files only
+
+### `.claude/` Directory (Internal Documentation)
+
+- **All technical documentation goes here!**
+- `CHANGELOG.md` - All changes log
+- `ARCHITECTURE.md` - System design
+- `DEVELOPMENT_GUIDE.md` - Dev workflows
+- `TEST_FAILURES_ANALYSIS.md` - Test debugging
+- `TEST_SUITE_OVERVIEW.md` - Test architecture
+- `TESTING_IMPLEMENTATION_SUMMARY.md` - Test summaries
+- `*_IMPLEMENTATION_SUMMARY.md` - Feature summaries
+- `*_TECHNICAL.md` - Technical deep dives
+
+### `.claude/skills/` Directory
+
+- Individual skill guides (SKILL.md files)
+- One folder per skill domain
+
+**Rule**: If it's technical documentation or analysis → `.claude/`
+**Rule**: If it's user-facing quick reference → Root directory
+
 ## Critical Rule
 
 **⚠️ ALWAYS UPDATE CHANGELOG IMMEDIATELY AFTER MAKING CHANGES ⚠️**

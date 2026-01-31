@@ -420,10 +420,26 @@ export class OkxService {
         throw new Error(`OKX API Error: ${order.data.msg}`);
       }
 
+      // Fetch order details to get average fill price
+      const orderId = order.data.data[0].ordId;
+      const orderDetails = await client.get("/api/v5/trade/order", {
+        params: {
+          instId: params.symbol,
+          ordId: orderId,
+        },
+      });
+
+      const avgPx = orderDetails.data.data[0]?.avgPx || null;
+
       this.logger.log(
-        `Opened OKX position ${params.symbol}: ${params.side} ${params.quantity} @ ${params.leverage}x`,
+        `Opened OKX position ${params.symbol}: ${params.side} ${params.quantity} @ ${params.leverage}x, Avg Price: ${avgPx || "N/A"}`,
       );
-      return order.data.data[0];
+
+      // Return order with avgPrice for re-entry optimization
+      return {
+        ...order.data.data[0],
+        avgPrice: avgPx, // Add avgPrice field for consistency with Binance
+      };
     } catch (error) {
       this.logger.error(
         `Error opening OKX position ${params.symbol}:`,
@@ -467,6 +483,45 @@ export class OkxService {
         `Error setting stop loss for ${symbol}:`,
         error.message,
       );
+      throw error;
+    }
+  }
+
+  async getKlines(
+    apiKey: string,
+    apiSecret: string,
+    passphrase: string,
+    symbol: string,
+    interval: string,
+    limit: number,
+  ): Promise<any[]> {
+    try {
+      const client = this.createClient(apiKey, apiSecret, passphrase);
+
+      // OKX interval format: 1m, 5m, 15m, 1H, 4H, 1D
+      const response = await client.get("/api/v5/market/candles", {
+        params: {
+          instId: symbol,
+          bar: interval.replace("m", "m").replace("h", "H"),
+          limit: limit.toString(),
+        },
+      });
+
+      if (response.data.code !== "0") {
+        throw new Error(`OKX API Error: ${response.data.msg}`);
+      }
+
+      // OKX returns: [timestamp, open, high, low, close, volume, volCcy, volCcyQuote, confirm]
+      return response.data.data.map((candle: any[]) => ({
+        openTime: parseInt(candle[0]),
+        open: candle[1],
+        high: candle[2],
+        low: candle[3],
+        close: candle[4],
+        volume: candle[5],
+      }));
+    } catch (error) {
+      this.logger.error(`Error fetching klines for ${symbol}:`, error.message);
       throw error;
     }
   }
