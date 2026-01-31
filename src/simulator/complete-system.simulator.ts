@@ -47,7 +47,7 @@ export class CompleteSystemSimulator {
   }
 
   /**
-   * Test 1: Check if TP target is reached
+   * Test 1: Check if TP target is reached (AGGREGATE MODE)
    */
   private testTPTargetCheck(
     positions: Position[],
@@ -58,6 +58,22 @@ export class CompleteSystemSimulator {
     const reached = totalPnl >= targetProfit;
 
     return { reached, totalPnl, targetProfit };
+  }
+
+  /**
+   * Test 1b: Check individual position TP (INDIVIDUAL MODE)
+   */
+  private testIndividualPositionTP(
+    positions: Position[],
+    tpPercentage: number,
+  ): Position[] {
+    return positions.filter((pos) => {
+      if (pos.unrealizedPnl <= 0) return false;
+
+      const profitPercent = this.calculateProfitPercent(pos);
+      // Check if position reached TP percentage and > 2% minimum
+      return profitPercent >= tpPercentage && profitPercent > 2;
+    });
   }
 
   /**
@@ -843,6 +859,141 @@ export class CompleteSystemSimulator {
   }
 
   /**
+   * Run Scenario 7: Individual Position TP Mode
+   */
+  private testScenario7() {
+    console.log("\n" + "=".repeat(80));
+    console.log("📍 SCENARIO 7: Individual Position TP Mode");
+    console.log("=".repeat(80));
+    console.log("\nMode: Individual (close each position at TP percentage)");
+
+    // Setup: 4 positions with different profit levels
+    const positions: Position[] = [
+      {
+        symbol: "BTCUSDT",
+        side: "LONG",
+        quantity: 1,
+        entryPrice: 100000,
+        currentPrice: 110000, // +10% profit
+        unrealizedPnl: 10000,
+        leverage: 10,
+      },
+      {
+        symbol: "ETHUSDT",
+        side: "LONG",
+        quantity: 10,
+        entryPrice: 5000,
+        currentPrice: 5200, // +4% profit
+        unrealizedPnl: 2000,
+        leverage: 10,
+      },
+      {
+        symbol: "SOLUSDT",
+        side: "SHORT",
+        quantity: 100,
+        entryPrice: 200,
+        currentPrice: 196, // +2% profit
+        unrealizedPnl: 400,
+        leverage: 10,
+      },
+      {
+        symbol: "BNBUSDT",
+        side: "LONG",
+        quantity: 5,
+        entryPrice: 600,
+        currentPrice: 606, // +1% profit
+        unrealizedPnl: 30,
+        leverage: 10,
+      },
+    ];
+
+    const tpPercentage = 5; // 5% TP target per position
+    const totalPnl = positions.reduce((sum, pos) => sum + pos.unrealizedPnl, 0);
+
+    console.log("\n📊 INPUT DATA:");
+    console.log(`  TP Mode: Individual`);
+    console.log(`  TP Percentage: ${tpPercentage}%`);
+    console.log(`  Total Positions: ${positions.length}`);
+    console.log(`  Total Unrealized PnL: $${totalPnl.toLocaleString()}`);
+
+    console.log("\n📈 POSITION STATUS:");
+    positions.forEach((pos) => {
+      const profitPercent = this.calculateProfitPercent(pos);
+      const shouldClose = profitPercent >= tpPercentage && profitPercent > 2;
+      const status = shouldClose ? "🎯 CLOSE" : "⏳ KEEP OPEN";
+      console.log(
+        `  ${pos.symbol}: ${pos.side} +${profitPercent.toFixed(2)}% ($${pos.unrealizedPnl.toLocaleString()}) - ${status}`,
+      );
+    });
+
+    // Test individual position TP
+    const positionsAtTP = this.testIndividualPositionTP(
+      positions,
+      tpPercentage,
+    );
+
+    console.log("\n✅ POSITIONS TO CLOSE:");
+    if (positionsAtTP.length === 0) {
+      console.log("  None (no positions reached TP yet)");
+    } else {
+      positionsAtTP.forEach((pos) => {
+        const profitPercent = this.calculateProfitPercent(pos);
+        console.log(
+          `  ${pos.symbol}: ${pos.side} +${profitPercent.toFixed(2)}% ($${pos.unrealizedPnl.toLocaleString()})`,
+        );
+      });
+    }
+
+    const closedProfit = positionsAtTP.reduce(
+      (sum, pos) => sum + pos.unrealizedPnl,
+      0,
+    );
+    const remainingPositions = positions.length - positionsAtTP.length;
+
+    console.log("\n📊 RESULTS:");
+    console.log(`  Closed: ${positionsAtTP.length} position(s)`);
+    console.log(`  Profit Captured: $${closedProfit.toLocaleString()}`);
+    console.log(`  Remaining Open: ${remainingPositions} position(s)`);
+
+    // Verify
+    const expectedToClose = ["BTCUSDT"]; // Only BTC has ≥5% profit
+    const actualClosed = positionsAtTP.map((p) => p.symbol);
+    const passed =
+      positionsAtTP.length === 1 &&
+      actualClosed[0] === "BTCUSDT" &&
+      closedProfit === 10000;
+
+    console.log("\n🎯 TEST VERIFICATION:");
+    console.log(
+      `  Expected to close: ${expectedToClose.join(", ")} (≥${tpPercentage}%)`,
+    );
+    console.log(`  Actually closed: ${actualClosed.join(", ") || "None"}`);
+    console.log(`  Expected profit: $10,000`);
+    console.log(`  Actual profit: $${closedProfit.toLocaleString()}`);
+
+    console.log("\n💡 KEY BEHAVIORS:");
+    console.log(`  ✅ BTC +10% → Closed (reached ${tpPercentage}% target)`);
+    console.log(`  ⏳ ETH +4% → Kept open (below ${tpPercentage}% target)`);
+    console.log(`  ⏳ SOL +2% → Kept open (below ${tpPercentage}% target)`);
+    console.log(`  ⏳ BNB +1% → Kept open (below 2% minimum filter)`);
+
+    console.log("\n🔄 VS AGGREGATE MODE:");
+    console.log(`  Aggregate: Would wait for total PnL to reach target`);
+    console.log(
+      `  Individual: Closes each position independently at ${tpPercentage}%`,
+    );
+    console.log(`  Result: More granular profit taking!`);
+
+    console.log(`\n  Status: ${passed ? "✅ PASSED" : "❌ FAILED"}`);
+
+    this.results.push({
+      scenario: "Individual Position TP Mode",
+      passed,
+      details: `Only positions ≥${tpPercentage}% profit are closed independently`,
+    });
+  }
+
+  /**
    * Run all test scenarios
    */
   public runAllTests() {
@@ -851,12 +1002,13 @@ export class CompleteSystemSimulator {
       "Testing: TP Check → Profit Filter → SL Calc → Re-entry Storage\n",
     );
 
-    this.testScenario1(); // TP + Filtering
+    this.testScenario1(); // TP + Filtering (Aggregate)
     this.testScenario2(); // SL Calculation
     this.testScenario3(); // Re-entry Data
     this.testScenario4(); // Complete Flow
     this.testScenario5(); // Multiple Cycles
-    this.testScenario6(); // Entry Price Optimization (NEW)
+    this.testScenario6(); // Entry Price Optimization
+    this.testScenario7(); // Individual Position TP (NEW)
 
     // Summary
     console.log("\n" + "=".repeat(80));
@@ -873,13 +1025,19 @@ export class CompleteSystemSimulator {
     });
 
     console.log("\n" + "=".repeat(80));
-    console.log(`Total Tests: ${this.results.length}`);
+    console.log(`Total Tests: ${this.results.length} (7 scenarios)`);
     console.log(`✅ Passed: ${passed}`);
     console.log(`❌ Failed: ${failed}`);
     console.log(
       `Success Rate: ${((passed / this.results.length) * 100).toFixed(1)}%`,
     );
     console.log("=".repeat(80) + "\n");
+
+    if (failed > 0) {
+      console.log("⚠️  Some tests failed. Please review the output above.\n");
+    } else {
+      console.log("🎉 All tests passed! System working correctly.\n");
+    }
 
     return {
       total: this.results.length,

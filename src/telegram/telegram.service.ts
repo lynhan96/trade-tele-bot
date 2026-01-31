@@ -66,6 +66,11 @@ export class TelegramBotService implements OnModuleInit {
       await this.handleSetAccount(msg, match);
     });
 
+    // Command: /setposition [exchange] [tp_percentage]
+    this.bot.onText(/\/setposition (.+)/, async (msg, match) => {
+      await this.handleSetPosition(msg, match);
+    });
+
     // Command: /cleartp [exchange]
     this.bot.onText(/\/cleartp(.*)/, async (msg, match) => {
       await this.handleClearTakeProfit(msg, match);
@@ -163,352 +168,25 @@ export class TelegramBotService implements OnModuleInit {
         const telegramId = parts[2];
         const exchange = parts[4] as "binance" | "okx";
 
-        const tpData = await this.redisService.get<{
-          percentage: number;
-          initialBalance: number;
-        }>(`user:${telegramId}:tp:${exchange}`);
-
-        if (!tpData) continue;
+        // Check which TP mode is configured
+        const tpMode = await this.redisService.get<{
+          mode: "aggregate" | "individual";
+        }>(`user:${telegramId}:tp:mode:${exchange}`);
 
         const userData = await this.getUserData(parseInt(telegramId), exchange);
         if (!userData) continue;
 
-        // Check account based on exchange
-        if (exchange === "binance") {
-          try {
-            const balance = await this.binanceService.getAccountBalance(
-              userData.apiKey,
-              userData.apiSecret,
-            );
-
-            const unrealizedPnl = balance.totalUnrealizedProfit;
-            const targetProfit =
-              (tpData.initialBalance * tpData.percentage) / 100;
-            const profitPercentage =
-              (unrealizedPnl / tpData.initialBalance) * 100;
-
-            this.logger.debug(
-              `User ${telegramId} (BINANCE): Unrealized PnL $${unrealizedPnl.toFixed(2)} / Target $${targetProfit.toFixed(2)} (${profitPercentage.toFixed(2)}% / ${tpData.percentage}%)`,
-            );
-
-            if (unrealizedPnl >= targetProfit) {
-              this.logger.log(
-                `TP Target reached for user ${telegramId} (BINANCE): Unrealized PnL $${unrealizedPnl.toFixed(2)}`,
-              );
-
-              const positions = await this.binanceService.getOpenPositions(
-                userData.apiKey,
-                userData.apiSecret,
-              );
-
-              // Filter positions with PnL > 0 and profit > 2%
-              const profitablePositions = positions.filter((pos) => {
-                if (pos.unrealizedPnl <= 0) return false;
-
-                // Calculate profit percentage
-                const isLong = pos.side === "LONG";
-                const profitPercent = isLong
-                  ? ((pos.currentPrice - pos.entryPrice) / pos.entryPrice) * 100
-                  : ((pos.entryPrice - pos.currentPrice) / pos.entryPrice) *
-                    100;
-
-                return profitPercent > 2;
-              });
-
-              if (profitablePositions.length > 0) {
-                // Check if retry is enabled
-                const retryConfig = await this.redisService.get<{
-                  maxRetry: number;
-                  currentRetryCount: number;
-                  volumeReductionPercent: number;
-                  enabled: boolean;
-                }>(`user:${telegramId}:retry:binance`);
-
-                // Store positions for re-entry if retry is enabled
-                if (
-                  retryConfig &&
-                  retryConfig.enabled &&
-                  retryConfig.currentRetryCount > 0
-                ) {
-                  const volumeReduction =
-                    retryConfig.volumeReductionPercent || 15;
-
-                  for (const position of profitablePositions) {
-                    const nextQuantity =
-                      position.quantity * (1 - volumeReduction / 100);
-
-                    // Calculate stop loss based on profit from closed position
-                    // Allow Position B to lose the same amount as its potential profit
-                    // This secures: original_profit - potential_next_profit as minimum
-                    const currentPrice = position.currentPrice;
-                    const positionProfit = position.unrealizedPnl;
-
-                    // Calculate potential profit if next position reaches TP
-                    const isLong = position.side === "LONG";
-                    const tpPrice = isLong
-                      ? position.entryPrice * (1 + tpData.percentage / 100)
-                      : position.entryPrice * (1 - tpData.percentage / 100);
-                    const potentialNextProfit =
-                      Math.abs(tpPrice - position.entryPrice) * nextQuantity;
-
-                    // Allow Position B to lose its potential profit amount
-                    // Example: Profit A = $10, Potential B = $8.50 → Allow loss of $8.50 → Net secured = $1.50
-                    const profitPerUnit = potentialNextProfit / nextQuantity;
-
-                    // For LONG: SL = entryPrice - profitPerUnit
-                    // For SHORT: SL = entryPrice + profitPerUnit
-                    const stopLossPrice = isLong
-                      ? parseFloat(
-                          (position.entryPrice - profitPerUnit).toFixed(4),
-                        )
-                      : parseFloat(
-                          (position.entryPrice + profitPerUnit).toFixed(4),
-                        );
-
-                    await this.redisService.set(
-                      `user:${telegramId}:reentry:binance:${position.symbol}`,
-                      {
-                        symbol: position.symbol,
-                        entryPrice: position.entryPrice,
-                        currentPrice: currentPrice,
-                        closedProfit: positionProfit, // Store the profit from closed position
-                        side: position.side,
-                        quantity: nextQuantity,
-                        originalQuantity: position.quantity,
-                        leverage: position.leverage,
-                        margin: position.margin,
-                        volume: nextQuantity * position.entryPrice,
-                        originalVolume: position.quantity * position.entryPrice,
-                        closedAt: new Date().toISOString(),
-                        tpPercentage: tpData.percentage,
-                        stopLossPrice: stopLossPrice, // Profit-protected stop loss
-                        currentRetry: 1,
-                        remainingRetries: retryConfig.currentRetryCount - 1,
-                        volumeReductionPercent: volumeReduction,
-                      },
-                    );
-                  }
-                }
-
-                await this.closeAllPositions(userData, profitablePositions);
-              }
-
-              // Prepare message
-              const totalProfit = profitablePositions.reduce(
-                (sum, pos) => sum + pos.unrealizedPnl,
-                0,
-              );
-              let message =
-                `🎯 *Take Profit Target Reached! (BINANCE)*\n\n` +
-                `Target: ${tpData.percentage}% of $${tpData.initialBalance.toFixed(2)}\n` +
-                `Target Profit: $${targetProfit.toFixed(2)}\n` +
-                `Unrealized PnL: $${unrealizedPnl.toFixed(2)}\n` +
-                `Total Balance: $${balance.totalBalance.toFixed(2)}\n\n` +
-                `✅ Closed ${profitablePositions.length} profitable position(s)\n` +
-                `💰 Total Profit Captured: $${totalProfit.toFixed(2)}\n\n` +
-                profitablePositions
-                  .map(
-                    (pos) =>
-                      `  ${pos.symbol}: ${pos.side} $${pos.unrealizedPnl.toFixed(2)}`,
-                  )
-                  .join("\n");
-
-              // Add retry info if enabled
-              const retryConfig = await this.redisService.get<{
-                maxRetry: number;
-                currentRetryCount: number;
-                volumeReductionPercent: number;
-              }>(`user:${telegramId}:retry:binance`);
-
-              if (retryConfig && retryConfig.currentRetryCount > 0) {
-                message +=
-                  `\n\n🔄 *Auto Re-entry Enabled*\n` +
-                  `Will re-enter when price returns (${retryConfig.volumeReductionPercent}% volume reduction)\n` +
-                  `Retries remaining: ${retryConfig.currentRetryCount}/${retryConfig.maxRetry}`;
-              }
-
-              await this.bot.sendMessage(userData.chatId, message, {
-                parse_mode: "Markdown",
-              });
-            }
-          } catch (error) {
-            this.fileLogger.logApiError(
-              "binance",
-              "checkTakeProfitTargets",
-              error,
-              parseInt(telegramId),
-            );
-          }
-        }
-
-        // Check OKX account
-        if (exchange === "okx") {
-          try {
-            const balance = await this.okxService.getAccountBalance(
-              userData.apiKey,
-              userData.apiSecret,
-              userData.passphrase,
-            );
-
-            const unrealizedPnl = balance.totalUnrealizedProfit;
-            const targetProfit =
-              (tpData.initialBalance * tpData.percentage) / 100;
-            const profitPercentage =
-              (unrealizedPnl / tpData.initialBalance) * 100;
-
-            this.logger.debug(
-              `User ${telegramId} (OKX): Unrealized PnL $${unrealizedPnl.toFixed(2)} / Target $${targetProfit.toFixed(2)} (${profitPercentage.toFixed(2)}% / ${tpData.percentage}%)`,
-            );
-
-            if (unrealizedPnl >= targetProfit) {
-              this.logger.log(
-                `TP Target reached for user ${telegramId} (OKX): Unrealized PnL $${unrealizedPnl.toFixed(2)}`,
-              );
-
-              const positions = await this.okxService.getOpenPositions(
-                userData.apiKey,
-                userData.apiSecret,
-                userData.passphrase,
-              );
-
-              // Filter positions with PnL > 0 and profit > 2%
-              const profitablePositions = positions.filter((pos) => {
-                if (pos.unrealizedPnl <= 0) return false;
-
-                // Calculate profit percentage
-                const isLong = pos.side === "LONG";
-                const profitPercent = isLong
-                  ? ((pos.currentPrice - pos.entryPrice) / pos.entryPrice) * 100
-                  : ((pos.entryPrice - pos.currentPrice) / pos.entryPrice) *
-                    100;
-
-                return profitPercent > 2;
-              });
-
-              if (profitablePositions.length > 0) {
-                // Check if retry is enabled
-                const retryConfig = await this.redisService.get<{
-                  maxRetry: number;
-                  currentRetryCount: number;
-                  volumeReductionPercent: number;
-                  enabled: boolean;
-                }>(`user:${telegramId}:retry:okx`);
-
-                // Store positions for re-entry if retry is enabled
-                if (
-                  retryConfig &&
-                  retryConfig.enabled &&
-                  retryConfig.currentRetryCount > 0
-                ) {
-                  const volumeReduction =
-                    retryConfig.volumeReductionPercent || 15;
-
-                  for (const position of profitablePositions) {
-                    const nextQuantity =
-                      position.quantity * (1 - volumeReduction / 100);
-
-                    // Calculate stop loss based on profit from closed position
-                    // Allow Position B to lose the same amount as its potential profit
-                    // This secures: original_profit - potential_next_profit as minimum
-                    const currentPrice = position.currentPrice;
-                    const positionProfit = position.unrealizedPnl;
-
-                    // Calculate potential profit if next position reaches TP
-                    const isLong = position.side === "LONG";
-                    const tpPrice = isLong
-                      ? position.entryPrice * (1 + tpData.percentage / 100)
-                      : position.entryPrice * (1 - tpData.percentage / 100);
-                    const potentialNextProfit =
-                      Math.abs(tpPrice - position.entryPrice) * nextQuantity;
-
-                    // Allow Position B to lose its potential profit amount
-                    // Example: Profit A = $10, Potential B = $8.50 → Allow loss of $8.50 → Net secured = $1.50
-                    const profitPerUnit = potentialNextProfit / nextQuantity;
-
-                    // For LONG: SL = entryPrice - profitPerUnit
-                    // For SHORT: SL = entryPrice + profitPerUnit
-                    const stopLossPrice = isLong
-                      ? parseFloat(
-                          (position.entryPrice - profitPerUnit).toFixed(4),
-                        )
-                      : parseFloat(
-                          (position.entryPrice + profitPerUnit).toFixed(4),
-                        );
-
-                    await this.redisService.set(
-                      `user:${telegramId}:reentry:okx:${position.symbol}`,
-                      {
-                        symbol: position.symbol,
-                        entryPrice: position.entryPrice,
-                        currentPrice: currentPrice,
-                        closedProfit: positionProfit, // Store the profit from closed position
-                        side: position.side,
-                        quantity: nextQuantity,
-                        originalQuantity: position.quantity,
-                        leverage: position.leverage,
-                        margin: position.margin,
-                        volume: nextQuantity * position.entryPrice,
-                        originalVolume: position.quantity * position.entryPrice,
-                        closedAt: new Date().toISOString(),
-                        tpPercentage: tpData.percentage,
-                        stopLossPrice: stopLossPrice, // Profit-protected stop loss
-                        currentRetry: 1,
-                        remainingRetries: retryConfig.currentRetryCount - 1,
-                        volumeReductionPercent: volumeReduction,
-                      },
-                    );
-                  }
-                }
-
-                await this.closeAllPositions(userData, profitablePositions);
-              }
-
-              // Prepare message
-              const totalProfit = profitablePositions.reduce(
-                (sum, pos) => sum + pos.unrealizedPnl,
-                0,
-              );
-              let message =
-                `🎯 *Take Profit Target Reached! (OKX)*\n\n` +
-                `Target: ${tpData.percentage}% of $${tpData.initialBalance.toFixed(2)}\n` +
-                `Target Profit: $${targetProfit.toFixed(2)}\n` +
-                `Unrealized PnL: $${unrealizedPnl.toFixed(2)}\n` +
-                `Total Balance: $${balance.totalBalance.toFixed(2)}\n\n` +
-                `✅ Closed ${profitablePositions.length} profitable position(s)\n` +
-                `💰 Total Profit Captured: $${totalProfit.toFixed(2)}\n\n` +
-                profitablePositions
-                  .map(
-                    (pos) =>
-                      `  ${pos.symbol}: ${pos.side} $${pos.unrealizedPnl.toFixed(2)}`,
-                  )
-                  .join("\n");
-
-              // Add retry info if enabled
-              const retryConfig = await this.redisService.get<{
-                maxRetry: number;
-                currentRetryCount: number;
-                volumeReductionPercent: number;
-              }>(`user:${telegramId}:retry:okx`);
-
-              if (retryConfig && retryConfig.currentRetryCount > 0) {
-                message +=
-                  `\n\n🔄 *Auto Re-entry Enabled*\n` +
-                  `Will re-enter when price returns (${retryConfig.volumeReductionPercent}% volume reduction)\n` +
-                  `Retries remaining: ${retryConfig.currentRetryCount}/${retryConfig.maxRetry}`;
-              }
-
-              await this.bot.sendMessage(userData.chatId, message, {
-                parse_mode: "Markdown",
-              });
-            }
-          } catch (error) {
-            this.fileLogger.logApiError(
-              "okx",
-              "checkTakeProfitTargets",
-              error,
-              parseInt(telegramId),
-            );
-          }
+        // Run appropriate TP check based on mode
+        if (tpMode?.mode === "individual") {
+          // Individual position TP mode
+          await this.checkIndividualPositionTP(
+            parseInt(telegramId),
+            exchange,
+            userData,
+          );
+        } else {
+          // Aggregate TP mode (default)
+          await this.checkAggregateTP(parseInt(telegramId), exchange, userData);
         }
       }
     } catch (error) {
@@ -516,6 +194,510 @@ export class TelegramBotService implements OnModuleInit {
         operation: "checkTakeProfitTargets",
         type: "CRON_ERROR",
       });
+    }
+  }
+
+  private async checkIndividualPositionTP(
+    telegramId: number,
+    exchange: "binance" | "okx",
+    userData: UserApiKeys,
+  ) {
+    try {
+      const tpConfig = await this.redisService.get<{
+        percentage: number;
+      }>(`user:${telegramId}:tp:individual:${exchange}`);
+
+      if (!tpConfig) return;
+
+      // Get all open positions
+      let positions: any[];
+      if (exchange === "binance") {
+        positions = await this.binanceService.getOpenPositions(
+          userData.apiKey,
+          userData.apiSecret,
+        );
+      } else {
+        positions = await this.okxService.getOpenPositions(
+          userData.apiKey,
+          userData.apiSecret,
+          userData.passphrase,
+        );
+      }
+
+      // Find positions that reached individual TP percentage
+      const positionsAtTP = positions.filter((pos) => {
+        if (pos.unrealizedPnl <= 0) return false;
+
+        const isLong = pos.side === "LONG";
+        const profitPercent = isLong
+          ? ((pos.currentPrice - pos.entryPrice) / pos.entryPrice) * 100
+          : ((pos.entryPrice - pos.currentPrice) / pos.entryPrice) * 100;
+
+        // Check if position reached TP percentage and > 2% minimum
+        return profitPercent >= tpConfig.percentage && profitPercent > 2;
+      });
+
+      if (positionsAtTP.length === 0) return;
+
+      this.logger.log(
+        `${positionsAtTP.length} position(s) reached individual TP (${tpConfig.percentage}%) for user ${telegramId} (${exchange.toUpperCase()})`,
+      );
+
+      // Check if retry is enabled
+      const retryConfig = await this.redisService.get<{
+        maxRetry: number;
+        currentRetryCount: number;
+        volumeReductionPercent: number;
+        enabled: boolean;
+      }>(`user:${telegramId}:retry:${exchange}`);
+
+      // Store positions for re-entry if retry is enabled
+      if (
+        retryConfig &&
+        retryConfig.enabled &&
+        retryConfig.currentRetryCount > 0
+      ) {
+        const volumeReduction = retryConfig.volumeReductionPercent || 15;
+
+        for (const position of positionsAtTP) {
+          const nextQuantity = position.quantity * (1 - volumeReduction / 100);
+          const currentPrice = position.currentPrice;
+          const positionProfit = position.unrealizedPnl;
+
+          const isLong = position.side === "LONG";
+          const tpPrice = isLong
+            ? position.entryPrice * (1 + tpConfig.percentage / 100)
+            : position.entryPrice * (1 - tpConfig.percentage / 100);
+          const potentialNextProfit =
+            Math.abs(tpPrice - position.entryPrice) * nextQuantity;
+
+          const profitPerUnit = potentialNextProfit / nextQuantity;
+          const stopLossPrice = isLong
+            ? parseFloat((position.entryPrice - profitPerUnit).toFixed(4))
+            : parseFloat((position.entryPrice + profitPerUnit).toFixed(4));
+
+          await this.redisService.set(
+            `user:${telegramId}:reentry:${exchange}:${position.symbol}`,
+            {
+              symbol: position.symbol,
+              entryPrice: position.entryPrice,
+              currentPrice: currentPrice,
+              closedProfit: positionProfit,
+              side: position.side,
+              quantity: nextQuantity,
+              originalQuantity: position.quantity,
+              leverage: position.leverage,
+              margin: position.margin,
+              volume: nextQuantity * position.entryPrice,
+              originalVolume: position.quantity * position.entryPrice,
+              closedAt: new Date().toISOString(),
+              tpPercentage: tpConfig.percentage,
+              stopLossPrice: stopLossPrice,
+              currentRetry: 1,
+              remainingRetries: retryConfig.currentRetryCount - 1,
+              volumeReductionPercent: volumeReduction,
+            },
+          );
+        }
+      }
+
+      // Close positions
+      await this.closeAllPositions(userData, positionsAtTP);
+
+      // Send notification
+      const totalProfit = positionsAtTP.reduce(
+        (sum, pos) => sum + pos.unrealizedPnl,
+        0,
+      );
+      let message =
+        `🎯 *Individual Position TP Reached! (${exchange.toUpperCase()})*\n\n` +
+        `TP Target: ${tpConfig.percentage}%\n` +
+        `✅ Closed ${positionsAtTP.length} position(s)\n` +
+        `💰 Total Profit: $${totalProfit.toFixed(2)}\n\n` +
+        positionsAtTP
+          .map((pos) => {
+            const isLong = pos.side === "LONG";
+            const profitPercent = isLong
+              ? ((pos.currentPrice - pos.entryPrice) / pos.entryPrice) * 100
+              : ((pos.entryPrice - pos.currentPrice) / pos.entryPrice) * 100;
+            return `  ${pos.symbol}: ${pos.side} +${profitPercent.toFixed(2)}% ($${pos.unrealizedPnl.toFixed(2)})`;
+          })
+          .join("\n");
+
+      if (retryConfig && retryConfig.currentRetryCount > 0) {
+        message +=
+          `\n\n🔄 *Auto Re-entry Enabled*\n` +
+          `Will re-enter when price returns (-${retryConfig.volumeReductionPercent}% volume)`;
+      }
+
+      await this.bot.sendMessage(userData.chatId, message, {
+        parse_mode: "Markdown",
+      });
+    } catch (error) {
+      this.fileLogger.logApiError(
+        exchange,
+        "checkIndividualPositionTP",
+        error,
+        telegramId,
+      );
+    }
+  }
+
+  private async checkAggregateTP(
+    telegramId: number,
+    exchange: "binance" | "okx",
+    userData: UserApiKeys,
+  ) {
+    try {
+      const tpData = await this.redisService.get<{
+        percentage: number;
+        initialBalance: number;
+      }>(`user:${telegramId}:tp:${exchange}`);
+
+      if (!tpData) return;
+
+      // Check account based on exchange
+      if (exchange === "binance") {
+        try {
+          const balance = await this.binanceService.getAccountBalance(
+            userData.apiKey,
+            userData.apiSecret,
+          );
+
+          const unrealizedPnl = balance.totalUnrealizedProfit;
+          const targetProfit =
+            (tpData.initialBalance * tpData.percentage) / 100;
+          const profitPercentage =
+            (unrealizedPnl / tpData.initialBalance) * 100;
+
+          this.logger.debug(
+            `User ${telegramId} (BINANCE): Unrealized PnL $${unrealizedPnl.toFixed(2)} / Target $${targetProfit.toFixed(2)} (${profitPercentage.toFixed(2)}% / ${tpData.percentage}%)`,
+          );
+
+          if (unrealizedPnl >= targetProfit) {
+            this.logger.log(
+              `TP Target reached for user ${telegramId} (BINANCE): Unrealized PnL $${unrealizedPnl.toFixed(2)}`,
+            );
+
+            const positions = await this.binanceService.getOpenPositions(
+              userData.apiKey,
+              userData.apiSecret,
+            );
+
+            // Filter positions with PnL > 0 and profit > 2%
+            const profitablePositions = positions.filter((pos) => {
+              if (pos.unrealizedPnl <= 0) return false;
+
+              // Calculate profit percentage
+              const isLong = pos.side === "LONG";
+              const profitPercent = isLong
+                ? ((pos.currentPrice - pos.entryPrice) / pos.entryPrice) * 100
+                : ((pos.entryPrice - pos.currentPrice) / pos.entryPrice) * 100;
+
+              return profitPercent > 2;
+            });
+
+            if (profitablePositions.length > 0) {
+              // Check if retry is enabled
+              const retryConfig = await this.redisService.get<{
+                maxRetry: number;
+                currentRetryCount: number;
+                volumeReductionPercent: number;
+                enabled: boolean;
+              }>(`user:${telegramId}:retry:binance`);
+
+              // Store positions for re-entry if retry is enabled
+              if (
+                retryConfig &&
+                retryConfig.enabled &&
+                retryConfig.currentRetryCount > 0
+              ) {
+                const volumeReduction =
+                  retryConfig.volumeReductionPercent || 15;
+
+                for (const position of profitablePositions) {
+                  const nextQuantity =
+                    position.quantity * (1 - volumeReduction / 100);
+
+                  // Calculate stop loss based on profit from closed position
+                  // Allow Position B to lose the same amount as its potential profit
+                  // This secures: original_profit - potential_next_profit as minimum
+                  const currentPrice = position.currentPrice;
+                  const positionProfit = position.unrealizedPnl;
+
+                  // Calculate potential profit if next position reaches TP
+                  const isLong = position.side === "LONG";
+                  const tpPrice = isLong
+                    ? position.entryPrice * (1 + tpData.percentage / 100)
+                    : position.entryPrice * (1 - tpData.percentage / 100);
+                  const potentialNextProfit =
+                    Math.abs(tpPrice - position.entryPrice) * nextQuantity;
+
+                  // Allow Position B to lose its potential profit amount
+                  // Example: Profit A = $10, Potential B = $8.50 → Allow loss of $8.50 → Net secured = $1.50
+                  const profitPerUnit = potentialNextProfit / nextQuantity;
+
+                  // For LONG: SL = entryPrice - profitPerUnit
+                  // For SHORT: SL = entryPrice + profitPerUnit
+                  const stopLossPrice = isLong
+                    ? parseFloat(
+                        (position.entryPrice - profitPerUnit).toFixed(4),
+                      )
+                    : parseFloat(
+                        (position.entryPrice + profitPerUnit).toFixed(4),
+                      );
+
+                  await this.redisService.set(
+                    `user:${telegramId}:reentry:binance:${position.symbol}`,
+                    {
+                      symbol: position.symbol,
+                      entryPrice: position.entryPrice,
+                      currentPrice: currentPrice,
+                      closedProfit: positionProfit, // Store the profit from closed position
+                      side: position.side,
+                      quantity: nextQuantity,
+                      originalQuantity: position.quantity,
+                      leverage: position.leverage,
+                      margin: position.margin,
+                      volume: nextQuantity * position.entryPrice,
+                      originalVolume: position.quantity * position.entryPrice,
+                      closedAt: new Date().toISOString(),
+                      tpPercentage: tpData.percentage,
+                      stopLossPrice: stopLossPrice, // Profit-protected stop loss
+                      currentRetry: 1,
+                      remainingRetries: retryConfig.currentRetryCount - 1,
+                      volumeReductionPercent: volumeReduction,
+                    },
+                  );
+                }
+              }
+
+              await this.closeAllPositions(userData, profitablePositions);
+            }
+
+            // Prepare message
+            const totalProfit = profitablePositions.reduce(
+              (sum, pos) => sum + pos.unrealizedPnl,
+              0,
+            );
+            let message =
+              `🎯 *Take Profit Target Reached! (BINANCE)*\n\n` +
+              `Target: ${tpData.percentage}% of $${tpData.initialBalance.toFixed(2)}\n` +
+              `Target Profit: $${targetProfit.toFixed(2)}\n` +
+              `Unrealized PnL: $${unrealizedPnl.toFixed(2)}\n` +
+              `Total Balance: $${balance.totalBalance.toFixed(2)}\n\n` +
+              `✅ Closed ${profitablePositions.length} profitable position(s)\n` +
+              `💰 Total Profit Captured: $${totalProfit.toFixed(2)}\n\n` +
+              profitablePositions
+                .map(
+                  (pos) =>
+                    `  ${pos.symbol}: ${pos.side} $${pos.unrealizedPnl.toFixed(2)}`,
+                )
+                .join("\n");
+
+            // Add retry info if enabled
+            const retryConfig = await this.redisService.get<{
+              maxRetry: number;
+              currentRetryCount: number;
+              volumeReductionPercent: number;
+            }>(`user:${telegramId}:retry:binance`);
+
+            if (retryConfig && retryConfig.currentRetryCount > 0) {
+              message +=
+                `\n\n🔄 *Auto Re-entry Enabled*\n` +
+                `Will re-enter when price returns (${retryConfig.volumeReductionPercent}% volume reduction)\n` +
+                `Retries remaining: ${retryConfig.currentRetryCount}/${retryConfig.maxRetry}`;
+            }
+
+            await this.bot.sendMessage(userData.chatId, message, {
+              parse_mode: "Markdown",
+            });
+          }
+        } catch (error) {
+          this.fileLogger.logApiError(
+            "binance",
+            "checkAggregateTP",
+            error,
+            telegramId,
+          );
+        }
+      }
+
+      // Check OKX account
+      if (exchange === "okx") {
+        try {
+          const balance = await this.okxService.getAccountBalance(
+            userData.apiKey,
+            userData.apiSecret,
+            userData.passphrase,
+          );
+
+          const unrealizedPnl = balance.totalUnrealizedProfit;
+          const targetProfit =
+            (tpData.initialBalance * tpData.percentage) / 100;
+          const profitPercentage =
+            (unrealizedPnl / tpData.initialBalance) * 100;
+
+          this.logger.debug(
+            `User ${telegramId} (OKX): Unrealized PnL $${unrealizedPnl.toFixed(2)} / Target $${targetProfit.toFixed(2)} (${profitPercentage.toFixed(2)}% / ${tpData.percentage}%)`,
+          );
+
+          if (unrealizedPnl >= targetProfit) {
+            this.logger.log(
+              `TP Target reached for user ${telegramId} (OKX): Unrealized PnL $${unrealizedPnl.toFixed(2)}`,
+            );
+
+            const positions = await this.okxService.getOpenPositions(
+              userData.apiKey,
+              userData.apiSecret,
+              userData.passphrase,
+            );
+
+            // Filter positions with PnL > 0 and profit > 2%
+            const profitablePositions = positions.filter((pos) => {
+              if (pos.unrealizedPnl <= 0) return false;
+
+              // Calculate profit percentage
+              const isLong = pos.side === "LONG";
+              const profitPercent = isLong
+                ? ((pos.currentPrice - pos.entryPrice) / pos.entryPrice) * 100
+                : ((pos.entryPrice - pos.currentPrice) / pos.entryPrice) * 100;
+
+              return profitPercent > 2;
+            });
+
+            if (profitablePositions.length > 0) {
+              // Check if retry is enabled
+              const retryConfig = await this.redisService.get<{
+                maxRetry: number;
+                currentRetryCount: number;
+                volumeReductionPercent: number;
+                enabled: boolean;
+              }>(`user:${telegramId}:retry:okx`);
+
+              // Store positions for re-entry if retry is enabled
+              if (
+                retryConfig &&
+                retryConfig.enabled &&
+                retryConfig.currentRetryCount > 0
+              ) {
+                const volumeReduction =
+                  retryConfig.volumeReductionPercent || 15;
+
+                for (const position of profitablePositions) {
+                  const nextQuantity =
+                    position.quantity * (1 - volumeReduction / 100);
+
+                  // Calculate stop loss based on profit from closed position
+                  // Allow Position B to lose the same amount as its potential profit
+                  // This secures: original_profit - potential_next_profit as minimum
+                  const currentPrice = position.currentPrice;
+                  const positionProfit = position.unrealizedPnl;
+
+                  // Calculate potential profit if next position reaches TP
+                  const isLong = position.side === "LONG";
+                  const tpPrice = isLong
+                    ? position.entryPrice * (1 + tpData.percentage / 100)
+                    : position.entryPrice * (1 - tpData.percentage / 100);
+                  const potentialNextProfit =
+                    Math.abs(tpPrice - position.entryPrice) * nextQuantity;
+
+                  // Allow Position B to lose its potential profit amount
+                  // Example: Profit A = $10, Potential B = $8.50 → Allow loss of $8.50 → Net secured = $1.50
+                  const profitPerUnit = potentialNextProfit / nextQuantity;
+
+                  // For LONG: SL = entryPrice - profitPerUnit
+                  // For SHORT: SL = entryPrice + profitPerUnit
+                  const stopLossPrice = isLong
+                    ? parseFloat(
+                        (position.entryPrice - profitPerUnit).toFixed(4),
+                      )
+                    : parseFloat(
+                        (position.entryPrice + profitPerUnit).toFixed(4),
+                      );
+
+                  await this.redisService.set(
+                    `user:${telegramId}:reentry:okx:${position.symbol}`,
+                    {
+                      symbol: position.symbol,
+                      entryPrice: position.entryPrice,
+                      currentPrice: currentPrice,
+                      closedProfit: positionProfit, // Store the profit from closed position
+                      side: position.side,
+                      quantity: nextQuantity,
+                      originalQuantity: position.quantity,
+                      leverage: position.leverage,
+                      margin: position.margin,
+                      volume: nextQuantity * position.entryPrice,
+                      originalVolume: position.quantity * position.entryPrice,
+                      closedAt: new Date().toISOString(),
+                      tpPercentage: tpData.percentage,
+                      stopLossPrice: stopLossPrice, // Profit-protected stop loss
+                      currentRetry: 1,
+                      remainingRetries: retryConfig.currentRetryCount - 1,
+                      volumeReductionPercent: volumeReduction,
+                    },
+                  );
+                }
+              }
+
+              await this.closeAllPositions(userData, profitablePositions);
+            }
+
+            // Prepare message
+            const totalProfit = profitablePositions.reduce(
+              (sum, pos) => sum + pos.unrealizedPnl,
+              0,
+            );
+            let message =
+              `🎯 *Take Profit Target Reached! (OKX)*\n\n` +
+              `Target: ${tpData.percentage}% of $${tpData.initialBalance.toFixed(2)}\n` +
+              `Target Profit: $${targetProfit.toFixed(2)}\n` +
+              `Unrealized PnL: $${unrealizedPnl.toFixed(2)}\n` +
+              `Total Balance: $${balance.totalBalance.toFixed(2)}\n\n` +
+              `✅ Closed ${profitablePositions.length} profitable position(s)\n` +
+              `💰 Total Profit Captured: $${totalProfit.toFixed(2)}\n\n` +
+              profitablePositions
+                .map(
+                  (pos) =>
+                    `  ${pos.symbol}: ${pos.side} $${pos.unrealizedPnl.toFixed(2)}`,
+                )
+                .join("\n");
+
+            // Add retry info if enabled
+            const retryConfig = await this.redisService.get<{
+              maxRetry: number;
+              currentRetryCount: number;
+              volumeReductionPercent: number;
+            }>(`user:${telegramId}:retry:okx`);
+
+            if (retryConfig && retryConfig.currentRetryCount > 0) {
+              message +=
+                `\n\n🔄 *Auto Re-entry Enabled*\n` +
+                `Will re-enter when price returns (${retryConfig.volumeReductionPercent}% volume reduction)\n` +
+                `Retries remaining: ${retryConfig.currentRetryCount}/${retryConfig.maxRetry}`;
+            }
+
+            await this.bot.sendMessage(userData.chatId, message, {
+              parse_mode: "Markdown",
+            });
+          }
+        } catch (error) {
+          this.fileLogger.logApiError(
+            "okx",
+            "checkAggregateTP",
+            error,
+            telegramId,
+          );
+        }
+      }
+    } catch (error) {
+      this.fileLogger.logApiError(
+        exchange,
+        "checkAggregateTP",
+        error,
+        telegramId,
+      );
     }
   }
 
@@ -1260,7 +1442,8 @@ export class TelegramBotService implements OnModuleInit {
           "\n*Commands:*\n" +
           "/position - View positions & PnL\n" +
           "/accounts - View configs & TP settings\n" +
-          "/setaccount exchange % balance - Set TP target\n" +
+          "/setaccount exchange % balance - Aggregate TP\n" +
+          "/setposition exchange % - Individual position TP\n" +
           "/close exchange symbol - Close specific position\n" +
           "/closeall exchange - Close all positions\n" +
           "/cleartp exchange - Remove TP target\n" +
@@ -1598,6 +1781,14 @@ export class TelegramBotService implements OnModuleInit {
           setAt: string;
         }>(`user:${telegramId}:tp:binance`);
 
+        const tpMode = await this.redisService.get<{
+          mode: "aggregate" | "individual";
+        }>(`user:${telegramId}:tp:mode:binance`);
+
+        const individualTpData = await this.redisService.get<{
+          percentage: number;
+        }>(`user:${telegramId}:tp:individual:binance`);
+
         const retryConfig = await this.redisService.get<{
           maxRetry: number;
           currentRetryCount: number;
@@ -1608,10 +1799,12 @@ export class TelegramBotService implements OnModuleInit {
         message += `${isActive ? "🟢" : "⚪"} *Binance*\n`;
         message += `├ Created: ${new Date(binanceData.createdAt).toLocaleDateString()}\n`;
 
-        if (tpData) {
+        if (tpMode?.mode === "individual" && individualTpData) {
+          message += `├ TP Mode: 📍 Individual (${individualTpData.percentage}% per position)\n`;
+        } else if (tpData && tpData.initialBalance > 0) {
           const targetProfit =
             (tpData.initialBalance * tpData.percentage) / 100;
-          message += `├ TP Config: ${tpData.percentage}% of $${tpData.initialBalance.toFixed(2)}\n`;
+          message += `├ TP Mode: 📊 Aggregate (${tpData.percentage}% of $${tpData.initialBalance.toFixed(2)})\n`;
           message += `├ TP Target: $${targetProfit.toFixed(2)}\n`;
         } else {
           message += `├ TP Config: Not set\n`;
@@ -1633,6 +1826,14 @@ export class TelegramBotService implements OnModuleInit {
           setAt: string;
         }>(`user:${telegramId}:tp:okx`);
 
+        const tpMode = await this.redisService.get<{
+          mode: "aggregate" | "individual";
+        }>(`user:${telegramId}:tp:mode:okx`);
+
+        const individualTpData = await this.redisService.get<{
+          percentage: number;
+        }>(`user:${telegramId}:tp:individual:okx`);
+
         const retryConfig = await this.redisService.get<{
           maxRetry: number;
           currentRetryCount: number;
@@ -1643,10 +1844,12 @@ export class TelegramBotService implements OnModuleInit {
         message += `${isActive ? "🟢" : "⚪"} *OKX*\n`;
         message += `├ Created: ${new Date(okxData.createdAt).toLocaleDateString()}\n`;
 
-        if (tpData) {
+        if (tpMode?.mode === "individual" && individualTpData) {
+          message += `├ TP Mode: 📍 Individual (${individualTpData.percentage}% per position)\n`;
+        } else if (tpData && tpData.initialBalance > 0) {
           const targetProfit =
             (tpData.initialBalance * tpData.percentage) / 100;
-          message += `├ TP Config: ${tpData.percentage}% of $${tpData.initialBalance.toFixed(2)}\n`;
+          message += `├ TP Mode: 📊 Aggregate (${tpData.percentage}% of $${tpData.initialBalance.toFixed(2)})\n`;
           message += `├ TP Target: $${targetProfit.toFixed(2)}\n`;
         } else {
           message += `├ TP Config: Not set\n`;
@@ -1753,14 +1956,20 @@ export class TelegramBotService implements OnModuleInit {
         setAt: new Date().toISOString(),
       });
 
+      // Set mode to aggregate
+      await this.redisService.set(`user:${telegramId}:tp:mode:${exchange}`, {
+        mode: "aggregate",
+      });
+
       await this.bot.sendMessage(
         chatId,
-        `✅ *TP Target Set for ${exchange.toUpperCase()}*\n\n` +
+        `✅ *Aggregate TP Set for ${exchange.toUpperCase()}*\n\n` +
+          `Mode: Aggregate (All Positions)\n` +
           `TP Percentage: ${percentage}%\n` +
           `Initial Balance: $${initialBalance.toFixed(2)}\n` +
           `Target Profit: $${targetProfit.toFixed(2)}\n\n` +
           `🤖 Bot will monitor ${exchange.toUpperCase()} account.\n` +
-          `All positions will close when unrealized PnL ≥ $${targetProfit.toFixed(2)}\n\n` +
+          `All positions will close when total unrealized PnL ≥ $${targetProfit.toFixed(2)}\n\n` +
           `Use /cleartp ${exchange} to remove`,
         { parse_mode: "Markdown" },
       );
@@ -1774,6 +1983,112 @@ export class TelegramBotService implements OnModuleInit {
         error.message,
       );
       this.fileLogger.logBusinessError("handleSetAccount", error, telegramId, {
+        exchange,
+      });
+    }
+  }
+
+  private async handleSetPosition(
+    msg: TelegramBot.Message,
+    match: RegExpExecArray,
+  ) {
+    const chatId = msg.chat.id;
+    const telegramId = msg.from.id;
+
+    // Ensure chatId is stored
+    await this.ensureChatIdStored(telegramId, chatId);
+
+    let exchange: "binance" | "okx" | undefined;
+
+    try {
+      if (!match || match.length < 2) {
+        await this.bot.sendMessage(
+          chatId,
+          "❌ Invalid format. Use:\n/setposition exchange %\n\n" +
+            "Examples:\n/setposition binance 3\n/setposition okx 5\n\n" +
+            "This will close each position when it reaches the TP percentage.",
+          { parse_mode: "Markdown" },
+        );
+        return;
+      }
+
+      const args = match[1].trim().split(/\s+/);
+
+      if (args.length < 2) {
+        await this.bot.sendMessage(
+          chatId,
+          "❌ Please provide exchange and TP percentage.\n" +
+            "Example: /setposition binance 3",
+        );
+        return;
+      }
+
+      exchange = args[0].toLowerCase() as "binance" | "okx";
+      const percentage = parseFloat(args[1]);
+
+      if (exchange !== "binance" && exchange !== "okx") {
+        await this.bot.sendMessage(
+          chatId,
+          "❌ Invalid exchange. Please use 'binance' or 'okx'.",
+        );
+        return;
+      }
+
+      const userData = await this.getUserData(telegramId, exchange);
+      if (!userData) {
+        await this.bot.sendMessage(
+          chatId,
+          `❌ ${exchange.toUpperCase()} account not found.\nUse /setkeys ${exchange} to connect.`,
+        );
+        return;
+      }
+
+      if (isNaN(percentage) || percentage <= 0) {
+        await this.bot.sendMessage(chatId, "❌ Invalid percentage value.");
+        return;
+      }
+
+      // Store individual TP configuration
+      await this.redisService.set(
+        `user:${telegramId}:tp:individual:${exchange}`,
+        {
+          percentage,
+          setAt: new Date().toISOString(),
+        },
+      );
+
+      // Store mode as individual and keep a marker in tp:{exchange} for cron to detect
+      await this.redisService.set(`user:${telegramId}:tp:mode:${exchange}`, {
+        mode: "individual",
+      });
+
+      // Set marker for cron job detection
+      await this.redisService.set(`user:${telegramId}:tp:${exchange}`, {
+        percentage: percentage,
+        initialBalance: 0, // Not used in individual mode
+        setAt: new Date().toISOString(),
+      });
+
+      await this.bot.sendMessage(
+        chatId,
+        `✅ *Individual Position TP Set for ${exchange.toUpperCase()}*\n\n` +
+          `Mode: Individual (Per Position)\n` +
+          `TP Percentage: ${percentage}%\n\n` +
+          `🤖 Bot will monitor each ${exchange.toUpperCase()} position.\n` +
+          `Each position will close independently when it reaches ${percentage}% profit.\n\n` +
+          `Use /cleartp ${exchange} to remove`,
+        { parse_mode: "Markdown" },
+      );
+    } catch (error) {
+      await this.bot.sendMessage(
+        chatId,
+        `❌ Error setting position TP: ${error.message}`,
+      );
+      this.logger.error(
+        `Error setting position TP for user ${telegramId}:`,
+        error.message,
+      );
+      this.fileLogger.logBusinessError("handleSetPosition", error, telegramId, {
         exchange,
       });
     }
@@ -1821,7 +2136,12 @@ export class TelegramBotService implements OnModuleInit {
         return;
       }
 
+      // Clear all TP-related keys
       await this.redisService.delete(tpKey);
+      await this.redisService.delete(`user:${telegramId}:tp:mode:${exchange}`);
+      await this.redisService.delete(
+        `user:${telegramId}:tp:individual:${exchange}`,
+      );
 
       await this.bot.sendMessage(
         chatId,

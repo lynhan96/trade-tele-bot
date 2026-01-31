@@ -5,12 +5,14 @@ import { CompleteSystemSimulator } from "./src/simulator/complete-system.simulat
 console.log("🎯 Complete Trading System - Test Simulator");
 console.log("============================================\n");
 console.log("Testing all functions:");
-console.log("  • TP Target Checking");
+console.log("  • TP Target Checking (Aggregate Mode)");
+console.log("  • Individual Position TP (NEW)");
 console.log("  • Profit Filtering (>2%)");
 console.log("  • Stop Loss Calculation");
 console.log("  • Re-entry Data Storage");
 console.log("  • Complete Flow Integration");
-console.log("  • Multiple Retry Cycles\n");
+console.log("  • Multiple Retry Cycles");
+console.log("  • Entry Price Optimization\n");
 
 const simulator = new CompleteSystemSimulator();
 const results = simulator.runAllTests();
