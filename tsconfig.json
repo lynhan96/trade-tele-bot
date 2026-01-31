@@ -18,5 +18,13 @@
     "forceConsistentCasingInFileNames": false,
     "noFallthroughCasesInSwitch": false,
     "esModuleInterop": true
-  }
+  },
+  "exclude": [
+    "run-simulator.ts",
+    "run-complete-simulator.ts",
+    "run-skills-simulator.ts",
+    "run-all-simulators.ts",
+    "dist",
+    "node_modules"
+  ]
 }
