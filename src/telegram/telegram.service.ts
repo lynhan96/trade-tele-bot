@@ -201,7 +201,21 @@ export class TelegramBotService implements OnModuleInit {
                 userData.apiSecret,
               );
 
-              if (positions.length > 0) {
+              // Filter positions with PnL > 0 and profit > 2%
+              const profitablePositions = positions.filter((pos) => {
+                if (pos.unrealizedPnl <= 0) return false;
+
+                // Calculate profit percentage
+                const isLong = pos.side === "LONG";
+                const profitPercent = isLong
+                  ? ((pos.currentPrice - pos.entryPrice) / pos.entryPrice) * 100
+                  : ((pos.entryPrice - pos.currentPrice) / pos.entryPrice) *
+                    100;
+
+                return profitPercent > 2;
+              });
+
+              if (profitablePositions.length > 0) {
                 // Check if retry is enabled
                 const retryConfig = await this.redisService.get<{
                   maxRetry: number;
@@ -219,22 +233,45 @@ export class TelegramBotService implements OnModuleInit {
                   const volumeReduction =
                     retryConfig.volumeReductionPercent || 15;
 
-                  for (const position of positions) {
+                  for (const position of profitablePositions) {
                     const nextQuantity =
                       position.quantity * (1 - volumeReduction / 100);
 
-                    // Calculate the TP price for this position
+                    // Calculate stop loss based on profit from closed position
+                    // Allow Position B to lose the same amount as its potential profit
+                    // This secures: original_profit - potential_next_profit as minimum
+                    const currentPrice = position.currentPrice;
+                    const positionProfit = position.unrealizedPnl;
+
+                    // Calculate potential profit if next position reaches TP
                     const isLong = position.side === "LONG";
                     const tpPrice = isLong
                       ? position.entryPrice * (1 + tpData.percentage / 100)
                       : position.entryPrice * (1 - tpData.percentage / 100);
-                    const stopLossPrice = parseFloat(tpPrice.toFixed(4));
+                    const potentialNextProfit =
+                      Math.abs(tpPrice - position.entryPrice) * nextQuantity;
+
+                    // Allow Position B to lose its potential profit amount
+                    // Example: Profit A = $10, Potential B = $8.50 → Allow loss of $8.50 → Net secured = $1.50
+                    const profitPerUnit = potentialNextProfit / nextQuantity;
+
+                    // For LONG: SL = entryPrice - profitPerUnit
+                    // For SHORT: SL = entryPrice + profitPerUnit
+                    const stopLossPrice = isLong
+                      ? parseFloat(
+                          (position.entryPrice - profitPerUnit).toFixed(4),
+                        )
+                      : parseFloat(
+                          (position.entryPrice + profitPerUnit).toFixed(4),
+                        );
 
                     await this.redisService.set(
                       `user:${telegramId}:reentry:binance:${position.symbol}`,
                       {
                         symbol: position.symbol,
                         entryPrice: position.entryPrice,
+                        currentPrice: currentPrice,
+                        closedProfit: positionProfit, // Store the profit from closed position
                         side: position.side,
                         quantity: nextQuantity,
                         originalQuantity: position.quantity,
@@ -244,7 +281,7 @@ export class TelegramBotService implements OnModuleInit {
                         originalVolume: position.quantity * position.entryPrice,
                         closedAt: new Date().toISOString(),
                         tpPercentage: tpData.percentage,
-                        stopLossPrice: stopLossPrice, // Store actual TP price as SL for retry
+                        stopLossPrice: stopLossPrice, // Profit-protected stop loss
                         currentRetry: 1,
                         remainingRetries: retryConfig.currentRetryCount - 1,
                         volumeReductionPercent: volumeReduction,
@@ -253,17 +290,28 @@ export class TelegramBotService implements OnModuleInit {
                   }
                 }
 
-                await this.closeAllPositions(userData, positions);
+                await this.closeAllPositions(userData, profitablePositions);
               }
 
               // Prepare message
+              const totalProfit = profitablePositions.reduce(
+                (sum, pos) => sum + pos.unrealizedPnl,
+                0,
+              );
               let message =
                 `🎯 *Take Profit Target Reached! (BINANCE)*\n\n` +
                 `Target: ${tpData.percentage}% of $${tpData.initialBalance.toFixed(2)}\n` +
                 `Target Profit: $${targetProfit.toFixed(2)}\n` +
                 `Unrealized PnL: $${unrealizedPnl.toFixed(2)}\n` +
                 `Total Balance: $${balance.totalBalance.toFixed(2)}\n\n` +
-                `✅ All positions have been closed!`;
+                `✅ Closed ${profitablePositions.length} profitable position(s)\n` +
+                `💰 Total Profit Captured: $${totalProfit.toFixed(2)}\n\n` +
+                profitablePositions
+                  .map(
+                    (pos) =>
+                      `  ${pos.symbol}: ${pos.side} $${pos.unrealizedPnl.toFixed(2)}`,
+                  )
+                  .join("\n");
 
               // Add retry info if enabled
               const retryConfig = await this.redisService.get<{
@@ -323,7 +371,21 @@ export class TelegramBotService implements OnModuleInit {
                 userData.passphrase,
               );
 
-              if (positions.length > 0) {
+              // Filter positions with PnL > 0 and profit > 2%
+              const profitablePositions = positions.filter((pos) => {
+                if (pos.unrealizedPnl <= 0) return false;
+
+                // Calculate profit percentage
+                const isLong = pos.side === "LONG";
+                const profitPercent = isLong
+                  ? ((pos.currentPrice - pos.entryPrice) / pos.entryPrice) * 100
+                  : ((pos.entryPrice - pos.currentPrice) / pos.entryPrice) *
+                    100;
+
+                return profitPercent > 2;
+              });
+
+              if (profitablePositions.length > 0) {
                 // Check if retry is enabled
                 const retryConfig = await this.redisService.get<{
                   maxRetry: number;
@@ -341,22 +403,45 @@ export class TelegramBotService implements OnModuleInit {
                   const volumeReduction =
                     retryConfig.volumeReductionPercent || 15;
 
-                  for (const position of positions) {
+                  for (const position of profitablePositions) {
                     const nextQuantity =
                       position.quantity * (1 - volumeReduction / 100);
 
-                    // Calculate the TP price for this position
+                    // Calculate stop loss based on profit from closed position
+                    // Allow Position B to lose the same amount as its potential profit
+                    // This secures: original_profit - potential_next_profit as minimum
+                    const currentPrice = position.currentPrice;
+                    const positionProfit = position.unrealizedPnl;
+
+                    // Calculate potential profit if next position reaches TP
                     const isLong = position.side === "LONG";
                     const tpPrice = isLong
                       ? position.entryPrice * (1 + tpData.percentage / 100)
                       : position.entryPrice * (1 - tpData.percentage / 100);
-                    const stopLossPrice = parseFloat(tpPrice.toFixed(4));
+                    const potentialNextProfit =
+                      Math.abs(tpPrice - position.entryPrice) * nextQuantity;
+
+                    // Allow Position B to lose its potential profit amount
+                    // Example: Profit A = $10, Potential B = $8.50 → Allow loss of $8.50 → Net secured = $1.50
+                    const profitPerUnit = potentialNextProfit / nextQuantity;
+
+                    // For LONG: SL = entryPrice - profitPerUnit
+                    // For SHORT: SL = entryPrice + profitPerUnit
+                    const stopLossPrice = isLong
+                      ? parseFloat(
+                          (position.entryPrice - profitPerUnit).toFixed(4),
+                        )
+                      : parseFloat(
+                          (position.entryPrice + profitPerUnit).toFixed(4),
+                        );
 
                     await this.redisService.set(
                       `user:${telegramId}:reentry:okx:${position.symbol}`,
                       {
                         symbol: position.symbol,
                         entryPrice: position.entryPrice,
+                        currentPrice: currentPrice,
+                        closedProfit: positionProfit, // Store the profit from closed position
                         side: position.side,
                         quantity: nextQuantity,
                         originalQuantity: position.quantity,
@@ -366,7 +451,7 @@ export class TelegramBotService implements OnModuleInit {
                         originalVolume: position.quantity * position.entryPrice,
                         closedAt: new Date().toISOString(),
                         tpPercentage: tpData.percentage,
-                        stopLossPrice: stopLossPrice, // Store actual TP price as SL for retry
+                        stopLossPrice: stopLossPrice, // Profit-protected stop loss
                         currentRetry: 1,
                         remainingRetries: retryConfig.currentRetryCount - 1,
                         volumeReductionPercent: volumeReduction,
@@ -375,17 +460,28 @@ export class TelegramBotService implements OnModuleInit {
                   }
                 }
 
-                await this.closeAllPositions(userData, positions);
+                await this.closeAllPositions(userData, profitablePositions);
               }
 
               // Prepare message
+              const totalProfit = profitablePositions.reduce(
+                (sum, pos) => sum + pos.unrealizedPnl,
+                0,
+              );
               let message =
                 `🎯 *Take Profit Target Reached! (OKX)*\n\n` +
                 `Target: ${tpData.percentage}% of $${tpData.initialBalance.toFixed(2)}\n` +
                 `Target Profit: $${targetProfit.toFixed(2)}\n` +
                 `Unrealized PnL: $${unrealizedPnl.toFixed(2)}\n` +
                 `Total Balance: $${balance.totalBalance.toFixed(2)}\n\n` +
-                `✅ All positions have been closed!`;
+                `✅ Closed ${profitablePositions.length} profitable position(s)\n` +
+                `💰 Total Profit Captured: $${totalProfit.toFixed(2)}\n\n` +
+                profitablePositions
+                  .map(
+                    (pos) =>
+                      `  ${pos.symbol}: ${pos.side} $${pos.unrealizedPnl.toFixed(2)}`,
+                  )
+                  .join("\n");
 
               // Add retry info if enabled
               const retryConfig = await this.redisService.get<{
@@ -536,16 +632,32 @@ export class TelegramBotService implements OnModuleInit {
 
       // Use stored Stop Loss price (from previous TP) to protect profits
       // If not stored (old data), calculate it
+      const isLong = reentryData.side === "LONG";
       const stopLossPrice =
         reentryData.stopLossPrice ||
         (() => {
-          const isLong = reentryData.side === "LONG";
           const tpPrice = isLong
             ? reentryData.entryPrice * (1 + reentryData.tpPercentage / 100)
             : reentryData.entryPrice * (1 - reentryData.tpPercentage / 100);
           return parseFloat(tpPrice.toFixed(4));
         })();
 
+      // Calculate Take Profit price
+      const takeProfitPrice = isLong
+        ? parseFloat(
+            (
+              reentryData.entryPrice *
+              (1 + reentryData.tpPercentage / 100)
+            ).toFixed(4),
+          )
+        : parseFloat(
+            (
+              reentryData.entryPrice *
+              (1 - reentryData.tpPercentage / 100)
+            ).toFixed(4),
+          );
+
+      // Set Stop Loss on exchange
       try {
         if (exchange === "binance") {
           await this.binanceService.setStopLoss(
@@ -568,7 +680,7 @@ export class TelegramBotService implements OnModuleInit {
           );
         }
         this.logger.log(
-          `Set SL at previous TP price $${stopLossPrice} for ${reentryData.symbol}`,
+          `Set SL at $${stopLossPrice} for ${reentryData.symbol}`,
         );
       } catch (slError) {
         this.fileLogger.logApiError(
@@ -579,6 +691,38 @@ export class TelegramBotService implements OnModuleInit {
           reentryData.symbol,
         );
         // Continue even if SL setting fails
+      }
+
+      // Set Take Profit on exchange
+      try {
+        if (exchange === "binance") {
+          await this.binanceService.setTakeProfit(
+            userData.apiKey,
+            userData.apiSecret,
+            reentryData.symbol,
+            reentryData.tpPercentage,
+          );
+        } else {
+          await this.okxService.setTakeProfit(
+            userData.apiKey,
+            userData.apiSecret,
+            userData.passphrase,
+            reentryData.symbol,
+            reentryData.tpPercentage,
+          );
+        }
+        this.logger.log(
+          `Set TP at $${takeProfitPrice} (${reentryData.tpPercentage}%) for ${reentryData.symbol}`,
+        );
+      } catch (tpError) {
+        this.fileLogger.logApiError(
+          exchange,
+          "setTakeProfit",
+          tpError,
+          telegramId,
+          reentryData.symbol,
+        );
+        // Continue even if TP setting fails
       }
 
       // Calculate next quantity with volume reduction
@@ -656,8 +800,9 @@ export class TelegramBotService implements OnModuleInit {
           `Entry: $${reentryData.entryPrice.toLocaleString()}\n` +
           `Quantity: ${reentryData.quantity.toFixed(4)} (-${volumeReductionAmount.toFixed(1)}% from original)\n` +
           `Volume: $${currentVolume.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}\n` +
-          `Leverage: ${reentryData.leverage}x\n` +
-          `🛡️ Stop Loss: $${stopLossPrice.toLocaleString()} (Previous TP - No loss risk!)\n\n` +
+          `Leverage: ${reentryData.leverage}x\n\n` +
+          `🎯 Take Profit: $${takeProfitPrice.toLocaleString()} (+${reentryData.tpPercentage}%)\n` +
+          `🛡️ Stop Loss: $${stopLossPrice.toLocaleString()} (Profit Protected)\n\n` +
           `${retryText}\n` +
           (reentryData.remainingRetries > 0
             ? `Retries remaining: ${reentryData.remainingRetries}`

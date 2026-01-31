@@ -65,37 +65,86 @@ interface ReentryData {
 // 1. Check unrealized PnL vs target
 const targetProfit = (initialBalance * tpPercentage) / 100;
 if (unrealizedPnl >= targetProfit) {
-  // 2. Close all positions
-  await closeAllPositions(userData, positions);
+  // 2. Filter positions with PnL > 0 only
+  const profitablePositions = positions.filter((pos) => pos.unrealizedPnl > 0);
 
-  // 3. For each position closed, calculate TP price
-  for (const position of positions) {
+  // 3. For each profitable position, calculate stop loss
+  for (const position of profitablePositions) {
+    const nextQuantity = position.quantity * (1 - volumeReduction / 100);
+
+    // Calculate potential profit if next position reaches TP
     const isLong = position.side === "LONG";
     const tpPrice = isLong
-      ? entryPrice * (1 + tpPercentage / 100)
-      : entryPrice * (1 - tpPercentage / 100);
+      ? position.entryPrice * (1 + tpPercentage / 100)
+      : position.entryPrice * (1 - tpPercentage / 100);
+    const potentialNextProfit =
+      Math.abs(tpPrice - position.entryPrice) * nextQuantity;
 
-    // 4. Store re-entry data with stopLossPrice = tpPrice
+    // Allow Position B to lose its potential profit amount
+    // Example: Profit A = $10, Potential B = $8.50 → Allow loss of $8.50 → Net secured = $1.50
+    const profitPerUnit = potentialNextProfit / nextQuantity;
+
+    // For LONG: SL = entryPrice - profitPerUnit
+    // For SHORT: SL = entryPrice + profitPerUnit
+    const stopLossPrice = isLong
+      ? parseFloat((position.entryPrice - profitPerUnit).toFixed(4))
+      : parseFloat((position.entryPrice + profitPerUnit).toFixed(4));
+
+    // 4. Store re-entry data with profit-protected stop loss
     await storeReentryData({
       ...position,
-      stopLossPrice: tpPrice, // Critical: Previous TP = Future SL
-      currentRetry: 0,
-      remainingRetries: maxRetry,
+      currentPrice: position.currentPrice,
+      closedProfit: position.unrealizedPnl,
+      stopLossPrice: stopLossPrice, // Profit-protected stop loss
+      currentRetry: 1,
+      remainingRetries: maxRetry - 1,
       volumeReductionPercent: config.volumeReductionPercent,
     });
   }
 
-  // 5. Notify user
-  sendNotification("TP reached, re-entry enabled");
+  // 5. Close only profitable positions
+  await closeAllPositions(userData, profitablePositions);
+
+  // 6. Notify user with details
+  const totalProfit = profitablePositions.reduce(
+    (sum, pos) => sum + pos.unrealizedPnl,
+    0,
+  );
+  sendNotification(
+    `TP reached! Closed ${profitablePositions.length} positions\n` +
+      `Total Profit: $${totalProfit.toFixed(2)}`,
+  );
 }
 ```
 
 **Key Points:**
 
-- All positions closed simultaneously
-- TP price calculated **once** and stored
-- No recalculation in future re-entries
-- Stop loss price = previous TP price
+- **Only closes positions with PnL > 0 AND profit > 2%**
+- Minimum 2% profit ensures meaningful gains (filters noise)
+- Stop loss calculation: `SL = entryPrice ± (potentialNextProfit / nextQuantity)`
+- This ensures: **Net Profit = Original Profit - Potential Next Profit**
+- Volume reduced by configured percentage (default 15%)
+- Stores closed profit for reference
+
+**Example Calculation:**
+
+**Position A (LONG BTC):**
+
+- Entry: $100, Quantity: 1 BTC
+- TP at 10%: $110
+- Profit when closed: **$10** ✅
+
+**Position B Re-entry Setup:**
+
+- Entry: $100 (when price returns)
+- Quantity: 0.85 BTC (15% reduction)
+- Potential TP profit: ($110 - $100) × 0.85 = **$8.50**
+- **Stop Loss: $100 - ($8.50 / 0.85) = $100 - $10 = $90**
+
+**Outcome:**
+
+- If SL hits: Loss = -$8.50, Net = $10 - $8.50 = **$1.50 secured** ✅
+- If TP hits: Profit = +$8.50, Total = $10 + $8.50 = **$18.50** 🎯
 
 ### Phase 2: Price Monitoring
 
@@ -141,15 +190,26 @@ async function executeReentry(reentryData) {
     leverage: reentryData.leverage,
   });
 
-  // 2. Set stop loss at PREVIOUS TP price (stored)
+  // 2. Set Stop Loss on exchange (profit-protected)
   await setStopLoss({
     symbol: reentryData.symbol,
-    stopPrice: reentryData.stopLossPrice, // No recalculation!
+    stopPrice: reentryData.stopLossPrice, // Stored SL price
     side: reentryData.side,
     quantity: reentryData.quantity,
   });
 
-  // 3. Calculate next quantity (volume reduction)
+  // 3. Set Take Profit on exchange
+  const isLong = reentryData.side === "LONG";
+  const takeProfitPrice = isLong
+    ? reentryData.entryPrice * (1 + reentryData.tpPercentage / 100)
+    : reentryData.entryPrice * (1 - reentryData.tpPercentage / 100);
+
+  await setTakeProfit({
+    symbol: reentryData.symbol,
+    tpPercentage: reentryData.tpPercentage,
+  });
+
+  // 4. Calculate next quantity (volume reduction)
   const nextQuantity =
     reentryData.quantity * (1 - reentryData.volumeReductionPercent / 100);
 

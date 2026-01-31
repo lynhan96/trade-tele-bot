@@ -1,5 +1,272 @@
 # Changelog
 
+## 2026-01-31 - Added 2% Minimum Profit Filter
+
+### Enhancement
+
+**What Changed**: Added minimum 2% profit requirement for positions to be closed when TP is reached.
+
+**Implementation**:
+
+```typescript
+// New filter logic
+const profitablePositions = positions.filter((pos) => {
+  if (pos.unrealizedPnl <= 0) return false;
+
+  // Calculate profit percentage
+  const isLong = pos.side === "LONG";
+  const profitPercent = isLong
+    ? ((pos.currentPrice - pos.entryPrice) / pos.entryPrice) * 100
+    : ((pos.entryPrice - pos.currentPrice) / pos.entryPrice) * 100;
+
+  return profitPercent > 2; // Minimum 2% profit required
+});
+```
+
+**Rationale**:
+
+- Filters out small price fluctuations (< 2% gains)
+- Ensures meaningful profit before closing positions
+- Reduces unnecessary re-entries
+- Covers trading fees and slippage
+- Avoids premature exit from positions
+
+**Examples**:
+
+| Position  | Entry  | Current | Profit % | Dollar PnL | Action             |
+| --------- | ------ | ------- | -------- | ---------- | ------------------ |
+| BTC LONG  | $100   | $101.50 | 1.5%     | +$1.50     | ❌ Left open       |
+| ETH LONG  | $3000  | $3070   | 2.33%    | +$70       | ✅ Closed          |
+| SOL SHORT | $100   | $98     | 2%       | +$2.00     | ❌ Left open (=2%) |
+| AVAX LONG | $50000 | $51500  | 3%       | +$1500     | ✅ Closed          |
+
+**Files Modified**:
+
+- `src/telegram/telegram.service.ts`: Lines 204-213 (Binance), Lines 365-374 (OKX)
+- `.claude/RETRY_SYSTEM_TECHNICAL.md`: Updated Phase 1 filtering logic
+- `.claude/skills/retry-reentry-system/SKILL.md`: Updated filtering section with examples
+- `.claude/CHANGELOG.md`: This entry
+
+**Impact**: More selective position closing, better profit management, reduced noise.
+
+---
+
+## 2026-01-31 - Retry System Enhancements
+
+### Features
+
+#### 1. Selective Position Closing (Profitable + Minimum 2% Profit)
+
+**What Changed**: When TP target is reached, bot now only closes positions with PnL > 0 AND profit > 2%
+
+**Before**:
+
+```typescript
+// Closed ALL positions regardless of profit/loss
+await closeAllPositions(userData, positions);
+```
+
+**After**:
+
+```typescript
+// Filter positions: profitable AND > 2% gain
+const profitablePositions = positions.filter((pos) => {
+  if (pos.unrealizedPnl <= 0) return false;
+
+  const isLong = pos.side === "LONG";
+  const profitPercent = isLong
+    ? ((pos.currentPrice - pos.entryPrice) / pos.entryPrice) * 100
+    : ((pos.entryPrice - pos.currentPrice) / pos.entryPrice) * 100;
+
+  return profitPercent > 2; // Minimum 2% profit
+});
+await closeAllPositions(userData, profitablePositions);
+```
+
+**Benefits**:
+
+- Losing positions stay open (can recover)
+- Small gains (< 2%) stay open (avoid premature exit)
+- Only meaningful profits trigger re-entry
+- Filters out noise and small fluctuations
+- Covers trading fees and slippage
+- More intelligent profit management
+- Better risk control
+
+**Example Scenarios**:
+
+| Position  | Entry | Current | Profit % | Action              |
+| --------- | ----- | ------- | -------- | ------------------- |
+| BTC LONG  | $100  | $101.50 | 1.5%     | ❌ Left open (< 2%) |
+| ETH LONG  | $3000 | $3070   | 2.33%    | ✅ Closed (> 2%)    |
+| SOL SHORT | $100  | $97     | 3%       | ✅ Closed (> 2%)    |
+| AVAX LONG | $50   | $48     | -4%      | ❌ Left open (loss) |
+
+**User Notification Updated**:
+
+```
+🎯 Take Profit Target Reached! (BINANCE)
+
+Target: 10% of $1000.00
+Target Profit: $100.00
+Unrealized PnL: $105.50
+Total Balance: $1105.50
+
+✅ Closed 2 profitable position(s)
+💰 Total Profit Captured: $105.50
+
+  BTCUSDT: LONG $75.00
+  ETHUSDT: LONG $30.50
+
+🔄 Auto Re-entry Enabled
+Will re-enter when price returns (15% volume reduction)
+Retries remaining: 5/5
+```
+
+#### 2. Profit-Protected Stop Loss Calculation
+
+**What Changed**: Stop loss now uses risk-equals-reward approach, protecting minimum profit
+
+**Old Calculation**:
+
+```typescript
+// Used previous TP price as SL
+const stopLossPrice = tpPrice; // Too conservative
+```
+
+**New Calculation**:
+
+```typescript
+// Calculate potential next profit
+const potentialNextProfit = Math.abs(tpPrice - entryPrice) × nextQuantity;
+const profitPerUnit = potentialNextProfit / nextQuantity;
+
+// Allow position to lose its potential gain
+const stopLossPrice = isLong
+  ? entryPrice - profitPerUnit
+  : entryPrice + profitPerUnit;
+```
+
+**Example**:
+
+**Position A (Original)**:
+
+- Entry: $100, Quantity: 1 BTC, LONG
+- TP at 10%: $110
+- Profit: **$10** (closed and secured)
+
+**Position B (Re-entry)**:
+
+- Entry: $100, Quantity: 0.85 BTC (15% reduction)
+- Potential TP profit: ($110 - $100) × 0.85 = **$8.50**
+- Stop Loss: $100 - $10 = **$90**
+
+**Outcomes**:
+
+- 📉 SL hits at $90: Loss = -$8.50, **Net = $1.50** ✅
+- 📈 TP hits at $110: Profit = +$8.50, **Total = $18.50** 🎯
+
+**Benefits**:
+
+- Secures minimum profit = original profit - potential next profit
+- Risk equals reward (symmetrical risk/reward)
+- More aggressive than old method (higher profit potential)
+- Still protects core gains
+
+#### 3. Automatic Exchange Orders for Re-entry
+
+**What Changed**: Both Stop Loss AND Take Profit are now automatically set on the exchange
+
+**Before**:
+
+```typescript
+// Only set stop loss
+await setStopLoss(...);
+// TP monitoring done by bot
+```
+
+**After**:
+
+```typescript
+// Set stop loss on exchange
+await setStopLoss({
+  symbol: reentryData.symbol,
+  stopPrice: stopLossPrice,
+  side: reentryData.side,
+  quantity: reentryData.quantity,
+});
+
+// Set take profit on exchange ⭐ NEW
+await setTakeProfit({
+  symbol: reentryData.symbol,
+  tpPercentage: reentryData.tpPercentage,
+});
+```
+
+**Benefits**:
+
+- Orders execute even if bot is offline
+- Exchange handles timing and execution
+- User can see orders in exchange UI
+- More reliable than bot monitoring
+- Reduces bot API calls
+
+**User Notification Updated**:
+
+```
+🔄 Re-entered Position! (BINANCE)
+
+📈 BTCUSDT LONG
+Entry: $100,000
+Quantity: 0.8500 (-15.0% from original)
+Volume: $85,000.00
+Leverage: 10x
+
+🎯 Take Profit: $110,000 (+10%)
+🛡️ Stop Loss: $90,000 (Profit Protected)
+
+Retry 1/5
+Retries remaining: 4
+```
+
+### Files Modified
+
+**src/telegram/telegram.service.ts**:
+
+- Lines 207-253: Updated Binance TP check with profitable filter + new SL calc
+- Lines 363-409: Updated OKX TP check with profitable filter + new SL calc
+- Lines 282-297: Updated Binance TP notification message
+- Lines 420-435: Updated OKX TP notification message
+- Lines 605-625: Updated re-entry execution to set both SL and TP
+- Lines 752-775: Updated re-entry notification message
+
+**Documentation**:
+
+- `.claude/RETRY_SYSTEM_TECHNICAL.md`: Updated Phase 1 and Phase 3 with new logic
+- `.claude/skills/retry-reentry-system/SKILL.md`: Created comprehensive skill guide
+
+### Database Schema Changes
+
+**ReentryData** (Redis storage):
+
+```typescript
+{
+  // Existing fields...
+  currentPrice: number,        // ⭐ NEW: Price when position closed
+  closedProfit: number,        // ⭐ NEW: Profit from closed position
+  stopLossPrice: number,       // Updated calculation method
+  // ...
+}
+```
+
+### Migration Notes
+
+- No database migration needed (backward compatible)
+- Old reentry data will use fallback SL calculation
+- New positions will use updated calculation automatically
+
+---
+
 ## 2026-01-30 - Command Name Standardization
 
 ### Changes
