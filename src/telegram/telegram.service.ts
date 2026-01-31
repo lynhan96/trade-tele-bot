@@ -71,6 +71,11 @@ export class TelegramBotService implements OnModuleInit {
       await this.handleSetPosition(msg, match);
     });
 
+    // Command: /setmode [exchange] [aggregate|individual]
+    this.bot.onText(/\/setmode (.+)/, async (msg, match) => {
+      await this.handleSetMode(msg, match);
+    });
+
     // Command: /cleartp [exchange]
     this.bot.onText(/\/cleartp(.*)/, async (msg, match) => {
       await this.handleClearTakeProfit(msg, match);
@@ -1249,25 +1254,41 @@ export class TelegramBotService implements OnModuleInit {
             );
 
             const unrealizedPnl = balance.totalUnrealizedProfit;
-            const targetProfit =
-              (tpData.initialBalance * tpData.percentage) / 100;
-            const currentPercentage =
-              (unrealizedPnl / tpData.initialBalance) * 100;
-            const progressEmoji = unrealizedPnl >= targetProfit ? "🎯" : "📊";
+
+            // Check TP mode
+            const tpMode = await this.redisService.get<{
+              mode: "aggregate" | "individual";
+            }>(`user:${telegramId}:tp:mode:${exchange}`);
+
+            let tpMessage: string;
+            if (tpMode?.mode === "individual") {
+              // Individual mode - show per-position TP
+              tpMessage =
+                `🎯 TP Mode: Individual\n` +
+                `└ Each position closes at ${tpData.percentage}% profit`;
+            } else {
+              // Aggregate mode - show progress
+              const targetProfit =
+                (tpData.initialBalance * tpData.percentage) / 100;
+              const currentPercentage =
+                (unrealizedPnl / tpData.initialBalance) * 100;
+              tpMessage =
+                `🎯 TP Target Progress:\n` +
+                `├ Target: ${tpData.percentage}% ($${targetProfit.toFixed(2)})\n` +
+                `├ Current: ${currentPercentage.toFixed(2)}%\n` +
+                `└ Remaining: ${(tpData.percentage - currentPercentage).toFixed(2)}%`;
+            }
 
             this.logger.log(
-              `User ${telegramId} (BINANCE): PnL=$${unrealizedPnl.toFixed(2)}, Target=$${targetProfit.toFixed(2)}, Progress=${currentPercentage.toFixed(2)}%`,
+              `Sending periodic update to user ${telegramId} (BINANCE)`,
             );
 
             await this.bot.sendMessage(
               userData.chatId,
-              `${progressEmoji} *10-Minute Update (BINANCE)*\n\n` +
+              `📊 *10-Minute Update (BINANCE)*\n\n` +
                 `💰 Current Balance: $${balance.totalBalance.toFixed(2)}\n` +
                 `📈 Unrealized PnL: $${unrealizedPnl.toFixed(2)}\n\n` +
-                `🎯 TP Target Progress:\n` +
-                `├ Target: ${tpData.percentage}% ($${targetProfit.toFixed(2)})\n` +
-                `├ Current: ${currentPercentage.toFixed(2)}%\n` +
-                `└ Remaining: ${(tpData.percentage - currentPercentage).toFixed(2)}%`,
+                tpMessage,
               { parse_mode: "Markdown" },
             );
 
@@ -1293,25 +1314,41 @@ export class TelegramBotService implements OnModuleInit {
             );
 
             const unrealizedPnl = balance.totalUnrealizedProfit;
-            const targetProfit =
-              (tpData.initialBalance * tpData.percentage) / 100;
-            const currentPercentage =
-              (unrealizedPnl / tpData.initialBalance) * 100;
-            const progressEmoji = unrealizedPnl >= targetProfit ? "🎯" : "📊";
+
+            // Check TP mode
+            const tpMode = await this.redisService.get<{
+              mode: "aggregate" | "individual";
+            }>(`user:${telegramId}:tp:mode:${exchange}`);
+
+            let tpMessage: string;
+            if (tpMode?.mode === "individual") {
+              // Individual mode - show per-position TP
+              tpMessage =
+                `🎯 TP Mode: Individual\n` +
+                `└ Each position closes at ${tpData.percentage}% profit`;
+            } else {
+              // Aggregate mode - show progress
+              const targetProfit =
+                (tpData.initialBalance * tpData.percentage) / 100;
+              const currentPercentage =
+                (unrealizedPnl / tpData.initialBalance) * 100;
+              tpMessage =
+                `🎯 TP Target Progress:\n` +
+                `├ Target: ${tpData.percentage}% ($${targetProfit.toFixed(2)})\n` +
+                `├ Current: ${currentPercentage.toFixed(2)}%\n` +
+                `└ Remaining: ${(tpData.percentage - currentPercentage).toFixed(2)}%`;
+            }
 
             this.logger.log(
-              `User ${telegramId} (OKX): PnL=$${unrealizedPnl.toFixed(2)}, Target=$${targetProfit.toFixed(2)}, Progress=${currentPercentage.toFixed(2)}%`,
+              `Sending periodic update to user ${telegramId} (OKX)`,
             );
 
             await this.bot.sendMessage(
               userData.chatId,
-              `${progressEmoji} *10-Minute Update (OKX)*\n\n` +
+              `📊 *10-Minute Update (OKX)*\n\n` +
                 `💰 Current Balance: $${balance.totalBalance.toFixed(2)}\n` +
                 `📈 Unrealized PnL: $${unrealizedPnl.toFixed(2)}\n\n` +
-                `🎯 TP Target Progress:\n` +
-                `├ Target: ${tpData.percentage}% ($${targetProfit.toFixed(2)})\n` +
-                `├ Current: ${currentPercentage.toFixed(2)}%\n` +
-                `└ Remaining: ${(tpData.percentage - currentPercentage).toFixed(2)}%`,
+                tpMessage,
               { parse_mode: "Markdown" },
             );
 
@@ -1444,6 +1481,7 @@ export class TelegramBotService implements OnModuleInit {
           "/accounts - View configs & TP settings\n" +
           "/setaccount exchange % balance - Aggregate TP\n" +
           "/setposition exchange % - Individual position TP\n" +
+          "/setmode exchange [aggregate|individual] - Switch mode\n" +
           "/close exchange symbol - Close specific position\n" +
           "/closeall exchange - Close all positions\n" +
           "/cleartp exchange - Remove TP target\n" +
@@ -1956,10 +1994,20 @@ export class TelegramBotService implements OnModuleInit {
         setAt: new Date().toISOString(),
       });
 
+      // Check if switching from individual mode
+      const existingMode = await this.redisService.get<{
+        mode: "aggregate" | "individual";
+      }>(`user:${telegramId}:tp:mode:${exchange}`);
+
       // Set mode to aggregate
       await this.redisService.set(`user:${telegramId}:tp:mode:${exchange}`, {
         mode: "aggregate",
       });
+
+      const modeSwitch =
+        existingMode?.mode === "individual"
+          ? "\n⚠️ Switched from Individual to Aggregate mode\n"
+          : "";
 
       await this.bot.sendMessage(
         chatId,
@@ -1969,8 +2017,9 @@ export class TelegramBotService implements OnModuleInit {
           `Initial Balance: $${initialBalance.toFixed(2)}\n` +
           `Target Profit: $${targetProfit.toFixed(2)}\n\n` +
           `🤖 Bot will monitor ${exchange.toUpperCase()} account.\n` +
-          `All positions will close when total unrealized PnL ≥ $${targetProfit.toFixed(2)}\n\n` +
-          `Use /cleartp ${exchange} to remove`,
+          `All positions will close when total unrealized PnL ≥ $${targetProfit.toFixed(2)}\n` +
+          modeSwitch +
+          `\nUse /cleartp ${exchange} to remove`,
         { parse_mode: "Markdown" },
       );
     } catch (error) {
@@ -2048,6 +2097,11 @@ export class TelegramBotService implements OnModuleInit {
         return;
       }
 
+      // Check if switching from aggregate mode
+      const existingMode = await this.redisService.get<{
+        mode: "aggregate" | "individual";
+      }>(`user:${telegramId}:tp:mode:${exchange}`);
+
       // Store individual TP configuration
       await this.redisService.set(
         `user:${telegramId}:tp:individual:${exchange}`,
@@ -2069,14 +2123,20 @@ export class TelegramBotService implements OnModuleInit {
         setAt: new Date().toISOString(),
       });
 
+      const modeSwitch =
+        existingMode?.mode === "aggregate"
+          ? "\n⚠️ Switched from Aggregate to Individual mode\n"
+          : "";
+
       await this.bot.sendMessage(
         chatId,
         `✅ *Individual Position TP Set for ${exchange.toUpperCase()}*\n\n` +
           `Mode: Individual (Per Position)\n` +
           `TP Percentage: ${percentage}%\n\n` +
           `🤖 Bot will monitor each ${exchange.toUpperCase()} position.\n` +
-          `Each position will close independently when it reaches ${percentage}% profit.\n\n` +
-          `Use /cleartp ${exchange} to remove`,
+          `Each position will close independently when it reaches ${percentage}% profit.\n` +
+          modeSwitch +
+          `\nUse /cleartp ${exchange} to remove`,
         { parse_mode: "Markdown" },
       );
     } catch (error) {
@@ -2089,6 +2149,199 @@ export class TelegramBotService implements OnModuleInit {
         error.message,
       );
       this.fileLogger.logBusinessError("handleSetPosition", error, telegramId, {
+        exchange,
+      });
+    }
+  }
+
+  private async handleSetMode(
+    msg: TelegramBot.Message,
+    match: RegExpExecArray,
+  ) {
+    const chatId = msg.chat.id;
+    const telegramId = msg.from.id;
+
+    // Ensure chatId is stored
+    await this.ensureChatIdStored(telegramId, chatId);
+
+    let exchange: "binance" | "okx" | undefined;
+
+    try {
+      if (!match || match.length < 2) {
+        await this.bot.sendMessage(
+          chatId,
+          "❌ Invalid format. Use:\n/setmode exchange [aggregate|individual]\n\n" +
+            "Examples:\n/setmode binance aggregate\n/setmode okx individual",
+          { parse_mode: "Markdown" },
+        );
+        return;
+      }
+
+      const args = match[1].trim().split(/\s+/);
+
+      if (args.length < 2) {
+        await this.bot.sendMessage(
+          chatId,
+          "❌ Please provide exchange and mode.\n" +
+            "Example: /setmode binance aggregate",
+        );
+        return;
+      }
+
+      exchange = args[0].toLowerCase() as "binance" | "okx";
+      const mode = args[1].toLowerCase() as "aggregate" | "individual";
+
+      if (exchange !== "binance" && exchange !== "okx") {
+        await this.bot.sendMessage(
+          chatId,
+          "❌ Invalid exchange. Please use 'binance' or 'okx'.",
+        );
+        return;
+      }
+
+      if (mode !== "aggregate" && mode !== "individual") {
+        await this.bot.sendMessage(
+          chatId,
+          "❌ Invalid mode. Please use 'aggregate' or 'individual'.",
+        );
+        return;
+      }
+
+      const userData = await this.getUserData(telegramId, exchange);
+      if (!userData) {
+        await this.bot.sendMessage(
+          chatId,
+          `❌ ${exchange.toUpperCase()} account not found.\nUse /setkeys ${exchange} to connect.`,
+        );
+        return;
+      }
+
+      // Check if TP is configured
+      const tpData = await this.redisService.get<{
+        percentage: number;
+        initialBalance: number;
+      }>(`user:${telegramId}:tp:${exchange}`);
+
+      if (!tpData) {
+        await this.bot.sendMessage(
+          chatId,
+          `❌ No TP configured for ${exchange.toUpperCase()}.\n\n` +
+            `Use:\n` +
+            `/setaccount ${exchange} % balance - for aggregate mode\n` +
+            `/setposition ${exchange} % - for individual mode`,
+        );
+        return;
+      }
+
+      // Check current mode
+      const currentMode = await this.redisService.get<{
+        mode: "aggregate" | "individual";
+      }>(`user:${telegramId}:tp:mode:${exchange}`);
+
+      if (currentMode?.mode === mode) {
+        await this.bot.sendMessage(
+          chatId,
+          `ℹ️ Already in ${mode} mode for ${exchange.toUpperCase()}.`,
+        );
+        return;
+      }
+
+      // Clear pending re-entry positions when switching modes
+      const reentryKeys = await this.redisService.keys(
+        `user:${telegramId}:reentry:${exchange}:*`,
+      );
+      let clearedReentries = 0;
+      for (const key of reentryKeys) {
+        await this.redisService.delete(key);
+        clearedReentries++;
+      }
+
+      // Switch mode
+      await this.redisService.set(`user:${telegramId}:tp:mode:${exchange}`, {
+        mode: mode,
+      });
+
+      let modeDescription: string;
+      let tpPercentage: number;
+
+      if (mode === "individual") {
+        const individualConfig = await this.redisService.get<{
+          percentage: number;
+        }>(`user:${telegramId}:tp:individual:${exchange}`);
+
+        tpPercentage = individualConfig?.percentage || tpData.percentage;
+
+        // Update marker for individual mode
+        await this.redisService.set(`user:${telegramId}:tp:${exchange}`, {
+          percentage: tpPercentage,
+          initialBalance: 0, // Marker for individual mode
+          setAt: new Date().toISOString(),
+        });
+
+        modeDescription =
+          `📍 *Individual Position Mode*\n\n` +
+          `TP Percentage: ${tpPercentage}%\n` +
+          `Each position closes independently at ${tpPercentage}% profit\n\n` +
+          `💡 To update percentage: /setposition ${exchange} %`;
+      } else {
+        tpPercentage = tpData.percentage;
+        const targetProfit = (tpData.initialBalance * tpPercentage) / 100;
+
+        // Restore aggregate mode marker
+        await this.redisService.set(`user:${telegramId}:tp:${exchange}`, {
+          percentage: tpPercentage,
+          initialBalance: tpData.initialBalance,
+          setAt: new Date().toISOString(),
+        });
+
+        modeDescription =
+          `📊 *Aggregate Mode*\n\n` +
+          `TP Percentage: ${tpPercentage}%\n` +
+          `Initial Balance: $${tpData.initialBalance.toFixed(2)}\n` +
+          `Target Profit: $${targetProfit.toFixed(2)}\n` +
+          `All positions close when total PnL reaches target\n\n` +
+          `💡 To update config: /setaccount ${exchange} % balance`;
+      }
+
+      // Check if retry is configured to show it's preserved
+      const retryConfig = await this.redisService.get<{
+        maxRetry: number;
+        currentRetryCount: number;
+        volumeReductionPercent: number;
+        enabled: boolean;
+      }>(`user:${telegramId}:retry:${exchange}`);
+
+      let retryNote = "";
+      if (retryConfig && retryConfig.enabled) {
+        retryNote =
+          `\n\n🔄 *Retry Config Preserved*\n` +
+          `└ ${retryConfig.currentRetryCount}/${retryConfig.maxRetry} retries, -${retryConfig.volumeReductionPercent}% volume`;
+      }
+
+      let clearedNote = "";
+      if (clearedReentries > 0) {
+        clearedNote = `\n\n🗑️ Cleared ${clearedReentries} pending re-entry position(s)`;
+      }
+
+      await this.bot.sendMessage(
+        chatId,
+        `✅ *Mode Switched for ${exchange.toUpperCase()}*\n\n` +
+          modeDescription +
+          retryNote +
+          clearedNote +
+          `\n\nUse /accounts to view current settings`,
+        { parse_mode: "Markdown" },
+      );
+    } catch (error) {
+      await this.bot.sendMessage(
+        chatId,
+        `❌ Error switching mode: ${error.message}`,
+      );
+      this.logger.error(
+        `Error setting mode for user ${telegramId}:`,
+        error.message,
+      );
+      this.fileLogger.logBusinessError("handleSetMode", error, telegramId, {
         exchange,
       });
     }
@@ -2223,21 +2476,37 @@ export class TelegramBotService implements OnModuleInit {
           );
 
           const unrealizedPnl = balance.totalUnrealizedProfit;
-          const targetProfit =
-            (tpData.initialBalance * tpData.percentage) / 100;
-          const currentPercentage =
-            (unrealizedPnl / tpData.initialBalance) * 100;
-          const progressEmoji = unrealizedPnl >= targetProfit ? "🎯" : "📊";
 
-          await this.bot.sendMessage(
-            chatId,
-            `${progressEmoji} *Manual Update (BINANCE)*\n\n` +
-              `💰 Current Balance: $${balance.totalBalance.toFixed(2)}\n` +
-              `📈 Unrealized PnL: $${unrealizedPnl.toFixed(2)}\n\n` +
+          // Check TP mode
+          const tpMode = await this.redisService.get<{
+            mode: "aggregate" | "individual";
+          }>(`user:${telegramId}:tp:mode:${exchange}`);
+
+          let tpMessage: string;
+          if (tpMode?.mode === "individual") {
+            // Individual mode
+            tpMessage =
+              `🎯 TP Mode: Individual\n` +
+              `└ Each position closes at ${tpData.percentage}% profit`;
+          } else {
+            // Aggregate mode
+            const targetProfit =
+              (tpData.initialBalance * tpData.percentage) / 100;
+            const currentPercentage =
+              (unrealizedPnl / tpData.initialBalance) * 100;
+            tpMessage =
               `🎯 TP Target Progress:\n` +
               `├ Target: ${tpData.percentage}% ($${targetProfit.toFixed(2)})\n` +
               `├ Current: ${currentPercentage.toFixed(2)}%\n` +
-              `└ Remaining: ${(tpData.percentage - currentPercentage).toFixed(2)}%`,
+              `└ Remaining: ${(tpData.percentage - currentPercentage).toFixed(2)}%`;
+          }
+
+          await this.bot.sendMessage(
+            chatId,
+            `📊 *Manual Update (BINANCE)*\n\n` +
+              `💰 Current Balance: $${balance.totalBalance.toFixed(2)}\n` +
+              `📈 Unrealized PnL: $${unrealizedPnl.toFixed(2)}\n\n` +
+              tpMessage,
             { parse_mode: "Markdown" },
           );
         } catch (error) {
@@ -2260,21 +2529,37 @@ export class TelegramBotService implements OnModuleInit {
           );
 
           const unrealizedPnl = balance.totalUnrealizedProfit;
-          const targetProfit =
-            (tpData.initialBalance * tpData.percentage) / 100;
-          const currentPercentage =
-            (unrealizedPnl / tpData.initialBalance) * 100;
-          const progressEmoji = unrealizedPnl >= targetProfit ? "🎯" : "📊";
 
-          await this.bot.sendMessage(
-            chatId,
-            `${progressEmoji} *Manual Update (OKX)*\n\n` +
-              `💰 Current Balance: $${balance.totalBalance.toFixed(2)}\n` +
-              `📈 Unrealized PnL: $${unrealizedPnl.toFixed(2)}\n\n` +
+          // Check TP mode
+          const tpMode = await this.redisService.get<{
+            mode: "aggregate" | "individual";
+          }>(`user:${telegramId}:tp:mode:${exchange}`);
+
+          let tpMessage: string;
+          if (tpMode?.mode === "individual") {
+            // Individual mode
+            tpMessage =
+              `🎯 TP Mode: Individual\n` +
+              `└ Each position closes at ${tpData.percentage}% profit`;
+          } else {
+            // Aggregate mode
+            const targetProfit =
+              (tpData.initialBalance * tpData.percentage) / 100;
+            const currentPercentage =
+              (unrealizedPnl / tpData.initialBalance) * 100;
+            tpMessage =
               `🎯 TP Target Progress:\n` +
               `├ Target: ${tpData.percentage}% ($${targetProfit.toFixed(2)})\n` +
               `├ Current: ${currentPercentage.toFixed(2)}%\n` +
-              `└ Remaining: ${(tpData.percentage - currentPercentage).toFixed(2)}%`,
+              `└ Remaining: ${(tpData.percentage - currentPercentage).toFixed(2)}%`;
+          }
+
+          await this.bot.sendMessage(
+            chatId,
+            `📊 *Manual Update (OKX)*\n\n` +
+              `💰 Current Balance: $${balance.totalBalance.toFixed(2)}\n` +
+              `📈 Unrealized PnL: $${unrealizedPnl.toFixed(2)}\n\n` +
+              tpMessage,
             { parse_mode: "Markdown" },
           );
         } catch (error) {
