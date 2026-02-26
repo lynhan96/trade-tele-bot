@@ -44,12 +44,31 @@ AppModule
 ├── RedisModule
 ├── BinanceModule
 ├── OkxModule
-└── TelegramModule
+├── TelegramModule
+└── SignalModule          ← NEW: imports TelegramModule, hosts TCP controller
 ```
 
 ## Data Flow
 
-### 1. User Command Flow
+### 1. Bot Signal Auto-Trade Flow (NEW)
+
+```
+bot-signal service
+    ↓  TCP port 8010 (cmd: bot-receive-signal)
+SignalController.handleSignal()
+    ↓
+TelegramBotService.handleIncomingSignal(signal)
+    ↓  SCAN Redis: user:*:bots:*
+    For each user with signal.botType enabled:
+        ↓
+    executeSignalTrade(telegramId, exchange, signal, botConfig)
+        ├→ getCurrentPrice()
+        ├→ openPosition(symbol, side, qty, leverage)
+        ├→ setStopLoss() [fire-and-forget]
+        └→ Notify user via Telegram
+```
+
+### 2. User Command Flow
 
 ```
 User → Telegram → Bot API → TelegramBotService

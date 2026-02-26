@@ -6,6 +6,7 @@ import { RedisModule } from "./redis/redis.module";
 import { BinanceModule } from "./binance/binance.module";
 import { OkxModule } from "./okx/okx.module";
 import { LoggerModule } from "./logger/logger.module";
+import { SignalModule } from "./signal/signal.module";
 
 @Module({
   imports: [
@@ -18,6 +19,7 @@ import { LoggerModule } from "./logger/logger.module";
     BinanceModule,
     OkxModule,
     TelegramModule,
+    SignalModule,
   ],
 })
 export class AppModule {}

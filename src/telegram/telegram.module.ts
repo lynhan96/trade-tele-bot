@@ -7,5 +7,6 @@ import { OkxModule } from "../okx/okx.module";
 @Module({
   imports: [RedisModule, BinanceModule, OkxModule],
   providers: [TelegramBotService],
+  exports: [TelegramBotService],
 })
 export class TelegramModule {}

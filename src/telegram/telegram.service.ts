@@ -6,7 +6,42 @@ import { RedisService } from "../redis/redis.service";
 import { BinanceService } from "../binance/binance.service";
 import { OkxService } from "../okx/okx.service";
 import { FileLoggerService } from "../logger/logger.service";
-import { UserApiKeys, UserActiveExchange } from "../interfaces/user.interface";
+import {
+  UserApiKeys,
+  UserActiveExchange,
+  UserBotConfig,
+  UserBotsConfig,
+} from "../interfaces/user.interface";
+
+// Bot type shorthand → full BotType string
+const BOT_TYPE_MAP: Record<string, string> = {
+  CT1: "BOT_FUTURE_CT_1",
+  CT2: "BOT_FUTURE_CT_2",
+  CT3: "BOT_FUTURE_CT_3",
+  CT4: "BOT_FUTURE_CT_4",
+  CT5: "BOT_FUTURE_CT_5",
+  CT6: "BOT_FUTURE_CT_6",
+  CT7: "BOT_FUTURE_CT_7",
+  CT8: "BOT_FUTURE_CT_8",
+  SPOT: "BOT_SPOT",
+};
+
+const BOT_TYPE_REVERSE_MAP: Record<string, string> = Object.fromEntries(
+  Object.entries(BOT_TYPE_MAP).map(([k, v]) => [v, k]),
+);
+
+// Payload type received from bot-signal service via TCP
+interface IncomingSignal {
+  coin: string;
+  currency: string;
+  equity: "LONG" | "SHORT" | "BUY";
+  entry: number;
+  stopLoss: number;
+  botType: string;
+  tradingPairType: "FUTURE" | "SPOT";
+  period?: string;
+  isManual?: boolean;
+}
 
 @Injectable()
 export class TelegramBotService implements OnModuleInit {
@@ -105,6 +140,26 @@ export class TelegramBotService implements OnModuleInit {
     // Command: /clearretry [exchange]
     this.bot.onText(/\/clearretry (.+)/, async (msg, match) => {
       await this.handleClearRetry(msg, match);
+    });
+
+    // Command: /setbot [exchange] [botType] [amount] [leverage]
+    this.bot.onText(/\/setbot (.+)/, async (msg, match) => {
+      await this.handleSetBot(msg, match);
+    });
+
+    // Command: /clearbot [exchange] [botType]
+    this.bot.onText(/\/clearbot (.+)/, async (msg, match) => {
+      await this.handleClearBot(msg, match);
+    });
+
+    // Command: /clearbots [exchange]
+    this.bot.onText(/\/clearbots(.*)/, async (msg, match) => {
+      await this.handleClearBots(msg, match);
+    });
+
+    // Command: /listbots
+    this.bot.onText(/\/listbots/, async (msg) => {
+      await this.handleListBots(msg);
     });
   }
 
@@ -1485,7 +1540,12 @@ export class TelegramBotService implements OnModuleInit {
           "⚙️ *Tài khoản*\n" +
           "/accounts — Xem cấu hình & trạng thái TP\n" +
           "/update `exchange` — Xem số dư & tiến độ TP\n" +
-          "/setkeys `exchange ...` — Cập nhật API keys",
+          "/setkeys `exchange ...` — Cập nhật API keys\n\n" +
+          "🤖 *Bot Signal*\n" +
+          "/setbot `exchange CT1 volume [lev]` — Bật bot tự động\n" +
+          "/clearbot `exchange CT1` — Tắt một bot\n" +
+          "/clearbots `exchange` — Tắt tất cả bots\n" +
+          "/listbots — Xem danh sách bots đang chạy",
         { parse_mode: "Markdown" },
       );
     } else {
@@ -3078,5 +3138,491 @@ export class TelegramBotService implements OnModuleInit {
         exchange,
       });
     }
+  }
+
+  // ─── Bot Signal Commands ──────────────────────────────────────────────────
+
+  private async handleSetBot(
+    msg: TelegramBot.Message,
+    match: RegExpExecArray,
+  ) {
+    const chatId = msg.chat.id;
+    const telegramId = msg.from.id;
+
+    const args = match[1].trim().split(/\s+/);
+    if (args.length < 3) {
+      await this.bot.sendMessage(
+        chatId,
+        "❌ Format: /setbot `<exchange> <botType> <volume> [leverage]`\n\n" +
+          "Example: `/setbot binance CT1 100 10`\n" +
+          "Bot types: CT1, CT2, CT3, CT4, CT5, CT6, CT7, CT8\n" +
+          "Volume: USDT per order · Default leverage: 10x",
+        { parse_mode: "Markdown" },
+      );
+      return;
+    }
+
+    const exchange = args[0].toLowerCase() as "binance" | "okx";
+    const botShort = args[1].toUpperCase();
+    const volume = parseFloat(args[2]);
+    const leverage = args[3] ? parseInt(args[3]) : 10;
+
+    if (!["binance", "okx"].includes(exchange)) {
+      await this.bot.sendMessage(
+        chatId,
+        "❌ Sàn không hợp lệ. Dùng `binance` hoặc `okx`.",
+        { parse_mode: "Markdown" },
+      );
+      return;
+    }
+
+    const botType = BOT_TYPE_MAP[botShort];
+    if (!botType) {
+      await this.bot.sendMessage(
+        chatId,
+        "❌ Bot type không hợp lệ.\nValid: CT1, CT2, CT3, CT4, CT5, CT6, CT7, CT8",
+      );
+      return;
+    }
+
+    if (isNaN(volume) || volume <= 0) {
+      await this.bot.sendMessage(chatId, "❌ Volume phải là số dương (USDT).");
+      return;
+    }
+
+    if (isNaN(leverage) || leverage < 1 || leverage > 125) {
+      await this.bot.sendMessage(chatId, "❌ Leverage phải từ 1 đến 125.");
+      return;
+    }
+
+    const userExists = await this.redisService.exists(
+      `user:${telegramId}:${exchange}`,
+    );
+    if (!userExists) {
+      await this.bot.sendMessage(
+        chatId,
+        `❌ Chưa có API keys cho ${exchange.toUpperCase()}.\n` +
+          `Dùng /setkeys ${exchange} để thêm API keys trước.`,
+      );
+      return;
+    }
+
+    const botsConfig =
+      (await this.redisService.get<UserBotsConfig>(
+        `user:${telegramId}:bots:${exchange}`,
+      )) || { bots: [], updatedAt: "" };
+
+    const idx = botsConfig.bots.findIndex((b) => b.botType === botType);
+    const newBot: UserBotConfig = {
+      botType,
+      enabled: true,
+      volume,
+      leverage,
+      enabledAt: new Date().toISOString(),
+    };
+
+    if (idx >= 0) {
+      botsConfig.bots[idx] = newBot;
+    } else {
+      botsConfig.bots.push(newBot);
+    }
+    botsConfig.updatedAt = new Date().toISOString();
+
+    await this.redisService.set(
+      `user:${telegramId}:bots:${exchange}`,
+      botsConfig,
+    );
+
+    await this.bot.sendMessage(
+      chatId,
+      `✅ *Bot Signal đã bật*\n\n` +
+        `├ Sàn: ${exchange.toUpperCase()}\n` +
+        `├ Bot: ${botShort} (${botType})\n` +
+        `├ Volume mỗi lệnh: $${volume}\n` +
+        `└ Đòn bẩy: ${leverage}x`,
+      { parse_mode: "Markdown" },
+    );
+  }
+
+  private async handleClearBot(
+    msg: TelegramBot.Message,
+    match: RegExpExecArray,
+  ) {
+    const chatId = msg.chat.id;
+    const telegramId = msg.from.id;
+
+    const args = match[1].trim().split(/\s+/);
+    if (args.length < 2) {
+      await this.bot.sendMessage(
+        chatId,
+        "❌ Format: /clearbot `<exchange> <botType>`\n\nExample: `/clearbot binance CT1`",
+        { parse_mode: "Markdown" },
+      );
+      return;
+    }
+
+    const exchange = args[0].toLowerCase() as "binance" | "okx";
+    const botShort = args[1].toUpperCase();
+    const botType = BOT_TYPE_MAP[botShort];
+
+    if (!botType) {
+      await this.bot.sendMessage(
+        chatId,
+        "❌ Bot type không hợp lệ.\nValid: CT1, CT2, CT3, CT4, CT5, CT6, CT7, CT8",
+      );
+      return;
+    }
+
+    const botsConfig = await this.redisService.get<UserBotsConfig>(
+      `user:${telegramId}:bots:${exchange}`,
+    );
+    if (!botsConfig || botsConfig.bots.length === 0) {
+      await this.bot.sendMessage(
+        chatId,
+        `ℹ️ Không có bot nào được cấu hình cho ${exchange.toUpperCase()}.`,
+      );
+      return;
+    }
+
+    const idx = botsConfig.bots.findIndex((b) => b.botType === botType);
+    if (idx < 0) {
+      await this.bot.sendMessage(
+        chatId,
+        `ℹ️ Bot ${botShort} không tồn tại trên ${exchange.toUpperCase()}.`,
+      );
+      return;
+    }
+
+    botsConfig.bots.splice(idx, 1);
+    botsConfig.updatedAt = new Date().toISOString();
+    await this.redisService.set(
+      `user:${telegramId}:bots:${exchange}`,
+      botsConfig,
+    );
+
+    await this.bot.sendMessage(
+      chatId,
+      `✅ Bot *${botShort}* đã tắt trên *${exchange.toUpperCase()}*`,
+      { parse_mode: "Markdown" },
+    );
+  }
+
+  private async handleClearBots(
+    msg: TelegramBot.Message,
+    match: RegExpExecArray,
+  ) {
+    const chatId = msg.chat.id;
+    const telegramId = msg.from.id;
+
+    const arg = match[1]?.trim().toLowerCase();
+
+    if (arg && ["binance", "okx"].includes(arg)) {
+      await this.redisService.delete(`user:${telegramId}:bots:${arg}`);
+      await this.bot.sendMessage(
+        chatId,
+        `✅ Đã xóa tất cả bots trên *${arg.toUpperCase()}*`,
+        { parse_mode: "Markdown" },
+      );
+    } else {
+      await Promise.all([
+        this.redisService.delete(`user:${telegramId}:bots:binance`),
+        this.redisService.delete(`user:${telegramId}:bots:okx`),
+      ]);
+      await this.bot.sendMessage(chatId, "✅ Đã xóa tất cả bots trên mọi sàn.");
+    }
+  }
+
+  private async handleListBots(msg: TelegramBot.Message) {
+    const chatId = msg.chat.id;
+    const telegramId = msg.from.id;
+
+    const [binanceBots, okxBots] = await Promise.all([
+      this.redisService.get<UserBotsConfig>(
+        `user:${telegramId}:bots:binance`,
+      ),
+      this.redisService.get<UserBotsConfig>(`user:${telegramId}:bots:okx`),
+    ]);
+
+    const hasAny =
+      (binanceBots?.bots?.length ?? 0) > 0 ||
+      (okxBots?.bots?.length ?? 0) > 0;
+
+    if (!hasAny) {
+      await this.bot.sendMessage(
+        chatId,
+        "ℹ️ Chưa có bot nào được bật.\n\nDùng /setbot để cấu hình.",
+      );
+      return;
+    }
+
+    let msg_text = "🤖 *Danh sách Bot Signal*\n\n";
+
+    const formatBots = (
+      label: string,
+      config: UserBotsConfig | null,
+    ): string => {
+      if (!config || config.bots.length === 0) return "";
+      let section = `*${label}*\n`;
+      for (const bot of config.bots) {
+        const short = BOT_TYPE_REVERSE_MAP[bot.botType] || bot.botType;
+        section +=
+          `  ├ ${short}: $${bot.volume} vol @ ${bot.leverage}x\n`;
+      }
+      return section + "\n";
+    };
+
+    msg_text += formatBots("BINANCE", binanceBots);
+    msg_text += formatBots("OKX", okxBots);
+    msg_text +=
+      "_Dùng /setbot để thêm, /clearbot để xóa từng bot_";
+
+    await this.bot.sendMessage(chatId, msg_text, { parse_mode: "Markdown" });
+  }
+
+  // ─── Incoming Signal Handling (TCP) ──────────────────────────────────────
+
+  public async handleIncomingSignal(signal: IncomingSignal): Promise<void> {
+    if (!this.bot) return;
+
+    // Only handle FUTURE signals; skip SPOT
+    if (signal.tradingPairType !== "FUTURE" || signal.botType === "BOT_SPOT") {
+      return;
+    }
+
+    // Find all users who have this botType enabled
+    const botKeys = await this.redisService.keys("user:*:bots:*");
+
+    for (const key of botKeys) {
+      // key = "binance-bot:user:<id>:bots:<exchange>"
+      const parts = key.replace("binance-bot:", "").split(":");
+      if (parts.length < 4) continue;
+
+      const telegramId = parseInt(parts[1]);
+      const exchange = parts[3] as "binance" | "okx";
+      if (isNaN(telegramId)) continue;
+
+      const botsConfig = await this.redisService.get<UserBotsConfig>(
+        `user:${telegramId}:bots:${exchange}`,
+      );
+      if (!botsConfig) continue;
+
+      const botConfig = botsConfig.bots.find(
+        (b) => b.botType === signal.botType && b.enabled,
+      );
+      if (!botConfig) continue;
+
+      // [TESTING] Notify only — no real order execution yet
+      this.notifySignalReceived(telegramId, exchange, signal, botConfig).catch(
+        (err) => {
+          this.fileLogger.logBusinessError(
+            "handleIncomingSignal",
+            err,
+            telegramId,
+            { exchange, botType: signal.botType },
+          );
+        },
+      );
+
+      // [PRODUCTION] Uncomment below (and remove notifySignalReceived above) to execute real trades
+      // this.executeSignalTrade(telegramId, exchange, signal, botConfig).catch(
+      //   (err) => {
+      //     this.fileLogger.logBusinessError(
+      //       "handleIncomingSignal",
+      //       err,
+      //       telegramId,
+      //       { exchange, botType: signal.botType },
+      //     );
+      //   },
+      // );
+    }
+  }
+
+  private async notifySignalReceived(
+    telegramId: number,
+    exchange: "binance" | "okx",
+    signal: IncomingSignal,
+    botConfig: UserBotConfig,
+  ): Promise<void> {
+    const chatId = await this.redisService.get<number>(
+      `user:${telegramId}:chatId`,
+    );
+    if (!chatId) return;
+
+    const side: "LONG" | "SHORT" =
+      signal.equity === "SHORT" ? "SHORT" : "LONG";
+    const sideEmoji = side === "LONG" ? "📈" : "📉";
+    const symbol =
+      exchange === "binance"
+        ? `${signal.coin}${signal.currency}`
+        : `${signal.coin}-${signal.currency}-SWAP`;
+    const botShort =
+      BOT_TYPE_REVERSE_MAP[signal.botType] || signal.botType;
+
+    await this.bot.sendMessage(
+      chatId,
+      `📡 *[TEST] Bot Signal Nhận Được*\n\n` +
+        `${sideEmoji} *${symbol}* ${side}\n` +
+        `├ Bot: ${botShort}\n` +
+        `├ Sàn: ${exchange.toUpperCase()}\n` +
+        `├ Giá vào (signal): $${signal.entry.toFixed(4)}\n` +
+        `├ Stop Loss: $${signal.stopLoss.toFixed(4)}\n` +
+        `├ Volume cấu hình: $${botConfig.volume}\n` +
+        `├ Đòn bẩy: ${botConfig.leverage}x\n` +
+        `└ Timeframe: ${signal.period || "N/A"}\n\n` +
+        `_⚠️ Testing mode — chưa đặt lệnh thật_`,
+      { parse_mode: "Markdown" },
+    );
+  }
+
+  private async executeSignalTrade(
+    telegramId: number,
+    exchange: "binance" | "okx",
+    signal: IncomingSignal,
+    botConfig: UserBotConfig,
+  ): Promise<void> {
+    const userData = await this.redisService.get<UserApiKeys>(
+      `user:${telegramId}:${exchange}`,
+    );
+    if (!userData) return;
+
+    const chatId = await this.redisService.get<number>(
+      `user:${telegramId}:chatId`,
+    );
+
+    const side: "LONG" | "SHORT" =
+      signal.equity === "SHORT" ? "SHORT" : "LONG";
+
+    try {
+      let currentPrice: number;
+      let quantity: number;
+      const botShort =
+        BOT_TYPE_REVERSE_MAP[signal.botType] || signal.botType;
+
+      if (exchange === "binance") {
+        const symbol = `${signal.coin}${signal.currency}`;
+        currentPrice = await this.binanceService.getCurrentPrice(
+          userData.apiKey,
+          userData.apiSecret,
+          symbol,
+        );
+        quantity = parseFloat(
+          (botConfig.volume / currentPrice).toFixed(
+            this.getQuantityPrecision(currentPrice),
+          ),
+        );
+
+        await this.binanceService.openPosition(
+          userData.apiKey,
+          userData.apiSecret,
+          { symbol, side, quantity, leverage: botConfig.leverage },
+        );
+
+        this.binanceService
+          .setStopLoss(
+            userData.apiKey,
+            userData.apiSecret,
+            symbol,
+            signal.stopLoss,
+            side,
+            quantity,
+          )
+          .catch((e) =>
+            this.fileLogger.logBusinessError("executeSignalTrade:setStopLoss", e, telegramId, { symbol }),
+          );
+
+        if (chatId) {
+          const sideEmoji = side === "LONG" ? "📈" : "📉";
+          await this.bot.sendMessage(
+            chatId,
+            `🤖 *Bot Signal Executed*\n\n` +
+              `${sideEmoji} ${symbol} ${side}\n` +
+              `├ Bot: ${botShort}\n` +
+              `├ Sàn: BINANCE\n` +
+              `├ Giá vào: $${currentPrice.toFixed(4)}\n` +
+              `├ Volume: $${botConfig.volume}\n` +
+              `├ Số lượng: ${quantity}\n` +
+              `├ Đòn bẩy: ${botConfig.leverage}x\n` +
+              `└ Stop Loss: $${signal.stopLoss.toFixed(4)}`,
+            { parse_mode: "Markdown" },
+          );
+        }
+      } else if (exchange === "okx") {
+        const symbol = `${signal.coin}-${signal.currency}-SWAP`;
+        currentPrice = await this.okxService.getCurrentPrice(
+          userData.apiKey,
+          userData.apiSecret,
+          userData.passphrase,
+          symbol,
+        );
+        quantity = parseFloat(
+          (botConfig.volume / currentPrice).toFixed(
+            this.getQuantityPrecision(currentPrice),
+          ),
+        );
+
+        await this.okxService.openPosition(
+          userData.apiKey,
+          userData.apiSecret,
+          userData.passphrase,
+          { symbol, side, quantity, leverage: botConfig.leverage },
+        );
+
+        this.okxService
+          .setStopLoss(
+            userData.apiKey,
+            userData.apiSecret,
+            userData.passphrase,
+            symbol,
+            signal.stopLoss,
+            side,
+            quantity,
+          )
+          .catch((e) =>
+            this.fileLogger.logBusinessError("executeSignalTrade:setStopLoss", e, telegramId, { symbol }),
+          );
+
+        if (chatId) {
+          const sideEmoji = side === "LONG" ? "📈" : "📉";
+          await this.bot.sendMessage(
+            chatId,
+            `🤖 *Bot Signal Executed*\n\n` +
+              `${sideEmoji} ${symbol} ${side}\n` +
+              `├ Bot: ${botShort}\n` +
+              `├ Sàn: OKX\n` +
+              `├ Giá vào: $${currentPrice.toFixed(4)}\n` +
+              `├ Volume: $${botConfig.volume}\n` +
+              `├ Số lượng: ${quantity}\n` +
+              `├ Đòn bẩy: ${botConfig.leverage}x\n` +
+              `└ Stop Loss: $${signal.stopLoss.toFixed(4)}`,
+            { parse_mode: "Markdown" },
+          );
+        }
+      }
+    } catch (error) {
+      this.fileLogger.logBusinessError(
+        "executeSignalTrade",
+        error,
+        telegramId,
+        { exchange, signal, botConfig },
+      );
+      if (chatId) {
+        const botShort =
+          BOT_TYPE_REVERSE_MAP[signal.botType] || signal.botType;
+        await this.bot
+          .sendMessage(
+            chatId,
+            `❌ Bot ${botShort} thất bại: ${error.message}`,
+          )
+          .catch(() => {});
+      }
+    }
+  }
+
+  private getQuantityPrecision(price: number): number {
+    if (price >= 10000) return 3;
+    if (price >= 1000) return 2;
+    if (price >= 100) return 1;
+    if (price >= 1) return 0;
+    return 0;
   }
 }
