@@ -4027,6 +4027,177 @@ export class TelegramBotService implements OnModuleInit {
     }
   }
 
+  // Cron: every 10 minutes — ensure all open positions have TP and SL orders
+  @Cron("0 */10 * * * *")
+  private async checkMissingTpSl() {
+    try {
+      const botKeys = await this.redisService.keys("user:*:bots:*");
+      if (!botKeys.length) return;
+
+      const seen = new Set<string>();
+
+      for (const key of botKeys) {
+        const parts = key.replace("binance-bot:", "").split(":");
+        if (parts.length < 4) continue;
+
+        const telegramId = parseInt(parts[1]);
+        const exchange = parts[3] as "binance" | "okx";
+        if (isNaN(telegramId)) continue;
+
+        const userExchangeKey = `${telegramId}:${exchange}`;
+        if (seen.has(userExchangeKey)) continue;
+        seen.add(userExchangeKey);
+
+        const lockKey = `tpsl-guard:${telegramId}:${exchange}`;
+        if (this.processingLocks.has(lockKey)) continue;
+        this.processingLocks.add(lockKey);
+
+        try {
+          const botsConfig = await this.redisService.get<UserBotsConfig>(
+            `user:${telegramId}:bots:${exchange}`,
+          );
+          if (!botsConfig) continue;
+
+          const enabledBots = botsConfig.bots.filter((b) => b.enabled);
+          if (!enabledBots.length) continue;
+
+          // Pick the first enabled bot that has TP% / SL% configured
+          const defaultTpPercent = enabledBots.find(
+            (b) => b.takeProfitPercent != null,
+          )?.takeProfitPercent;
+          const defaultSlPercent = enabledBots.find(
+            (b) => b.stopLossPercent != null,
+          )?.stopLossPercent;
+
+          if (!defaultTpPercent && !defaultSlPercent) continue;
+
+          const userData = await this.getUserData(telegramId, exchange);
+          if (!userData) continue;
+
+          const positions =
+            exchange === "binance"
+              ? await this.binanceService.getOpenPositions(
+                  userData.apiKey,
+                  userData.apiSecret,
+                )
+              : await this.okxService.getOpenPositions(
+                  userData.apiKey,
+                  userData.apiSecret,
+                  userData.passphrase,
+                );
+
+          const missing = positions.filter(
+            (p) => !p.takeProfit || !p.stopLoss,
+          );
+          if (!missing.length) continue;
+
+          const results: string[] = [];
+
+          for (const pos of missing) {
+            const isLong = pos.side === "LONG";
+            const entry = pos.entryPrice;
+
+            // Set TP if missing
+            if (!pos.takeProfit && defaultTpPercent) {
+              try {
+                if (exchange === "binance") {
+                  await this.binanceService.setTakeProfit(
+                    userData.apiKey,
+                    userData.apiSecret,
+                    pos.symbol,
+                    defaultTpPercent,
+                  );
+                } else {
+                  await this.okxService.setTakeProfit(
+                    userData.apiKey,
+                    userData.apiSecret,
+                    userData.passphrase,
+                    pos.symbol,
+                    defaultTpPercent,
+                  );
+                }
+                const tpPrice = isLong
+                  ? (entry * (1 + defaultTpPercent / 100)).toFixed(4)
+                  : (entry * (1 - defaultTpPercent / 100)).toFixed(4);
+                results.push(
+                  `✅ ${pos.symbol} TP → $${tpPrice} (+${defaultTpPercent}%)`,
+                );
+              } catch (e) {
+                this.fileLogger.logBusinessError(
+                  "checkMissingTpSl:setTakeProfit",
+                  e,
+                  telegramId,
+                  { symbol: pos.symbol },
+                );
+                results.push(`⚠️ ${pos.symbol} TP failed: ${e.message}`);
+              }
+            }
+
+            // Set SL if missing
+            if (!pos.stopLoss && defaultSlPercent) {
+              const slPrice = isLong
+                ? parseFloat((entry * (1 - defaultSlPercent / 100)).toFixed(4))
+                : parseFloat(
+                    (entry * (1 + defaultSlPercent / 100)).toFixed(4),
+                  );
+              try {
+                if (exchange === "binance") {
+                  await this.binanceService.setStopLoss(
+                    userData.apiKey,
+                    userData.apiSecret,
+                    pos.symbol,
+                    slPrice,
+                    pos.side as "LONG" | "SHORT",
+                    pos.quantity,
+                  );
+                } else {
+                  await this.okxService.setStopLoss(
+                    userData.apiKey,
+                    userData.apiSecret,
+                    userData.passphrase,
+                    pos.symbol,
+                    slPrice,
+                    pos.side as "LONG" | "SHORT",
+                    pos.quantity,
+                  );
+                }
+                results.push(
+                  `✅ ${pos.symbol} SL → $${slPrice} (-${defaultSlPercent}%)`,
+                );
+              } catch (e) {
+                this.fileLogger.logBusinessError(
+                  "checkMissingTpSl:setStopLoss",
+                  e,
+                  telegramId,
+                  { symbol: pos.symbol },
+                );
+                results.push(`⚠️ ${pos.symbol} SL failed: ${e.message}`);
+              }
+            }
+          }
+
+          if (results.length && userData.chatId) {
+            await this.bot
+              .sendMessage(
+                userData.chatId,
+                `🔧 *Auto TP/SL Guard* (${exchange.toUpperCase()})\n\n` +
+                  results.join("\n"),
+                { parse_mode: "Markdown" },
+              )
+              .catch(() => {});
+          }
+        } finally {
+          this.processingLocks.delete(lockKey);
+        }
+      }
+    } catch (error) {
+      this.fileLogger.logError(error, {
+        operation: "checkMissingTpSl",
+        type: "CRON_ERROR",
+      });
+    }
+  }
+
   private getQuantityPrecision(price: number): number {
     if (price >= 10000) return 3;
     if (price >= 1000) return 2;

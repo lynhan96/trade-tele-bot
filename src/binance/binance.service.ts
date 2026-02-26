@@ -364,12 +364,12 @@ export class BinanceService {
       const client = this.createClient(apiKey, apiSecret);
 
       // Set stop loss order
+      // Note: closePosition and quantity are mutually exclusive on Binance API
       const order = await client.futuresOrder({
         symbol,
         side: side === "LONG" ? "SELL" : "BUY",
         type: "STOP_MARKET",
         stopPrice: stopPrice.toString(),
-        quantity: quantity.toString(),
         closePosition: "true",
       });
 
