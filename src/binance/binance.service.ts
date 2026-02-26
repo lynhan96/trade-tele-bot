@@ -163,7 +163,6 @@ export class BinanceService {
         throw new Error(`No open position found for ${symbol}`);
       }
 
-      const quantity = Math.abs(parseFloat(position.positionAmt));
       const entryPrice = parseFloat(position.entryPrice);
       const isLong = parseFloat(position.positionAmt) > 0;
 

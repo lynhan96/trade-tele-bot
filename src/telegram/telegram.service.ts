@@ -3654,8 +3654,7 @@ export class TelegramBotService implements OnModuleInit {
         `[Signal] Dispatching to user=${telegramId} exchange=${exchange} bot=${signal.botType} vol=$${botConfig.volume} lev=${botConfig.leverage}x`,
       );
 
-      // [TESTING] Notify only — no real order execution
-      this.notifySignalReceived(telegramId, exchange, signal, botConfig).catch(
+      this.executeSignalTrade(telegramId, exchange, signal, botConfig).catch(
         (err) => {
           this.fileLogger.logBusinessError(
             "handleIncomingSignal",
@@ -3665,18 +3664,6 @@ export class TelegramBotService implements OnModuleInit {
           );
         },
       );
-
-      // [PRODUCTION] Uncomment below to execute real trades
-      // this.executeSignalTrade(telegramId, exchange, signal, botConfig).catch(
-      //   (err) => {
-      //     this.fileLogger.logBusinessError(
-      //       "handleIncomingSignal",
-      //       err,
-      //       telegramId,
-      //       { exchange, botType: signal.botType },
-      //     );
-      //   },
-      // );
     }
   }
 
@@ -3742,6 +3729,38 @@ export class TelegramBotService implements OnModuleInit {
       let quantity: number;
       const botShort =
         BOT_TYPE_REVERSE_MAP[signal.botType] || signal.botType;
+
+      // Deduplication: skip if position already exists for same symbol + same side
+      // (opposite side is allowed — e.g. existing LONG + incoming SHORT signal)
+      const openPositions =
+        exchange === "binance"
+          ? await this.binanceService.getOpenPositions(userData.apiKey, userData.apiSecret)
+          : await this.okxService.getOpenPositions(userData.apiKey, userData.apiSecret, userData.passphrase);
+
+      const symbolForCheck =
+        exchange === "binance"
+          ? `${signal.coin}${signal.currency}`
+          : `${signal.coin}-${signal.currency}-SWAP`;
+
+      const duplicatePosition = openPositions.find(
+        (p) => p.symbol === symbolForCheck && p.side === side,
+      );
+
+      if (duplicatePosition) {
+        this.logger.log(
+          `[Signal] user=${telegramId} ${symbolForCheck} ${side} — position already exists, skipping`,
+        );
+        if (chatId) {
+          await this.bot
+            .sendMessage(
+              chatId,
+              `⚠️ *${signal.coin}/${signal.currency}* ${side} — đã có vị thế, bỏ qua tín hiệu.`,
+              { parse_mode: "Markdown" },
+            )
+            .catch(() => {});
+        }
+        return;
+      }
 
       if (exchange === "binance") {
         const symbol = `${signal.coin}${signal.currency}`;
@@ -3812,7 +3831,7 @@ export class TelegramBotService implements OnModuleInit {
               `├ Số lượng: ${quantity}\n` +
               `├ Đòn bẩy: ${botConfig.leverage}x\n` +
               (binanceTpPrice ? `├ Take Profit: $${binanceTpPrice}\n` : "") +
-              `└ Stop Loss: $${binanceSlPrice.toFixed(4)}`,
+              `└ Stop Loss: $${binanceSlPrice}`,
             { parse_mode: "Markdown" },
           );
         }
@@ -3889,7 +3908,7 @@ export class TelegramBotService implements OnModuleInit {
               `├ Số lượng: ${quantity}\n` +
               `├ Đòn bẩy: ${botConfig.leverage}x\n` +
               (okxTpPrice ? `├ Take Profit: $${okxTpPrice}\n` : "") +
-              `└ Stop Loss: $${okxSlPrice.toFixed(4)}`,
+              `└ Stop Loss: $${okxSlPrice}`,
             { parse_mode: "Markdown" },
           );
         }
