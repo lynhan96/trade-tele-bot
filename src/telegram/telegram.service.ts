@@ -3486,7 +3486,12 @@ export class TelegramBotService implements OnModuleInit {
     const chatId = await this.redisService.get<number>(
       `user:${telegramId}:chatId`,
     );
-    if (!chatId) return;
+    if (!chatId) {
+      this.logger.warn(
+        `[Signal] user=${telegramId} — no chatId in Redis, cannot send Telegram message`,
+      );
+      return;
+    }
 
     const side: "LONG" | "SHORT" =
       signal.equity === "SHORT" ? "SHORT" : "LONG";
