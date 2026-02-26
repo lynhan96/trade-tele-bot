@@ -1469,17 +1469,23 @@ export class TelegramBotService implements OnModuleInit {
         chatId,
         "👋 Welcome back!\n\n" +
           accountInfo +
-          "\n*Commands:*\n" +
-          "/position - View positions & PnL\n" +
-          "/accounts - View configs & TP settings\n" +
-          "/setaccount exchange % balance - Aggregate TP\n" +
-          "/setposition exchange % - Individual position TP\n" +
-          "/setmode exchange [aggregate|individual] - Switch mode\n" +
-          "/close exchange symbol - Close specific position\n" +
-          "/closeall exchange - Close all positions\n" +
-          "/cleartp exchange - Remove TP target\n" +
-          "/update exchange - Get balance & TP progress\n" +
-          "/setkeys exchange ... - Update API keys",
+          "\n*📋 Commands:*\n\n" +
+          "📊 *Positions*\n" +
+          "/position — Xem tất cả vị thế & PnL\n" +
+          "/close `exchange symbol` — Đóng 1 vị thế\n" +
+          "/closeall `exchange` — Đóng tất cả vị thế\n\n" +
+          "🎯 *Take Profit*\n" +
+          "/setaccount `exchange % balance` — TP theo tổng tài khoản\n" +
+          "/setposition `exchange %` — TP theo từng vị thế\n" +
+          "/setmode `exchange aggregate|individual` — Đổi chế độ TP\n" +
+          "/cleartp `exchange` — Xóa cấu hình TP\n\n" +
+          "🔄 *Re-entry*\n" +
+          "/setretry `exchange max_retry volume_reduction%` — Bật tự động vào lại\n" +
+          "/clearretry `exchange` — Tắt tự động vào lại\n\n" +
+          "⚙️ *Tài khoản*\n" +
+          "/accounts — Xem cấu hình & trạng thái TP\n" +
+          "/update `exchange` — Xem số dư & tiến độ TP\n" +
+          "/setkeys `exchange ...` — Cập nhật API keys",
         { parse_mode: "Markdown" },
       );
     } else {

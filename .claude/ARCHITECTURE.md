@@ -93,23 +93,30 @@ Cron (30s) → checkTakeProfitTargets()
 ### 3. Re-entry System Flow
 
 ```
-Cron (15s) → checkReentryOpportunities()
+Cron (30s) → checkReentryOpportunities()
                 ↓
-        Get All Pending Re-entries
+        Get All Pending Re-entries (SCAN)
                 ↓
         For Each Re-entry:
                 ↓
-        Get Current Price
+        ① Cooldown Check (30 min, pure math — NO API call)
+                ↓ (passes)
+        ② Get Current Price
                 ↓
-        If Price ± 0.5% of Entry:
-                ↓
+        ③ checkReentrySafety():
+            - Price range (5–25% from entry)
+            - EMA9/EMA21 alignment (30 klines)
+            - Buy/sell volume pressure (last 20 candles)
+                ↓ (all pass)
         executeReentry()
                 ↓
         ┌───────┴───────┐
         ▼               ▼
     Open Position   Set Stop Loss
     (Reduced Volume) (At Previous TP)
-        ▼               ▼
+        ▼
+    Set Take Profit on Exchange
+        ▼
     Store Next Re-entry Config
         ↓
     Decrement Retries
@@ -259,26 +266,31 @@ LOG_LEVEL=info                  # Logging level
 ### checkTakeProfitTargets
 
 - **Frequency:** Every 30 seconds
+- **Concurrency guard:** `processingLocks` Set prevents double-processing same user+exchange
 - **Purpose:** Monitor unrealized PnL vs TP target
 - **Actions:**
-  - Close all positions if target reached
+  - Fetch `retryConfig` once (reused for both re-entry storage and notification)
+  - Close all profitable positions (> 2% profit) if target reached
   - Store re-entry data if retry enabled
   - Send notifications
 
 ### checkReentryOpportunities
 
-- **Frequency:** Every 15 seconds
-- **Purpose:** Check for price return to entry
-- **Actions:**
-  - Get current prices
-  - Compare with stored entry prices (±0.5%)
-  - Execute re-entry with reduced volume
-  - Set stop loss at previous TP
+- **Frequency:** Every 30 seconds
+- **Purpose:** Check for re-entry conditions after TP
+- **Order of checks (fail-fast, cheapest first):**
+  1. Cooldown check — 30 min since close (pure date math, no API)
+  2. Current price fetch
+  3. Price range check (5–25% from original entry)
+  4. EMA9/EMA21 alignment (30 × 15m klines)
+  5. Volume pressure (>55% buy for LONG, >45% for SHORT)
+- **On pass:** Execute re-entry, set SL + TP on exchange
 
 ### sendPeriodicUpdates
 
 - **Frequency:** Every 5 minutes
-- **Purpose:** Send balance updates to users
+- **Message label:** "5-Minute Update"
+- **Purpose:** Send balance updates to users with TP configured
 - **Actions:**
   - Fetch current balance
   - Calculate progress to TP
@@ -342,7 +354,11 @@ LOG_LEVEL=info                  # Logging level
 
 - All file I/O is async
 - Non-blocking logging
-- Parallel API calls where possible
+- `/position` fetches Binance and OKX concurrently via top-level `Promise.all`
+- `BinanceService.getOpenPositions`: all open orders fetched once, grouped by symbol (eliminates N+1 per-position calls)
+- `BinanceService.getAccountBalance`: uses `futuresAccountInfo()` (1 call) — no secondary `getOpenPositions` call
+- `OkxService.getAccountBalance`: uses `upl` field from balance response (1 call) — no secondary `getOpenPositions` call
+- Redis `keys()` uses non-blocking SCAN cursor loop instead of blocking `KEYS` command
 
 ## Deployment Considerations
 
