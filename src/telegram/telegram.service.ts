@@ -1961,7 +1961,14 @@ export class TelegramBotService implements OnModuleInit {
         const binanceBots = botsConfig?.bots ?? [];
         if (binanceBots.length > 0) {
           const botList = binanceBots
-            .map((b) => `${BOT_TYPE_REVERSE_MAP[b.botType] || b.botType} $${b.volume}@${b.leverage}x`)
+            .map((b) => {
+              const name = BOT_TYPE_REVERSE_MAP[b.botType] || b.botType;
+              const tpsl =
+                b.takeProfitPercent !== undefined || b.stopLossPercent !== undefined
+                  ? ` [TP:${b.takeProfitPercent ?? "—"}%/SL:${b.stopLossPercent ?? "—"}%]`
+                  : "";
+              return `${name} $${b.volume}@${b.leverage}x${tpsl}`;
+            })
             .join(" · ");
           message += `├ 🤖 Bots: ${botList}\n`;
         } else {
@@ -2054,7 +2061,14 @@ export class TelegramBotService implements OnModuleInit {
         const okxBots = botsConfig?.bots ?? [];
         if (okxBots.length > 0) {
           const botList = okxBots
-            .map((b) => `${BOT_TYPE_REVERSE_MAP[b.botType] || b.botType} $${b.volume}@${b.leverage}x`)
+            .map((b) => {
+              const name = BOT_TYPE_REVERSE_MAP[b.botType] || b.botType;
+              const tpsl =
+                b.takeProfitPercent !== undefined || b.stopLossPercent !== undefined
+                  ? ` [TP:${b.takeProfitPercent ?? "—"}%/SL:${b.stopLossPercent ?? "—"}%]`
+                  : "";
+              return `${name} $${b.volume}@${b.leverage}x${tpsl}`;
+            })
             .join(" · ");
           message += `├ 🤖 Bots: ${botList}\n`;
         } else {
