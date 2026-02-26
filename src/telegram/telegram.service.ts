@@ -122,6 +122,11 @@ export class TelegramBotService implements OnModuleInit {
       await this.handleSetAllTp(msg, match);
     });
 
+    // Command: /setmaxpos [exchange] [max]
+    this.bot.onText(/\/setmaxpos (.+)/, async (msg, match) => {
+      await this.handleSetMaxPositions(msg, match);
+    });
+
     // Command: /update [exchange] (manual trigger for testing)
     this.bot.onText(/\/update(.*)/, async (msg, match) => {
       await this.handleManualUpdate(msg, match);
@@ -1889,7 +1894,7 @@ export class TelegramBotService implements OnModuleInit {
         const isActive = activeExchange === "binance";
 
         // Fetch live data + config in parallel
-        const [balance, positions, tpData, tpMode, individualTpData, retryConfig, botsConfig] =
+        const [balance, positions, tpData, tpMode, individualTpData, retryConfig, botsConfig, maxPos] =
           await Promise.all([
             this.binanceService
               .getAccountBalance(binanceData.apiKey, binanceData.apiSecret)
@@ -1916,6 +1921,7 @@ export class TelegramBotService implements OnModuleInit {
             this.redisService.get<UserBotsConfig>(
               `user:${telegramId}:bots:binance`,
             ),
+            this.redisService.get<number>(`user:${telegramId}:maxpos:binance`),
           ]);
 
         const longCount = positions.filter((p) => p.side === "LONG").length;
@@ -1958,6 +1964,7 @@ export class TelegramBotService implements OnModuleInit {
         } else {
           message += `├ 🔄 Retry: Tắt\n`;
         }
+        message += `├ 🔒 Max vị thế: ${maxPos !== null ? maxPos : "Không giới hạn"}\n`;
         const binanceBots = botsConfig?.bots ?? [];
         if (binanceBots.length > 0) {
           const botList = binanceBots
@@ -1981,7 +1988,7 @@ export class TelegramBotService implements OnModuleInit {
         const isActive = activeExchange === "okx";
 
         // Fetch live data + config in parallel
-        const [balance, positions, tpData, tpMode, individualTpData, retryConfig, botsConfig] =
+        const [balance, positions, tpData, tpMode, individualTpData, retryConfig, botsConfig, maxPos] =
           await Promise.all([
             this.okxService
               .getAccountBalance(
@@ -2016,6 +2023,7 @@ export class TelegramBotService implements OnModuleInit {
             this.redisService.get<UserBotsConfig>(
               `user:${telegramId}:bots:okx`,
             ),
+            this.redisService.get<number>(`user:${telegramId}:maxpos:okx`),
           ]);
 
         const longCount = positions.filter((p) => p.side === "LONG").length;
@@ -2058,6 +2066,7 @@ export class TelegramBotService implements OnModuleInit {
         } else {
           message += `├ 🔄 Retry: Tắt\n`;
         }
+        message += `├ 🔒 Max vị thế: ${maxPos !== null ? maxPos : "Không giới hạn"}\n`;
         const okxBots = botsConfig?.bots ?? [];
         if (okxBots.length > 0) {
           const botList = okxBots
@@ -2755,6 +2764,71 @@ export class TelegramBotService implements OnModuleInit {
       this.fileLogger.logBusinessError("handleSetAllTp", error, telegramId, {
         exchange,
       });
+    }
+  }
+
+  private async handleSetMaxPositions(
+    msg: TelegramBot.Message,
+    match: RegExpExecArray,
+  ): Promise<void> {
+    const chatId = msg.chat.id;
+    const telegramId = msg.from.id;
+
+    await this.ensureChatIdStored(telegramId, chatId);
+
+    try {
+      const args = match[1].trim().split(/\s+/);
+      if (args.length < 2) {
+        await this.bot.sendMessage(
+          chatId,
+          "❌ Thiếu tham số. Dùng:\n/setmaxpos exchange max\n\nVí dụ:\n/setmaxpos binance 5",
+        );
+        return;
+      }
+
+      const exchange = args[0].toLowerCase() as "binance" | "okx";
+      const maxPositions = parseInt(args[1]);
+
+      if (exchange !== "binance" && exchange !== "okx") {
+        await this.bot.sendMessage(
+          chatId,
+          "❌ Exchange không hợp lệ. Dùng binance hoặc okx.",
+        );
+        return;
+      }
+
+      if (isNaN(maxPositions) || maxPositions < 1) {
+        await this.bot.sendMessage(chatId, "❌ Số vị thế tối đa phải >= 1.");
+        return;
+      }
+
+      const userData = await this.getUserData(telegramId, exchange);
+      if (!userData) {
+        await this.bot.sendMessage(
+          chatId,
+          `❌ Không tìm thấy tài khoản ${exchange.toUpperCase()}.\nDùng /setkeys ${exchange} để kết nối.`,
+        );
+        return;
+      }
+
+      await this.redisService.set(
+        `user:${telegramId}:maxpos:${exchange}`,
+        maxPositions,
+      );
+
+      await this.bot.sendMessage(
+        chatId,
+        `✅ *Giới hạn vị thế — ${exchange.toUpperCase()}*\n\n` +
+          `Tối đa: ${maxPositions} vị thế\n\n` +
+          `🤖 Bot sẽ bỏ qua tín hiệu mới khi đang có ≥ ${maxPositions} vị thế mở.`,
+        { parse_mode: "Markdown" },
+      );
+    } catch (error) {
+      await this.bot.sendMessage(chatId, `❌ Lỗi: ${error.message}`);
+      this.logger.error(
+        `Error setting max positions for user ${telegramId}:`,
+        error.message,
+      );
     }
   }
 
@@ -3741,6 +3815,26 @@ export class TelegramBotService implements OnModuleInit {
         exchange === "binance"
           ? `${signal.coin}${signal.currency}`
           : `${signal.coin}-${signal.currency}-SWAP`;
+
+      // Check max open positions limit
+      const maxPositions = await this.redisService.get<number>(
+        `user:${telegramId}:maxpos:${exchange}`,
+      );
+      if (maxPositions !== null && openPositions.length >= maxPositions) {
+        this.logger.log(
+          `[Signal] user=${telegramId} ${exchange} — max positions reached (${openPositions.length}/${maxPositions}), skipping`,
+        );
+        if (chatId) {
+          await this.bot
+            .sendMessage(
+              chatId,
+              `⚠️ Đã đạt giới hạn *${maxPositions}* vị thế trên ${exchange.toUpperCase()}, bỏ qua tín hiệu *${signal.coin}/${signal.currency}*.`,
+              { parse_mode: "Markdown" },
+            )
+            .catch(() => {});
+        }
+        return;
+      }
 
       const duplicatePosition = openPositions.find(
         (p) => p.symbol === symbolForCheck && p.side === side,
