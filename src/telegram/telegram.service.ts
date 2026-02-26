@@ -1014,6 +1014,14 @@ export class TelegramBotService implements OnModuleInit {
         );
       }
 
+      // Store open time for expiry-based closing
+      await this.redisService
+        .set(
+          `user:${telegramId}:opentime:${exchange}:${reentryData.symbol}`,
+          { openedAt: Date.now(), side: reentryData.side },
+        )
+        .catch(() => {});
+
       // Get ACTUAL execution price from order result
       // This is the real entry price for this retry
       const actualEntryPrice = orderResult?.avgPrice
@@ -1064,6 +1072,41 @@ export class TelegramBotService implements OnModuleInit {
           this.logger.log(
             `Stored TP ($${takeProfitPrice}) and SL ($${stopLossPrice}) in Redis for ${reentryData.symbol}`,
           );
+          // Also place actual orders on Binance exchange
+          await this.binanceService
+            .setStopLoss(
+              userData.apiKey,
+              userData.apiSecret,
+              reentryData.symbol,
+              stopLossPrice,
+              reentryData.side,
+              reentryData.quantity,
+            )
+            .catch((e) =>
+              this.fileLogger.logApiError(
+                "binance",
+                "executeReentry:setStopLoss",
+                e,
+                telegramId,
+                reentryData.symbol,
+              ),
+            );
+          await this.binanceService
+            .setTakeProfit(
+              userData.apiKey,
+              userData.apiSecret,
+              reentryData.symbol,
+              reentryData.tpPercentage,
+            )
+            .catch((e) =>
+              this.fileLogger.logApiError(
+                "binance",
+                "executeReentry:setTakeProfit",
+                e,
+                telegramId,
+                reentryData.symbol,
+              ),
+            );
         } else {
           // OKX: use exchange-side orders
           await this.okxService.setStopLoss(
@@ -1451,10 +1494,15 @@ export class TelegramBotService implements OnModuleInit {
           );
         }
         this.logger.log(`Closed position: ${position.symbol}`);
-        // Clean up any stored TP/SL for this position
+        // Clean up any stored TP/SL and open time for this position
         await this.redisService
           .delete(
             `user:${userData.telegramId}:tpsl:${userData.exchange}:${position.symbol}`,
+          )
+          .catch(() => {});
+        await this.redisService
+          .delete(
+            `user:${userData.telegramId}:opentime:${userData.exchange}:${position.symbol}`,
           )
           .catch(() => {});
       } catch (error) {
@@ -3945,6 +3993,52 @@ export class TelegramBotService implements OnModuleInit {
           ),
         );
 
+        // Place actual TP/SL orders on Binance exchange
+        if (binanceSlPrice) {
+          this.binanceService
+            .setStopLoss(
+              userData.apiKey,
+              userData.apiSecret,
+              symbol,
+              binanceSlPrice,
+              side,
+              quantity,
+            )
+            .catch((e) =>
+              this.fileLogger.logBusinessError(
+                "executeSignalTrade:binance:setStopLoss",
+                e,
+                telegramId,
+                { symbol },
+              ),
+            );
+        }
+        if (botConfig.takeProfitPercent) {
+          this.binanceService
+            .setTakeProfit(
+              userData.apiKey,
+              userData.apiSecret,
+              symbol,
+              botConfig.takeProfitPercent,
+            )
+            .catch((e) =>
+              this.fileLogger.logBusinessError(
+                "executeSignalTrade:binance:setTakeProfit",
+                e,
+                telegramId,
+                { symbol },
+              ),
+            );
+        }
+
+        // Store open time for expiry-based closing
+        this.redisService
+          .set(`user:${telegramId}:opentime:binance:${symbol}`, {
+            openedAt: Date.now(),
+            side,
+          })
+          .catch(() => {});
+
         if (chatId) {
           const sideEmoji = side === "LONG" ? "📈" : "📉";
           const binanceTpPrice = botConfig.takeProfitPercent
@@ -3993,6 +4087,14 @@ export class TelegramBotService implements OnModuleInit {
           userData.passphrase,
           { symbol, side, quantity, leverage: botConfig.leverage },
         );
+
+        // Store open time for expiry-based closing
+        this.redisService
+          .set(`user:${telegramId}:opentime:okx:${symbol}`, {
+            openedAt: Date.now(),
+            side,
+          })
+          .catch(() => {});
 
         const okxSlPrice = botConfig.stopLossPercent
           ? side === "LONG"
@@ -4444,6 +4546,9 @@ export class TelegramBotService implements OnModuleInit {
           await this.redisService.delete(
             `user:${telegramId}:tpsl:${exchange}:${symbol}`,
           );
+          await this.redisService
+            .delete(`user:${telegramId}:opentime:${exchange}:${symbol}`)
+            .catch(() => {});
 
           if (userData.chatId) {
             const emoji = triggered === "TP" ? "🎯" : "🛑";
@@ -4477,6 +4582,130 @@ export class TelegramBotService implements OnModuleInit {
     } catch (error) {
       this.fileLogger.logError(error, {
         operation: "checkPriceLevelTpSl",
+        type: "CRON_ERROR",
+      });
+    }
+  }
+
+  // Cron: every 5 minutes — close positions that have been open for more than 1 hour
+  @Cron("0 */5 * * * *")
+  private async checkExpiredPositions() {
+    try {
+      const keys = await this.redisService.keys("user:*:opentime:*:*");
+      if (!keys.length) return;
+
+      for (const key of keys) {
+        // Key format: binance-bot:user:{telegramId}:opentime:{exchange}:{symbol}
+        const parts = key.split(":");
+        if (parts.length < 6) continue;
+        const telegramId = parseInt(parts[2]);
+        const exchange = parts[4] as "binance" | "okx";
+        const symbol = parts[5];
+        if (isNaN(telegramId)) continue;
+
+        const lockKey = `expiry:${telegramId}:${exchange}:${symbol}`;
+        if (this.processingLocks.has(lockKey)) continue;
+        this.processingLocks.add(lockKey);
+
+        try {
+          const data = await this.redisService.get<{
+            openedAt: number;
+            side: "LONG" | "SHORT";
+          }>(`user:${telegramId}:opentime:${exchange}:${symbol}`);
+
+          if (!data) continue;
+
+          // Skip if position has not yet been open for 1 hour
+          if (Date.now() - data.openedAt < 3600000) continue;
+
+          const userData = await this.getUserData(telegramId, exchange);
+          if (!userData) continue;
+
+          // Verify position is still open with the same side
+          let positions: any[];
+          if (exchange === "binance") {
+            positions = await this.binanceService.getOpenPositions(
+              userData.apiKey,
+              userData.apiSecret,
+            );
+          } else {
+            positions = await this.okxService.getOpenPositions(
+              userData.apiKey,
+              userData.apiSecret,
+              userData.passphrase,
+            );
+          }
+
+          // Always clean up the opentime key
+          await this.redisService.delete(
+            `user:${telegramId}:opentime:${exchange}:${symbol}`,
+          );
+
+          const pos = positions.find(
+            (p) => p.symbol === symbol && p.side === data.side,
+          );
+          if (!pos) continue; // Position already closed
+
+          this.logger.log(
+            `Closing expired position ${symbol} (${data.side}) for user ${telegramId} on ${exchange} — open > 1h`,
+          );
+
+          if (exchange === "binance") {
+            await this.binanceService.closePosition(
+              userData.apiKey,
+              userData.apiSecret,
+              symbol,
+              pos.quantity,
+              data.side,
+            );
+          } else {
+            await this.okxService.closePosition(
+              userData.apiKey,
+              userData.apiSecret,
+              userData.passphrase,
+              symbol,
+              pos.quantity,
+              data.side,
+            );
+          }
+
+          // Clean up tpsl key
+          await this.redisService
+            .delete(`user:${telegramId}:tpsl:${exchange}:${symbol}`)
+            .catch(() => {});
+
+          if (userData.chatId) {
+            const pnl =
+              data.side === "LONG"
+                ? ((pos.currentPrice - pos.entryPrice) / pos.entryPrice) * 100
+                : ((pos.entryPrice - pos.currentPrice) / pos.entryPrice) * 100;
+            await this.bot
+              .sendMessage(
+                userData.chatId,
+                `⏰ *Đóng lệnh hết hạn — ${exchange.toUpperCase()}*\n\n` +
+                  `${data.side} ${symbol}\n` +
+                  `├ Entry: $${pos.entryPrice.toFixed(4)}\n` +
+                  `├ Close: $${pos.currentPrice.toFixed(4)}\n` +
+                  `└ PnL: ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}% (quá 1 giờ)`,
+                { parse_mode: "Markdown" },
+              )
+              .catch(() => {});
+          }
+        } catch (error) {
+          this.fileLogger.logApiError(
+            exchange,
+            "checkExpiredPositions",
+            error,
+            telegramId,
+            symbol,
+          );
+        } finally {
+          this.processingLocks.delete(lockKey);
+        }
+      }
+    } catch (error) {
+      this.fileLogger.logError(error, {
+        operation: "checkExpiredPositions",
         type: "CRON_ERROR",
       });
     }
