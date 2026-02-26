@@ -3237,7 +3237,7 @@ export class TelegramBotService implements OnModuleInit {
       chatId,
       `✅ *Bot Signal đã bật*\n\n` +
         `├ Sàn: ${exchange.toUpperCase()}\n` +
-        `├ Bot: ${botShort} (${botType})\n` +
+        `├ Bot: ${botShort} (${botType.replace(/_/g, "\\_")})\n` +
         `├ Volume mỗi lệnh: $${volume}\n` +
         `└ Đòn bẩy: ${leverage}x`,
       { parse_mode: "Markdown" },
