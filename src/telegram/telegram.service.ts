@@ -3483,12 +3483,11 @@ export class TelegramBotService implements OnModuleInit {
     signal: IncomingSignal,
     botConfig: UserBotConfig,
   ): Promise<void> {
-    const chatId = await this.redisService.get<number>(
-      `user:${telegramId}:chatId`,
-    );
+    const userData = await this.getUserData(telegramId, exchange);
+    const chatId = userData?.chatId;
     if (!chatId) {
       this.logger.warn(
-        `[Signal] user=${telegramId} — no chatId in Redis, cannot send Telegram message`,
+        `[Signal] user=${telegramId} exchange=${exchange} — no chatId in userData, cannot send Telegram message`,
       );
       return;
     }
@@ -3530,9 +3529,7 @@ export class TelegramBotService implements OnModuleInit {
     );
     if (!userData) return;
 
-    const chatId = await this.redisService.get<number>(
-      `user:${telegramId}:chatId`,
-    );
+    const chatId = userData.chatId;
 
     const side: "LONG" | "SHORT" =
       signal.equity === "SHORT" ? "SHORT" : "LONG";
