@@ -282,11 +282,29 @@ export class BinanceService {
     try {
       const client = this.createClient(apiKey, apiSecret);
 
-      // Set leverage first
-      await client.futuresLeverage({
-        symbol: params.symbol,
-        leverage: params.leverage,
-      });
+      // Set leverage — fall back to symbol's max if requested leverage is too high
+      let effectiveLeverage = params.leverage;
+      try {
+        await client.futuresLeverage({
+          symbol: params.symbol,
+          leverage: params.leverage,
+        });
+      } catch (leverageError) {
+        const brackets = await client.futuresLeverageBracket({
+          symbol: params.symbol,
+          recvWindow: 5000,
+        });
+        const maxLeverage =
+          (brackets as any)[0]?.brackets?.[0]?.initialLeverage ?? 20;
+        this.logger.warn(
+          `Leverage ${params.leverage}x not valid for ${params.symbol}, falling back to max ${maxLeverage}x`,
+        );
+        await client.futuresLeverage({
+          symbol: params.symbol,
+          leverage: maxLeverage,
+        });
+        effectiveLeverage = maxLeverage;
+      }
 
       // Open position with market order
       const order = await client.futuresOrder({
@@ -297,7 +315,7 @@ export class BinanceService {
       });
 
       this.logger.log(
-        `Opened Binance position ${params.symbol}: ${params.side} ${params.quantity} @ ${params.leverage}x, Avg Price: ${order.avgPrice || "N/A"}`,
+        `Opened Binance position ${params.symbol}: ${params.side} ${params.quantity} @ ${effectiveLeverage}x, Avg Price: ${order.avgPrice || "N/A"}`,
       );
 
       // Return order with avgPrice for re-entry optimization
