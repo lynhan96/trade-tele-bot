@@ -1256,7 +1256,7 @@ export class TelegramBotService implements OnModuleInit {
     }
   }
 
-  // @Cron(CronExpression.EVERY_5_MINUTES)
+  @Cron(CronExpression.EVERY_5_MINUTES)
   private async sendPeriodicUpdates() {
     this.logger.log(
       "========== Running sendPeriodicUpdates cron job ==========",
@@ -1453,7 +1453,9 @@ export class TelegramBotService implements OnModuleInit {
         this.logger.log(`Closed position: ${position.symbol}`);
         // Clean up any stored TP/SL for this position
         await this.redisService
-          .delete(`user:${userData.telegramId}:tpsl:${userData.exchange}:${position.symbol}`)
+          .delete(
+            `user:${userData.telegramId}:tpsl:${userData.exchange}:${position.symbol}`,
+          )
           .catch(() => {});
       } catch (error) {
         this.fileLogger.logApiError(
@@ -1896,35 +1898,43 @@ export class TelegramBotService implements OnModuleInit {
         const isActive = activeExchange === "binance";
 
         // Fetch live data + config in parallel
-        const [balance, positions, tpData, tpMode, individualTpData, retryConfig, botsConfig, maxPos] =
-          await Promise.all([
-            this.binanceService
-              .getAccountBalance(binanceData.apiKey, binanceData.apiSecret)
-              .catch(() => null),
-            this.binanceService
-              .getOpenPositions(binanceData.apiKey, binanceData.apiSecret)
-              .catch(() => []),
-            this.redisService.get<{
-              percentage: number;
-              initialBalance: number;
-            }>(`user:${telegramId}:tp:binance`),
-            this.redisService.get<{ mode: "aggregate" | "individual" }>(
-              `user:${telegramId}:tp:mode:binance`,
-            ),
-            this.redisService.get<{ percentage: number }>(
-              `user:${telegramId}:tp:individual:binance`,
-            ),
-            this.redisService.get<{
-              maxRetry: number;
-              currentRetryCount: number;
-              volumeReductionPercent: number;
-              enabled: boolean;
-            }>(`user:${telegramId}:retry:binance`),
-            this.redisService.get<UserBotsConfig>(
-              `user:${telegramId}:bots:binance`,
-            ),
-            this.redisService.get<number>(`user:${telegramId}:maxpos:binance`),
-          ]);
+        const [
+          balance,
+          positions,
+          tpData,
+          tpMode,
+          individualTpData,
+          retryConfig,
+          botsConfig,
+          maxPos,
+        ] = await Promise.all([
+          this.binanceService
+            .getAccountBalance(binanceData.apiKey, binanceData.apiSecret)
+            .catch(() => null),
+          this.binanceService
+            .getOpenPositions(binanceData.apiKey, binanceData.apiSecret)
+            .catch(() => []),
+          this.redisService.get<{
+            percentage: number;
+            initialBalance: number;
+          }>(`user:${telegramId}:tp:binance`),
+          this.redisService.get<{ mode: "aggregate" | "individual" }>(
+            `user:${telegramId}:tp:mode:binance`,
+          ),
+          this.redisService.get<{ percentage: number }>(
+            `user:${telegramId}:tp:individual:binance`,
+          ),
+          this.redisService.get<{
+            maxRetry: number;
+            currentRetryCount: number;
+            volumeReductionPercent: number;
+            enabled: boolean;
+          }>(`user:${telegramId}:retry:binance`),
+          this.redisService.get<UserBotsConfig>(
+            `user:${telegramId}:bots:binance`,
+          ),
+          this.redisService.get<number>(`user:${telegramId}:maxpos:binance`),
+        ]);
 
         const longCount = positions.filter((p) => p.side === "LONG").length;
         const shortCount = positions.filter((p) => p.side === "SHORT").length;
@@ -1973,7 +1983,8 @@ export class TelegramBotService implements OnModuleInit {
             .map((b) => {
               const name = BOT_TYPE_REVERSE_MAP[b.botType] || b.botType;
               const tpsl =
-                b.takeProfitPercent !== undefined || b.stopLossPercent !== undefined
+                b.takeProfitPercent !== undefined ||
+                b.stopLossPercent !== undefined
                   ? ` [TP:${b.takeProfitPercent ?? "—"}%/SL:${b.stopLossPercent ?? "—"}%]`
                   : "";
               return `${name} $${b.volume}@${b.leverage}x${tpsl}`;
@@ -1990,43 +2001,49 @@ export class TelegramBotService implements OnModuleInit {
         const isActive = activeExchange === "okx";
 
         // Fetch live data + config in parallel
-        const [balance, positions, tpData, tpMode, individualTpData, retryConfig, botsConfig, maxPos] =
-          await Promise.all([
-            this.okxService
-              .getAccountBalance(
-                okxData.apiKey,
-                okxData.apiSecret,
-                okxData.passphrase,
-              )
-              .catch(() => null),
-            this.okxService
-              .getOpenPositions(
-                okxData.apiKey,
-                okxData.apiSecret,
-                okxData.passphrase,
-              )
-              .catch(() => []),
-            this.redisService.get<{
-              percentage: number;
-              initialBalance: number;
-            }>(`user:${telegramId}:tp:okx`),
-            this.redisService.get<{ mode: "aggregate" | "individual" }>(
-              `user:${telegramId}:tp:mode:okx`,
-            ),
-            this.redisService.get<{ percentage: number }>(
-              `user:${telegramId}:tp:individual:okx`,
-            ),
-            this.redisService.get<{
-              maxRetry: number;
-              currentRetryCount: number;
-              volumeReductionPercent: number;
-              enabled: boolean;
-            }>(`user:${telegramId}:retry:okx`),
-            this.redisService.get<UserBotsConfig>(
-              `user:${telegramId}:bots:okx`,
-            ),
-            this.redisService.get<number>(`user:${telegramId}:maxpos:okx`),
-          ]);
+        const [
+          balance,
+          positions,
+          tpData,
+          tpMode,
+          individualTpData,
+          retryConfig,
+          botsConfig,
+          maxPos,
+        ] = await Promise.all([
+          this.okxService
+            .getAccountBalance(
+              okxData.apiKey,
+              okxData.apiSecret,
+              okxData.passphrase,
+            )
+            .catch(() => null),
+          this.okxService
+            .getOpenPositions(
+              okxData.apiKey,
+              okxData.apiSecret,
+              okxData.passphrase,
+            )
+            .catch(() => []),
+          this.redisService.get<{
+            percentage: number;
+            initialBalance: number;
+          }>(`user:${telegramId}:tp:okx`),
+          this.redisService.get<{ mode: "aggregate" | "individual" }>(
+            `user:${telegramId}:tp:mode:okx`,
+          ),
+          this.redisService.get<{ percentage: number }>(
+            `user:${telegramId}:tp:individual:okx`,
+          ),
+          this.redisService.get<{
+            maxRetry: number;
+            currentRetryCount: number;
+            volumeReductionPercent: number;
+            enabled: boolean;
+          }>(`user:${telegramId}:retry:okx`),
+          this.redisService.get<UserBotsConfig>(`user:${telegramId}:bots:okx`),
+          this.redisService.get<number>(`user:${telegramId}:maxpos:okx`),
+        ]);
 
         const longCount = positions.filter((p) => p.side === "LONG").length;
         const shortCount = positions.filter((p) => p.side === "SHORT").length;
@@ -2075,7 +2092,8 @@ export class TelegramBotService implements OnModuleInit {
             .map((b) => {
               const name = BOT_TYPE_REVERSE_MAP[b.botType] || b.botType;
               const tpsl =
-                b.takeProfitPercent !== undefined || b.stopLossPercent !== undefined
+                b.takeProfitPercent !== undefined ||
+                b.stopLossPercent !== undefined
                   ? ` [TP:${b.takeProfitPercent ?? "—"}%/SL:${b.stopLossPercent ?? "—"}%]`
                   : "";
               return `${name} $${b.volume}@${b.leverage}x${tpsl}`;
@@ -2700,7 +2718,13 @@ export class TelegramBotService implements OnModuleInit {
                 `   TP: $${tpPrice} ✓  |  SL: $${slPrice} ✓`,
             );
           } catch (e) {
-            this.fileLogger.logApiError(exchange, "storeTpSl", e, telegramId, symbol);
+            this.fileLogger.logApiError(
+              exchange,
+              "storeTpSl",
+              e,
+              telegramId,
+              symbol,
+            );
             results.push(
               `⚠️ *${symbol}* (${pos.side}) — failed to store TP/SL`,
             );
@@ -2719,7 +2743,13 @@ export class TelegramBotService implements OnModuleInit {
             );
             tpOk = true;
           } catch (e) {
-            this.fileLogger.logApiError(exchange, "setTakeProfit", e, telegramId, symbol);
+            this.fileLogger.logApiError(
+              exchange,
+              "setTakeProfit",
+              e,
+              telegramId,
+              symbol,
+            );
           }
 
           try {
@@ -2734,7 +2764,13 @@ export class TelegramBotService implements OnModuleInit {
             );
             slOk = true;
           } catch (e) {
-            this.fileLogger.logApiError(exchange, "setStopLoss", e, telegramId, symbol);
+            this.fileLogger.logApiError(
+              exchange,
+              "setStopLoss",
+              e,
+              telegramId,
+              symbol,
+            );
           }
 
           results.push(
@@ -3423,10 +3459,7 @@ export class TelegramBotService implements OnModuleInit {
 
   // ─── Bot Signal Commands ──────────────────────────────────────────────────
 
-  private async handleSetBot(
-    msg: TelegramBot.Message,
-    match: RegExpExecArray,
-  ) {
+  private async handleSetBot(msg: TelegramBot.Message, match: RegExpExecArray) {
     const chatId = msg.chat.id;
     const telegramId = msg.from.id;
 
@@ -3491,10 +3524,9 @@ export class TelegramBotService implements OnModuleInit {
       return;
     }
 
-    const botsConfig =
-      (await this.redisService.get<UserBotsConfig>(
-        `user:${telegramId}:bots:${exchange}`,
-      )) || { bots: [], updatedAt: "" };
+    const botsConfig = (await this.redisService.get<UserBotsConfig>(
+      `user:${telegramId}:bots:${exchange}`,
+    )) || { bots: [], updatedAt: "" };
 
     const idx = botsConfig.bots.findIndex((b) => b.botType === botType);
     const newBot: UserBotConfig = {
@@ -3630,15 +3662,12 @@ export class TelegramBotService implements OnModuleInit {
     const telegramId = msg.from.id;
 
     const [binanceBots, okxBots] = await Promise.all([
-      this.redisService.get<UserBotsConfig>(
-        `user:${telegramId}:bots:binance`,
-      ),
+      this.redisService.get<UserBotsConfig>(`user:${telegramId}:bots:binance`),
       this.redisService.get<UserBotsConfig>(`user:${telegramId}:bots:okx`),
     ]);
 
     const hasAny =
-      (binanceBots?.bots?.length ?? 0) > 0 ||
-      (okxBots?.bots?.length ?? 0) > 0;
+      (binanceBots?.bots?.length ?? 0) > 0 || (okxBots?.bots?.length ?? 0) > 0;
 
     if (!hasAny) {
       await this.bot.sendMessage(
@@ -3658,16 +3687,14 @@ export class TelegramBotService implements OnModuleInit {
       let section = `*${label}*\n`;
       for (const bot of config.bots) {
         const short = BOT_TYPE_REVERSE_MAP[bot.botType] || bot.botType;
-        section +=
-          `  ├ ${short}: $${bot.volume} vol @ ${bot.leverage}x\n`;
+        section += `  ├ ${short}: $${bot.volume} vol @ ${bot.leverage}x\n`;
       }
       return section + "\n";
     };
 
     msg_text += formatBots("BINANCE", binanceBots);
     msg_text += formatBots("OKX", okxBots);
-    msg_text +=
-      "_Dùng /setbot để thêm, /clearbot để xóa từng bot_";
+    msg_text += "_Dùng /setbot để thêm, /clearbot để xóa từng bot_";
 
     await this.bot.sendMessage(chatId, msg_text, { parse_mode: "Markdown" });
   }
@@ -3689,7 +3716,9 @@ export class TelegramBotService implements OnModuleInit {
 
     // Find all users who have this botType enabled
     const botKeys = await this.redisService.keys("user:*:bots:*");
-    this.logger.log(`[Signal] Found ${botKeys.length} user-bot key(s) in Redis`);
+    this.logger.log(
+      `[Signal] Found ${botKeys.length} user-bot key(s) in Redis`,
+    );
 
     for (const key of botKeys) {
       // key = "binance-bot:user:<id>:bots:<exchange>"
@@ -3748,15 +3777,13 @@ export class TelegramBotService implements OnModuleInit {
       return;
     }
 
-    const side: "LONG" | "SHORT" =
-      signal.equity === "SHORT" ? "SHORT" : "LONG";
+    const side: "LONG" | "SHORT" = signal.equity === "SHORT" ? "SHORT" : "LONG";
     const sideEmoji = side === "LONG" ? "📈" : "📉";
     const symbol =
       exchange === "binance"
         ? `${signal.coin}${signal.currency}`
         : `${signal.coin}-${signal.currency}-SWAP`;
-    const botShort =
-      BOT_TYPE_REVERSE_MAP[signal.botType] || signal.botType;
+    const botShort = BOT_TYPE_REVERSE_MAP[signal.botType] || signal.botType;
 
     await this.bot.sendMessage(
       chatId,
@@ -3787,21 +3814,26 @@ export class TelegramBotService implements OnModuleInit {
 
     const chatId = userData.chatId;
 
-    const side: "LONG" | "SHORT" =
-      signal.equity === "SHORT" ? "SHORT" : "LONG";
+    const side: "LONG" | "SHORT" = signal.equity === "SHORT" ? "SHORT" : "LONG";
 
     try {
       let currentPrice: number;
       let quantity: number;
-      const botShort =
-        BOT_TYPE_REVERSE_MAP[signal.botType] || signal.botType;
+      const botShort = BOT_TYPE_REVERSE_MAP[signal.botType] || signal.botType;
 
       // Deduplication: skip if position already exists for same symbol + same side
       // (opposite side is allowed — e.g. existing LONG + incoming SHORT signal)
       const openPositions =
         exchange === "binance"
-          ? await this.binanceService.getOpenPositions(userData.apiKey, userData.apiSecret)
-          : await this.okxService.getOpenPositions(userData.apiKey, userData.apiSecret, userData.passphrase);
+          ? await this.binanceService.getOpenPositions(
+              userData.apiKey,
+              userData.apiSecret,
+            )
+          : await this.okxService.getOpenPositions(
+              userData.apiKey,
+              userData.apiSecret,
+              userData.passphrase,
+            );
 
       const symbolForCheck =
         exchange === "binance"
@@ -3869,14 +3901,32 @@ export class TelegramBotService implements OnModuleInit {
 
         const binanceSlPrice = botConfig.stopLossPercent
           ? side === "LONG"
-            ? parseFloat((currentPrice * (1 - botConfig.stopLossPercent / 100)).toFixed(4))
-            : parseFloat((currentPrice * (1 + botConfig.stopLossPercent / 100)).toFixed(4))
+            ? parseFloat(
+                (currentPrice * (1 - botConfig.stopLossPercent / 100)).toFixed(
+                  4,
+                ),
+              )
+            : parseFloat(
+                (currentPrice * (1 + botConfig.stopLossPercent / 100)).toFixed(
+                  4,
+                ),
+              )
           : signal.stopLoss;
 
         const binanceTpPriceValue = botConfig.takeProfitPercent
           ? side === "LONG"
-            ? parseFloat((currentPrice * (1 + botConfig.takeProfitPercent / 100)).toFixed(4))
-            : parseFloat((currentPrice * (1 - botConfig.takeProfitPercent / 100)).toFixed(4))
+            ? parseFloat(
+                (
+                  currentPrice *
+                  (1 + botConfig.takeProfitPercent / 100)
+                ).toFixed(4),
+              )
+            : parseFloat(
+                (
+                  currentPrice *
+                  (1 - botConfig.takeProfitPercent / 100)
+                ).toFixed(4),
+              )
           : null;
 
         this.storeTpSl(
@@ -3887,15 +3937,26 @@ export class TelegramBotService implements OnModuleInit {
           binanceTpPriceValue,
           binanceSlPrice,
         ).catch((e) =>
-          this.fileLogger.logBusinessError("executeSignalTrade:storeTpSl", e, telegramId, { symbol }),
+          this.fileLogger.logBusinessError(
+            "executeSignalTrade:storeTpSl",
+            e,
+            telegramId,
+            { symbol },
+          ),
         );
 
         if (chatId) {
           const sideEmoji = side === "LONG" ? "📈" : "📉";
           const binanceTpPrice = botConfig.takeProfitPercent
             ? side === "LONG"
-              ? (currentPrice * (1 + botConfig.takeProfitPercent / 100)).toFixed(4)
-              : (currentPrice * (1 - botConfig.takeProfitPercent / 100)).toFixed(4)
+              ? (
+                  currentPrice *
+                  (1 + botConfig.takeProfitPercent / 100)
+                ).toFixed(4)
+              : (
+                  currentPrice *
+                  (1 - botConfig.takeProfitPercent / 100)
+                ).toFixed(4)
             : null;
           await this.bot.sendMessage(
             chatId,
@@ -3935,8 +3996,16 @@ export class TelegramBotService implements OnModuleInit {
 
         const okxSlPrice = botConfig.stopLossPercent
           ? side === "LONG"
-            ? parseFloat((currentPrice * (1 - botConfig.stopLossPercent / 100)).toFixed(4))
-            : parseFloat((currentPrice * (1 + botConfig.stopLossPercent / 100)).toFixed(4))
+            ? parseFloat(
+                (currentPrice * (1 - botConfig.stopLossPercent / 100)).toFixed(
+                  4,
+                ),
+              )
+            : parseFloat(
+                (currentPrice * (1 + botConfig.stopLossPercent / 100)).toFixed(
+                  4,
+                ),
+              )
           : signal.stopLoss;
 
         this.okxService
@@ -3950,7 +4019,12 @@ export class TelegramBotService implements OnModuleInit {
             quantity,
           )
           .catch((e) =>
-            this.fileLogger.logBusinessError("executeSignalTrade:setStopLoss", e, telegramId, { symbol }),
+            this.fileLogger.logBusinessError(
+              "executeSignalTrade:setStopLoss",
+              e,
+              telegramId,
+              { symbol },
+            ),
           );
 
         if (botConfig.takeProfitPercent) {
@@ -3963,7 +4037,12 @@ export class TelegramBotService implements OnModuleInit {
               botConfig.takeProfitPercent,
             )
             .catch((e) =>
-              this.fileLogger.logBusinessError("executeSignalTrade:setTakeProfit", e, telegramId, { symbol }),
+              this.fileLogger.logBusinessError(
+                "executeSignalTrade:setTakeProfit",
+                e,
+                telegramId,
+                { symbol },
+              ),
             );
         }
 
@@ -3971,8 +4050,14 @@ export class TelegramBotService implements OnModuleInit {
           const sideEmoji = side === "LONG" ? "📈" : "📉";
           const okxTpPrice = botConfig.takeProfitPercent
             ? side === "LONG"
-              ? (currentPrice * (1 + botConfig.takeProfitPercent / 100)).toFixed(4)
-              : (currentPrice * (1 - botConfig.takeProfitPercent / 100)).toFixed(4)
+              ? (
+                  currentPrice *
+                  (1 + botConfig.takeProfitPercent / 100)
+                ).toFixed(4)
+              : (
+                  currentPrice *
+                  (1 - botConfig.takeProfitPercent / 100)
+                ).toFixed(4)
             : null;
           await this.bot.sendMessage(
             chatId,
@@ -3998,13 +4083,9 @@ export class TelegramBotService implements OnModuleInit {
         { exchange, signal, botConfig },
       );
       if (chatId) {
-        const botShort =
-          BOT_TYPE_REVERSE_MAP[signal.botType] || signal.botType;
+        const botShort = BOT_TYPE_REVERSE_MAP[signal.botType] || signal.botType;
         await this.bot
-          .sendMessage(
-            chatId,
-            `❌ Bot ${botShort} thất bại: ${error.message}`,
-          )
+          .sendMessage(chatId, `❌ Bot ${botShort} thất bại: ${error.message}`)
           .catch(() => {});
       }
     }
@@ -4085,13 +4166,21 @@ export class TelegramBotService implements OnModuleInit {
 
               const tpPrice = defaultTpPercent
                 ? isLong
-                  ? parseFloat((entry * (1 + defaultTpPercent / 100)).toFixed(4))
-                  : parseFloat((entry * (1 - defaultTpPercent / 100)).toFixed(4))
+                  ? parseFloat(
+                      (entry * (1 + defaultTpPercent / 100)).toFixed(4),
+                    )
+                  : parseFloat(
+                      (entry * (1 - defaultTpPercent / 100)).toFixed(4),
+                    )
                 : null;
               const slPrice = defaultSlPercent
                 ? isLong
-                  ? parseFloat((entry * (1 - defaultSlPercent / 100)).toFixed(4))
-                  : parseFloat((entry * (1 + defaultSlPercent / 100)).toFixed(4))
+                  ? parseFloat(
+                      (entry * (1 - defaultSlPercent / 100)).toFixed(4),
+                    )
+                  : parseFloat(
+                      (entry * (1 + defaultSlPercent / 100)).toFixed(4),
+                    )
                 : null;
 
               if (!tpPrice && !slPrice) continue;
@@ -4148,8 +4237,12 @@ export class TelegramBotService implements OnModuleInit {
 
               if (!pos.stopLoss && defaultSlPercent) {
                 const slPrice = isLong
-                  ? parseFloat((entry * (1 - defaultSlPercent / 100)).toFixed(4))
-                  : parseFloat((entry * (1 + defaultSlPercent / 100)).toFixed(4));
+                  ? parseFloat(
+                      (entry * (1 - defaultSlPercent / 100)).toFixed(4),
+                    )
+                  : parseFloat(
+                      (entry * (1 + defaultSlPercent / 100)).toFixed(4),
+                    );
                 try {
                   await this.okxService.setStopLoss(
                     userData.apiKey,
@@ -4215,11 +4308,14 @@ export class TelegramBotService implements OnModuleInit {
     // Only carry over existing prices if the position direction is the same.
     // If side changed (e.g. LONG → SHORT), discard stale prices to avoid wrong triggers.
     const sameDirection = existing?.side === side;
-    await this.redisService.set(`user:${telegramId}:tpsl:${exchange}:${symbol}`, {
-      tpPrice: tpPrice ?? (sameDirection ? existing?.tpPrice : null) ?? null,
-      slPrice: slPrice ?? (sameDirection ? existing?.slPrice : null) ?? null,
-      side,
-    });
+    await this.redisService.set(
+      `user:${telegramId}:tpsl:${exchange}:${symbol}`,
+      {
+        tpPrice: tpPrice ?? (sameDirection ? existing?.tpPrice : null) ?? null,
+        slPrice: slPrice ?? (sameDirection ? existing?.slPrice : null) ?? null,
+        side,
+      },
+    );
   }
 
   // Cron: every 30 seconds — check stored TP/SL price levels and close positions when triggered
@@ -4273,11 +4369,15 @@ export class TelegramBotService implements OnModuleInit {
           let triggered: "TP" | "SL" | null = null;
 
           if (isLong) {
-            if (tpslData.tpPrice && currentPrice >= tpslData.tpPrice) triggered = "TP";
-            else if (tpslData.slPrice && currentPrice <= tpslData.slPrice) triggered = "SL";
+            if (tpslData.tpPrice && currentPrice >= tpslData.tpPrice)
+              triggered = "TP";
+            else if (tpslData.slPrice && currentPrice <= tpslData.slPrice)
+              triggered = "SL";
           } else {
-            if (tpslData.tpPrice && currentPrice <= tpslData.tpPrice) triggered = "TP";
-            else if (tpslData.slPrice && currentPrice >= tpslData.slPrice) triggered = "SL";
+            if (tpslData.tpPrice && currentPrice <= tpslData.tpPrice)
+              triggered = "TP";
+            else if (tpslData.slPrice && currentPrice >= tpslData.slPrice)
+              triggered = "SL";
           }
 
           if (!triggered) continue;
@@ -4300,7 +4400,9 @@ export class TelegramBotService implements OnModuleInit {
           const pos = positions.find((p) => p.symbol === symbol);
           if (!pos) {
             // Position already closed — clean up stale key
-            await this.redisService.delete(`user:${telegramId}:tpsl:${exchange}:${symbol}`);
+            await this.redisService.delete(
+              `user:${telegramId}:tpsl:${exchange}:${symbol}`,
+            );
             continue;
           }
 
@@ -4309,7 +4411,9 @@ export class TelegramBotService implements OnModuleInit {
             this.logger.warn(
               `Stale tpsl data for ${symbol}: stored side=${tpslData.side} but actual=${pos.side}, clearing`,
             );
-            await this.redisService.delete(`user:${telegramId}:tpsl:${exchange}:${symbol}`);
+            await this.redisService.delete(
+              `user:${telegramId}:tpsl:${exchange}:${symbol}`,
+            );
             continue;
           }
 
@@ -4337,7 +4441,9 @@ export class TelegramBotService implements OnModuleInit {
             );
           }
 
-          await this.redisService.delete(`user:${telegramId}:tpsl:${exchange}:${symbol}`);
+          await this.redisService.delete(
+            `user:${telegramId}:tpsl:${exchange}:${symbol}`,
+          );
 
           if (userData.chatId) {
             const emoji = triggered === "TP" ? "🎯" : "🛑";
