@@ -1248,7 +1248,7 @@ export class TelegramBotService implements OnModuleInit {
     }
   }
 
-  @Cron(CronExpression.EVERY_5_MINUTES)
+  // @Cron(CronExpression.EVERY_5_MINUTES)
   private async sendPeriodicUpdates() {
     this.logger.log(
       "========== Running sendPeriodicUpdates cron job ==========",
