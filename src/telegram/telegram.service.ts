@@ -1049,18 +1049,23 @@ export class TelegramBotService implements OnModuleInit {
             ),
           );
 
-      // Set Stop Loss on exchange
+      // Set Stop Loss and Take Profit
       try {
         if (exchange === "binance") {
-          await this.binanceService.setStopLoss(
-            userData.apiKey,
-            userData.apiSecret,
+          // Binance: store in Redis for scheduler-based monitoring
+          await this.storeTpSl(
+            telegramId,
+            "binance",
             reentryData.symbol,
-            stopLossPrice,
             reentryData.side,
-            reentryData.quantity,
+            takeProfitPrice,
+            stopLossPrice,
+          );
+          this.logger.log(
+            `Stored TP ($${takeProfitPrice}) and SL ($${stopLossPrice}) in Redis for ${reentryData.symbol}`,
           );
         } else {
+          // OKX: use exchange-side orders
           await this.okxService.setStopLoss(
             userData.apiKey,
             userData.apiSecret,
@@ -1070,10 +1075,10 @@ export class TelegramBotService implements OnModuleInit {
             reentryData.side,
             reentryData.quantity,
           );
+          this.logger.log(
+            `Set SL at $${stopLossPrice} for ${reentryData.symbol}`,
+          );
         }
-        this.logger.log(
-          `Set SL at $${stopLossPrice} for ${reentryData.symbol}`,
-        );
       } catch (slError) {
         this.fileLogger.logApiError(
           exchange,
@@ -1085,16 +1090,9 @@ export class TelegramBotService implements OnModuleInit {
         // Continue even if SL setting fails
       }
 
-      // Set Take Profit on exchange
-      try {
-        if (exchange === "binance") {
-          await this.binanceService.setTakeProfit(
-            userData.apiKey,
-            userData.apiSecret,
-            reentryData.symbol,
-            reentryData.tpPercentage,
-          );
-        } else {
+      // Set Take Profit on exchange (OKX only — Binance handled above via Redis)
+      if (exchange !== "binance") {
+        try {
           await this.okxService.setTakeProfit(
             userData.apiKey,
             userData.apiSecret,
@@ -1102,19 +1100,19 @@ export class TelegramBotService implements OnModuleInit {
             reentryData.symbol,
             reentryData.tpPercentage,
           );
+          this.logger.log(
+            `Set TP at $${takeProfitPrice} (${reentryData.tpPercentage}%) for ${reentryData.symbol}`,
+          );
+        } catch (tpError) {
+          this.fileLogger.logApiError(
+            exchange,
+            "setTakeProfit",
+            tpError,
+            telegramId,
+            reentryData.symbol,
+          );
+          // Continue even if TP setting fails
         }
-        this.logger.log(
-          `Set TP at $${takeProfitPrice} (${reentryData.tpPercentage}%) for ${reentryData.symbol}`,
-        );
-      } catch (tpError) {
-        this.fileLogger.logApiError(
-          exchange,
-          "setTakeProfit",
-          tpError,
-          telegramId,
-          reentryData.symbol,
-        );
-        // Continue even if TP setting fails
       }
 
       // Calculate next quantity with volume reduction
@@ -1453,6 +1451,10 @@ export class TelegramBotService implements OnModuleInit {
           );
         }
         this.logger.log(`Closed position: ${position.symbol}`);
+        // Clean up any stored TP/SL for this position
+        await this.redisService
+          .delete(`user:${userData.telegramId}:tpsl:${userData.exchange}:${position.symbol}`)
+          .catch(() => {});
       } catch (error) {
         this.fileLogger.logApiError(
           userData.exchange,
@@ -2678,19 +2680,36 @@ export class TelegramBotService implements OnModuleInit {
         const slPrice = isLong
           ? parseFloat((pos.entryPrice * (1 - slPercent / 100)).toFixed(4))
           : parseFloat((pos.entryPrice * (1 + slPercent / 100)).toFixed(4));
+        const tpPrice = isLong
+          ? (pos.entryPrice * (1 + tpPercent / 100)).toFixed(4)
+          : (pos.entryPrice * (1 - tpPercent / 100)).toFixed(4);
 
-        let tpOk = false;
-        let slOk = false;
-
-        try {
-          if (exchange === "binance") {
-            await this.binanceService.setTakeProfit(
-              userData.apiKey,
-              userData.apiSecret,
+        if (exchange === "binance") {
+          // Binance: store in Redis for scheduler-based monitoring
+          try {
+            await this.storeTpSl(
+              telegramId,
+              "binance",
               symbol,
-              tpPercent,
+              pos.side as "LONG" | "SHORT",
+              parseFloat(tpPrice),
+              slPrice,
             );
-          } else {
+            results.push(
+              `✅ *${symbol}* (${pos.side})\n` +
+                `   TP: $${tpPrice} ✓  |  SL: $${slPrice} ✓`,
+            );
+          } catch (e) {
+            this.fileLogger.logApiError(exchange, "storeTpSl", e, telegramId, symbol);
+            results.push(
+              `⚠️ *${symbol}* (${pos.side}) — failed to store TP/SL`,
+            );
+          }
+        } else {
+          let tpOk = false;
+          let slOk = false;
+
+          try {
             await this.okxService.setTakeProfit(
               userData.apiKey,
               userData.apiSecret,
@@ -2698,29 +2717,12 @@ export class TelegramBotService implements OnModuleInit {
               symbol,
               tpPercent,
             );
+            tpOk = true;
+          } catch (e) {
+            this.fileLogger.logApiError(exchange, "setTakeProfit", e, telegramId, symbol);
           }
-          tpOk = true;
-        } catch (e) {
-          this.fileLogger.logApiError(
-            exchange,
-            "setTakeProfit",
-            e,
-            telegramId,
-            symbol,
-          );
-        }
 
-        try {
-          if (exchange === "binance") {
-            await this.binanceService.setStopLoss(
-              userData.apiKey,
-              userData.apiSecret,
-              symbol,
-              slPrice,
-              pos.side as "LONG" | "SHORT",
-              pos.quantity,
-            );
-          } else {
+          try {
             await this.okxService.setStopLoss(
               userData.apiKey,
               userData.apiSecret,
@@ -2730,26 +2732,16 @@ export class TelegramBotService implements OnModuleInit {
               pos.side as "LONG" | "SHORT",
               pos.quantity,
             );
+            slOk = true;
+          } catch (e) {
+            this.fileLogger.logApiError(exchange, "setStopLoss", e, telegramId, symbol);
           }
-          slOk = true;
-        } catch (e) {
-          this.fileLogger.logApiError(
-            exchange,
-            "setStopLoss",
-            e,
-            telegramId,
-            symbol,
+
+          results.push(
+            `${tpOk && slOk ? "✅" : "⚠️"} *${symbol}* (${pos.side})\n` +
+              `   TP: $${tpPrice} ${tpOk ? "✓" : "✗"}  |  SL: $${slPrice} ${slOk ? "✓" : "✗"}`,
           );
         }
-
-        const tpPrice = isLong
-          ? (pos.entryPrice * (1 + tpPercent / 100)).toFixed(4)
-          : (pos.entryPrice * (1 - tpPercent / 100)).toFixed(4);
-
-        results.push(
-          `${tpOk && slOk ? "✅" : "⚠️"} *${symbol}* (${pos.side})\n` +
-            `   TP: $${tpPrice} ${tpOk ? "✓" : "✗"}  |  SL: $${slPrice} ${slOk ? "✓" : "✗"}`,
-        );
       }
 
       await this.bot.sendMessage(
@@ -3881,31 +3873,22 @@ export class TelegramBotService implements OnModuleInit {
             : parseFloat((currentPrice * (1 + botConfig.stopLossPercent / 100)).toFixed(4))
           : signal.stopLoss;
 
-        this.binanceService
-          .setStopLoss(
-            userData.apiKey,
-            userData.apiSecret,
-            symbol,
-            binanceSlPrice,
-            side,
-            quantity,
-          )
-          .catch((e) =>
-            this.fileLogger.logBusinessError("executeSignalTrade:setStopLoss", e, telegramId, { symbol }),
-          );
+        const binanceTpPriceValue = botConfig.takeProfitPercent
+          ? side === "LONG"
+            ? parseFloat((currentPrice * (1 + botConfig.takeProfitPercent / 100)).toFixed(4))
+            : parseFloat((currentPrice * (1 - botConfig.takeProfitPercent / 100)).toFixed(4))
+          : null;
 
-        if (botConfig.takeProfitPercent) {
-          this.binanceService
-            .setTakeProfit(
-              userData.apiKey,
-              userData.apiSecret,
-              symbol,
-              botConfig.takeProfitPercent,
-            )
-            .catch((e) =>
-              this.fileLogger.logBusinessError("executeSignalTrade:setTakeProfit", e, telegramId, { symbol }),
-            );
-        }
+        this.storeTpSl(
+          telegramId,
+          "binance",
+          symbol,
+          side,
+          binanceTpPriceValue,
+          binanceSlPrice,
+        ).catch((e) =>
+          this.fileLogger.logBusinessError("executeSignalTrade:storeTpSl", e, telegramId, { symbol }),
+        );
 
         if (chatId) {
           const sideEmoji = side === "LONG" ? "📈" : "📉";
@@ -4086,28 +4069,59 @@ export class TelegramBotService implements OnModuleInit {
                   userData.passphrase,
                 );
 
-          const missing = positions.filter(
-            (p) => !p.takeProfit || !p.stopLoss,
-          );
-          if (!missing.length) continue;
-
           const results: string[] = [];
 
-          for (const pos of missing) {
+          for (const pos of positions) {
             const isLong = pos.side === "LONG";
             const entry = pos.entryPrice;
 
-            // Set TP if missing
-            if (!pos.takeProfit && defaultTpPercent) {
+            if (exchange === "binance") {
+              // Binance: store TP/SL in Redis for scheduler-based monitoring
+              // Skip if prices already stored in Redis
+              const stored = await this.redisService.get(
+                `user:${telegramId}:tpsl:binance:${pos.symbol}`,
+              );
+              if (stored) continue;
+
+              const tpPrice = defaultTpPercent
+                ? isLong
+                  ? parseFloat((entry * (1 + defaultTpPercent / 100)).toFixed(4))
+                  : parseFloat((entry * (1 - defaultTpPercent / 100)).toFixed(4))
+                : null;
+              const slPrice = defaultSlPercent
+                ? isLong
+                  ? parseFloat((entry * (1 - defaultSlPercent / 100)).toFixed(4))
+                  : parseFloat((entry * (1 + defaultSlPercent / 100)).toFixed(4))
+                : null;
+
+              if (!tpPrice && !slPrice) continue;
+
               try {
-                if (exchange === "binance") {
-                  await this.binanceService.setTakeProfit(
-                    userData.apiKey,
-                    userData.apiSecret,
-                    pos.symbol,
-                    defaultTpPercent,
-                  );
-                } else {
+                await this.storeTpSl(
+                  telegramId,
+                  "binance",
+                  pos.symbol,
+                  pos.side as "LONG" | "SHORT",
+                  tpPrice,
+                  slPrice,
+                );
+                results.push(
+                  `✅ ${pos.symbol} (scheduler)` +
+                    (tpPrice ? ` TP: $${tpPrice}` : "") +
+                    (slPrice ? ` SL: $${slPrice}` : ""),
+                );
+              } catch (e) {
+                this.fileLogger.logBusinessError(
+                  "checkMissingTpSl:storeTpSl",
+                  e,
+                  telegramId,
+                  { symbol: pos.symbol },
+                );
+              }
+            } else {
+              // OKX: use exchange-side orders
+              if (!pos.takeProfit && defaultTpPercent) {
+                try {
                   await this.okxService.setTakeProfit(
                     userData.apiKey,
                     userData.apiSecret,
@@ -4115,42 +4129,28 @@ export class TelegramBotService implements OnModuleInit {
                     pos.symbol,
                     defaultTpPercent,
                   );
+                  const tpPrice = isLong
+                    ? (entry * (1 + defaultTpPercent / 100)).toFixed(4)
+                    : (entry * (1 - defaultTpPercent / 100)).toFixed(4);
+                  results.push(
+                    `✅ ${pos.symbol} TP → $${tpPrice} (+${defaultTpPercent}%)`,
+                  );
+                } catch (e) {
+                  this.fileLogger.logBusinessError(
+                    "checkMissingTpSl:setTakeProfit",
+                    e,
+                    telegramId,
+                    { symbol: pos.symbol },
+                  );
+                  results.push(`⚠️ ${pos.symbol} TP failed: ${e.message}`);
                 }
-                const tpPrice = isLong
-                  ? (entry * (1 + defaultTpPercent / 100)).toFixed(4)
-                  : (entry * (1 - defaultTpPercent / 100)).toFixed(4);
-                results.push(
-                  `✅ ${pos.symbol} TP → $${tpPrice} (+${defaultTpPercent}%)`,
-                );
-              } catch (e) {
-                this.fileLogger.logBusinessError(
-                  "checkMissingTpSl:setTakeProfit",
-                  e,
-                  telegramId,
-                  { symbol: pos.symbol },
-                );
-                results.push(`⚠️ ${pos.symbol} TP failed: ${e.message}`);
               }
-            }
 
-            // Set SL if missing
-            if (!pos.stopLoss && defaultSlPercent) {
-              const slPrice = isLong
-                ? parseFloat((entry * (1 - defaultSlPercent / 100)).toFixed(4))
-                : parseFloat(
-                    (entry * (1 + defaultSlPercent / 100)).toFixed(4),
-                  );
-              try {
-                if (exchange === "binance") {
-                  await this.binanceService.setStopLoss(
-                    userData.apiKey,
-                    userData.apiSecret,
-                    pos.symbol,
-                    slPrice,
-                    pos.side as "LONG" | "SHORT",
-                    pos.quantity,
-                  );
-                } else {
+              if (!pos.stopLoss && defaultSlPercent) {
+                const slPrice = isLong
+                  ? parseFloat((entry * (1 - defaultSlPercent / 100)).toFixed(4))
+                  : parseFloat((entry * (1 + defaultSlPercent / 100)).toFixed(4));
+                try {
                   await this.okxService.setStopLoss(
                     userData.apiKey,
                     userData.apiSecret,
@@ -4160,18 +4160,18 @@ export class TelegramBotService implements OnModuleInit {
                     pos.side as "LONG" | "SHORT",
                     pos.quantity,
                   );
+                  results.push(
+                    `✅ ${pos.symbol} SL → $${slPrice} (-${defaultSlPercent}%)`,
+                  );
+                } catch (e) {
+                  this.fileLogger.logBusinessError(
+                    "checkMissingTpSl:setStopLoss",
+                    e,
+                    telegramId,
+                    { symbol: pos.symbol },
+                  );
+                  results.push(`⚠️ ${pos.symbol} SL failed: ${e.message}`);
                 }
-                results.push(
-                  `✅ ${pos.symbol} SL → $${slPrice} (-${defaultSlPercent}%)`,
-                );
-              } catch (e) {
-                this.fileLogger.logBusinessError(
-                  "checkMissingTpSl:setStopLoss",
-                  e,
-                  telegramId,
-                  { symbol: pos.symbol },
-                );
-                results.push(`⚠️ ${pos.symbol} SL failed: ${e.message}`);
               }
             }
           }
@@ -4193,6 +4193,172 @@ export class TelegramBotService implements OnModuleInit {
     } catch (error) {
       this.fileLogger.logError(error, {
         operation: "checkMissingTpSl",
+        type: "CRON_ERROR",
+      });
+    }
+  }
+
+  // Store TP/SL prices in Redis for scheduler-based monitoring (Binance)
+  private async storeTpSl(
+    telegramId: number,
+    exchange: string,
+    symbol: string,
+    side: "LONG" | "SHORT",
+    tpPrice: number | null,
+    slPrice: number | null,
+  ): Promise<void> {
+    const existing = await this.redisService.get<{
+      tpPrice: number | null;
+      slPrice: number | null;
+      side: string;
+    }>(`user:${telegramId}:tpsl:${exchange}:${symbol}`);
+    await this.redisService.set(`user:${telegramId}:tpsl:${exchange}:${symbol}`, {
+      tpPrice: tpPrice ?? existing?.tpPrice ?? null,
+      slPrice: slPrice ?? existing?.slPrice ?? null,
+      side,
+    });
+  }
+
+  // Cron: every 30 seconds — check stored TP/SL price levels and close positions when triggered
+  @Cron("*/30 * * * * *")
+  private async checkPriceLevelTpSl() {
+    try {
+      const keys = await this.redisService.keys("user:*:tpsl:*:*");
+
+      for (const key of keys) {
+        // Key format: binance-bot:user:{telegramId}:tpsl:{exchange}:{symbol}
+        const parts = key.split(":");
+        if (parts.length < 6) continue;
+        const telegramId = parseInt(parts[2]);
+        const exchange = parts[4] as "binance" | "okx";
+        const symbol = parts[5];
+        if (isNaN(telegramId)) continue;
+
+        const lockKey = `pricetpsl:${telegramId}:${exchange}:${symbol}`;
+        if (this.processingLocks.has(lockKey)) continue;
+        this.processingLocks.add(lockKey);
+
+        try {
+          const tpslData = await this.redisService.get<{
+            tpPrice: number | null;
+            slPrice: number | null;
+            side: "LONG" | "SHORT";
+          }>(`user:${telegramId}:tpsl:${exchange}:${symbol}`);
+
+          if (!tpslData) continue;
+
+          const userData = await this.getUserData(telegramId, exchange);
+          if (!userData) continue;
+
+          let currentPrice: number;
+          if (exchange === "binance") {
+            currentPrice = await this.binanceService.getCurrentPrice(
+              userData.apiKey,
+              userData.apiSecret,
+              symbol,
+            );
+          } else {
+            currentPrice = await this.okxService.getCurrentPrice(
+              userData.apiKey,
+              userData.apiSecret,
+              userData.passphrase,
+              symbol,
+            );
+          }
+
+          const isLong = tpslData.side === "LONG";
+          let triggered: "TP" | "SL" | null = null;
+
+          if (isLong) {
+            if (tpslData.tpPrice && currentPrice >= tpslData.tpPrice) triggered = "TP";
+            else if (tpslData.slPrice && currentPrice <= tpslData.slPrice) triggered = "SL";
+          } else {
+            if (tpslData.tpPrice && currentPrice <= tpslData.tpPrice) triggered = "TP";
+            else if (tpslData.slPrice && currentPrice >= tpslData.slPrice) triggered = "SL";
+          }
+
+          if (!triggered) continue;
+
+          // Verify position is still open and get quantity
+          let positions: any[];
+          if (exchange === "binance") {
+            positions = await this.binanceService.getOpenPositions(
+              userData.apiKey,
+              userData.apiSecret,
+            );
+          } else {
+            positions = await this.okxService.getOpenPositions(
+              userData.apiKey,
+              userData.apiSecret,
+              userData.passphrase,
+            );
+          }
+
+          const pos = positions.find((p) => p.symbol === symbol);
+          if (!pos) {
+            // Position already closed — clean up stale key
+            await this.redisService.delete(`user:${telegramId}:tpsl:${exchange}:${symbol}`);
+            continue;
+          }
+
+          this.logger.log(
+            `${triggered} triggered for ${symbol} at $${currentPrice} (${tpslData.side}, ${exchange.toUpperCase()})`,
+          );
+
+          // Close position via market order
+          if (exchange === "binance") {
+            await this.binanceService.closePosition(
+              userData.apiKey,
+              userData.apiSecret,
+              symbol,
+              pos.quantity,
+              tpslData.side,
+            );
+          } else {
+            await this.okxService.closePosition(
+              userData.apiKey,
+              userData.apiSecret,
+              userData.passphrase,
+              symbol,
+              pos.quantity,
+              tpslData.side,
+            );
+          }
+
+          await this.redisService.delete(`user:${telegramId}:tpsl:${exchange}:${symbol}`);
+
+          if (userData.chatId) {
+            const emoji = triggered === "TP" ? "🎯" : "🛑";
+            const pnl = isLong
+              ? ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100
+              : ((pos.entryPrice - currentPrice) / pos.entryPrice) * 100;
+            await this.bot
+              .sendMessage(
+                userData.chatId,
+                `${emoji} *${triggered} Triggered — ${exchange.toUpperCase()}*\n\n` +
+                  `${tpslData.side} ${symbol}\n` +
+                  `├ Entry: $${pos.entryPrice.toFixed(4)}\n` +
+                  `├ Close: $${currentPrice.toFixed(4)}\n` +
+                  `└ PnL: ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}%`,
+                { parse_mode: "Markdown" },
+              )
+              .catch(() => {});
+          }
+        } catch (error) {
+          this.fileLogger.logApiError(
+            exchange,
+            "checkPriceLevelTpSl",
+            error,
+            telegramId,
+            symbol,
+          );
+        } finally {
+          this.processingLocks.delete(lockKey);
+        }
+      }
+    } catch (error) {
+      this.fileLogger.logError(error, {
+        operation: "checkPriceLevelTpSl",
         type: "CRON_ERROR",
       });
     }

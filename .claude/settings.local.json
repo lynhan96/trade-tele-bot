@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx tsc --noEmit)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:developers.binance.com)",
+      "Bash(npm run build)"
+    ]
+  }
+}

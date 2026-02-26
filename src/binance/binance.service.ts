@@ -81,14 +81,19 @@ export class BinanceService {
         (pos) => parseFloat(pos.positionAmt) !== 0,
       );
 
-      // Fetch all open orders once instead of per-position (avoids N+1 API calls)
-      const allOpenOrders = await client.futuresOpenOrders({});
-      const ordersBySymbol = new Map<string, typeof allOpenOrders>();
-      for (const order of allOpenOrders) {
-        if (!ordersBySymbol.has(order.symbol)) {
-          ordersBySymbol.set(order.symbol, []);
+      // Fetch algo orders (new endpoint since Binance migration on 2025-12-09)
+      // Conditional orders (STOP_MARKET, TAKE_PROFIT_MARKET) are now on /fapi/v1/openAlgoOrders
+      const algoOrders: any[] = await (client as any)
+        .privateRequest('GET', '/fapi/v1/openAlgoOrders', {})
+        .catch(() => []);
+      const algoOrdersBySymbol = new Map<string, any[]>();
+      if (Array.isArray(algoOrders)) {
+        for (const order of algoOrders) {
+          if (!algoOrdersBySymbol.has(order.symbol)) {
+            algoOrdersBySymbol.set(order.symbol, []);
+          }
+          algoOrdersBySymbol.get(order.symbol).push(order);
         }
-        ordersBySymbol.get(order.symbol).push(order);
       }
 
       const positionInfos: PositionInfo[] = [];
@@ -121,16 +126,20 @@ export class BinanceService {
           liquidationPrice: parseFloat(pos.liquidationPrice),
         };
 
-        const orders = ordersBySymbol.get(pos.symbol) || [];
-        for (const order of orders) {
+        // Check algo orders for TP/SL (new Binance API since 2025-12-09)
+        const symbolAlgoOrders = algoOrdersBySymbol.get(pos.symbol) || [];
+        for (const order of symbolAlgoOrders) {
           if (
-            order.type === "TAKE_PROFIT_MARKET" ||
-            order.type === "TAKE_PROFIT"
+            order.orderType === "TAKE_PROFIT_MARKET" ||
+            order.orderType === "TAKE_PROFIT"
           ) {
-            positionInfo.takeProfit = order.stopPrice || order.price;
+            positionInfo.takeProfit = order.triggerPrice;
           }
-          if (order.type === "STOP_MARKET" || order.type === "STOP") {
-            positionInfo.stopLoss = order.stopPrice || order.price;
+          if (
+            order.orderType === "STOP_MARKET" ||
+            order.orderType === "STOP"
+          ) {
+            positionInfo.stopLoss = order.triggerPrice;
           }
         }
 
@@ -180,26 +189,30 @@ export class BinanceService {
       const pricePrecision = symbolData?.pricePrecision || 2;
       tpPrice = parseFloat(tpPrice.toFixed(pricePrecision));
 
-      // Cancel existing TP orders
-      const openOrders = await client.futuresOpenOrders({ symbol });
-      for (const order of openOrders) {
-        if (
-          order.type === "TAKE_PROFIT_MARKET" ||
-          order.type === "TAKE_PROFIT"
-        ) {
-          await client.futuresCancelOrder({
-            symbol,
-            orderId: parseInt(order.orderId.toString()),
-          });
+      // Cancel existing TP algo orders (new endpoint since Binance migration 2025-12-09)
+      const openAlgoOrders: any[] = await (client as any)
+        .privateRequest('GET', '/fapi/v1/openAlgoOrders', { symbol })
+        .catch(() => []);
+      if (Array.isArray(openAlgoOrders)) {
+        for (const order of openAlgoOrders) {
+          if (
+            order.orderType === "TAKE_PROFIT_MARKET" ||
+            order.orderType === "TAKE_PROFIT"
+          ) {
+            await (client as any)
+              .privateRequest('DELETE', '/fapi/v1/algoOrder', { algoId: order.algoId })
+              .catch(() => {});
+          }
         }
       }
 
-      // Place new TP order
-      const tpOrder = await client.futuresOrder({
+      // Place new TP order via Algo Order API (required since Binance migration 2025-12-09)
+      const tpOrder = await (client as any).privateRequest('POST', '/fapi/v1/algoOrder', {
+        algoType: 'CONDITIONAL',
         symbol,
         side: isLong ? "SELL" : "BUY",
         type: "TAKE_PROFIT_MARKET",
-        stopPrice: tpPrice.toString(),
+        triggerPrice: tpPrice.toString(),
         closePosition: "true",
       });
 
@@ -363,13 +376,13 @@ export class BinanceService {
     try {
       const client = this.createClient(apiKey, apiSecret);
 
-      // Set stop loss order
-      // Note: closePosition and quantity are mutually exclusive on Binance API
-      const order = await client.futuresOrder({
+      // Place stop loss via Algo Order API (required since Binance migration 2025-12-09)
+      const order = await (client as any).privateRequest('POST', '/fapi/v1/algoOrder', {
+        algoType: 'CONDITIONAL',
         symbol,
         side: side === "LONG" ? "SELL" : "BUY",
         type: "STOP_MARKET",
-        stopPrice: stopPrice.toString(),
+        triggerPrice: stopPrice.toString(),
         closePosition: "true",
       });
 
