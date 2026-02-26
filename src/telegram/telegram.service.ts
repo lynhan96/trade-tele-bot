@@ -4077,11 +4077,11 @@ export class TelegramBotService implements OnModuleInit {
 
             if (exchange === "binance") {
               // Binance: store TP/SL in Redis for scheduler-based monitoring
-              // Skip if prices already stored in Redis
-              const stored = await this.redisService.get(
+              // Skip only if already stored AND side matches current position
+              const stored = await this.redisService.get<{ side?: string }>(
                 `user:${telegramId}:tpsl:binance:${pos.symbol}`,
               );
-              if (stored) continue;
+              if (stored && stored.side === pos.side) continue;
 
               const tpPrice = defaultTpPercent
                 ? isLong
@@ -4212,9 +4212,12 @@ export class TelegramBotService implements OnModuleInit {
       slPrice: number | null;
       side: string;
     }>(`user:${telegramId}:tpsl:${exchange}:${symbol}`);
+    // Only carry over existing prices if the position direction is the same.
+    // If side changed (e.g. LONG → SHORT), discard stale prices to avoid wrong triggers.
+    const sameDirection = existing?.side === side;
     await this.redisService.set(`user:${telegramId}:tpsl:${exchange}:${symbol}`, {
-      tpPrice: tpPrice ?? existing?.tpPrice ?? null,
-      slPrice: slPrice ?? existing?.slPrice ?? null,
+      tpPrice: tpPrice ?? (sameDirection ? existing?.tpPrice : null) ?? null,
+      slPrice: slPrice ?? (sameDirection ? existing?.slPrice : null) ?? null,
       side,
     });
   }
@@ -4297,6 +4300,15 @@ export class TelegramBotService implements OnModuleInit {
           const pos = positions.find((p) => p.symbol === symbol);
           if (!pos) {
             // Position already closed — clean up stale key
+            await this.redisService.delete(`user:${telegramId}:tpsl:${exchange}:${symbol}`);
+            continue;
+          }
+
+          // Guard: if actual position side doesn't match stored side, data is stale
+          if (pos.side !== tpslData.side) {
+            this.logger.warn(
+              `Stale tpsl data for ${symbol}: stored side=${tpslData.side} but actual=${pos.side}, clearing`,
+            );
             await this.redisService.delete(`user:${telegramId}:tpsl:${exchange}:${symbol}`);
             continue;
           }
