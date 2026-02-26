@@ -3408,13 +3408,19 @@ export class TelegramBotService implements OnModuleInit {
   public async handleIncomingSignal(signal: IncomingSignal): Promise<void> {
     if (!this.bot) return;
 
+    this.logger.log(
+      `[Signal] Received: ${signal.botType} ${signal.equity} ${signal.coin}/${signal.currency} entry=$${signal.entry} sl=$${signal.stopLoss}`,
+    );
+
     // Only handle FUTURE signals; skip SPOT
     if (signal.tradingPairType !== "FUTURE" || signal.botType === "BOT_SPOT") {
+      this.logger.log(`[Signal] Skipped — not a FUTURE signal`);
       return;
     }
 
     // Find all users who have this botType enabled
     const botKeys = await this.redisService.keys("user:*:bots:*");
+    this.logger.log(`[Signal] Found ${botKeys.length} user-bot key(s) in Redis`);
 
     for (const key of botKeys) {
       // key = "binance-bot:user:<id>:bots:<exchange>"
@@ -3433,9 +3439,19 @@ export class TelegramBotService implements OnModuleInit {
       const botConfig = botsConfig.bots.find(
         (b) => b.botType === signal.botType && b.enabled,
       );
-      if (!botConfig) continue;
 
-      // [TESTING] Notify only — no real order execution yet
+      if (!botConfig) {
+        this.logger.log(
+          `[Signal] user=${telegramId} exchange=${exchange} — no matching enabled bot for ${signal.botType}`,
+        );
+        continue;
+      }
+
+      this.logger.log(
+        `[Signal] Dispatching to user=${telegramId} exchange=${exchange} bot=${signal.botType} vol=$${botConfig.volume} lev=${botConfig.leverage}x`,
+      );
+
+      // [TESTING] Notify only — no real order execution
       this.notifySignalReceived(telegramId, exchange, signal, botConfig).catch(
         (err) => {
           this.fileLogger.logBusinessError(
@@ -3447,7 +3463,7 @@ export class TelegramBotService implements OnModuleInit {
         },
       );
 
-      // [PRODUCTION] Uncomment below (and remove notifySignalReceived above) to execute real trades
+      // [PRODUCTION] Uncomment below to execute real trades
       // this.executeSignalTrade(telegramId, exchange, signal, botConfig).catch(
       //   (err) => {
       //     this.fileLogger.logBusinessError(
