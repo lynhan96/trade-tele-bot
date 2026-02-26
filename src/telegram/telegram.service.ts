@@ -117,6 +117,11 @@ export class TelegramBotService implements OnModuleInit {
       await this.handleClearTakeProfit(msg, match);
     });
 
+    // Command: /setalltp [exchange] [tp%] [sl%]
+    this.bot.onText(/\/setalltp (.+)/, async (msg, match) => {
+      await this.handleSetAllTp(msg, match);
+    });
+
     // Command: /update [exchange] (manual trigger for testing)
     this.bot.onText(/\/update(.*)/, async (msg, match) => {
       await this.handleManualUpdate(msg, match);
@@ -2567,6 +2572,178 @@ export class TelegramBotService implements OnModuleInit {
     }
   }
 
+  private async handleSetAllTp(
+    msg: TelegramBot.Message,
+    match: RegExpExecArray,
+  ): Promise<void> {
+    const chatId = msg.chat.id;
+    const telegramId = msg.from.id;
+
+    await this.ensureChatIdStored(telegramId, chatId);
+
+    let exchange: "binance" | "okx" | undefined;
+
+    try {
+      const args = match[1].trim().split(/\s+/);
+      if (args.length < 3) {
+        await this.bot.sendMessage(
+          chatId,
+          "❌ Thiếu tham số. Dùng:\n/setalltp exchange tp% sl%\n\nVí dụ:\n/setalltp binance 5 3",
+        );
+        return;
+      }
+
+      exchange = args[0].toLowerCase() as "binance" | "okx";
+      const tpPercent = parseFloat(args[1]);
+      const slPercent = parseFloat(args[2]);
+
+      if (exchange !== "binance" && exchange !== "okx") {
+        await this.bot.sendMessage(
+          chatId,
+          "❌ Exchange không hợp lệ. Dùng binance hoặc okx.",
+        );
+        return;
+      }
+      if (isNaN(tpPercent) || tpPercent <= 0) {
+        await this.bot.sendMessage(chatId, "❌ TP % không hợp lệ.");
+        return;
+      }
+      if (isNaN(slPercent) || slPercent <= 0) {
+        await this.bot.sendMessage(chatId, "❌ SL % không hợp lệ.");
+        return;
+      }
+
+      const userData = await this.getUserData(telegramId, exchange);
+      if (!userData) {
+        await this.bot.sendMessage(
+          chatId,
+          `❌ Không tìm thấy tài khoản ${exchange.toUpperCase()}.\nDùng /setkeys ${exchange} để kết nối.`,
+        );
+        return;
+      }
+
+      const positions =
+        exchange === "binance"
+          ? await this.binanceService.getOpenPositions(
+              userData.apiKey,
+              userData.apiSecret,
+            )
+          : await this.okxService.getOpenPositions(
+              userData.apiKey,
+              userData.apiSecret,
+              userData.passphrase,
+            );
+
+      if (!positions || positions.length === 0) {
+        await this.bot.sendMessage(
+          chatId,
+          `ℹ️ Không có lệnh mở nào trên ${exchange.toUpperCase()}.`,
+        );
+        return;
+      }
+
+      await this.bot.sendMessage(
+        chatId,
+        `⏳ Đang đặt TP/SL cho ${positions.length} lệnh trên ${exchange.toUpperCase()}...`,
+      );
+
+      const results: string[] = [];
+
+      for (const pos of positions) {
+        const symbol = pos.symbol;
+        const isLong = pos.side === "LONG";
+        const slPrice = isLong
+          ? parseFloat((pos.entryPrice * (1 - slPercent / 100)).toFixed(4))
+          : parseFloat((pos.entryPrice * (1 + slPercent / 100)).toFixed(4));
+
+        let tpOk = false;
+        let slOk = false;
+
+        try {
+          if (exchange === "binance") {
+            await this.binanceService.setTakeProfit(
+              userData.apiKey,
+              userData.apiSecret,
+              symbol,
+              tpPercent,
+            );
+          } else {
+            await this.okxService.setTakeProfit(
+              userData.apiKey,
+              userData.apiSecret,
+              userData.passphrase,
+              symbol,
+              tpPercent,
+            );
+          }
+          tpOk = true;
+        } catch (e) {
+          this.fileLogger.logApiError(
+            exchange,
+            "setTakeProfit",
+            e,
+            telegramId,
+            symbol,
+          );
+        }
+
+        try {
+          if (exchange === "binance") {
+            await this.binanceService.setStopLoss(
+              userData.apiKey,
+              userData.apiSecret,
+              symbol,
+              slPrice,
+              pos.side as "LONG" | "SHORT",
+              pos.quantity,
+            );
+          } else {
+            await this.okxService.setStopLoss(
+              userData.apiKey,
+              userData.apiSecret,
+              userData.passphrase,
+              symbol,
+              slPrice,
+              pos.side as "LONG" | "SHORT",
+              pos.quantity,
+            );
+          }
+          slOk = true;
+        } catch (e) {
+          this.fileLogger.logApiError(
+            exchange,
+            "setStopLoss",
+            e,
+            telegramId,
+            symbol,
+          );
+        }
+
+        const tpPrice = isLong
+          ? (pos.entryPrice * (1 + tpPercent / 100)).toFixed(4)
+          : (pos.entryPrice * (1 - tpPercent / 100)).toFixed(4);
+
+        results.push(
+          `${tpOk && slOk ? "✅" : "⚠️"} *${symbol}* (${pos.side})\n` +
+            `   TP: $${tpPrice} ${tpOk ? "✓" : "✗"}  |  SL: $${slPrice} ${slOk ? "✓" : "✗"}`,
+        );
+      }
+
+      await this.bot.sendMessage(
+        chatId,
+        `✅ *Đặt TP/SL Hoàn Tất — ${exchange.toUpperCase()}*\n\n` +
+          `TP: +${tpPercent}%  |  SL: -${slPercent}%\n\n` +
+          results.join("\n\n"),
+        { parse_mode: "Markdown" },
+      );
+    } catch (error) {
+      await this.bot.sendMessage(chatId, `❌ Lỗi: ${error.message}`);
+      this.fileLogger.logBusinessError("handleSetAllTp", error, telegramId, {
+        exchange,
+      });
+    }
+  }
+
   private async handleManualUpdate(
     msg: TelegramBot.Message,
     match: RegExpExecArray,
@@ -3177,10 +3354,11 @@ export class TelegramBotService implements OnModuleInit {
     if (args.length < 3) {
       await this.bot.sendMessage(
         chatId,
-        "❌ Format: /setbot `<exchange> <botType> <volume> [leverage]`\n\n" +
-          "Example: `/setbot binance CT1 100 10`\n" +
+        "❌ Format: /setbot `<exchange> <botType> <volume> [leverage] [tp%] [sl%]`\n\n" +
+          "Example: `/setbot binance CT1 100 10 5 3`\n" +
           "Bot types: CT1, CT2, CT3, CT4, CT5, CT6, CT7, CT8\n" +
-          "Volume: USDT per order · Default leverage: 10x",
+          "Volume: USDT per order · Default leverage: 10x\n" +
+          "tp%/sl%: optional, sets TP/SL % when signal trade executes",
         { parse_mode: "Markdown" },
       );
       return;
@@ -3190,6 +3368,8 @@ export class TelegramBotService implements OnModuleInit {
     const botShort = args[1].toUpperCase();
     const volume = parseFloat(args[2]);
     const leverage = args[3] ? parseInt(args[3]) : 10;
+    const takeProfitPercent = args[4] ? parseFloat(args[4]) : undefined;
+    const stopLossPercent = args[5] ? parseFloat(args[5]) : undefined;
 
     if (!["binance", "okx"].includes(exchange)) {
       await this.bot.sendMessage(
@@ -3243,6 +3423,8 @@ export class TelegramBotService implements OnModuleInit {
       volume,
       leverage,
       enabledAt: new Date().toISOString(),
+      ...(takeProfitPercent !== undefined && { takeProfitPercent }),
+      ...(stopLossPercent !== undefined && { stopLossPercent }),
     };
 
     if (idx >= 0) {
@@ -3257,13 +3439,20 @@ export class TelegramBotService implements OnModuleInit {
       botsConfig,
     );
 
+    const tpSlInfo =
+      takeProfitPercent !== undefined || stopLossPercent !== undefined
+        ? `\n├ TP: ${takeProfitPercent !== undefined ? `${takeProfitPercent}%` : "—"}` +
+          `\n└ SL: ${stopLossPercent !== undefined ? `${stopLossPercent}%` : "—"}`
+        : `\n└ TP/SL: không cấu hình`;
+
     await this.bot.sendMessage(
       chatId,
       `✅ *Bot Signal đã bật*\n\n` +
         `├ Sàn: ${exchange.toUpperCase()}\n` +
         `├ Bot: ${botShort} (${botType.replace(/_/g, "\\_")})\n` +
         `├ Volume mỗi lệnh: $${volume}\n` +
-        `└ Đòn bẩy: ${leverage}x`,
+        `├ Đòn bẩy: ${leverage}x` +
+        tpSlInfo,
       { parse_mode: "Markdown" },
     );
   }
@@ -3559,12 +3748,18 @@ export class TelegramBotService implements OnModuleInit {
           { symbol, side, quantity, leverage: botConfig.leverage },
         );
 
+        const binanceSlPrice = botConfig.stopLossPercent
+          ? side === "LONG"
+            ? parseFloat((currentPrice * (1 - botConfig.stopLossPercent / 100)).toFixed(4))
+            : parseFloat((currentPrice * (1 + botConfig.stopLossPercent / 100)).toFixed(4))
+          : signal.stopLoss;
+
         this.binanceService
           .setStopLoss(
             userData.apiKey,
             userData.apiSecret,
             symbol,
-            signal.stopLoss,
+            binanceSlPrice,
             side,
             quantity,
           )
@@ -3572,8 +3767,26 @@ export class TelegramBotService implements OnModuleInit {
             this.fileLogger.logBusinessError("executeSignalTrade:setStopLoss", e, telegramId, { symbol }),
           );
 
+        if (botConfig.takeProfitPercent) {
+          this.binanceService
+            .setTakeProfit(
+              userData.apiKey,
+              userData.apiSecret,
+              symbol,
+              botConfig.takeProfitPercent,
+            )
+            .catch((e) =>
+              this.fileLogger.logBusinessError("executeSignalTrade:setTakeProfit", e, telegramId, { symbol }),
+            );
+        }
+
         if (chatId) {
           const sideEmoji = side === "LONG" ? "📈" : "📉";
+          const binanceTpPrice = botConfig.takeProfitPercent
+            ? side === "LONG"
+              ? (currentPrice * (1 + botConfig.takeProfitPercent / 100)).toFixed(4)
+              : (currentPrice * (1 - botConfig.takeProfitPercent / 100)).toFixed(4)
+            : null;
           await this.bot.sendMessage(
             chatId,
             `🤖 *Bot Signal Executed*\n\n` +
@@ -3584,7 +3797,8 @@ export class TelegramBotService implements OnModuleInit {
               `├ Volume: $${botConfig.volume}\n` +
               `├ Số lượng: ${quantity}\n` +
               `├ Đòn bẩy: ${botConfig.leverage}x\n` +
-              `└ Stop Loss: $${signal.stopLoss.toFixed(4)}`,
+              (binanceTpPrice ? `├ Take Profit: $${binanceTpPrice}\n` : "") +
+              `└ Stop Loss: $${binanceSlPrice.toFixed(4)}`,
             { parse_mode: "Markdown" },
           );
         }
@@ -3609,13 +3823,19 @@ export class TelegramBotService implements OnModuleInit {
           { symbol, side, quantity, leverage: botConfig.leverage },
         );
 
+        const okxSlPrice = botConfig.stopLossPercent
+          ? side === "LONG"
+            ? parseFloat((currentPrice * (1 - botConfig.stopLossPercent / 100)).toFixed(4))
+            : parseFloat((currentPrice * (1 + botConfig.stopLossPercent / 100)).toFixed(4))
+          : signal.stopLoss;
+
         this.okxService
           .setStopLoss(
             userData.apiKey,
             userData.apiSecret,
             userData.passphrase,
             symbol,
-            signal.stopLoss,
+            okxSlPrice,
             side,
             quantity,
           )
@@ -3623,8 +3843,27 @@ export class TelegramBotService implements OnModuleInit {
             this.fileLogger.logBusinessError("executeSignalTrade:setStopLoss", e, telegramId, { symbol }),
           );
 
+        if (botConfig.takeProfitPercent) {
+          this.okxService
+            .setTakeProfit(
+              userData.apiKey,
+              userData.apiSecret,
+              userData.passphrase,
+              symbol,
+              botConfig.takeProfitPercent,
+            )
+            .catch((e) =>
+              this.fileLogger.logBusinessError("executeSignalTrade:setTakeProfit", e, telegramId, { symbol }),
+            );
+        }
+
         if (chatId) {
           const sideEmoji = side === "LONG" ? "📈" : "📉";
+          const okxTpPrice = botConfig.takeProfitPercent
+            ? side === "LONG"
+              ? (currentPrice * (1 + botConfig.takeProfitPercent / 100)).toFixed(4)
+              : (currentPrice * (1 - botConfig.takeProfitPercent / 100)).toFixed(4)
+            : null;
           await this.bot.sendMessage(
             chatId,
             `🤖 *Bot Signal Executed*\n\n` +
@@ -3635,7 +3874,8 @@ export class TelegramBotService implements OnModuleInit {
               `├ Volume: $${botConfig.volume}\n` +
               `├ Số lượng: ${quantity}\n` +
               `├ Đòn bẩy: ${botConfig.leverage}x\n` +
-              `└ Stop Loss: $${signal.stopLoss.toFixed(4)}`,
+              (okxTpPrice ? `├ Take Profit: $${okxTpPrice}\n` : "") +
+              `└ Stop Loss: $${okxSlPrice.toFixed(4)}`,
             { parse_mode: "Markdown" },
           );
         }

@@ -19,6 +19,8 @@ export interface UserBotConfig {
   volume: number; // USDT volume per order
   leverage: number; // Leverage multiplier
   enabledAt: string; // ISO timestamp
+  takeProfitPercent?: number; // TP % from entry price (e.g. 5 = 5%)
+  stopLossPercent?: number; // SL % from entry price (e.g. 3 = 3%)
 }
 
 export interface UserBotsConfig {
