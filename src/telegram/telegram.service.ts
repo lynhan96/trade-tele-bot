@@ -1884,7 +1884,7 @@ export class TelegramBotService implements OnModuleInit {
         const isActive = activeExchange === "binance";
 
         // Fetch live data + config in parallel
-        const [balance, positions, tpData, tpMode, individualTpData, retryConfig] =
+        const [balance, positions, tpData, tpMode, individualTpData, retryConfig, botsConfig] =
           await Promise.all([
             this.binanceService
               .getAccountBalance(binanceData.apiKey, binanceData.apiSecret)
@@ -1908,6 +1908,9 @@ export class TelegramBotService implements OnModuleInit {
               volumeReductionPercent: number;
               enabled: boolean;
             }>(`user:${telegramId}:retry:binance`),
+            this.redisService.get<UserBotsConfig>(
+              `user:${telegramId}:bots:binance`,
+            ),
           ]);
 
         const longCount = positions.filter((p) => p.side === "LONG").length;
@@ -1950,6 +1953,15 @@ export class TelegramBotService implements OnModuleInit {
         } else {
           message += `├ 🔄 Retry: Tắt\n`;
         }
+        const binanceBots = botsConfig?.bots ?? [];
+        if (binanceBots.length > 0) {
+          const botList = binanceBots
+            .map((b) => `${BOT_TYPE_REVERSE_MAP[b.botType] || b.botType} $${b.volume}@${b.leverage}x`)
+            .join(" · ");
+          message += `├ 🤖 Bots: ${botList}\n`;
+        } else {
+          message += `├ 🤖 Bots: Chưa cấu hình\n`;
+        }
         message += `└ Created: ${new Date(binanceData.createdAt).toLocaleDateString()}\n\n`;
       }
 
@@ -1957,7 +1969,7 @@ export class TelegramBotService implements OnModuleInit {
         const isActive = activeExchange === "okx";
 
         // Fetch live data + config in parallel
-        const [balance, positions, tpData, tpMode, individualTpData, retryConfig] =
+        const [balance, positions, tpData, tpMode, individualTpData, retryConfig, botsConfig] =
           await Promise.all([
             this.okxService
               .getAccountBalance(
@@ -1989,6 +2001,9 @@ export class TelegramBotService implements OnModuleInit {
               volumeReductionPercent: number;
               enabled: boolean;
             }>(`user:${telegramId}:retry:okx`),
+            this.redisService.get<UserBotsConfig>(
+              `user:${telegramId}:bots:okx`,
+            ),
           ]);
 
         const longCount = positions.filter((p) => p.side === "LONG").length;
@@ -2030,6 +2045,15 @@ export class TelegramBotService implements OnModuleInit {
           message += `├ 🔄 Retry: ${retryConfig.currentRetryCount}/${retryConfig.maxRetry} (-${retryConfig.volumeReductionPercent}% vol)\n`;
         } else {
           message += `├ 🔄 Retry: Tắt\n`;
+        }
+        const okxBots = botsConfig?.bots ?? [];
+        if (okxBots.length > 0) {
+          const botList = okxBots
+            .map((b) => `${BOT_TYPE_REVERSE_MAP[b.botType] || b.botType} $${b.volume}@${b.leverage}x`)
+            .join(" · ");
+          message += `├ 🤖 Bots: ${botList}\n`;
+        } else {
+          message += `├ 🤖 Bots: Chưa cấu hình\n`;
         }
         message += `└ Created: ${new Date(okxData.createdAt).toLocaleDateString()}\n\n`;
       }
