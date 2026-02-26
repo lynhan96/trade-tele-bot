@@ -1816,101 +1816,165 @@ export class TelegramBotService implements OnModuleInit {
         return;
       }
 
-      let message = "📋 *Your Connected Accounts*\n\n";
+      await this.bot.sendMessage(chatId, "⏳ Đang tải thông tin tài khoản...");
+
+      let message = "📋 *Tài khoản đã kết nối*\n\n";
 
       if (binanceData) {
         const isActive = activeExchange === "binance";
-        const tpData = await this.redisService.get<{
-          percentage: number;
-          initialBalance: number;
-          setAt: string;
-        }>(`user:${telegramId}:tp:binance`);
 
-        const tpMode = await this.redisService.get<{
-          mode: "aggregate" | "individual";
-        }>(`user:${telegramId}:tp:mode:binance`);
+        // Fetch live data + config in parallel
+        const [balance, positions, tpData, tpMode, individualTpData, retryConfig] =
+          await Promise.all([
+            this.binanceService
+              .getAccountBalance(binanceData.apiKey, binanceData.apiSecret)
+              .catch(() => null),
+            this.binanceService
+              .getOpenPositions(binanceData.apiKey, binanceData.apiSecret)
+              .catch(() => []),
+            this.redisService.get<{
+              percentage: number;
+              initialBalance: number;
+            }>(`user:${telegramId}:tp:binance`),
+            this.redisService.get<{ mode: "aggregate" | "individual" }>(
+              `user:${telegramId}:tp:mode:binance`,
+            ),
+            this.redisService.get<{ percentage: number }>(
+              `user:${telegramId}:tp:individual:binance`,
+            ),
+            this.redisService.get<{
+              maxRetry: number;
+              currentRetryCount: number;
+              volumeReductionPercent: number;
+              enabled: boolean;
+            }>(`user:${telegramId}:retry:binance`),
+          ]);
 
-        const individualTpData = await this.redisService.get<{
-          percentage: number;
-        }>(`user:${telegramId}:tp:individual:binance`);
-
-        const retryConfig = await this.redisService.get<{
-          maxRetry: number;
-          currentRetryCount: number;
-          volumeReductionPercent: number;
-          enabled: boolean;
-        }>(`user:${telegramId}:retry:binance`);
+        const longCount = positions.filter((p) => p.side === "LONG").length;
+        const shortCount = positions.filter((p) => p.side === "SHORT").length;
+        const unrealizedPnl = balance?.totalUnrealizedProfit ?? 0;
+        const pnlEmoji = unrealizedPnl >= 0 ? "🟢" : "🔴";
 
         message += `${isActive ? "🟢" : "⚪"} *Binance*\n`;
-        message += `├ Created: ${new Date(binanceData.createdAt).toLocaleDateString()}\n`;
+
+        if (balance) {
+          message += `├ 💰 Balance: $${balance.totalBalance.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}\n`;
+          message += `├ ${pnlEmoji} Unrealized PnL: $${unrealizedPnl.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}\n`;
+        }
+
+        message += `├ 📊 Vị thế: ${positions.length} lệnh`;
+        if (positions.length > 0) {
+          message += ` (${longCount > 0 ? `📈 ${longCount} Long` : ""}${longCount > 0 && shortCount > 0 ? " · " : ""}${shortCount > 0 ? `📉 ${shortCount} Short` : ""})`;
+        }
+        message += `\n`;
 
         if (tpMode?.mode === "individual" && individualTpData) {
-          message += `├ TP Mode: 📍 Individual (${individualTpData.percentage}% per position)\n`;
+          message += `├ 🎯 TP Mode: Individual (${individualTpData.percentage}% / vị thế)\n`;
         } else if (tpData && tpData.initialBalance > 0) {
           const targetProfit =
             (tpData.initialBalance * tpData.percentage) / 100;
-          message += `├ TP Mode: 📊 Aggregate (${tpData.percentage}% of $${tpData.initialBalance.toFixed(2)})\n`;
-          message += `├ TP Target: $${targetProfit.toFixed(2)}\n`;
+          const progress = balance
+            ? ((unrealizedPnl / tpData.initialBalance) * 100).toFixed(2)
+            : null;
+          message += `├ 🎯 TP Mode: Aggregate (${tpData.percentage}% · $${targetProfit.toFixed(2)})`;
+          if (progress !== null) {
+            message += ` → ${progress}%`;
+          }
+          message += `\n`;
         } else {
-          message += `├ TP Config: Not set\n`;
+          message += `├ 🎯 TP: Chưa cấu hình\n`;
         }
 
         if (retryConfig && retryConfig.enabled) {
           message += `├ 🔄 Retry: ${retryConfig.currentRetryCount}/${retryConfig.maxRetry} (-${retryConfig.volumeReductionPercent}% vol)\n`;
         } else {
-          message += `├ 🔄 Retry: Disabled\n`;
+          message += `├ 🔄 Retry: Tắt\n`;
         }
-        message += `└\n\n`;
+        message += `└ Created: ${new Date(binanceData.createdAt).toLocaleDateString()}\n\n`;
       }
 
       if (okxData) {
         const isActive = activeExchange === "okx";
-        const tpData = await this.redisService.get<{
-          percentage: number;
-          initialBalance: number;
-          setAt: string;
-        }>(`user:${telegramId}:tp:okx`);
 
-        const tpMode = await this.redisService.get<{
-          mode: "aggregate" | "individual";
-        }>(`user:${telegramId}:tp:mode:okx`);
+        // Fetch live data + config in parallel
+        const [balance, positions, tpData, tpMode, individualTpData, retryConfig] =
+          await Promise.all([
+            this.okxService
+              .getAccountBalance(
+                okxData.apiKey,
+                okxData.apiSecret,
+                okxData.passphrase,
+              )
+              .catch(() => null),
+            this.okxService
+              .getOpenPositions(
+                okxData.apiKey,
+                okxData.apiSecret,
+                okxData.passphrase,
+              )
+              .catch(() => []),
+            this.redisService.get<{
+              percentage: number;
+              initialBalance: number;
+            }>(`user:${telegramId}:tp:okx`),
+            this.redisService.get<{ mode: "aggregate" | "individual" }>(
+              `user:${telegramId}:tp:mode:okx`,
+            ),
+            this.redisService.get<{ percentage: number }>(
+              `user:${telegramId}:tp:individual:okx`,
+            ),
+            this.redisService.get<{
+              maxRetry: number;
+              currentRetryCount: number;
+              volumeReductionPercent: number;
+              enabled: boolean;
+            }>(`user:${telegramId}:retry:okx`),
+          ]);
 
-        const individualTpData = await this.redisService.get<{
-          percentage: number;
-        }>(`user:${telegramId}:tp:individual:okx`);
-
-        const retryConfig = await this.redisService.get<{
-          maxRetry: number;
-          currentRetryCount: number;
-          volumeReductionPercent: number;
-          enabled: boolean;
-        }>(`user:${telegramId}:retry:okx`);
+        const longCount = positions.filter((p) => p.side === "LONG").length;
+        const shortCount = positions.filter((p) => p.side === "SHORT").length;
+        const unrealizedPnl = balance?.totalUnrealizedProfit ?? 0;
+        const pnlEmoji = unrealizedPnl >= 0 ? "🟢" : "🔴";
 
         message += `${isActive ? "🟢" : "⚪"} *OKX*\n`;
-        message += `├ Created: ${new Date(okxData.createdAt).toLocaleDateString()}\n`;
+
+        if (balance) {
+          message += `├ 💰 Balance: $${balance.totalBalance.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}\n`;
+          message += `├ ${pnlEmoji} Unrealized PnL: $${unrealizedPnl.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}\n`;
+        }
+
+        message += `├ 📊 Vị thế: ${positions.length} lệnh`;
+        if (positions.length > 0) {
+          message += ` (${longCount > 0 ? `📈 ${longCount} Long` : ""}${longCount > 0 && shortCount > 0 ? " · " : ""}${shortCount > 0 ? `📉 ${shortCount} Short` : ""})`;
+        }
+        message += `\n`;
 
         if (tpMode?.mode === "individual" && individualTpData) {
-          message += `├ TP Mode: 📍 Individual (${individualTpData.percentage}% per position)\n`;
+          message += `├ 🎯 TP Mode: Individual (${individualTpData.percentage}% / vị thế)\n`;
         } else if (tpData && tpData.initialBalance > 0) {
           const targetProfit =
             (tpData.initialBalance * tpData.percentage) / 100;
-          message += `├ TP Mode: 📊 Aggregate (${tpData.percentage}% of $${tpData.initialBalance.toFixed(2)})\n`;
-          message += `├ TP Target: $${targetProfit.toFixed(2)}\n`;
+          const progress = balance
+            ? ((unrealizedPnl / tpData.initialBalance) * 100).toFixed(2)
+            : null;
+          message += `├ 🎯 TP Mode: Aggregate (${tpData.percentage}% · $${targetProfit.toFixed(2)})`;
+          if (progress !== null) {
+            message += ` → ${progress}%`;
+          }
+          message += `\n`;
         } else {
-          message += `├ TP Config: Not set\n`;
+          message += `├ 🎯 TP: Chưa cấu hình\n`;
         }
 
         if (retryConfig && retryConfig.enabled) {
           message += `├ 🔄 Retry: ${retryConfig.currentRetryCount}/${retryConfig.maxRetry} (-${retryConfig.volumeReductionPercent}% vol)\n`;
         } else {
-          message += `├ 🔄 Retry: Disabled\n`;
+          message += `├ 🔄 Retry: Tắt\n`;
         }
-        message += `└\n\n`;
+        message += `└ Created: ${new Date(okxData.createdAt).toLocaleDateString()}\n\n`;
       }
 
-      message += `Active Exchange: *${activeExchange?.toUpperCase() || "None"}*\n\n`;
-      message +=
-        "Use /setaccount [exchange] to configure TP for each exchange.";
+      message += `Active: *${activeExchange?.toUpperCase() || "None"}*`;
 
       await this.bot.sendMessage(chatId, message, { parse_mode: "Markdown" });
     } catch (error) {
