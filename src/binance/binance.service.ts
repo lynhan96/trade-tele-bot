@@ -55,28 +55,12 @@ export class BinanceService {
   ): Promise<AccountBalance> {
     try {
       const client = this.createClient(apiKey, apiSecret);
-      const account = await client.futuresAccountBalance();
-
-      let totalBalance = 0;
-      let availableBalance = 0;
-
-      account.forEach((asset) => {
-        if (asset.asset === "USDT") {
-          totalBalance = parseFloat(asset.balance);
-          availableBalance = parseFloat(asset.availableBalance);
-        }
-      });
-
-      const positions = await this.getOpenPositions(apiKey, apiSecret);
-      const totalUnrealizedProfit = positions.reduce(
-        (sum, pos) => sum + pos.unrealizedPnl,
-        0,
-      );
+      const account = await client.futuresAccountInfo();
 
       return {
-        totalBalance,
-        availableBalance,
-        totalUnrealizedProfit,
+        totalBalance: parseFloat(account.totalWalletBalance),
+        availableBalance: parseFloat(account.availableBalance),
+        totalUnrealizedProfit: parseFloat(account.totalUnrealizedProfit),
       };
     } catch (error) {
       this.logger.error("Error fetching account balance:", error.message);
@@ -97,6 +81,16 @@ export class BinanceService {
         (pos) => parseFloat(pos.positionAmt) !== 0,
       );
 
+      // Fetch all open orders once instead of per-position (avoids N+1 API calls)
+      const allOpenOrders = await client.futuresOpenOrders({});
+      const ordersBySymbol = new Map<string, typeof allOpenOrders>();
+      for (const order of allOpenOrders) {
+        if (!ordersBySymbol.has(order.symbol)) {
+          ordersBySymbol.set(order.symbol, []);
+        }
+        ordersBySymbol.get(order.symbol).push(order);
+      }
+
       const positionInfos: PositionInfo[] = [];
 
       for (const pos of openPositions) {
@@ -106,12 +100,10 @@ export class BinanceService {
         const unrealizedPnl = parseFloat(pos.unRealizedProfit);
         const leverage = parseFloat(pos.leverage);
 
-        // Calculate margin: position value / leverage
-        const positionValue = quantity * entryPrice;
-        const margin = positionValue / leverage;
-
-        // Volume = margin * quantity
-        const volume = margin * quantity;
+        // Margin: position notional / leverage
+        const margin = (quantity * entryPrice) / leverage;
+        // Volume: notional value of the position
+        const volume = quantity * entryPrice;
 
         const positionInfo: PositionInfo = {
           symbol: pos.symbol,
@@ -120,7 +112,7 @@ export class BinanceService {
           entryPrice,
           currentPrice,
           unrealizedPnl,
-          realizedPnl: 0, // Will need to fetch from income history if needed
+          realizedPnl: 0,
           leverage,
           margin,
           volume,
@@ -129,9 +121,7 @@ export class BinanceService {
           liquidationPrice: parseFloat(pos.liquidationPrice),
         };
 
-        // Get open orders to check for TP/SL
-        const orders = await client.futuresOpenOrders({ symbol: pos.symbol });
-
+        const orders = ordersBySymbol.get(pos.symbol) || [];
         for (const order of orders) {
           if (
             order.type === "TAKE_PROFIT_MARKET" ||

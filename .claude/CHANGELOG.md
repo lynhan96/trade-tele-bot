@@ -1,5 +1,142 @@
 # Changelog
 
+## 2026-02-26 - Performance & Correctness Fixes
+
+### Bug Fixes
+
+#### 1. OKX `cancel-algos` Wrong Request Body
+
+**Problem**: `setTakeProfit` in `okx.service.ts` was wrapping the cancel payload in `{ data: [...] }` — the OKX API expects the array as the direct body. Existing TP orders were never cancelled before placing new ones.
+
+**Fix**: Changed `client.post("/api/v5/trade/cancel-algos", { data: [...] })` → `client.post("/api/v5/trade/cancel-algos", [...])`.
+
+**Files Modified**: `src/okx/okx.service.ts`
+
+---
+
+#### 2. "10-Minute Update" Label Mismatch
+
+**Problem**: `sendPeriodicUpdates` cron runs `@Cron(EVERY_5_MINUTES)` but the notification message said "10-Minute Update".
+
+**Fix**: Changed message text to "5-Minute Update" for both Binance and OKX.
+
+**Files Modified**: `src/telegram/telegram.service.ts`
+
+---
+
+#### 3. "babywatermelon" Hardcoded in Position Output
+
+**Problem**: The `/position` command included the literal string `babywatermelon` in position messages for both exchanges — a test artifact left in production.
+
+**Fix**: Replaced with `Đang có các vị thế:` for both exchange blocks.
+
+**Files Modified**: `src/telegram/telegram.service.ts`
+
+---
+
+#### 4. `BinanceService.volume` Incorrect Formula
+
+**Problem**: Volume was computed as `margin * quantity` (dimensionally nonsensical). Standard position notional value is `quantity * entryPrice`.
+
+**Fix**: Changed formula to `volume = quantity * entryPrice`.
+
+**Files Modified**: `src/binance/binance.service.ts`
+
+---
+
+### Performance Improvements
+
+#### 5. `BinanceService.getAccountBalance` — Eliminated Double `getOpenPositions` Call
+
+**Problem**: `getAccountBalance` internally called `getOpenPositions` just to sum `totalUnrealizedProfit`. When `/position` called both methods, `getOpenPositions` ran twice.
+
+**Fix**: Replaced with `client.futuresAccountInfo()` which returns `totalWalletBalance`, `availableBalance`, and `totalUnrealizedProfit` directly in one API call.
+
+**Files Modified**: `src/binance/binance.service.ts`
+
+---
+
+#### 6. `OkxService.getAccountBalance` — Eliminated Double `getOpenPositions` Call
+
+**Problem**: Same issue as Binance — `getAccountBalance` called `getOpenPositions` internally for unrealized PnL.
+
+**Fix**: Use `usdtDetail.upl` from the OKX `/api/v5/account/balance` response (already included in the response).
+
+**Files Modified**: `src/okx/okx.service.ts`
+
+---
+
+#### 7. `BinanceService.getOpenPositions` — N+1 API Calls
+
+**Problem**: For each open position, it called `client.futuresOpenOrders({ symbol })` individually — 10 positions = 11 API calls, risking rate limits.
+
+**Fix**: Fetch all open orders once with `client.futuresOpenOrders({})`, group into a `Map<symbol, orders[]>`, then look up per-position in O(1).
+
+**Files Modified**: `src/binance/binance.service.ts`
+
+---
+
+#### 8. `RedisService.keys()` — `KEYS` → `SCAN`
+
+**Problem**: `client.keys(pattern)` is a blocking O(N) Redis command that halts the server during execution. Called in 3 cron jobs every 15–30 seconds.
+
+**Fix**: Replaced with SCAN cursor loop (`COUNT: 100`) which is non-blocking and iterative.
+
+```typescript
+let cursor = 0;
+do {
+  const result = await this.client.scan(cursor, { MATCH: fullPattern, COUNT: 100 });
+  cursor = result.cursor;
+  allKeys.push(...result.keys);
+} while (cursor !== 0);
+```
+
+**Files Modified**: `src/redis/redis.service.ts`
+
+---
+
+#### 9. `checkReentryOpportunities` — Cooldown Before API Calls
+
+**Problem**: Every 30-second cron tick fetched current price + 30 klines from the exchange for each pending re-entry, even if still in the 30-minute cooldown.
+
+**Fix**: Moved the cooldown date check to the top of the loop (pure math, zero API calls). API calls only happen after cooldown passes. Also removed duplicate cooldown check inside `checkReentrySafety`.
+
+**Files Modified**: `src/telegram/telegram.service.ts`
+
+---
+
+#### 10. `checkAggregateTP` — `retryConfig` Double Redis Fetch
+
+**Problem**: In both the Binance and OKX branches, `retryConfig` was fetched from Redis twice per TP trigger — once inside the `profitablePositions` block and again for building the notification message.
+
+**Fix**: Hoisted `retryConfig` fetch to before the `profitablePositions.length > 0` block; single result reused for both purposes.
+
+**Files Modified**: `src/telegram/telegram.service.ts`
+
+---
+
+#### 11. `handlePosition` — Sequential → Parallel Exchange Fetches
+
+**Problem**: When a user had both Binance and OKX connected, `/position` fetched them sequentially.
+
+**Fix**: Wrapped both exchange fetch operations in a top-level `Promise.all`. Both exchanges are fetched concurrently; errors per-exchange are caught independently.
+
+**Files Modified**: `src/telegram/telegram.service.ts`
+
+---
+
+### Reliability Improvements
+
+#### 12. Cron Concurrency Guard
+
+**Problem**: `checkTakeProfitTargets` and `checkReentryOpportunities` both run on 30-second intervals. If processing takes longer than 30 seconds, two cron ticks could process the same user+exchange concurrently, risking duplicate position closes or race conditions in Redis state.
+
+**Fix**: Added `private readonly processingLocks = new Set<string>()` to `TelegramBotService`. Each user+exchange acquires a lock before processing and releases it in a `finally`-equivalent block.
+
+**Files Modified**: `src/telegram/telegram.service.ts`
+
+---
+
 ## 2026-01-31 - Entry Price Optimization & Documentation Organization
 
 ### Entry Price Optimization (NEW FEATURE)

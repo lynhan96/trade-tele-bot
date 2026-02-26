@@ -12,6 +12,7 @@ import { UserApiKeys, UserActiveExchange } from "../interfaces/user.interface";
 export class TelegramBotService implements OnModuleInit {
   private readonly logger = new Logger(TelegramBotService.name);
   private bot: TelegramBot;
+  private readonly processingLocks = new Set<string>();
 
   constructor(
     private configService: ConfigService,
@@ -181,6 +182,10 @@ export class TelegramBotService implements OnModuleInit {
         const userData = await this.getUserData(parseInt(telegramId), exchange);
         if (!userData) continue;
 
+        const lockKey = `tp:${telegramId}:${exchange}`;
+        if (this.processingLocks.has(lockKey)) continue;
+        this.processingLocks.add(lockKey);
+
         // Run appropriate TP check based on mode
         if (tpMode?.mode === "individual") {
           // Individual position TP mode
@@ -193,6 +198,8 @@ export class TelegramBotService implements OnModuleInit {
           // Aggregate TP mode (default)
           await this.checkAggregateTP(parseInt(telegramId), exchange, userData);
         }
+
+        this.processingLocks.delete(lockKey);
       }
     } catch (error) {
       this.fileLogger.logError(error, {
@@ -402,15 +409,15 @@ export class TelegramBotService implements OnModuleInit {
               return profitPercent > 2;
             });
 
-            if (profitablePositions.length > 0) {
-              // Check if retry is enabled
-              const retryConfig = await this.redisService.get<{
-                maxRetry: number;
-                currentRetryCount: number;
-                volumeReductionPercent: number;
-                enabled: boolean;
-              }>(`user:${telegramId}:retry:binance`);
+            // Fetch retryConfig once, reuse below for message building
+            const retryConfig = await this.redisService.get<{
+              maxRetry: number;
+              currentRetryCount: number;
+              volumeReductionPercent: number;
+              enabled: boolean;
+            }>(`user:${telegramId}:retry:binance`);
 
+            if (profitablePositions.length > 0) {
               // Store positions for re-entry if retry is enabled
               if (
                 retryConfig &&
@@ -458,7 +465,7 @@ export class TelegramBotService implements OnModuleInit {
                       symbol: position.symbol,
                       entryPrice: position.entryPrice,
                       currentPrice: currentPrice,
-                      closedProfit: positionProfit, // Store the profit from closed position
+                      closedProfit: positionProfit,
                       side: position.side,
                       quantity: nextQuantity,
                       originalQuantity: position.quantity,
@@ -468,7 +475,7 @@ export class TelegramBotService implements OnModuleInit {
                       originalVolume: position.quantity * position.entryPrice,
                       closedAt: new Date().toISOString(),
                       tpPercentage: tpData.percentage,
-                      stopLossPrice: stopLossPrice, // Profit-protected stop loss
+                      stopLossPrice: stopLossPrice,
                       currentRetry: 1,
                       remainingRetries: retryConfig.currentRetryCount - 1,
                       volumeReductionPercent: volumeReduction,
@@ -499,13 +506,6 @@ export class TelegramBotService implements OnModuleInit {
                     `  ${pos.symbol}: ${pos.side} $${pos.unrealizedPnl.toFixed(2)}`,
                 )
                 .join("\n");
-
-            // Add retry info if enabled
-            const retryConfig = await this.redisService.get<{
-              maxRetry: number;
-              currentRetryCount: number;
-              volumeReductionPercent: number;
-            }>(`user:${telegramId}:retry:binance`);
 
             if (retryConfig && retryConfig.currentRetryCount > 0) {
               message +=
@@ -571,15 +571,15 @@ export class TelegramBotService implements OnModuleInit {
               return profitPercent > 2;
             });
 
-            if (profitablePositions.length > 0) {
-              // Check if retry is enabled
-              const retryConfig = await this.redisService.get<{
-                maxRetry: number;
-                currentRetryCount: number;
-                volumeReductionPercent: number;
-                enabled: boolean;
-              }>(`user:${telegramId}:retry:okx`);
+            // Fetch retryConfig once, reuse below for message building
+            const retryConfig = await this.redisService.get<{
+              maxRetry: number;
+              currentRetryCount: number;
+              volumeReductionPercent: number;
+              enabled: boolean;
+            }>(`user:${telegramId}:retry:okx`);
 
+            if (profitablePositions.length > 0) {
               // Store positions for re-entry if retry is enabled
               if (
                 retryConfig &&
@@ -627,7 +627,7 @@ export class TelegramBotService implements OnModuleInit {
                       symbol: position.symbol,
                       entryPrice: position.entryPrice,
                       currentPrice: currentPrice,
-                      closedProfit: positionProfit, // Store the profit from closed position
+                      closedProfit: positionProfit,
                       side: position.side,
                       quantity: nextQuantity,
                       originalQuantity: position.quantity,
@@ -637,7 +637,7 @@ export class TelegramBotService implements OnModuleInit {
                       originalVolume: position.quantity * position.entryPrice,
                       closedAt: new Date().toISOString(),
                       tpPercentage: tpData.percentage,
-                      stopLossPrice: stopLossPrice, // Profit-protected stop loss
+                      stopLossPrice: stopLossPrice,
                       currentRetry: 1,
                       remainingRetries: retryConfig.currentRetryCount - 1,
                       volumeReductionPercent: volumeReduction,
@@ -668,13 +668,6 @@ export class TelegramBotService implements OnModuleInit {
                     `  ${pos.symbol}: ${pos.side} $${pos.unrealizedPnl.toFixed(2)}`,
                 )
                 .join("\n");
-
-            // Add retry info if enabled
-            const retryConfig = await this.redisService.get<{
-              maxRetry: number;
-              currentRetryCount: number;
-              volumeReductionPercent: number;
-            }>(`user:${telegramId}:retry:okx`);
 
             if (retryConfig && retryConfig.currentRetryCount > 0) {
               message +=
@@ -728,6 +721,17 @@ export class TelegramBotService implements OnModuleInit {
         if (!userData) continue;
 
         try {
+          // Cooldown check first — pure date math, no API calls needed
+          const timeSinceClose =
+            Date.now() - new Date(reentryData.closedAt).getTime();
+          const cooldownMinutes = 30;
+          if (timeSinceClose < cooldownMinutes * 60 * 1000) {
+            this.logger.debug(
+              `Re-entry cooldown active for ${symbol}: ${Math.floor(timeSinceClose / 60000)}/${cooldownMinutes} min`,
+            );
+            continue;
+          }
+
           // Get current market price
           let currentPrice: number;
           if (exchange === "binance") {
@@ -745,7 +749,7 @@ export class TelegramBotService implements OnModuleInit {
             );
           }
 
-          // Safety checks before re-entry
+          // Remaining safety checks (price range, EMA, volume)
           const safetyChecks = await this.checkReentrySafety(
             exchange,
             userData,
@@ -796,18 +800,7 @@ export class TelegramBotService implements OnModuleInit {
     try {
       const isLong = reentryData.side === "LONG";
 
-      // 1. Cooldown Check (30 minutes minimum)
-      const timeSinceClose =
-        Date.now() - new Date(reentryData.closedAt).getTime();
-      const cooldownMinutes = 30;
-      if (timeSinceClose < cooldownMinutes * 60 * 1000) {
-        return {
-          safe: false,
-          reason: `Cooldown active (${Math.floor(timeSinceClose / 60000)}/${cooldownMinutes} min)`,
-        };
-      }
-
-      // 2. Price Range Check (5-25% below original entry for LONG, 5-25% above for SHORT)
+      // 1. Price Range Check (5-25% below original entry for LONG, 5-25% above for SHORT)
       const priceChange = isLong
         ? ((reentryData.entryPrice - currentPrice) / reentryData.entryPrice) *
           100
@@ -1285,7 +1278,7 @@ export class TelegramBotService implements OnModuleInit {
 
             await this.bot.sendMessage(
               userData.chatId,
-              `📊 *10-Minute Update (BINANCE)*\n\n` +
+              `📊 *5-Minute Update (BINANCE)*\n\n` +
                 `💰 Current Balance: $${balance.totalBalance.toFixed(2)}\n` +
                 `📈 Unrealized PnL: $${unrealizedPnl.toFixed(2)}\n\n` +
                 tpMessage,
@@ -1345,7 +1338,7 @@ export class TelegramBotService implements OnModuleInit {
 
             await this.bot.sendMessage(
               userData.chatId,
-              `📊 *10-Minute Update (OKX)*\n\n` +
+              `📊 *5-Minute Update (OKX)*\n\n` +
                 `💰 Current Balance: $${balance.totalBalance.toFixed(2)}\n` +
                 `📈 Unrealized PnL: $${unrealizedPnl.toFixed(2)}\n\n` +
                 tpMessage,
@@ -1640,96 +1633,57 @@ export class TelegramBotService implements OnModuleInit {
 
       await this.bot.sendMessage(chatId, "⏳ Fetching your positions...");
 
-      let allMessages = [];
+      const allMessages = [];
 
-      // Fetch Binance positions if connected
+      // Fetch Binance and OKX concurrently
+      const [binanceResult, okxResult] = await Promise.all([
+        binanceData
+          ? Promise.all([
+              this.binanceService.getOpenPositions(
+                binanceData.apiKey,
+                binanceData.apiSecret,
+              ),
+              this.binanceService.getAccountBalance(
+                binanceData.apiKey,
+                binanceData.apiSecret,
+              ),
+            ]).catch((error) => ({ error }))
+          : Promise.resolve(null),
+        okxData
+          ? Promise.all([
+              this.okxService.getOpenPositions(
+                okxData.apiKey,
+                okxData.apiSecret,
+                okxData.passphrase,
+              ),
+              this.okxService.getAccountBalance(
+                okxData.apiKey,
+                okxData.apiSecret,
+                okxData.passphrase,
+              ),
+            ]).catch((error) => ({ error }))
+          : Promise.resolve(null),
+      ]);
+
       if (binanceData) {
-        try {
-          const [positions, balance] = await Promise.all([
-            this.binanceService.getOpenPositions(
-              binanceData.apiKey,
-              binanceData.apiSecret,
-            ),
-            this.binanceService.getAccountBalance(
-              binanceData.apiKey,
-              binanceData.apiSecret,
-            ),
-          ]);
-
-          const totalPnl = positions.reduce(
-            (sum, pos) => sum + pos.unrealizedPnl,
-            0,
-          );
-
-          let message = `🟢 *BINANCE*\nbabywatermelon đang có các vị thế:\n`;
-
-          if (positions.length === 0) {
-            message += `\nKhông có vị thế nào.\n\n`;
-          } else {
-            positions.forEach((pos) => {
-              const sideText = pos.side === "LONG" ? "Long" : "Short";
-              const profitEmoji = pos.unrealizedPnl > 0 ? "🟢" : "🔴";
-
-              const tpValue = pos.takeProfit
-                ? parseFloat(pos.takeProfit).toLocaleString("en-US", {
-                    minimumFractionDigits: 0,
-                    maximumFractionDigits: 4,
-                  })
-                : "--";
-              const slValue = pos.stopLoss
-                ? parseFloat(pos.stopLoss).toLocaleString("en-US", {
-                    minimumFractionDigits: 0,
-                    maximumFractionDigits: 4,
-                  })
-                : "--";
-
-              message += `${profitEmoji} ${sideText} ${pos.symbol} x ${pos.leverage}\n`;
-              message += `Entry: ${pos.entryPrice.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 4 })}\n`;
-              message += `TP/SL: ${tpValue}/${slValue}\n`;
-              message += `Volume: ${pos.volume.toLocaleString("en-US", { minimumFractionDigits: 4, maximumFractionDigits: 4 })} USDT\n`;
-              message += `Profit: ${pos.unrealizedPnl.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDT\n\n`;
-            });
-          }
-
-          message += `Lãi/lỗ chưa ghi nhận: ${totalPnl.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}\n`;
-          message += `Balance hiện tại: ${balance.totalBalance.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-
-          allMessages.push(message);
-        } catch (error) {
+        if (binanceResult && "error" in binanceResult) {
           allMessages.push(
-            `🟢 *BINANCE*\n❌ Error fetching positions: ${error.message}`,
+            `🟢 *BINANCE*\n❌ Error fetching positions: ${(binanceResult as any).error.message}`,
           );
           this.fileLogger.logApiError(
             "binance",
             "getPositions",
-            error,
+            (binanceResult as any).error,
             telegramId,
           );
-        }
-      }
-
-      // Fetch OKX positions if connected
-      if (okxData) {
-        try {
-          const [positions, balance] = await Promise.all([
-            this.okxService.getOpenPositions(
-              okxData.apiKey,
-              okxData.apiSecret,
-              okxData.passphrase,
-            ),
-            this.okxService.getAccountBalance(
-              okxData.apiKey,
-              okxData.apiSecret,
-              okxData.passphrase,
-            ),
-          ]);
-
+        } else if (binanceResult) {
+          const [positions, balance] = binanceResult as any;
           const totalPnl = positions.reduce(
             (sum, pos) => sum + pos.unrealizedPnl,
             0,
           );
 
-          let message = `🟠 *OKX*\nbabywatermelon đang có các vị thế:\n`;
+          let message = `🟢 *BINANCE*\nĐang có các vị thế:\n`;
 
           if (positions.length === 0) {
             message += `\nKhông có vị thế nào.\n\n`;
@@ -1763,15 +1717,62 @@ export class TelegramBotService implements OnModuleInit {
           message += `Balance hiện tại: ${balance.totalBalance.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
           allMessages.push(message);
-        } catch (error) {
+        }
+      }
+
+      // OKX positions (result already fetched above concurrently)
+      if (okxData) {
+        if (okxResult && "error" in okxResult) {
           allMessages.push(
-            `🟠 *OKX*\n❌ Error fetching positions: ${error.message}`,
+            `🟠 *OKX*\n❌ Error fetching positions: ${(okxResult as any).error.message}`,
           );
-          this.logger.error(
-            `Error fetching OKX positions for user ${telegramId}:`,
-            error.message,
+          this.fileLogger.logApiError(
+            "okx",
+            "getPositions",
+            (okxResult as any).error,
+            telegramId,
           );
-          this.fileLogger.logApiError("okx", "getPositions", error, telegramId);
+        } else if (okxResult) {
+          const [positions, balance] = okxResult as any;
+          const totalPnl = positions.reduce(
+            (sum, pos) => sum + pos.unrealizedPnl,
+            0,
+          );
+
+          let message = `🟠 *OKX*\nĐang có các vị thế:\n`;
+
+          if (positions.length === 0) {
+            message += `\nKhông có vị thế nào.\n\n`;
+          } else {
+            positions.forEach((pos) => {
+              const sideText = pos.side === "LONG" ? "Long" : "Short";
+              const profitEmoji = pos.unrealizedPnl > 0 ? "🟢" : "🔴";
+
+              const tpValue = pos.takeProfit
+                ? parseFloat(pos.takeProfit).toLocaleString("en-US", {
+                    minimumFractionDigits: 0,
+                    maximumFractionDigits: 4,
+                  })
+                : "--";
+              const slValue = pos.stopLoss
+                ? parseFloat(pos.stopLoss).toLocaleString("en-US", {
+                    minimumFractionDigits: 0,
+                    maximumFractionDigits: 4,
+                  })
+                : "--";
+
+              message += `${profitEmoji} ${sideText} ${pos.symbol} x ${pos.leverage}\n`;
+              message += `Entry: ${pos.entryPrice.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 4 })}\n`;
+              message += `TP/SL: ${tpValue}/${slValue}\n`;
+              message += `Volume: ${pos.volume.toLocaleString("en-US", { minimumFractionDigits: 4, maximumFractionDigits: 4 })} USDT\n`;
+              message += `Profit: ${pos.unrealizedPnl.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDT\n\n`;
+            });
+          }
+
+          message += `Lãi/lỗ chưa ghi nhận: ${totalPnl.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}\n`;
+          message += `Balance hiện tại: ${balance.totalBalance.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+          allMessages.push(message);
         }
       }
 

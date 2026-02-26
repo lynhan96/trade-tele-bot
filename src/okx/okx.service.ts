@@ -116,23 +116,10 @@ export class OkxService {
       const data = response.data.data[0];
       const usdtDetail = data.details.find((d: any) => d.ccy === "USDT");
 
-      const totalBalance = parseFloat(usdtDetail?.eq || "0");
-      const availableBalance = parseFloat(usdtDetail?.availBal || "0");
-
-      const positions = await this.getOpenPositions(
-        apiKey,
-        apiSecret,
-        passphrase,
-      );
-      const totalUnrealizedProfit = positions.reduce(
-        (sum, pos) => sum + pos.unrealizedPnl,
-        0,
-      );
-
       return {
-        totalBalance,
-        availableBalance,
-        totalUnrealizedProfit,
+        totalBalance: parseFloat(usdtDetail?.eq || "0"),
+        availableBalance: parseFloat(usdtDetail?.availBal || "0"),
+        totalUnrealizedProfit: parseFloat(usdtDetail?.upl || "0"),
       };
     } catch (error) {
       this.logger.error("Error fetching OKX account balance:", error.message);
@@ -281,14 +268,12 @@ export class OkxService {
           const orders = ordersResponse.data.data;
           for (const order of orders) {
             if (order.ordType === "conditional" && order.tpTriggerPx) {
-              await client.post("/api/v5/trade/cancel-algos", {
-                data: [
-                  {
-                    instId: symbol,
-                    algoId: order.algoId,
-                  },
-                ],
-              });
+              await client.post("/api/v5/trade/cancel-algos", [
+                {
+                  instId: symbol,
+                  algoId: order.algoId,
+                },
+              ]);
             }
           }
         }
