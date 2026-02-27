@@ -8,10 +8,10 @@ import { OkxService } from "../okx/okx.service";
 import { FileLoggerService } from "../logger/logger.service";
 import {
   UserApiKeys,
-  UserActiveExchange,
   UserBotConfig,
   UserBotsConfig,
 } from "../interfaces/user.interface";
+import { UserSettingsService } from "../user/user-settings.service";
 
 // Bot type shorthand → full BotType string
 const BOT_TYPE_MAP: Record<string, string> = {
@@ -23,6 +23,7 @@ const BOT_TYPE_MAP: Record<string, string> = {
   CT6: "BOT_FUTURE_CT_6",
   CT7: "BOT_FUTURE_CT_7",
   CT8: "BOT_FUTURE_CT_8",
+  AI1: "BOT_FUTURE_AI_1",
   SPOT: "BOT_SPOT",
 };
 
@@ -55,6 +56,7 @@ export class TelegramBotService implements OnModuleInit {
     private binanceService: BinanceService,
     private okxService: OkxService,
     private fileLogger: FileLoggerService,
+    private userSettingsService: UserSettingsService,
   ) {
     this.fileLogger.setContext(TelegramBotService.name);
   }
@@ -142,16 +144,6 @@ export class TelegramBotService implements OnModuleInit {
       await this.handleClosePosition(msg, match);
     });
 
-    // Command: /setretry [exchange] [max_retry] [volume_reduction%]
-    this.bot.onText(/\/setretry (.+)/, async (msg, match) => {
-      await this.handleSetRetry(msg, match);
-    });
-
-    // Command: /clearretry [exchange]
-    this.bot.onText(/\/clearretry (.+)/, async (msg, match) => {
-      await this.handleClearRetry(msg, match);
-    });
-
     // Command: /setbot [exchange] [botType] [amount] [leverage]
     this.bot.onText(/\/setbot (.+)/, async (msg, match) => {
       await this.handleSetBot(msg, match);
@@ -178,28 +170,11 @@ export class TelegramBotService implements OnModuleInit {
     });
   }
 
-  // Helper: Get active exchange for a user (defaults to first found if not set)
+  // Helper: Get active exchange for a user (delegates to UserSettingsService)
   private async getActiveExchange(
     telegramId: number,
   ): Promise<"binance" | "okx" | null> {
-    const activeData = await this.redisService.get<UserActiveExchange>(
-      `user:${telegramId}:active`,
-    );
-
-    if (activeData) {
-      return activeData.exchange;
-    }
-
-    // If no active exchange is set, check which accounts exist
-    const binanceExists = await this.redisService.exists(
-      `user:${telegramId}:binance`,
-    );
-    const okxExists = await this.redisService.exists(`user:${telegramId}:okx`);
-
-    // Default to binance if it exists, otherwise okx
-    if (binanceExists) return "binance";
-    if (okxExists) return "okx";
-    return null;
+    return this.userSettingsService.getActiveExchange(telegramId);
   }
 
   // Helper: Set active exchange for a user
@@ -207,20 +182,15 @@ export class TelegramBotService implements OnModuleInit {
     telegramId: number,
     exchange: "binance" | "okx",
   ): Promise<void> {
-    await this.redisService.set(`user:${telegramId}:active`, {
-      exchange,
-      setAt: new Date().toISOString(),
-    });
+    await this.userSettingsService.setActiveExchange(telegramId, exchange);
   }
 
-  // Helper: Get user data for a specific exchange
+  // Helper: Get user data (API keys) for a specific exchange
   private async getUserData(
     telegramId: number,
     exchange: "binance" | "okx",
   ): Promise<UserApiKeys | null> {
-    return await this.redisService.get<UserApiKeys>(
-      `user:${telegramId}:${exchange}`,
-    );
+    return this.userSettingsService.getApiKeys(telegramId, exchange);
   }
 
   // Helper: Get user data for active exchange
@@ -229,27 +199,23 @@ export class TelegramBotService implements OnModuleInit {
   ): Promise<UserApiKeys | null> {
     const activeExchange = await this.getActiveExchange(telegramId);
     if (!activeExchange) return null;
-    return await this.getUserData(telegramId, activeExchange);
+    return this.getUserData(telegramId, activeExchange);
   }
 
   @Cron(CronExpression.EVERY_30_SECONDS)
   private async checkTakeProfitTargets() {
     try {
-      // Get all users with TP set (exchange-specific)
-      const keys = await this.redisService.keys("user:*:tp:*");
+      // Query MongoDB for all users with TP configured (replaces Redis key scan)
+      const usersWithTp = await this.userSettingsService.findAllUsersWithTp();
 
-      for (const key of keys) {
-        // Key format: binance-bot:user:{telegramId}:tp:{exchange}
-        const parts = key.split(":");
-        const telegramId = parts[2];
-        const exchange = parts[4] as "binance" | "okx";
-
+      for (const { telegramId, exchange } of usersWithTp) {
         // Check which TP mode is configured
-        const tpMode = await this.redisService.get<{
-          mode: "aggregate" | "individual";
-        }>(`user:${telegramId}:tp:mode:${exchange}`);
+        const tpMode = await this.userSettingsService.getTpMode(
+          telegramId,
+          exchange,
+        );
 
-        const userData = await this.getUserData(parseInt(telegramId), exchange);
+        const userData = await this.getUserData(telegramId, exchange);
         if (!userData) continue;
 
         const lockKey = `tp:${telegramId}:${exchange}`;
@@ -259,14 +225,10 @@ export class TelegramBotService implements OnModuleInit {
         // Run appropriate TP check based on mode
         if (tpMode?.mode === "individual") {
           // Individual position TP mode
-          await this.checkIndividualPositionTP(
-            parseInt(telegramId),
-            exchange,
-            userData,
-          );
+          await this.checkIndividualPositionTP(telegramId, exchange, userData);
         } else {
           // Aggregate TP mode (default)
-          await this.checkAggregateTP(parseInt(telegramId), exchange, userData);
+          await this.checkAggregateTP(telegramId, exchange, userData);
         }
 
         this.processingLocks.delete(lockKey);
@@ -285,9 +247,10 @@ export class TelegramBotService implements OnModuleInit {
     userData: UserApiKeys,
   ) {
     try {
-      const tpConfig = await this.redisService.get<{
-        percentage: number;
-      }>(`user:${telegramId}:tp:individual:${exchange}`);
+      const tpConfig = await this.userSettingsService.getTpIndividual(
+        telegramId,
+        exchange,
+      );
 
       if (!tpConfig) return;
 
@@ -326,12 +289,10 @@ export class TelegramBotService implements OnModuleInit {
       );
 
       // Check if retry is enabled
-      const retryConfig = await this.redisService.get<{
-        maxRetry: number;
-        currentRetryCount: number;
-        volumeReductionPercent: number;
-        enabled: boolean;
-      }>(`user:${telegramId}:retry:${exchange}`);
+      const retryConfig = await this.userSettingsService.getRetryConfig(
+        telegramId,
+        exchange,
+      );
 
       // Store positions for re-entry if retry is enabled
       if (
@@ -431,10 +392,10 @@ export class TelegramBotService implements OnModuleInit {
     userData: UserApiKeys,
   ) {
     try {
-      const tpData = await this.redisService.get<{
-        percentage: number;
-        initialBalance: number;
-      }>(`user:${telegramId}:tp:${exchange}`);
+      const tpData = await this.userSettingsService.getTpConfig(
+        telegramId,
+        exchange,
+      );
 
       if (!tpData) return;
 
@@ -480,12 +441,10 @@ export class TelegramBotService implements OnModuleInit {
             });
 
             // Fetch retryConfig once, reuse below for message building
-            const retryConfig = await this.redisService.get<{
-              maxRetry: number;
-              currentRetryCount: number;
-              volumeReductionPercent: number;
-              enabled: boolean;
-            }>(`user:${telegramId}:retry:binance`);
+            const retryConfig = await this.userSettingsService.getRetryConfig(
+              telegramId,
+              "binance",
+            );
 
             if (profitablePositions.length > 0) {
               // Store positions for re-entry if retry is enabled
@@ -642,12 +601,10 @@ export class TelegramBotService implements OnModuleInit {
             });
 
             // Fetch retryConfig once, reuse below for message building
-            const retryConfig = await this.redisService.get<{
-              maxRetry: number;
-              currentRetryCount: number;
-              volumeReductionPercent: number;
-              enabled: boolean;
-            }>(`user:${telegramId}:retry:okx`);
+            const retryConfig = await this.userSettingsService.getRetryConfig(
+              telegramId,
+              "okx",
+            );
 
             if (profitablePositions.length > 0) {
               // Store positions for re-entry if retry is enabled
@@ -1021,10 +978,10 @@ export class TelegramBotService implements OnModuleInit {
 
       // Store open time for expiry-based closing
       await this.redisService
-        .set(
-          `user:${telegramId}:opentime:${exchange}:${reentryData.symbol}`,
-          { openedAt: Date.now(), side: reentryData.side },
-        )
+        .set(`user:${telegramId}:opentime:${exchange}:${reentryData.symbol}`, {
+          openedAt: Date.now(),
+          side: reentryData.side,
+        })
         .catch(() => {});
 
       // Get ACTUAL execution price from order result
@@ -1220,17 +1177,16 @@ export class TelegramBotService implements OnModuleInit {
 
         // If no more re-entries pending, reset retry count in config
         if (remainingReentries.length === 0) {
-          const retryConfig = await this.redisService.get<{
-            maxRetry: number;
-            currentRetryCount: number;
-            volumeReductionPercent: number;
-            enabled: boolean;
-          }>(`user:${telegramId}:retry:${exchange}`);
+          const retryConfig = await this.userSettingsService.getRetryConfig(
+            telegramId,
+            exchange,
+          );
 
           if (retryConfig) {
             // Reset retry count to max for next time
-            await this.redisService.set(
-              `user:${telegramId}:retry:${exchange}`,
+            await this.userSettingsService.setRetryConfig(
+              telegramId,
+              exchange,
               {
                 ...retryConfig,
                 currentRetryCount: retryConfig.maxRetry,
@@ -1315,9 +1271,8 @@ export class TelegramBotService implements OnModuleInit {
     const arg = match?.[1]?.trim().toLowerCase();
 
     if (arg !== "on" && arg !== "off") {
-      const disabled = await this.redisService.get<boolean>(
-        `user:${telegramId}:updates:disabled`,
-      );
+      const disabled =
+        await this.userSettingsService.getUpdatesDisabled(telegramId);
       const status = disabled ? "🔴 OFF" : "🟢 ON";
       await this.bot.sendMessage(
         chatId,
@@ -1329,19 +1284,17 @@ export class TelegramBotService implements OnModuleInit {
 
     try {
       if (arg === "off") {
-        await this.redisService.set(`user:${telegramId}:updates:disabled`, true);
+        await this.userSettingsService.setUpdatesDisabled(telegramId, true);
         await this.bot.sendMessage(
           chatId,
           "🔴 5-minute updates *disabled*.\n\nUse /updates on to re-enable.",
           { parse_mode: "Markdown" },
         );
       } else {
-        await this.redisService.delete(`user:${telegramId}:updates:disabled`);
-        await this.bot.sendMessage(
-          chatId,
-          "🟢 5-minute updates *enabled*.",
-          { parse_mode: "Markdown" },
-        );
+        await this.userSettingsService.setUpdatesDisabled(telegramId, false);
+        await this.bot.sendMessage(chatId, "🟢 5-minute updates *enabled*.", {
+          parse_mode: "Markdown",
+        });
       }
     } catch (error) {
       await this.bot.sendMessage(chatId, `❌ Error: ${error.message}`);
@@ -1355,32 +1308,26 @@ export class TelegramBotService implements OnModuleInit {
       "========== Running sendPeriodicUpdates cron job ==========",
     );
     try {
-      // Get all users with TP set (exchange-specific)
-      const keys = await this.redisService.keys("user:*:tp:*");
+      // Query MongoDB for all users with TP configured (replaces Redis key scan)
+      const usersWithTp = await this.userSettingsService.findAllUsersWithTp();
       this.logger.log(
-        `Found ${keys.length} users with TP set for periodic updates`,
+        `Found ${usersWithTp.length} user-exchange pairs with TP set for periodic updates`,
       );
 
-      for (const key of keys) {
-        // Key format: binance-bot:user:{telegramId}:tp:{exchange}
-        const parts = key.split(":");
-        const telegramId = parts[2];
-        const exchange = parts[4] as "binance" | "okx";
+      for (const { telegramId, exchange } of usersWithTp) {
         this.logger.debug(
           `Processing periodic update for user ${telegramId} (${exchange})`,
         );
-        this.logger.debug(`Full key: ${key}`);
 
         // Skip if user has disabled periodic updates
-        const updatesDisabled = await this.redisService.get<boolean>(
-          `user:${telegramId}:updates:disabled`,
-        );
+        const updatesDisabled =
+          await this.userSettingsService.getUpdatesDisabled(telegramId);
         if (updatesDisabled) continue;
 
-        const tpData = await this.redisService.get<{
-          percentage: number;
-          initialBalance: number;
-        }>(`user:${telegramId}:tp:${exchange}`);
+        const tpData = await this.userSettingsService.getTpConfig(
+          telegramId,
+          exchange,
+        );
 
         if (!tpData) {
           this.logger.warn(
@@ -1389,7 +1336,7 @@ export class TelegramBotService implements OnModuleInit {
           continue;
         }
 
-        const userData = await this.getUserData(parseInt(telegramId), exchange);
+        const userData = await this.getUserData(telegramId, exchange);
         if (!userData) {
           this.logger.warn(
             `No user data found for user ${telegramId} (${exchange})`,
@@ -1411,9 +1358,10 @@ export class TelegramBotService implements OnModuleInit {
             const unrealizedPnl = balance.totalUnrealizedProfit;
 
             // Check TP mode
-            const tpMode = await this.redisService.get<{
-              mode: "aggregate" | "individual";
-            }>(`user:${telegramId}:tp:mode:${exchange}`);
+            const tpMode = await this.userSettingsService.getTpMode(
+              telegramId,
+              exchange,
+            );
 
             let tpMessage: string;
             if (tpMode?.mode === "individual") {
@@ -1471,9 +1419,10 @@ export class TelegramBotService implements OnModuleInit {
             const unrealizedPnl = balance.totalUnrealizedProfit;
 
             // Check TP mode
-            const tpMode = await this.redisService.get<{
-              mode: "aggregate" | "individual";
-            }>(`user:${telegramId}:tp:mode:${exchange}`);
+            const tpMode = await this.userSettingsService.getTpMode(
+              telegramId,
+              exchange,
+            );
 
             let tpMessage: string;
             if (tpMode?.mode === "individual") {
@@ -1578,25 +1527,7 @@ export class TelegramBotService implements OnModuleInit {
     chatId: number,
   ): Promise<void> {
     try {
-      // Update chatId for all exchange accounts
-      const binanceData = await this.getUserData(telegramId, "binance");
-      const okxData = await this.getUserData(telegramId, "okx");
-
-      if (binanceData && !binanceData.chatId) {
-        this.logger.log(
-          `Updating Binance account for user ${telegramId} with chatId: ${chatId}`,
-        );
-        binanceData.chatId = chatId;
-        await this.redisService.set(`user:${telegramId}:binance`, binanceData);
-      }
-
-      if (okxData && !okxData.chatId) {
-        this.logger.log(
-          `Updating OKX account for user ${telegramId} with chatId: ${chatId}`,
-        );
-        okxData.chatId = chatId;
-        await this.redisService.set(`user:${telegramId}:okx`, okxData);
-      }
+      await this.userSettingsService.updateChatId(telegramId, chatId);
     } catch (error) {
       this.logger.error(
         `Error ensuring chatId for user ${telegramId}:`,
@@ -1609,10 +1540,10 @@ export class TelegramBotService implements OnModuleInit {
     const chatId = msg.chat.id;
     const telegramId = msg.from.id;
 
-    const binanceExists = await this.redisService.exists(
-      `user:${telegramId}:binance`,
-    );
-    const okxExists = await this.redisService.exists(`user:${telegramId}:okx`);
+    const [binanceExists, okxExists] = await Promise.all([
+      this.userSettingsService.hasExchangeAccount(telegramId, "binance"),
+      this.userSettingsService.hasExchangeAccount(telegramId, "okx"),
+    ]);
 
     if (binanceExists || okxExists) {
       // Ensure chatId is stored for existing users
@@ -1620,10 +1551,7 @@ export class TelegramBotService implements OnModuleInit {
 
       const activeExchange = await this.getActiveExchange(telegramId);
       const tpData = activeExchange
-        ? await this.redisService.get<{
-            percentage: number;
-            initialBalance: number;
-          }>(`user:${telegramId}:tp:${activeExchange}`)
+        ? await this.userSettingsService.getTpConfig(telegramId, activeExchange)
         : null;
 
       let accountInfo = "📊 *Your Accounts*\n\n";
@@ -1652,9 +1580,6 @@ export class TelegramBotService implements OnModuleInit {
           "/setposition `exchange %` — TP theo từng vị thế\n" +
           "/setmode `exchange aggregate|individual` — Đổi chế độ TP\n" +
           "/cleartp `exchange` — Xóa cấu hình TP\n\n" +
-          "🔄 *Re-entry*\n" +
-          "/setretry `exchange max_retry volume_reduction%` — Bật tự động vào lại\n" +
-          "/clearretry `exchange` — Tắt tự động vào lại\n\n" +
           "⚙️ *Tài khoản*\n" +
           "/accounts — Xem cấu hình & trạng thái TP\n" +
           "/update `exchange` — Xem số dư & tiến độ TP\n" +
@@ -1663,7 +1588,13 @@ export class TelegramBotService implements OnModuleInit {
           "/setbot `exchange CT1 volume [lev]` — Bật bot tự động\n" +
           "/clearbot `exchange CT1` — Tắt một bot\n" +
           "/clearbots `exchange` — Tắt tất cả bots\n" +
-          "/listbots — Xem danh sách bots đang chạy\n" +
+          "/listbots — Xem danh sách bots đang chạy\n\n" +
+          "🧠 *AI Signal*\n" +
+          "/ai subscribe — Đăng ký nhận tín hiệu AI tự động\n" +
+          "/ai unsubscribe — Hủy đăng ký\n" +
+          "/ai status — Trạng thái hệ thống AI\n" +
+          "/ai check `SYMBOL` — Kiểm tra tín hiệu đang chạy\n" +
+          "/ai — Xem tất cả lệnh AI\n" +
           "\n⏱ *Updates*\n" +
           "/updates on — Bật cập nhật 5 phút\n" +
           "/updates off — Tắt cập nhật 5 phút",
@@ -1673,13 +1604,15 @@ export class TelegramBotService implements OnModuleInit {
       await this.bot.sendMessage(
         chatId,
         "👋 Welcome to Crypto Trading Bot!\n\n" +
-          "To get started, please set your API keys:\n\n" +
+          "📡 *Nhận tín hiệu AI miễn phí:*\n" +
+          "Gõ /ai subscribe để nhận tín hiệu giao dịch AI tự động \\- không cần cấu hình thêm\\!\n\n" +
+          "⚙️ *Cấu hình để tự động đặt lệnh:*\n\n" +
           "*For Binance:*\n" +
-          "/setkeys binance [api_key] [api_secret]\n\n" +
+          "/setkeys binance [api\\_key] [api\\_secret]\n\n" +
           "*For OKX:*\n" +
-          "/setkeys okx [api_key] [api_secret] [passphrase]\n\n" +
+          "/setkeys okx [api\\_key] [api\\_secret] [passphrase]\n\n" +
           "⚠️ Make sure your API key has Futures trading permissions enabled.",
-        { parse_mode: "Markdown" },
+        { parse_mode: "MarkdownV2" },
       );
     }
   }
@@ -1745,18 +1678,15 @@ export class TelegramBotService implements OnModuleInit {
         await this.binanceService.getAccountBalance(apiKey, apiSecret);
       }
 
-      // Store in Redis
-      const userData: UserApiKeys = {
+      // Save to MongoDB
+      await this.userSettingsService.saveApiKeys(
         telegramId,
         chatId,
+        exchange,
         apiKey,
         apiSecret,
-        passphrase: exchange === "okx" ? passphrase : undefined,
-        exchange,
-        createdAt: new Date().toISOString(),
-      };
-
-      await this.redisService.set(`user:${telegramId}:${exchange}`, userData);
+        exchange === "okx" ? passphrase : undefined,
+      );
       this.logger.log(
         `Stored ${exchange.toUpperCase()} user data for ${telegramId} with chatId ${chatId}`,
       );
@@ -2004,7 +1934,7 @@ export class TelegramBotService implements OnModuleInit {
       if (binanceData) {
         const isActive = activeExchange === "binance";
 
-        // Fetch live data + config in parallel
+        // Fetch settings from DB + live data from exchange in parallel
         const [
           balance,
           positions,
@@ -2021,26 +1951,12 @@ export class TelegramBotService implements OnModuleInit {
           this.binanceService
             .getOpenPositions(binanceData.apiKey, binanceData.apiSecret)
             .catch(() => []),
-          this.redisService.get<{
-            percentage: number;
-            initialBalance: number;
-          }>(`user:${telegramId}:tp:binance`),
-          this.redisService.get<{ mode: "aggregate" | "individual" }>(
-            `user:${telegramId}:tp:mode:binance`,
-          ),
-          this.redisService.get<{ percentage: number }>(
-            `user:${telegramId}:tp:individual:binance`,
-          ),
-          this.redisService.get<{
-            maxRetry: number;
-            currentRetryCount: number;
-            volumeReductionPercent: number;
-            enabled: boolean;
-          }>(`user:${telegramId}:retry:binance`),
-          this.redisService.get<UserBotsConfig>(
-            `user:${telegramId}:bots:binance`,
-          ),
-          this.redisService.get<number>(`user:${telegramId}:maxpos:binance`),
+          this.userSettingsService.getTpConfig(telegramId, "binance"),
+          this.userSettingsService.getTpMode(telegramId, "binance"),
+          this.userSettingsService.getTpIndividual(telegramId, "binance"),
+          this.userSettingsService.getRetryConfig(telegramId, "binance"),
+          this.userSettingsService.getBotsConfig(telegramId, "binance"),
+          this.userSettingsService.getMaxPositions(telegramId, "binance"),
         ]);
 
         const longCount = positions.filter((p) => p.side === "LONG").length;
@@ -2107,7 +2023,7 @@ export class TelegramBotService implements OnModuleInit {
       if (okxData) {
         const isActive = activeExchange === "okx";
 
-        // Fetch live data + config in parallel
+        // Fetch settings from DB + live data from exchange in parallel
         const [
           balance,
           positions,
@@ -2132,24 +2048,12 @@ export class TelegramBotService implements OnModuleInit {
               okxData.passphrase,
             )
             .catch(() => []),
-          this.redisService.get<{
-            percentage: number;
-            initialBalance: number;
-          }>(`user:${telegramId}:tp:okx`),
-          this.redisService.get<{ mode: "aggregate" | "individual" }>(
-            `user:${telegramId}:tp:mode:okx`,
-          ),
-          this.redisService.get<{ percentage: number }>(
-            `user:${telegramId}:tp:individual:okx`,
-          ),
-          this.redisService.get<{
-            maxRetry: number;
-            currentRetryCount: number;
-            volumeReductionPercent: number;
-            enabled: boolean;
-          }>(`user:${telegramId}:retry:okx`),
-          this.redisService.get<UserBotsConfig>(`user:${telegramId}:bots:okx`),
-          this.redisService.get<number>(`user:${telegramId}:maxpos:okx`),
+          this.userSettingsService.getTpConfig(telegramId, "okx"),
+          this.userSettingsService.getTpMode(telegramId, "okx"),
+          this.userSettingsService.getTpIndividual(telegramId, "okx"),
+          this.userSettingsService.getRetryConfig(telegramId, "okx"),
+          this.userSettingsService.getBotsConfig(telegramId, "okx"),
+          this.userSettingsService.getMaxPositions(telegramId, "okx"),
         ]);
 
         const longCount = positions.filter((p) => p.side === "LONG").length;
@@ -2297,22 +2201,26 @@ export class TelegramBotService implements OnModuleInit {
 
       const targetProfit = (initialBalance * percentage) / 100;
 
-      // Store TP percentage and initial balance in Redis (exchange-specific)
-      await this.redisService.set(`user:${telegramId}:tp:${exchange}`, {
+      // Persist TP config to MongoDB
+      await this.userSettingsService.setTpConfig(
+        telegramId,
+        exchange,
         percentage,
         initialBalance,
-        setAt: new Date().toISOString(),
-      });
+      );
 
       // Check if switching from individual mode
-      const existingMode = await this.redisService.get<{
-        mode: "aggregate" | "individual";
-      }>(`user:${telegramId}:tp:mode:${exchange}`);
+      const existingMode = await this.userSettingsService.getTpMode(
+        telegramId,
+        exchange,
+      );
 
       // Set mode to aggregate
-      await this.redisService.set(`user:${telegramId}:tp:mode:${exchange}`, {
-        mode: "aggregate",
-      });
+      await this.userSettingsService.setTpMode(
+        telegramId,
+        exchange,
+        "aggregate",
+      );
 
       const modeSwitch =
         existingMode?.mode === "individual"
@@ -2408,30 +2316,32 @@ export class TelegramBotService implements OnModuleInit {
       }
 
       // Check if switching from aggregate mode
-      const existingMode = await this.redisService.get<{
-        mode: "aggregate" | "individual";
-      }>(`user:${telegramId}:tp:mode:${exchange}`);
-
-      // Store individual TP configuration
-      await this.redisService.set(
-        `user:${telegramId}:tp:individual:${exchange}`,
-        {
-          percentage,
-          setAt: new Date().toISOString(),
-        },
+      const existingMode = await this.userSettingsService.getTpMode(
+        telegramId,
+        exchange,
       );
 
-      // Store mode as individual and keep a marker in tp:{exchange} for cron to detect
-      await this.redisService.set(`user:${telegramId}:tp:mode:${exchange}`, {
-        mode: "individual",
-      });
+      // Store individual TP configuration in MongoDB
+      await this.userSettingsService.setTpIndividual(
+        telegramId,
+        exchange,
+        percentage,
+      );
 
-      // Set marker for cron job detection
-      await this.redisService.set(`user:${telegramId}:tp:${exchange}`, {
-        percentage: percentage,
-        initialBalance: 0, // Not used in individual mode
-        setAt: new Date().toISOString(),
-      });
+      // Set mode to individual
+      await this.userSettingsService.setTpMode(
+        telegramId,
+        exchange,
+        "individual",
+      );
+
+      // Store a marker TP config (initialBalance=0 signals individual mode to cron)
+      await this.userSettingsService.setTpConfig(
+        telegramId,
+        exchange,
+        percentage,
+        0,
+      );
 
       const modeSwitch =
         existingMode?.mode === "aggregate"
@@ -2527,10 +2437,10 @@ export class TelegramBotService implements OnModuleInit {
       }
 
       // Check if TP is configured
-      const tpData = await this.redisService.get<{
-        percentage: number;
-        initialBalance: number;
-      }>(`user:${telegramId}:tp:${exchange}`);
+      const tpData = await this.userSettingsService.getTpConfig(
+        telegramId,
+        exchange,
+      );
 
       if (!tpData) {
         await this.bot.sendMessage(
@@ -2544,9 +2454,10 @@ export class TelegramBotService implements OnModuleInit {
       }
 
       // Check current mode
-      const currentMode = await this.redisService.get<{
-        mode: "aggregate" | "individual";
-      }>(`user:${telegramId}:tp:mode:${exchange}`);
+      const currentMode = await this.userSettingsService.getTpMode(
+        telegramId,
+        exchange,
+      );
 
       if (currentMode?.mode === mode) {
         await this.bot.sendMessage(
@@ -2556,7 +2467,7 @@ export class TelegramBotService implements OnModuleInit {
         return;
       }
 
-      // Clear pending re-entry positions when switching modes
+      // Clear pending re-entry positions when switching modes (stays in Redis — ephemeral)
       const reentryKeys = await this.redisService.keys(
         `user:${telegramId}:reentry:${exchange}:*`,
       );
@@ -2566,27 +2477,27 @@ export class TelegramBotService implements OnModuleInit {
         clearedReentries++;
       }
 
-      // Switch mode
-      await this.redisService.set(`user:${telegramId}:tp:mode:${exchange}`, {
-        mode: mode,
-      });
+      // Switch mode in MongoDB
+      await this.userSettingsService.setTpMode(telegramId, exchange, mode);
 
       let modeDescription: string;
       let tpPercentage: number;
 
       if (mode === "individual") {
-        const individualConfig = await this.redisService.get<{
-          percentage: number;
-        }>(`user:${telegramId}:tp:individual:${exchange}`);
+        const individualConfig = await this.userSettingsService.getTpIndividual(
+          telegramId,
+          exchange,
+        );
 
         tpPercentage = individualConfig?.percentage || tpData.percentage;
 
-        // Update marker for individual mode
-        await this.redisService.set(`user:${telegramId}:tp:${exchange}`, {
-          percentage: tpPercentage,
-          initialBalance: 0, // Marker for individual mode
-          setAt: new Date().toISOString(),
-        });
+        // Update TP config marker for individual mode (initialBalance=0)
+        await this.userSettingsService.setTpConfig(
+          telegramId,
+          exchange,
+          tpPercentage,
+          0,
+        );
 
         modeDescription =
           `📍 *Individual Position Mode*\n\n` +
@@ -2598,11 +2509,12 @@ export class TelegramBotService implements OnModuleInit {
         const targetProfit = (tpData.initialBalance * tpPercentage) / 100;
 
         // Restore aggregate mode marker
-        await this.redisService.set(`user:${telegramId}:tp:${exchange}`, {
-          percentage: tpPercentage,
-          initialBalance: tpData.initialBalance,
-          setAt: new Date().toISOString(),
-        });
+        await this.userSettingsService.setTpConfig(
+          telegramId,
+          exchange,
+          tpPercentage,
+          tpData.initialBalance,
+        );
 
         modeDescription =
           `📊 *Aggregate Mode*\n\n` +
@@ -2614,12 +2526,10 @@ export class TelegramBotService implements OnModuleInit {
       }
 
       // Check if retry is configured to show it's preserved
-      const retryConfig = await this.redisService.get<{
-        maxRetry: number;
-        currentRetryCount: number;
-        volumeReductionPercent: number;
-        enabled: boolean;
-      }>(`user:${telegramId}:retry:${exchange}`);
+      const retryConfig = await this.userSettingsService.getRetryConfig(
+        telegramId,
+        exchange,
+      );
 
       let retryNote = "";
       if (retryConfig && retryConfig.enabled) {
@@ -2688,8 +2598,10 @@ export class TelegramBotService implements OnModuleInit {
         return;
       }
 
-      const tpKey = `user:${telegramId}:tp:${exchange}`;
-      const tpExists = await this.redisService.exists(tpKey);
+      const tpExists = await this.userSettingsService.hasTpConfig(
+        telegramId,
+        exchange,
+      );
 
       if (!tpExists) {
         await this.bot.sendMessage(
@@ -2699,12 +2611,8 @@ export class TelegramBotService implements OnModuleInit {
         return;
       }
 
-      // Clear all TP-related keys
-      await this.redisService.delete(tpKey);
-      await this.redisService.delete(`user:${telegramId}:tp:mode:${exchange}`);
-      await this.redisService.delete(
-        `user:${telegramId}:tp:individual:${exchange}`,
-      );
+      // Clear all TP-related fields from MongoDB
+      await this.userSettingsService.clearTpConfig(telegramId, exchange);
 
       await this.bot.sendMessage(
         chatId,
@@ -2946,8 +2854,9 @@ export class TelegramBotService implements OnModuleInit {
         return;
       }
 
-      await this.redisService.set(
-        `user:${telegramId}:maxpos:${exchange}`,
+      await this.userSettingsService.setMaxPositions(
+        telegramId,
+        exchange,
         maxPositions,
       );
 
@@ -3000,10 +2909,10 @@ export class TelegramBotService implements OnModuleInit {
         return;
       }
 
-      const tpData = await this.redisService.get<{
-        percentage: number;
-        initialBalance: number;
-      }>(`user:${telegramId}:tp:${exchange}`);
+      const tpData = await this.userSettingsService.getTpConfig(
+        telegramId,
+        exchange,
+      );
 
       if (!tpData) {
         await this.bot.sendMessage(
@@ -3033,9 +2942,10 @@ export class TelegramBotService implements OnModuleInit {
           const unrealizedPnl = balance.totalUnrealizedProfit;
 
           // Check TP mode
-          const tpMode = await this.redisService.get<{
-            mode: "aggregate" | "individual";
-          }>(`user:${telegramId}:tp:mode:${exchange}`);
+          const tpMode = await this.userSettingsService.getTpMode(
+            telegramId,
+            exchange,
+          );
 
           let tpMessage: string;
           if (tpMode?.mode === "individual") {
@@ -3086,12 +2996,13 @@ export class TelegramBotService implements OnModuleInit {
           const unrealizedPnl = balance.totalUnrealizedProfit;
 
           // Check TP mode
-          const tpMode = await this.redisService.get<{
-            mode: "aggregate" | "individual";
-          }>(`user:${telegramId}:tp:mode:${exchange}`);
+          const tpModeOkx = await this.userSettingsService.getTpMode(
+            telegramId,
+            exchange,
+          );
 
           let tpMessage: string;
-          if (tpMode?.mode === "individual") {
+          if (tpModeOkx?.mode === "individual") {
             // Individual mode
             tpMessage =
               `🎯 TP Mode: Individual\n` +
@@ -3365,205 +3276,6 @@ export class TelegramBotService implements OnModuleInit {
     }
   }
 
-  private async handleSetRetry(
-    msg: TelegramBot.Message,
-    match: RegExpExecArray,
-  ) {
-    const chatId = msg.chat.id;
-    const telegramId = msg.from.id;
-
-    await this.ensureChatIdStored(telegramId, chatId);
-
-    let exchange: "binance" | "okx" | undefined;
-    let maxRetry: number | undefined;
-    let volumeReductionPercent: number | undefined;
-
-    try {
-      if (!match || match.length < 2) {
-        await this.bot.sendMessage(
-          chatId,
-          "❌ Invalid format. Use:\n/setretry exchange max_retry [volume_reduction%]\n\n" +
-            "Examples:\n/setretry binance 5\n/setretry okx 3 20\n\n" +
-            "• max_retry: 1-10 (number of re-entries)\n" +
-            "• volume_reduction: 1-50% (default 15%)",
-        );
-        return;
-      }
-
-      const args = match[1].trim().split(/\s+/);
-      if (args.length < 2) {
-        await this.bot.sendMessage(
-          chatId,
-          "❌ Please provide exchange and max retry count.\nExample: /setretry binance 5",
-        );
-        return;
-      }
-
-      exchange = args[0].toLowerCase() as "binance" | "okx";
-      maxRetry = parseInt(args[1]);
-      volumeReductionPercent = args[2] ? parseFloat(args[2]) : 15;
-
-      if (exchange !== "binance" && exchange !== "okx") {
-        await this.bot.sendMessage(
-          chatId,
-          "❌ Invalid exchange. Please use 'binance' or 'okx'.",
-        );
-        return;
-      }
-
-      if (isNaN(maxRetry) || maxRetry < 1 || maxRetry > 10) {
-        await this.bot.sendMessage(
-          chatId,
-          "❌ Max retry must be between 1 and 10.",
-        );
-        return;
-      }
-
-      if (
-        isNaN(volumeReductionPercent) ||
-        volumeReductionPercent < 1 ||
-        volumeReductionPercent > 50
-      ) {
-        await this.bot.sendMessage(
-          chatId,
-          "❌ Volume reduction must be between 1% and 50%.",
-        );
-        return;
-      }
-
-      const userData = await this.getUserData(telegramId, exchange);
-      if (!userData) {
-        await this.bot.sendMessage(
-          chatId,
-          `❌ ${exchange.toUpperCase()} account not found.\nUse /setkeys ${exchange} to connect.`,
-        );
-        return;
-      }
-
-      // Store retry configuration
-      await this.redisService.set(`user:${telegramId}:retry:${exchange}`, {
-        maxRetry,
-        currentRetryCount: maxRetry,
-        volumeReductionPercent,
-        enabled: true,
-        setAt: new Date().toISOString(),
-      });
-
-      await this.bot.sendMessage(
-        chatId,
-        `✅ *Retry Enabled for ${exchange.toUpperCase()}*\n\n` +
-          `📊 Configuration:\n` +
-          `├ Max Retries: ${maxRetry}\n` +
-          `├ Volume Reduction: ${volumeReductionPercent}% per retry\n` +
-          `└ Status: Active\n\n` +
-          `When TP is reached, positions will be re-entered automatically when price returns to entry level.\n\n` +
-          `Use /clearretry ${exchange} to disable.`,
-        { parse_mode: "Markdown" },
-      );
-
-      this.logger.log(
-        `Retry enabled for user ${telegramId} (${exchange}): maxRetry=${maxRetry}, volumeReduction=${volumeReductionPercent}%`,
-      );
-    } catch (error) {
-      await this.bot.sendMessage(
-        chatId,
-        `❌ Error setting retry: ${error.message}`,
-      );
-      this.logger.error(
-        `Error in handleSetRetry for user ${telegramId}:`,
-        error.message,
-      );
-      this.fileLogger.logBusinessError("handleSetRetry", error, telegramId, {
-        exchange,
-        maxRetry,
-        volumeReductionPercent,
-      });
-    }
-  }
-
-  private async handleClearRetry(
-    msg: TelegramBot.Message,
-    match: RegExpExecArray,
-  ) {
-    const chatId = msg.chat.id;
-    const telegramId = msg.from.id;
-
-    await this.ensureChatIdStored(telegramId, chatId);
-
-    let exchange: "binance" | "okx" | undefined;
-
-    try {
-      if (!match || match.length < 2) {
-        await this.bot.sendMessage(
-          chatId,
-          "❌ Invalid format. Use:\n/clearretry exchange\n\nExamples:\n/clearretry binance\n/clearretry okx",
-        );
-        return;
-      }
-
-      exchange = match[1].trim().toLowerCase() as "binance" | "okx";
-
-      if (exchange !== "binance" && exchange !== "okx") {
-        await this.bot.sendMessage(
-          chatId,
-          "❌ Invalid exchange. Please use 'binance' or 'okx'.",
-        );
-        return;
-      }
-
-      // Check if retry config exists
-      const retryConfig = await this.redisService.get(
-        `user:${telegramId}:retry:${exchange}`,
-      );
-
-      if (!retryConfig) {
-        await this.bot.sendMessage(
-          chatId,
-          `ℹ️ No retry configuration found for ${exchange.toUpperCase()}.`,
-        );
-        return;
-      }
-
-      // Delete retry configuration
-      await this.redisService.delete(`user:${telegramId}:retry:${exchange}`);
-
-      // Clear all pending re-entries for this exchange
-      const reentryKeys = await this.redisService.keys(
-        `user:${telegramId}:reentry:${exchange}:*`,
-      );
-      let clearedCount = 0;
-      for (const key of reentryKeys) {
-        const simplifiedKey = key.replace("binance-bot:", "");
-        await this.redisService.delete(simplifiedKey);
-        clearedCount++;
-      }
-
-      await this.bot.sendMessage(
-        chatId,
-        `✅ *Retry Disabled for ${exchange.toUpperCase()}*\n\n` +
-          `Cleared ${clearedCount} pending re-entry position(s).\n\n` +
-          `Use /setretry ${exchange} to re-enable.`,
-        { parse_mode: "Markdown" },
-      );
-
-      this.logger.log(
-        `Retry disabled for user ${telegramId} (${exchange}), cleared ${clearedCount} pending re-entries`,
-      );
-    } catch (error) {
-      await this.bot.sendMessage(
-        chatId,
-        `❌ Error clearing retry: ${error.message}`,
-      );
-      this.logger.error(
-        `Error in handleClearRetry for user ${telegramId}:`,
-        error.message,
-      );
-      this.fileLogger.logBusinessError("handleClearRetry", error, telegramId, {
-        exchange,
-      });
-    }
-  }
-
   // ─── Bot Signal Commands ──────────────────────────────────────────────────
 
   private async handleSetBot(msg: TelegramBot.Message, match: RegExpExecArray) {
@@ -3619,8 +3331,9 @@ export class TelegramBotService implements OnModuleInit {
       return;
     }
 
-    const userExists = await this.redisService.exists(
-      `user:${telegramId}:${exchange}`,
+    const userExists = await this.userSettingsService.hasExchangeAccount(
+      telegramId,
+      exchange,
     );
     if (!userExists) {
       await this.bot.sendMessage(
@@ -3631,8 +3344,9 @@ export class TelegramBotService implements OnModuleInit {
       return;
     }
 
-    const botsConfig = (await this.redisService.get<UserBotsConfig>(
-      `user:${telegramId}:bots:${exchange}`,
+    const botsConfig = (await this.userSettingsService.getBotsConfig(
+      telegramId,
+      exchange,
     )) || { bots: [], updatedAt: "" };
 
     const idx = botsConfig.bots.findIndex((b) => b.botType === botType);
@@ -3653,8 +3367,9 @@ export class TelegramBotService implements OnModuleInit {
     }
     botsConfig.updatedAt = new Date().toISOString();
 
-    await this.redisService.set(
-      `user:${telegramId}:bots:${exchange}`,
+    await this.userSettingsService.setBotsConfig(
+      telegramId,
+      exchange,
       botsConfig,
     );
 
@@ -3705,8 +3420,9 @@ export class TelegramBotService implements OnModuleInit {
       return;
     }
 
-    const botsConfig = await this.redisService.get<UserBotsConfig>(
-      `user:${telegramId}:bots:${exchange}`,
+    const botsConfig = await this.userSettingsService.getBotsConfig(
+      telegramId,
+      exchange,
     );
     if (!botsConfig || botsConfig.bots.length === 0) {
       await this.bot.sendMessage(
@@ -3727,8 +3443,9 @@ export class TelegramBotService implements OnModuleInit {
 
     botsConfig.bots.splice(idx, 1);
     botsConfig.updatedAt = new Date().toISOString();
-    await this.redisService.set(
-      `user:${telegramId}:bots:${exchange}`,
+    await this.userSettingsService.setBotsConfig(
+      telegramId,
+      exchange,
       botsConfig,
     );
 
@@ -3749,17 +3466,17 @@ export class TelegramBotService implements OnModuleInit {
     const arg = match[1]?.trim().toLowerCase();
 
     if (arg && ["binance", "okx"].includes(arg)) {
-      await this.redisService.delete(`user:${telegramId}:bots:${arg}`);
+      await this.userSettingsService.clearBotsConfig(
+        telegramId,
+        arg as "binance" | "okx",
+      );
       await this.bot.sendMessage(
         chatId,
         `✅ Đã xóa tất cả bots trên *${arg.toUpperCase()}*`,
         { parse_mode: "Markdown" },
       );
     } else {
-      await Promise.all([
-        this.redisService.delete(`user:${telegramId}:bots:binance`),
-        this.redisService.delete(`user:${telegramId}:bots:okx`),
-      ]);
+      await this.userSettingsService.clearBotsConfig(telegramId, "all");
       await this.bot.sendMessage(chatId, "✅ Đã xóa tất cả bots trên mọi sàn.");
     }
   }
@@ -3769,8 +3486,8 @@ export class TelegramBotService implements OnModuleInit {
     const telegramId = msg.from.id;
 
     const [binanceBots, okxBots] = await Promise.all([
-      this.redisService.get<UserBotsConfig>(`user:${telegramId}:bots:binance`),
-      this.redisService.get<UserBotsConfig>(`user:${telegramId}:bots:okx`),
+      this.userSettingsService.getBotsConfig(telegramId, "binance"),
+      this.userSettingsService.getBotsConfig(telegramId, "okx"),
     ]);
 
     const hasAny =
@@ -3822,36 +3539,14 @@ export class TelegramBotService implements OnModuleInit {
     }
 
     // Find all users who have this botType enabled
-    const botKeys = await this.redisService.keys("user:*:bots:*");
+    const users = await this.userSettingsService.findUsersWithBot(
+      signal.botType,
+    );
     this.logger.log(
-      `[Signal] Found ${botKeys.length} user-bot key(s) in Redis`,
+      `[Signal] Found ${users.length} user(s) with bot ${signal.botType}`,
     );
 
-    for (const key of botKeys) {
-      // key = "binance-bot:user:<id>:bots:<exchange>"
-      const parts = key.replace("binance-bot:", "").split(":");
-      if (parts.length < 4) continue;
-
-      const telegramId = parseInt(parts[1]);
-      const exchange = parts[3] as "binance" | "okx";
-      if (isNaN(telegramId)) continue;
-
-      const botsConfig = await this.redisService.get<UserBotsConfig>(
-        `user:${telegramId}:bots:${exchange}`,
-      );
-      if (!botsConfig) continue;
-
-      const botConfig = botsConfig.bots.find(
-        (b) => b.botType === signal.botType && b.enabled,
-      );
-
-      if (!botConfig) {
-        this.logger.log(
-          `[Signal] user=${telegramId} exchange=${exchange} — no matching enabled bot for ${signal.botType}`,
-        );
-        continue;
-      }
-
+    for (const { telegramId, exchange, botConfig } of users) {
       this.logger.log(
         `[Signal] Dispatching to user=${telegramId} exchange=${exchange} bot=${signal.botType} vol=$${botConfig.volume} lev=${botConfig.leverage}x`,
       );
@@ -3914,9 +3609,7 @@ export class TelegramBotService implements OnModuleInit {
     signal: IncomingSignal,
     botConfig: UserBotConfig,
   ): Promise<void> {
-    const userData = await this.redisService.get<UserApiKeys>(
-      `user:${telegramId}:${exchange}`,
-    );
+    const userData = await this.getUserData(telegramId, exchange);
     if (!userData) return;
 
     const chatId = userData.chatId;
@@ -3948,8 +3641,9 @@ export class TelegramBotService implements OnModuleInit {
           : `${signal.coin}-${signal.currency}-SWAP`;
 
       // Check max open positions limit
-      const maxPositions = await this.redisService.get<number>(
-        `user:${telegramId}:maxpos:${exchange}`,
+      const maxPositions = await this.userSettingsService.getMaxPositions(
+        telegramId,
+        exchange,
       );
       if (maxPositions !== null && openPositions.length >= maxPositions) {
         this.logger.log(
@@ -4256,30 +3950,19 @@ export class TelegramBotService implements OnModuleInit {
   @Cron("0 */10 * * * *")
   private async checkMissingTpSl() {
     try {
-      const botKeys = await this.redisService.keys("user:*:bots:*");
-      if (!botKeys.length) return;
+      const usersWithBots =
+        await this.userSettingsService.findAllUsersWithBots();
+      if (!usersWithBots.length) return;
 
-      const seen = new Set<string>();
-
-      for (const key of botKeys) {
-        const parts = key.replace("binance-bot:", "").split(":");
-        if (parts.length < 4) continue;
-
-        const telegramId = parseInt(parts[1]);
-        const exchange = parts[3] as "binance" | "okx";
-        if (isNaN(telegramId)) continue;
-
-        const userExchangeKey = `${telegramId}:${exchange}`;
-        if (seen.has(userExchangeKey)) continue;
-        seen.add(userExchangeKey);
-
+      for (const { telegramId, exchange } of usersWithBots) {
         const lockKey = `tpsl-guard:${telegramId}:${exchange}`;
         if (this.processingLocks.has(lockKey)) continue;
         this.processingLocks.add(lockKey);
 
         try {
-          const botsConfig = await this.redisService.get<UserBotsConfig>(
-            `user:${telegramId}:bots:${exchange}`,
+          const botsConfig = await this.userSettingsService.getBotsConfig(
+            telegramId,
+            exchange,
           );
           if (!botsConfig) continue;
 
@@ -4776,5 +4459,79 @@ export class TelegramBotService implements OnModuleInit {
     if (price >= 100) return 1;
     if (price >= 1) return 0;
     return 0;
+  }
+
+  // ─── Public helpers for external modules (AiSignalModule) ─────────────────
+
+  /**
+   * Register an additional bot command from outside this class.
+   * Used by AiCommandService to add /ai commands without circular dependency.
+   */
+  public registerBotCommand(
+    pattern: RegExp,
+    handler: (msg: any, match: RegExpExecArray | null) => Promise<void>,
+  ): void {
+    if (!this.bot) {
+      // Bot not yet initialized — defer until it is
+      const interval = setInterval(() => {
+        if (this.bot) {
+          clearInterval(interval);
+          this.bot.onText(pattern, handler);
+        }
+      }, 500);
+      return;
+    }
+    this.bot.onText(pattern, handler);
+  }
+
+  /**
+   * Send a Telegram message to a specific chat.
+   * Used by AiSignalNotification and AiCommandService.
+   */
+  public async sendTelegramMessage(
+    chatId: number,
+    text: string,
+    options: { parse_mode?: "Markdown" | "HTML" } = { parse_mode: "Markdown" },
+  ): Promise<void> {
+    if (!this.bot || !chatId) return;
+    try {
+      await this.bot.sendMessage(chatId, text, options);
+    } catch (err) {
+      this.logger.warn(
+        `[Telegram] Failed to send message to ${chatId}: ${err?.message}`,
+      );
+    }
+  }
+
+  /**
+   * Iterate all users who have a specific botType enabled and call the callback.
+   * Used by AiSignalService to send AI-specific notifications without placing trades.
+   */
+  public async notifyUsersForBot(
+    botType: string,
+    notifyFn: (
+      chatId: number,
+      telegramId: number,
+      exchange: string,
+    ) => Promise<void>,
+  ): Promise<number> {
+    if (!this.bot) return 0;
+
+    const users = await this.userSettingsService.findUsersWithBot(botType);
+    let notified = 0;
+
+    for (const { telegramId, exchange, userData } of users) {
+      if (!userData?.chatId) continue;
+
+      try {
+        await notifyFn(userData.chatId, telegramId, exchange);
+        notified++;
+      } catch (err) {
+        this.logger.warn(
+          `[Telegram] notifyUsersForBot error for ${telegramId}: ${err?.message}`,
+        );
+      }
+    }
+    return notified;
   }
 }

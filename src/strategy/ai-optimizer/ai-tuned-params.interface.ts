@@ -1,0 +1,110 @@
+/**
+ * AI-tuned parameters for a given coin/interval combination.
+ * Returned by AiOptimizerService (Haiku call or fallback defaults).
+ */
+export interface AiTunedParams {
+  /** Market regime detected by AI */
+  regime:
+    | "STRONG_TREND"
+    | "RANGE_BOUND"
+    | "VOLATILE"
+    | "BTC_CORRELATION"
+    | "MIXED";
+
+  /** Timeframe profile: INTRADAY = 15m primary / 1h HTF; SWING = 4h primary / 1d HTF */
+  timeframeProfile: "INTRADAY" | "SWING";
+
+  /** Selected strategy */
+  strategy:
+    | "RSI_CROSS"
+    | "RSI_ZONE"
+    | "TREND_EMA"
+    | "MEAN_REVERT_RSI"
+    | "STOCH_BB_PATTERN"
+    | "STOCH_EMA_KDJ";
+
+  /** AI confidence in this regime assessment (0-100) */
+  confidence: number;
+
+  /** Stop loss percent for generated signals */
+  stopLossPercent: number;
+
+  /** Minimum AI confidence to actually trade (skip signal if below this) */
+  minConfidenceToTrade: number;
+
+  /** RSI_CROSS specific params */
+  rsiCross?: {
+    primaryKline: string; // e.g. "15m"
+    rsiPeriod: number; // default 14
+    rsiEmaPeriod: number; // default 9
+    enableThreshold: boolean;
+    rsiThreshold: number; // default 50
+    enableHtfRsi: boolean;
+    htfKline: string; // e.g. "1h"
+    enableCandleDir: boolean;
+    candleKline: string;
+  };
+
+  /** RSI_ZONE specific params */
+  rsiZone?: {
+    primaryKline: string;
+    rsiPeriod: number;
+    rsiEmaPeriod: number;
+    rsiTop: number; // SHORT when RSI > rsiTop (default 70)
+    rsiBottom: number; // LONG when RSI < rsiBottom (default 30)
+    enableHtfRsi: boolean;
+    htfKline: string;
+    enableInitialCandle: boolean;
+    excludeLatestCandle: boolean;
+  };
+
+  /** TREND_EMA specific params */
+  trendEma?: {
+    primaryKline: string;
+    fastPeriod: number; // default 9
+    slowPeriod: number; // default 21
+    enableTrendGate: boolean;
+    trendKline: string; // e.g. "4h"
+    trendEmaPeriod: number; // default 200
+    trendRange: number; // price must be within X% of trend EMA
+  };
+
+  /** MEAN_REVERT_RSI specific params */
+  meanRevertRsi?: {
+    primaryKline: string;
+    rsiPeriod: number;
+    emaPeriod: number; // EMA to measure "mean" (default 200)
+    priceRange: number; // price must be within X% of EMA
+    longRsi: number; // LONG when RSI < longRsi
+    shortRsi: number; // SHORT when RSI > shortRsi
+  };
+
+  /** STOCH_BB_PATTERN specific params */
+  stochBbPattern?: {
+    primaryKline: string;
+    bbPeriod: number; // default 20
+    bbStdDev: number; // default 2
+    stochK: number; // Stoch period K
+    stochSmoothK: number;
+    stochSmoothD: number;
+    stochLong: number; // Stoch zone for LONG (default < 30)
+    stochShort: number; // Stoch zone for SHORT (default > 70)
+    rangeCondition1: number; // Stage 1: price within X% of BB band
+    rangeCondition2: number; // Stage 2: price within X% of BB band (tighter)
+    maxCandleCount: number; // Max candles to wait for Stage 2
+  };
+
+  /** STOCH_EMA_KDJ specific params */
+  stochEmaKdj?: {
+    primaryKline: string;
+    stochK: number;
+    stochSmoothK: number;
+    stochSmoothD: number;
+    stochLong: number;
+    stochShort: number;
+    emaPeriod: number; // EMA to pierce
+    emaRange: number; // Candle body must straddle EMA within X%
+    enableKdj: boolean;
+    kdjRangeLength: number;
+  };
+}

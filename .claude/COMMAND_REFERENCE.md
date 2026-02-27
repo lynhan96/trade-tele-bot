@@ -229,83 +229,6 @@ PnL: 225.50 USDT
 
 ---
 
-### Retry System
-
-#### /setretry [exchange] [max_retry] [volume_reduction%]
-
-**Description:** Enable automatic re-entry after TP
-
-**Usage:**
-
-```
-/setretry binance 5
-→ 5 retries with 15% volume reduction (default)
-
-/setretry okx 3 20
-→ 3 retries with 20% volume reduction
-
-/setretry binance 10 10
-→ 10 retries with 10% reduction each time
-```
-
-**Parameters:**
-
-- `exchange`: binance or okx
-- `max_retry`: 1-10 retries
-- `volume_reduction`: 1-50% (optional, default 15%)
-
-**How It Works:**
-
-1. TP target reached → Close all positions
-2. Store position data with entry prices
-3. When price returns to entry (±0.5%) → Re-enter
-4. Each retry reduces volume by configured %
-5. Stop loss set at previous TP price (risk-free!)
-
-**Example Response:**
-
-```
-✅ Retry enabled for BINANCE!
-
-📊 Configuration:
-├ Max Retries: 5
-├ Volume Reduction: 15% per retry
-└ Status: Active
-
-When TP is reached, positions will be re-entered
-automatically when price returns to entry level.
-```
-
----
-
-#### /clearretry [exchange]
-
-**Description:** Disable retry system and clear pending re-entries
-
-**Usage:**
-
-```
-/clearretry binance
-/clearretry okx
-```
-
-**Effect:**
-
-- Disables automatic re-entry
-- Deletes all pending re-entries
-- Shows count of cleared entries
-
-**Example Response:**
-
-```
-✅ Retry disabled for BINANCE
-
-Cleared 3 pending re-entries.
-Use /setretry binance to re-enable.
-```
-
----
-
 ### Manual Updates
 
 #### /update [exchange]
@@ -350,7 +273,6 @@ Use /setretry binance to re-enable.
 1. /start
 2. /setkeys binance YOUR_KEY YOUR_SECRET
 3. /setaccount binance 5 10000
-4. /setretry binance 5 15
 ```
 
 ### Check Status
@@ -365,9 +287,7 @@ Use /setretry binance to re-enable.
 
 ```
 /setaccount binance 10 15000  → Change TP target
-/setretry binance 3 20        → Change retry config
 /cleartp binance              → Disable TP
-/clearretry binance           → Disable retry
 ```
 
 ### Position Management
@@ -585,10 +505,9 @@ No admin/special permissions needed.
 
 **Re-entry not working:**
 
-1. Check retry enabled (/setretry)
-2. Verify price at entry level
-3. Wait for next cron cycle (15s)
-4. Check logs for errors
+1. Verify price at entry level
+2. Wait for next cron cycle (15s)
+3. Check logs for errors
 
 ---
 

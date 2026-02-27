@@ -1,5 +1,81 @@
 # Changelog
 
+## 2026-02-28 (2) - Schema Consolidation + Redis Migration + Remove Retry Commands
+
+### Refactor: Centralize all schemas in `src/schemas/`
+
+All Mongoose schema files moved from `src/user/schemas/` and `src/ai-signal/schemas/` to a single `src/schemas/` folder:
+- `src/schemas/user-settings.schema.ts`
+- `src/schemas/ai-signal.schema.ts`
+- `src/schemas/ai-coin-profile.schema.ts`
+- `src/schemas/ai-regime-history.schema.ts`
+- `src/schemas/user-signal-subscription.schema.ts`
+
+9 files updated with new import paths. Old `src/user/schemas/` and `src/ai-signal/schemas/` directories deleted.
+
+### Feature: One-time Redis → MongoDB migration on startup
+
+`UserSettingsService` now implements `OnModuleInit` and runs `migrateFromRedis()` on startup:
+- Scans Redis for `user:*:binance` and `user:*:okx` keys
+- For each user not yet in MongoDB, reads all settings (apiKeys, TP, bots, retry, maxPos, activeEx, updatesDisabled) and upserts into `user_settings`
+- Idempotent — skips users already in MongoDB
+- `UserModule` now imports `RedisModule` to support this
+
+### Removed: `/setretry` and `/clearretry` Telegram commands
+
+The retry system configuration commands have been removed:
+- `handleSetRetry()` and `handleClearRetry()` methods deleted
+- `bot.onText(/\/setretry/)` and `bot.onText(/\/clearretry/)` registrations removed
+- Help text updated to remove the Re-entry section
+- The internal retry execution logic (`checkReentryOpportunities`, `executeReentry`) remains intact
+
+---
+
+## 2026-02-28 - User Settings Migrated to MongoDB
+
+### Feature: MongoDB-backed User Settings
+
+All persistent user configuration previously stored in Redis has been migrated to a MongoDB collection (`user_settings`). Ephemeral position-lifecycle data (reentry, tpsl, opentime) remains in Redis.
+
+#### New Files
+
+- `src/user/schemas/user-settings.schema.ts` — Mongoose schema (`UserSettings` root + `ExchangeSettings` + `BotConfigEntry` embedded docs)
+- `src/user/user-settings.service.ts` — Full CRUD service with cron query helpers
+- `src/user/user.module.ts` — NestJS module (imports MongooseModule, exports UserSettingsService)
+
+#### Modified Files
+
+- `src/telegram/telegram.module.ts` — Added `UserModule` to imports
+- `src/telegram/telegram.service.ts` — All user settings Redis calls replaced with `UserSettingsService` calls
+
+#### Data Migrated to MongoDB (`user_settings` collection)
+
+| Old Redis Key | New MongoDB Field |
+|---|---|
+| `user:{id}:{exchange}` (apiKey/secret) | `binance.apiKey`, `okx.apiKey`, etc. |
+| `user:{id}:active` | `activeExchange` |
+| `user:{id}:updates:disabled` | `updatesDisabled` |
+| `user:{id}:tp:{exchange}` | `binance.tpPercentage`, `binance.tpInitialBalance` |
+| `user:{id}:tp:mode:{exchange}` | `binance.tpMode` |
+| `user:{id}:tp:individual:{exchange}` | `binance.tpIndividualPercentage` |
+| `user:{id}:bots:{exchange}` | `binance.bots[]` |
+| `user:{id}:retry:{exchange}` | `binance.retryMaxRetry`, etc. |
+| `user:{id}:maxpos:{exchange}` | `binance.maxPositions` |
+
+#### Cron Query Helpers (replace Redis SCAN)
+
+- `findAllUsersWithTp()` — replaces `keys("user:*:tp:*")`
+- `findAllUsersWithBots()` — replaces `keys("user:*:bots:*")`
+- `findUsersWithBot(botType)` — replaces SCAN + per-key fetch loop
+
+#### Ephemeral Keys Remaining in Redis
+
+- `user:{id}:reentry:{exchange}:{symbol}` — re-entry position data
+- `user:{id}:tpsl:{exchange}:{symbol}` — TP/SL prices for scheduler
+- `user:{id}:opentime:{exchange}:{symbol}` — position open timestamp
+
+---
+
 ## 2026-02-26 (2) - Bot Signal TCP Integration
 
 ### New Feature: Bot Signal Auto-Trading

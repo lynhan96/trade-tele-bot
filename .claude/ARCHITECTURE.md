@@ -41,16 +41,18 @@ AppModule
 ├── ConfigModule (Global)
 ├── ScheduleModule (Cron Jobs)
 ├── LoggerModule (Global)
+├── MongooseModule (Global, MongoDB)
 ├── RedisModule
 ├── BinanceModule
 ├── OkxModule
-├── TelegramModule
-└── SignalModule          ← NEW: imports TelegramModule, hosts TCP controller
+├── UserModule            ← persistent user settings (MongoDB)
+├── TelegramModule        ← imports UserModule
+└── SignalModule          ← imports TelegramModule, hosts TCP controller
 ```
 
 ## Data Flow
 
-### 1. Bot Signal Auto-Trade Flow (NEW)
+### 1. Bot Signal Auto-Trade Flow
 
 ```
 bot-signal service
@@ -58,7 +60,7 @@ bot-signal service
 SignalController.handleSignal()
     ↓
 TelegramBotService.handleIncomingSignal(signal)
-    ↓  SCAN Redis: user:*:bots:*
+    ↓  MongoDB: userSettingsService.findUsersWithBot(botType)
     For each user with signal.botType enabled:
         ↓
     executeSignalTrade(telegramId, exchange, signal, botConfig)
@@ -91,7 +93,7 @@ User → Telegram → Bot API → TelegramBotService
 ```
 Cron (30s) → checkTakeProfitTargets()
                 ↓
-        Get Users with TP Config from Redis
+        Get Users with TP Config from MongoDB (findAllUsersWithTp)
                 ↓
         For Each User/Exchange:
                 ↓
@@ -200,23 +202,46 @@ Cron (30s) → checkReentryOpportunities()
 - `setStopLoss()`
 - `getCurrentPrice()`
 
+### UserSettingsService
+
+**Responsibilities:**
+
+- Persistent user settings storage in MongoDB (`user_settings` collection)
+- Single document per user (keyed by `telegramId`)
+
+**Stored in MongoDB:**
+
+```
+user_settings collection (one document per user):
+  telegramId, chatId, activeExchange, updatesDisabled
+  binance/okx:
+    apiKey, apiSecret, passphrase, createdAt
+    tpPercentage, tpInitialBalance, tpSetAt
+    tpMode, tpIndividualPercentage, tpIndividualSetAt
+    bots[] (botType, enabled, volume, leverage, TP/SL %)
+    retryMaxRetry, retryCurrentCount, retryVolumeReductionPercent, retryEnabled
+    maxPositions
+```
+
+**Cron query helpers:**
+
+- `findAllUsersWithTp()` — replaces Redis SCAN `user:*:tp:*`
+- `findAllUsersWithBots()` — replaces Redis SCAN `user:*:bots:*`
+- `findUsersWithBot(botType)` — replaces SCAN + filter loop
+
 ### RedisService
 
 **Responsibilities:**
 
-- State persistence
-- Cache management
+- Ephemeral position state (short-lived, position-scoped)
 - Key-value operations
 
-**Key Data Structures:**
+**Ephemeral Redis Keys (NOT migrated):**
 
 ```
-user:{id}:api:{exchange}          → API credentials
-user:{id}:tp:{exchange}           → TP config
-user:{id}:retry:{exchange}        → Retry config
-user:{id}:reentry:{exchange}:{symbol} → Re-entry data
-user:{id}:active:exchange         → Active exchange
-user:{id}:chatId                  → Telegram chat ID
+user:{id}:reentry:{exchange}:{symbol} → Re-entry data (position lifecycle)
+user:{id}:tpsl:{exchange}:{symbol}    → TP/SL prices for scheduler
+user:{id}:opentime:{exchange}:{symbol} → Position open timestamp
 ```
 
 ### FileLoggerService
@@ -338,7 +363,7 @@ LOG_LEVEL=info                  # Logging level
 
 ### API Key Storage
 
-- Stored in Redis with encryption support
+- Stored in MongoDB (`user_settings` collection, `binance.apiKey` / `okx.apiKey`)
 - Never logged to files
 - Transmitted only to exchange APIs
 
@@ -358,10 +383,9 @@ LOG_LEVEL=info                  # Logging level
 
 ### Caching Strategy
 
-- User data cached in Redis
-- API credentials cached
-- Configuration cached
-- TTL not implemented (manual cleanup)
+- Persistent user settings in MongoDB (no TTL)
+- Ephemeral position state in Redis (reentry, tpsl, opentime)
+- Exchange API responses not cached (always fresh)
 
 ### Rate Limiting
 
@@ -442,8 +466,7 @@ LOG_LEVEL=info                  # Logging level
 
 ### Technical Improvements
 
-1. Database migration from Redis
-2. WebSocket for real-time updates
-3. Horizontal scaling support
-4. Real-time monitoring dashboard
-5. Automated backup system
+1. WebSocket for real-time updates
+2. Horizontal scaling support
+3. Real-time monitoring dashboard
+4. Automated backup system
