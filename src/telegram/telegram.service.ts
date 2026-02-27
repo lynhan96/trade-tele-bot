@@ -171,6 +171,11 @@ export class TelegramBotService implements OnModuleInit {
     this.bot.onText(/\/listbots/, async (msg) => {
       await this.handleListBots(msg);
     });
+
+    // Command: /updates on|off - enable/disable 5-minute periodic updates
+    this.bot.onText(/\/updates(.*)/, async (msg, match) => {
+      await this.handleToggleUpdates(msg, match);
+    });
   }
 
   // Helper: Get active exchange for a user (defaults to first found if not set)
@@ -1299,6 +1304,51 @@ export class TelegramBotService implements OnModuleInit {
     }
   }
 
+  private async handleToggleUpdates(
+    msg: TelegramBot.Message,
+    match: RegExpExecArray | null,
+  ) {
+    const chatId = msg.chat.id;
+    const telegramId = msg.from.id;
+    await this.ensureChatIdStored(telegramId, chatId);
+
+    const arg = match?.[1]?.trim().toLowerCase();
+
+    if (arg !== "on" && arg !== "off") {
+      const disabled = await this.redisService.get<boolean>(
+        `user:${telegramId}:updates:disabled`,
+      );
+      const status = disabled ? "🔴 OFF" : "🟢 ON";
+      await this.bot.sendMessage(
+        chatId,
+        `📊 *5-Minute Updates*\n\nCurrent status: ${status}\n\nUsage:\n/updates on — Enable\n/updates off — Disable`,
+        { parse_mode: "Markdown" },
+      );
+      return;
+    }
+
+    try {
+      if (arg === "off") {
+        await this.redisService.set(`user:${telegramId}:updates:disabled`, true);
+        await this.bot.sendMessage(
+          chatId,
+          "🔴 5-minute updates *disabled*.\n\nUse /updates on to re-enable.",
+          { parse_mode: "Markdown" },
+        );
+      } else {
+        await this.redisService.delete(`user:${telegramId}:updates:disabled`);
+        await this.bot.sendMessage(
+          chatId,
+          "🟢 5-minute updates *enabled*.",
+          { parse_mode: "Markdown" },
+        );
+      }
+    } catch (error) {
+      await this.bot.sendMessage(chatId, `❌ Error: ${error.message}`);
+      this.logger.error(`Error in handleToggleUpdates: ${error.message}`);
+    }
+  }
+
   @Cron(CronExpression.EVERY_5_MINUTES)
   private async sendPeriodicUpdates() {
     this.logger.log(
@@ -1320,6 +1370,12 @@ export class TelegramBotService implements OnModuleInit {
           `Processing periodic update for user ${telegramId} (${exchange})`,
         );
         this.logger.debug(`Full key: ${key}`);
+
+        // Skip if user has disabled periodic updates
+        const updatesDisabled = await this.redisService.get<boolean>(
+          `user:${telegramId}:updates:disabled`,
+        );
+        if (updatesDisabled) continue;
 
         const tpData = await this.redisService.get<{
           percentage: number;
@@ -1607,7 +1663,10 @@ export class TelegramBotService implements OnModuleInit {
           "/setbot `exchange CT1 volume [lev]` — Bật bot tự động\n" +
           "/clearbot `exchange CT1` — Tắt một bot\n" +
           "/clearbots `exchange` — Tắt tất cả bots\n" +
-          "/listbots — Xem danh sách bots đang chạy",
+          "/listbots — Xem danh sách bots đang chạy\n" +
+          "\n⏱ *Updates*\n" +
+          "/updates on — Bật cập nhật 5 phút\n" +
+          "/updates off — Tắt cập nhật 5 phút",
         { parse_mode: "Markdown" },
       );
     } else {
