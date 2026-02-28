@@ -5,9 +5,7 @@ import { MongooseModule } from "@nestjs/mongoose";
 import { TelegramModule } from "./telegram/telegram.module";
 import { RedisModule } from "./redis/redis.module";
 import { BinanceModule } from "./binance/binance.module";
-import { OkxModule } from "./okx/okx.module";
 import { LoggerModule } from "./logger/logger.module";
-import { SignalModule } from "./signal/signal.module";
 import { AiSignalModule } from "./ai-signal/ai-signal.module";
 
 @Module({
@@ -29,9 +27,7 @@ import { AiSignalModule } from "./ai-signal/ai-signal.module";
     LoggerModule,
     RedisModule,
     BinanceModule,
-    OkxModule,
     TelegramModule,
-    SignalModule,
     AiSignalModule,
   ],
 })

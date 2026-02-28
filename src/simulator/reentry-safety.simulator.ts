@@ -170,7 +170,7 @@ export class ReentrySafetySimulator {
 
       case "HEALTHY_PULLBACK":
         // Healthy pullback - recovery starting, EMA9 > EMA21, good buy volume
-        // First 15 candles: strong downtrend
+        // First 15 candles: strong downtrend (oldest → newest: prices declining)
         for (let i = 30; i > 15; i--) {
           const price = basePrice + i * 50;
           candles.push({
@@ -182,9 +182,11 @@ export class ReentrySafetySimulator {
             volume: "900000",
           });
         }
-        // Last 15 candles: strong recovery (green candles with momentum)
+        // Last 15 candles: strong recovery — prices must INCREASE over time.
+        // Loop: i=15 (oldest, 225min ago) → i=1 (newest, 15min ago).
+        // Use (16-i) so price grows as i shrinks (newest gets highest price).
         for (let i = 15; i > 0; i--) {
-          const price = basePrice + i * 10;
+          const price = basePrice + (16 - i) * 100;
           candles.push({
             openTime: now - i * 15 * 60 * 1000,
             open: price.toString(),
@@ -242,7 +244,7 @@ export class ReentrySafetySimulator {
 
       case "STRONG_RECOVERY":
         // Strong recovery - clear uptrend, EMA9 >> EMA21, strong buy volume
-        // First 12 candles: crash down
+        // First 12 candles: crash down (oldest → newest: prices declining)
         for (let i = 30; i > 18; i--) {
           const price = basePrice + i * 60;
           candles.push({
@@ -254,9 +256,11 @@ export class ReentrySafetySimulator {
             volume: "1000000",
           });
         }
-        // Last 18 candles: massive recovery rally
+        // Last 18 candles: massive rally — prices must INCREASE over time.
+        // Loop: i=18 (oldest, 270min ago) → i=1 (newest, 15min ago).
+        // Use (19-i) so price grows as i shrinks (newest gets highest price).
         for (let i = 18; i > 0; i--) {
-          const price = basePrice + i * 15;
+          const price = basePrice + (19 - i) * 120;
           candles.push({
             openTime: now - i * 15 * 60 * 1000,
             open: price.toString(),
@@ -461,28 +465,30 @@ export class ReentrySafetySimulator {
       ),
     );
 
-    // Scenario 8: SHORT Position Crash Up - Should BLOCK
+    // Scenario 8: SHORT Position — Market still pumping — Should BLOCK
+    // Use STRONG_RECOVERY: EMA9 > EMA21 (uptrend) + high buy pressure → both fail SHORT conditions
     results.push(
       this.runScenario(
-        "SHORT Position - Price Pumping",
-        "SHORT closed at $100k, price pumped to $115k (+15%). Market still pumping, no reversal.",
+        "SHORT Position - Market Still Pumping",
+        "SHORT closed at $100k, price pumped to $115k (+15%). Market showing strong uptrend (EMA9>EMA21, high buy volume). No reversal yet — BLOCK.",
         {
           symbol: "BTCUSDT",
           side: "SHORT",
           entryPrice: 100000,
           closedAt: new Date(now - 45 * 60 * 1000).toISOString(),
         },
-        115000, // 15% up (bad for SHORT)
-        "CRASH_CONTINUING", // Inverted for SHORT
+        115000, // 15% up
+        "STRONG_RECOVERY", // uptrend: EMA9 > EMA21, high buy pressure — both bad for SHORT re-entry
         false, // Should BLOCK
       ),
     );
 
-    // Scenario 9: SHORT Position Good Reversal - Should ALLOW
+    // Scenario 9: SHORT Position — Clear reversal — Should ALLOW
+    // Use CRASH_CONTINUING: EMA9 < EMA21 (downtrend) + all-sell pressure → both pass SHORT conditions
     results.push(
       this.runScenario(
-        "SHORT Position - Healthy Reversal",
-        "SHORT closed at $100k, price pumped to $118k (+18%), now showing reversal signs.",
+        "SHORT Position - Clear Reversal Signal",
+        "SHORT closed at $100k, price pumped to $118k (+18%). Market now in clear downtrend (EMA9<EMA21, sell pressure). Reversal confirmed — ALLOW.",
         {
           symbol: "BTCUSDT",
           side: "SHORT",
@@ -490,7 +496,7 @@ export class ReentrySafetySimulator {
           closedAt: new Date(now - 50 * 60 * 1000).toISOString(),
         },
         118000, // 18% up
-        "HEALTHY_PULLBACK", // Recovery = downtrend for SHORT
+        "CRASH_CONTINUING", // downtrend: EMA9 < EMA21, buyPressure≈0 — both good for SHORT re-entry
         true, // Should ALLOW
       ),
     );

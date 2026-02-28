@@ -29,6 +29,13 @@ export interface AiTunedParams {
   /** Stop loss percent for generated signals */
   stopLossPercent: number;
 
+  /**
+   * Take profit percent for generated signals.
+   * Haiku sets this based on regime/volatility (typical range: 1.5×–3× stopLossPercent).
+   * Falls back to stopLossPercent × 2 if omitted.
+   */
+  takeProfitPercent: number;
+
   /** Minimum AI confidence to actually trade (skip signal if below this) */
   minConfidenceToTrade: number;
 

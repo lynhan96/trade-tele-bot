@@ -5,9 +5,15 @@ import {
   OnModuleDestroy,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
+import { InjectModel } from "@nestjs/mongoose";
+import { Model } from "mongoose";
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const WebSocket = require("ws");
 import { RedisService } from "../redis/redis.service";
+import {
+  CandleHistory,
+  CandleHistoryDocument,
+} from "./schemas/candle-history.schema";
 
 export interface KlineCloseEvent {
   symbol: string;
@@ -48,9 +54,15 @@ export class MarketDataService implements OnModuleInit, OnModuleDestroy {
   // Reconnect timers
   private reconnectTimers = new Map<string, NodeJS.Timeout>();
 
+  // Real-time price listeners: symbol → Set of callbacks
+  // Callbacks are fired on every kline tick (including non-final) at ~250ms resolution.
+  private priceListeners = new Map<string, Set<(price: number) => void>>();
+
   constructor(
     private readonly redisService: RedisService,
     private readonly configService: ConfigService,
+    @InjectModel(CandleHistory.name)
+    private readonly candleHistoryModel: Model<CandleHistoryDocument>,
   ) {}
 
   async onModuleInit() {
@@ -152,6 +164,24 @@ export class MarketDataService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
+  // ─── Real-time price listener registry ───────────────────────────────────
+
+  /**
+   * Register a callback to receive live price ticks for a symbol.
+   * The callback fires on every kline message (~250ms resolution for futures).
+   * Used by PositionMonitorService for real-time TP/SL checking.
+   */
+  registerPriceListener(symbol: string, cb: (price: number) => void): void {
+    if (!this.priceListeners.has(symbol)) {
+      this.priceListeners.set(symbol, new Set());
+    }
+    this.priceListeners.get(symbol)!.add(cb);
+  }
+
+  unregisterPriceListener(symbol: string, cb: (price: number) => void): void {
+    this.priceListeners.get(symbol)?.delete(cb);
+  }
+
   // ─── Internal: WebSocket subscription ────────────────────────────────────
 
   private async subscribeCoin(coin: string): Promise<void> {
@@ -238,6 +268,11 @@ export class MarketDataService implements OnModuleInit, OnModuleDestroy {
       T: closeTime,
     } = k;
 
+    // Emit live price to registered listeners on every tick (including non-final).
+    // This is used by PositionMonitorService for real-time TP/SL checking (~250ms resolution).
+    const currentPrice = parseFloat(close);
+    this.priceListeners.get(symbol)?.forEach((cb) => cb(currentPrice));
+
     // Only process when candle is CLOSED (isFinal = true)
     if (!isFinal) return;
 
@@ -246,6 +281,7 @@ export class MarketDataService implements OnModuleInit, OnModuleDestroy {
     const openPrice = parseFloat(open);
     const highPrice = parseFloat(high);
     const lowPrice = parseFloat(low);
+    const volumeValue = parseFloat(volume);
 
     await Promise.all([
       this.appendToArray(`cache:candle:close:${coin}:${interval}`, closePrice),
@@ -253,6 +289,32 @@ export class MarketDataService implements OnModuleInit, OnModuleDestroy {
       this.appendToArray(`cache:candle:high:${coin}:${interval}`, highPrice),
       this.appendToArray(`cache:candle:low:${coin}:${interval}`, lowPrice),
     ]);
+
+    // Persist to MongoDB for long-term analysis and debugging.
+    // Fire-and-forget — never block the indicator computation path.
+    const closeDate = new Date(closeTime);
+    this.candleHistoryModel
+      .updateOne(
+        { symbol, interval, closeTime: closeDate },
+        {
+          $setOnInsert: {
+            symbol,
+            interval,
+            closeTime: closeDate,
+            open: openPrice,
+            high: highPrice,
+            low: lowPrice,
+            close: closePrice,
+            volume: volumeValue,
+          },
+        },
+        { upsert: true },
+      )
+      .catch((err) =>
+        this.logger.error(
+          `[MarketData] CandleHistory upsert failed: ${err?.message}`,
+        ),
+      );
   }
 
   /**
@@ -316,6 +378,38 @@ export class MarketDataService implements OnModuleInit, OnModuleDestroy {
             ttl,
           ),
         ]);
+
+        // Bulk-upsert historical candles to MongoDB (idempotent — safe to re-run).
+        // REST candle array layout: [openTime, open, high, low, close, volume, closeTime, ...]
+        const ops = candles.map((c: any[]) => ({
+          updateOne: {
+            filter: {
+              symbol,
+              interval,
+              closeTime: new Date(Number(c[6])),
+            },
+            update: {
+              $setOnInsert: {
+                symbol,
+                interval,
+                closeTime: new Date(Number(c[6])),
+                open: parseFloat(c[1]),
+                high: parseFloat(c[2]),
+                low: parseFloat(c[3]),
+                close: parseFloat(c[4]),
+                volume: parseFloat(c[5]),
+              },
+            },
+            upsert: true,
+          },
+        }));
+        this.candleHistoryModel
+          .bulkWrite(ops, { ordered: false })
+          .catch((err) =>
+            this.logger.warn(
+              `[MarketData] Seed bulkWrite partial error for ${symbol} ${interval}: ${err?.message}`,
+            ),
+          );
 
         this.logger.log(
           `[MarketData] Seeded ${candles.length} candles for ${symbol} ${interval}`,

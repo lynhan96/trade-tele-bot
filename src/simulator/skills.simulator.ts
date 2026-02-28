@@ -56,14 +56,22 @@ export class SkillsSimulator {
         throw new Error("Failed to parse setaccount command");
       }
 
-      // Simulate /setretry command parsing
-      const setretry = "/setretry binance 3 20";
-      const setretryMatch = setretry.match(
-        /\/setretry\s+(\w+)\s+(\d+)\s+([\d.]+)/,
+      // Simulate /setmode command parsing
+      const setmode = "/setmode binance individual";
+      const setmodeMatch = setmode.match(/\/setmode\s+(\w+)\s+(\w+)/);
+
+      if (!setmodeMatch || setmodeMatch[2] !== "individual") {
+        throw new Error("Failed to parse setmode command");
+      }
+
+      // Simulate /setbot command parsing
+      const setbot = "/setbot binance BOT_FUTURE_CT_1 100 10";
+      const setbotMatch = setbot.match(
+        /\/setbot\s+(\w+)\s+(\S+)\s+([\d.]+)\s+([\d.]+)/,
       );
 
-      if (!setretryMatch || parseInt(setretryMatch[2]) !== 3) {
-        throw new Error("Failed to parse setretry command");
+      if (!setbotMatch || parseFloat(setbotMatch[3]) !== 100) {
+        throw new Error("Failed to parse setbot command");
       }
 
       console.log("✅ Input: /setkeys binance [key] [secret]");
@@ -74,14 +82,18 @@ export class SkillsSimulator {
       console.log("   Output: Exchange='okx', Has passphrase=true");
       console.log("✅ Input: /setaccount binance 5 10000");
       console.log("   Output: Exchange='binance', TP=5%, Balance=$10,000");
-      console.log("✅ Input: /setretry binance 3 20");
-      console.log("   Output: Exchange='binance', MaxRetry=3, Reduction=20%");
+      console.log("✅ Input: /setmode binance individual");
+      console.log("   Output: Exchange='binance', Mode='individual'");
+      console.log("✅ Input: /setbot binance BOT_FUTURE_CT_1 100 10");
+      console.log(
+        "   Output: Exchange='binance', Bot='BOT_FUTURE_CT_1', Volume=100, Leverage=10",
+      );
 
       return {
         scenario: "Command Parsing",
         passed: true,
         details:
-          "All commands parsed correctly (setkeys, setaccount, setretry)",
+          "All commands parsed correctly (setkeys, setaccount, setmode, setbot)",
       };
     } catch (error) {
       console.log(`❌ Error: ${error.message}`);
@@ -204,59 +216,94 @@ export class SkillsSimulator {
   }
 
   /**
-   * Test 4: Retry Configuration Logic
-   * Tests /setretry validation and calculation
+   * Test 4: Bot Signal Trade Configuration
+   * Tests /setbot, /clearbot command parsing and validation
    */
-  private testRetryConfiguration(): TestResult {
-    console.log("\n📊 TEST 4: Retry Configuration Logic");
+  private testBotSignalConfiguration(): TestResult {
+    console.log("\n📊 TEST 4: Bot Signal Trade Configuration");
     console.log("━".repeat(60));
 
     try {
-      // Valid retry configuration
-      const maxRetry = 3;
-      const reductionPercent = 20;
+      // Test /setbot command parsing for multiple bots
+      const validBots = [
+        {
+          cmd: "/setbot binance BOT_FUTURE_CT_1 100 10",
+          exchange: "binance",
+          botType: "BOT_FUTURE_CT_1",
+          volume: 100,
+          leverage: 10,
+        },
+        {
+          cmd: "/setbot okx BOT_FUTURE_CT_2 50 20",
+          exchange: "okx",
+          botType: "BOT_FUTURE_CT_2",
+          volume: 50,
+          leverage: 20,
+        },
+      ];
 
-      if (maxRetry <= 0 || maxRetry > 10) {
-        throw new Error("Max retry out of range");
+      for (const bot of validBots) {
+        const match = bot.cmd.match(
+          /\/setbot\s+(\w+)\s+(\S+)\s+([\d.]+)\s+([\d.]+)/,
+        );
+        if (!match) throw new Error(`Failed to parse: ${bot.cmd}`);
+        if (match[1] !== bot.exchange)
+          throw new Error(`Exchange mismatch in: ${bot.cmd}`);
+        if (match[2] !== bot.botType)
+          throw new Error(`BotType mismatch in: ${bot.cmd}`);
+        if (parseFloat(match[3]) !== bot.volume)
+          throw new Error(`Volume mismatch in: ${bot.cmd}`);
+        if (parseFloat(match[4]) !== bot.leverage)
+          throw new Error(`Leverage mismatch in: ${bot.cmd}`);
       }
 
-      if (reductionPercent <= 0 || reductionPercent >= 100) {
-        throw new Error("Reduction percent out of range");
+      console.log("✅ /setbot binance BOT_FUTURE_CT_1 100 10");
+      console.log(
+        "   Exchange='binance', Bot='BOT_FUTURE_CT_1', Volume=100 USDT, Leverage=10x",
+      );
+      console.log("✅ /setbot okx BOT_FUTURE_CT_2 50 20");
+      console.log(
+        "   Exchange='okx', Bot='BOT_FUTURE_CT_2', Volume=50 USDT, Leverage=20x",
+      );
+
+      // Test /clearbot command parsing
+      const clearbot = "/clearbot binance BOT_FUTURE_CT_1";
+      const clearbotMatch = clearbot.match(/\/clearbot\s+(\w+)\s+(\S+)/);
+      if (!clearbotMatch || clearbotMatch[2] !== "BOT_FUTURE_CT_1") {
+        throw new Error("Failed to parse clearbot command");
       }
 
-      // Simulate quantity reduction over retries
-      let quantity = 1.0; // 1 BTC
-      const quantities = [quantity];
+      console.log("✅ /clearbot binance BOT_FUTURE_CT_1");
+      console.log("   Exchange='binance', Bot='BOT_FUTURE_CT_1' → disabled");
 
-      for (let i = 0; i < maxRetry; i++) {
-        quantity = quantity * (1 - reductionPercent / 100);
-        quantities.push(quantity);
+      // Test invalid bot configs (volume/leverage must be > 0)
+      const invalidConfigs = [
+        { volume: 0, leverage: 10, reason: "Zero volume" },
+        { volume: 100, leverage: 0, reason: "Zero leverage" },
+        { volume: -50, leverage: 10, reason: "Negative volume" },
+      ];
+
+      let invalidDetected = 0;
+      for (const config of invalidConfigs) {
+        if (config.volume <= 0 || config.leverage <= 0) invalidDetected++;
       }
 
-      // Expected: 1.0 → 0.8 → 0.64 → 0.512
-      const expected = [1.0, 0.8, 0.64, 0.512];
-      for (let i = 0; i < expected.length; i++) {
-        if (Math.abs(quantities[i] - expected[i]) > 0.001) {
-          throw new Error(`Quantity calculation mismatch at retry ${i}`);
-        }
+      if (invalidDetected !== invalidConfigs.length) {
+        throw new Error("Failed to detect invalid bot configurations");
       }
 
-      console.log("✅ Valid Config: MaxRetry=3, Reduction=20%");
-      console.log("✅ Quantity Reduction Sequence:");
-      quantities.forEach((q, i) => {
-        console.log(`   Retry ${i}: ${q.toFixed(3)} BTC`);
-      });
-      console.log("✅ Total attempts: 4 (original + 3 retries)");
+      console.log("✅ Invalid bot configs correctly rejected:");
+      invalidConfigs.forEach((c) => console.log(`   • ${c.reason}`));
 
       return {
-        scenario: "Retry Configuration Logic",
+        scenario: "Bot Signal Trade Configuration",
         passed: true,
-        details: `MaxRetry=3, Reduction=20%, Final quantity=${quantities[quantities.length - 1].toFixed(3)}`,
+        details: `setbot/clearbot parsing valid, ${invalidDetected} invalid configs rejected`,
       };
     } catch (error) {
       console.log(`❌ Error: ${error.message}`);
       return {
-        scenario: "Retry Configuration Logic",
+        scenario: "Bot Signal Trade Configuration",
         passed: false,
         details: error.message,
       };
@@ -325,79 +372,79 @@ export class SkillsSimulator {
   }
 
   /**
-   * Test 6: Redis Data Structure Validation
-   * Tests data storage patterns for TP, retry, and re-entry
+   * Test 6: Redis Key Structure Validation
+   * Tests actual Redis key patterns used in the refactored services.
+   * All keys are prefixed with "binance-bot:" by RedisService.getKey().
    */
   private testRedisDataStructures(): TestResult {
-    console.log("\n📊 TEST 6: Redis Data Structure Validation");
+    console.log("\n📊 TEST 6: Redis Key Structure Validation");
     console.log("━".repeat(60));
 
     try {
-      // Test 1: TP Configuration storage
-      const tpConfig = {
-        exchange: "binance",
-        tpPercentage: 5,
-        initialBalance: 10000,
-      };
+      const telegramId = 123456789;
+      const exchange = "binance";
+      const symbol = "BTCUSDT";
 
-      const tpKey = `user:123456789:binance:tp_config`;
-      if (!tpKey.includes("tp_config")) {
-        throw new Error("TP config key pattern incorrect");
-      }
+      // Test 1: TP key patterns (prefixed with "binance-bot:")
+      const tpKey = `binance-bot:user:${telegramId}:tp:${exchange}`;
+      const tpModeKey = `binance-bot:user:${telegramId}:tp:mode:${exchange}`;
+      const tpIndividualKey = `binance-bot:user:${telegramId}:tp:individual:${exchange}`;
 
-      console.log("✅ TP Config Storage:");
-      console.log(`   Key: ${tpKey}`);
-      console.log(`   Data: ${JSON.stringify(tpConfig, null, 2)}`);
+      if (!tpKey.includes(":tp:"))
+        throw new Error("TP key pattern incorrect");
+      if (!tpModeKey.includes(":tp:mode:"))
+        throw new Error("TP mode key pattern incorrect");
+      if (!tpIndividualKey.includes(":tp:individual:"))
+        throw new Error("TP individual key pattern incorrect");
 
-      // Test 2: Retry Configuration storage
-      const retryConfig = {
-        enabled: true,
-        maxRetry: 3,
-        currentRetryCount: 0,
-        volumeReductionPercent: 20,
-      };
+      console.log("✅ TP Keys (binance-bot: prefix):");
+      console.log(`   Config:     ${tpKey}`);
+      console.log(`   Mode:       ${tpModeKey}`);
+      console.log(`   Individual: ${tpIndividualKey}`);
 
-      const retryKey = `user:123456789:binance:retry_config`;
-      if (!retryKey.includes("retry_config")) {
-        throw new Error("Retry config key pattern incorrect");
-      }
+      // Test 2: Re-entry key pattern and critical split parsing
+      // "binance-bot" contains a hyphen, NOT a colon — it is ONE segment when split by ":"
+      const reentryKey = `binance-bot:user:${telegramId}:reentry:${exchange}:${symbol}`;
+      const parts = reentryKey.split(":");
+      // Expected: ["binance-bot", "user", "123456789", "reentry", "binance", "BTCUSDT"]
 
-      console.log("\n✅ Retry Config Storage:");
-      console.log(`   Key: ${retryKey}`);
-      console.log(`   Data: ${JSON.stringify(retryConfig, null, 2)}`);
+      if (parts.length !== 6)
+        throw new Error(`Expected 6 parts, got ${parts.length}: ${parts.join("|")}`);
+      if (parts[0] !== "binance-bot")
+        throw new Error(`parts[0] should be 'binance-bot', got '${parts[0]}'`);
+      if (parts[2] !== String(telegramId))
+        throw new Error(`parts[2] should be telegramId '${telegramId}', got '${parts[2]}'`);
+      if (parts[4] !== exchange)
+        throw new Error(`parts[4] should be exchange '${exchange}', got '${parts[4]}'`);
+      if (parts[5] !== symbol)
+        throw new Error(`parts[5] should be symbol '${symbol}', got '${parts[5]}'`);
 
-      // Test 3: Re-entry Data storage
+      console.log("\n✅ Re-entry Key Split Parsing (critical — 'binance-bot' is 1 segment):");
+      console.log(`   Key: ${reentryKey}`);
+      console.log(`   parts[0] = "${parts[0]}"  (prefix)`);
+      console.log(`   parts[2] = "${parts[2]}"  (telegramId) ✅`);
+      console.log(`   parts[4] = "${parts[4]}"  (exchange) ✅`);
+      console.log(`   parts[5] = "${parts[5]}"  (symbol) ✅`);
+
+      // Test 3: Validate re-entry data required fields
       const reentryData = {
-        symbol: "BTCUSDT",
-        side: "LONG",
+        symbol,
+        side: "LONG" as const,
         quantity: 0.8,
+        originalQuantity: 1.0,
         entryPrice: 100000,
         stopLossPrice: 95000,
         tpPercentage: 5,
         leverage: 20,
-        retryCount: 1,
-        maxRetry: 3,
-        volumeReductionPercent: 20,
+        volume: 80000,
+        originalVolume: 100000,
         closedAt: new Date().toISOString(),
+        closedProfit: 5000,
+        currentRetry: 1,
+        remainingRetries: 2,
+        volumeReductionPercent: 20,
       };
 
-      const reentryKey = `user:123456789:binance:reentry:BTCUSDT`;
-      if (!reentryKey.includes("reentry")) {
-        throw new Error("Re-entry key pattern incorrect");
-      }
-
-      console.log("\n✅ Re-entry Data Storage:");
-      console.log(`   Key: ${reentryKey}`);
-      console.log(`   Symbol: ${reentryData.symbol}`);
-      console.log(`   Quantity: ${reentryData.quantity} (reduced from 1.0)`);
-      console.log(
-        `   Stop Loss: $${reentryData.stopLossPrice.toLocaleString()}`,
-      );
-      console.log(
-        `   Retry: ${reentryData.retryCount}/${reentryData.maxRetry}`,
-      );
-
-      // Validate all required fields present
       const requiredFields = [
         "symbol",
         "side",
@@ -406,30 +453,30 @@ export class SkillsSimulator {
         "stopLossPrice",
         "tpPercentage",
         "leverage",
-        "retryCount",
-        "maxRetry",
         "closedAt",
+        "currentRetry",
+        "remainingRetries",
       ];
 
-      const missingFields = requiredFields.filter(
-        (field) => !(field in reentryData),
-      );
-
+      const missingFields = requiredFields.filter((f) => !(f in reentryData));
       if (missingFields.length > 0) {
         throw new Error(`Missing required fields: ${missingFields.join(", ")}`);
       }
 
-      console.log("\n✅ All required fields present in re-entry data");
+      console.log("\n✅ Re-entry Data: All required fields present");
+      console.log(`   quantity=${reentryData.quantity} (reduced from ${reentryData.originalQuantity})`);
+      console.log(`   stopLossPrice=$${reentryData.stopLossPrice.toLocaleString()}`);
+      console.log(`   retry=${reentryData.currentRetry}, remaining=${reentryData.remainingRetries}`);
 
       return {
-        scenario: "Redis Data Structure Validation",
+        scenario: "Redis Key Structure Validation",
         passed: true,
-        details: "TP config, Retry config, Re-entry data structures validated",
+        details: "TP keys, re-entry key split parsing (parts[2/4/5]), data fields validated",
       };
     } catch (error) {
       console.log(`❌ Error: ${error.message}`);
       return {
-        scenario: "Redis Data Structure Validation",
+        scenario: "Redis Key Structure Validation",
         passed: false,
         details: error.message,
       };
@@ -623,7 +670,7 @@ export class SkillsSimulator {
       this.testCommandParsing(),
       this.testExchangeDetection(),
       this.testTPConfiguration(),
-      this.testRetryConfiguration(),
+      this.testBotSignalConfiguration(),
       this.testPositionClosing(),
       this.testRedisDataStructures(),
       this.testAPIErrorHandling(),

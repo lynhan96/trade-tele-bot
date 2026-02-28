@@ -1,5 +1,40 @@
 # Changelog
 
+## 2026-02-28 (3) - Refactor: Extract Domain Services from TelegramBotService
+
+### Refactor: `telegram.service.ts` reduced from 4,537 → ~200 lines
+
+`TelegramBotService` is now a thin command router. All business logic extracted into focused NestJS modules:
+
+| New Module | Service(s) | Responsibility |
+|---|---|---|
+| `src/account/` | `AccountService` | `/start`, `/setkeys`, `/accounts`; `getUserData`, `getActiveExchange`, `ensureChatIdStored` helpers |
+| `src/position/` | `PositionService` | `/position`, `/close`, `/closeall`, `closeAllPositions` |
+| `src/reentry/` | `ReentryService` | `checkReentryOpportunities` (cron 30s), `executeReentry`, `checkReentrySafety`, `calculateEMA` |
+| `src/take-profit/` | `TakeProfitService` | 5 crons: `checkTakeProfitTargets`, `checkMissingTpSl`, `checkPriceLevelTpSl`, `checkExpiredPositions`, `sendPeriodicUpdates` |
+| `src/take-profit/` | `TakeProfitHandlersService` | `/setaccount`, `/setposition`, `/setmode`, `/cleartp`, `/setalltp`, `/setmaxpos`, `/update`, `/updates` |
+| `src/bot-signal-trade/` | `BotSignalTradeService` | `handleIncomingSignal`, `executeSignalTrade`, `notifyUsersForBot`, `/setbot`, `/clearbot`, `/clearbots`, `/listbots` |
+
+### Key design decisions
+- All domain modules inject `TelegramBotService` via `forwardRef(() => TelegramModule)` for `sendTelegramMessage()`
+- `TelegramModule` imports all domain modules wrapped in `forwardRef()` to resolve circular deps
+- `TelegramBotService` exposes: `sendTelegramMessage()`, `deleteMessage()`, `registerBotCommand()`, `notifyUsersForBot()` (delegate), `handleIncomingSignal()` (delegate)
+- `closeAllPositions` lives in `PositionService`, injected by `TakeProfitModule` for reuse
+- `storeTpSl` Redis helper duplicated locally in `TakeProfitService`, `TakeProfitHandlersService`, and `BotSignalTradeService` (pure Redis helper, no external dependency)
+
+### New files
+- `src/account/account.module.ts`, `account.service.ts`
+- `src/position/position.module.ts`, `position.service.ts`
+- `src/reentry/reentry.module.ts`, `reentry.service.ts`
+- `src/take-profit/take-profit.module.ts`, `take-profit.service.ts`, `take-profit-handlers.service.ts`
+- `src/bot-signal-trade/bot-signal-trade.module.ts`, `bot-signal-trade.service.ts`
+
+### Modified files
+- `src/telegram/telegram.service.ts` — gutted to ~200 lines
+- `src/telegram/telegram.module.ts` — imports all new domain modules via `forwardRef()`
+
+---
+
 ## 2026-02-28 (2) - Schema Consolidation + Redis Migration + Remove Retry Commands
 
 ### Refactor: Centralize all schemas in `src/schemas/`

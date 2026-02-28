@@ -1,10 +1,24 @@
 {
   "permissions": {
     "allow": [
-      "Bash(npx tsc --noEmit)",
+      "Bash(npx prettier:*)",
+      "Bash(npx tsc:*)",
       "WebFetch(domain:github.com)",
       "WebFetch(domain:developers.binance.com)",
-      "Bash(npm run build)"
+      "Bash(npx nest build:*)",
+      "Bash(yarn build:*)",
+      "Bash(yarn build)",
+      "Bash(yarn install:*)",
+      "Bash(yarn add:*)",
+      "Bash(npm run build:*)",
+      "Bash(npm install:*)",
+      "Bash(wc:*)",
+      "Bash(ls:*)",
+      "Bash(find:*)",
+      "Bash(xargs:*)",
+      "Bash(fc:*)",
+      "Bash(mkdir:*)",
+      "Bash(sed:*)"
     ]
   }
 }

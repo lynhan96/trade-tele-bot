@@ -11,13 +11,18 @@
                      ▼
 ┌─────────────────────────────────────────────────────────┐
 │              TelegramBotService                          │
-│          (Business Logic & Orchestration)                │
+│          (Thin Command Router ~200 lines)                │
 │                                                          │
-│  • Command Handlers                                      │
-│  • Cron Jobs (TP Check, Re-entry, Updates)             │
-│  • Position Management                                   │
-│  • Retry Logic Orchestration                            │
-└─┬─────────┬─────────┬─────────┬─────────┬──────────────┘
+│  • Bot init + setupCommands()                            │
+│  • Delegates all commands to domain services            │
+│  • sendTelegramMessage(), deleteMessage()               │
+│  • registerBotCommand() (for AiCommandService)          │
+└─┬──────┬───────┬───────┬───────┬───────────────────────┘
+  │      │       │       │       │
+  ▼      ▼       ▼       ▼       ▼
+Account Position Reentry TakeProfit BotSignalTrade
+ Svc     Svc      Svc      Svc/Hdlr    Svc
+  └──────┴───────┴───────┴───────┴───────────────────────┘
   │         │         │         │         │
   ▼         ▼         ▼         ▼         ▼
 ┌────┐   ┌────┐   ┌─────┐   ┌─────┐   ┌──────┐
@@ -45,9 +50,27 @@ AppModule
 ├── RedisModule
 ├── BinanceModule
 ├── OkxModule
-├── UserModule            ← persistent user settings (MongoDB)
-├── TelegramModule        ← imports UserModule
-└── SignalModule          ← imports TelegramModule, hosts TCP controller
+├── UserModule              ← persistent user settings (MongoDB)
+├── AccountModule           ← handleStart, handleSetKeys, handleListAccounts; helper methods (getUserData, getActiveExchange, ensureChatIdStored)
+├── PositionModule          ← handlePosition, handleClosePosition, handleCloseAllPositions, closeAllPositions
+├── ReentryModule           ← checkReentryOpportunities (cron 30s), executeReentry, checkReentrySafety, calculateEMA
+├── TakeProfitModule        ← TakeProfitService (5 crons), TakeProfitHandlersService (9 command handlers)
+├── BotSignalTradeModule    ← handleIncomingSignal, executeSignalTrade, notifyUsersForBot, bot CRUD handlers
+├── TelegramModule          ← thin command router (~200 lines); imports all domain modules via forwardRef
+├── AiSignalModule          ← AI signal scanning, queue, position monitoring
+└── SignalModule            ← TCP controller; imports TelegramModule
+```
+
+### Domain Module Dependencies
+
+All domain modules use `forwardRef(() => TelegramModule)` to resolve the circular dependency with `TelegramBotService` (needed for `sendTelegramMessage`). `TelegramModule` in turn wraps all domain module imports with `forwardRef()`.
+
+```
+TelegramModule ↔ AccountModule
+TelegramModule ↔ PositionModule
+TelegramModule ↔ ReentryModule
+TelegramModule ↔ TakeProfitModule → PositionModule (for closeAllPositions)
+TelegramModule ↔ BotSignalTradeModule
 ```
 
 ## Data Flow

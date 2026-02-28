@@ -350,6 +350,7 @@ Return ONLY valid JSON (no extra fields, no comments):
   "strategy": "RSI_CROSS|RSI_ZONE|TREND_EMA|MEAN_REVERT_RSI|STOCH_BB_PATTERN|STOCH_EMA_KDJ",
   "confidence": <0-100>,
   "stopLossPercent": <0.5-5.0>,
+  "takeProfitPercent": <0.5-15.0>,
   "minConfidenceToTrade": <50-80>,
   "rsiCross": { "primaryKline": "<15m|4h>", "rsiPeriod": 14, "rsiEmaPeriod": 9, "enableThreshold": true, "rsiThreshold": 50, "enableHtfRsi": true, "htfKline": "<1h|1d>", "enableCandleDir": false, "candleKline": "<15m|4h>" },
   "rsiZone": { "primaryKline": "<15m|4h>", "rsiPeriod": 14, "rsiEmaPeriod": 9, "rsiTop": 70, "rsiBottom": 30, "enableHtfRsi": true, "htfKline": "<1h|1d>", "enableInitialCandle": true, "excludeLatestCandle": true }
@@ -357,7 +358,8 @@ Return ONLY valid JSON (no extra fields, no comments):
 
 Strategy guide: STRONG_TREND→RSI_CROSS/TREND_EMA, RANGE_BOUND→STOCH_BB_PATTERN/MEAN_REVERT_RSI, VOLATILE→RSI_ZONE, BTC_CORRELATION→RSI_CROSS, MIXED→RSI_ZONE
 Kline guide: INTRADAY→primaryKline="15m" htfKline="1h"; SWING→primaryKline="4h" htfKline="1d"
-Higher ATR%→wider stop loss. Low BBWidth%→tighter RSI zones. SWING→stopLossPercent 1.5-4.0.`;
+Higher ATR%→wider stop loss. Low BBWidth%→tighter RSI zones. SWING→stopLossPercent 1.5-4.0.
+takeProfitPercent guide: set based on regime/volatility. STRONG_TREND→2×-3× SL. RANGE_BOUND→1.5×-2× SL. VOLATILE→1.5× SL. SWING→wider TP (3×-4× SL). Minimum 1.5× stopLossPercent.`;
 
     const response = await this.anthropic.messages.create({
       model: HAIKU_MODEL,
@@ -386,6 +388,7 @@ Higher ATR%→wider stop loss. Low BBWidth%→tighter RSI zones. SWING→stopLos
       strategy: "RSI_CROSS",
       confidence: 65,
       stopLossPercent: 2.0,
+      takeProfitPercent: 4.0, // default 2:1 reward:risk
       minConfidenceToTrade: 60,
       rsiCross: {
         primaryKline: "15m",
@@ -456,9 +459,13 @@ Higher ATR%→wider stop loss. Low BBWidth%→tighter RSI zones. SWING→stopLos
 
   private mergeWithDefaults(parsed: Partial<AiTunedParams>): AiTunedParams {
     const defaults = this.getDefaultParams(parsed.regime || "MIXED");
+    const stopLossPercent = parsed.stopLossPercent ?? defaults.stopLossPercent;
     return {
       ...defaults,
       ...parsed,
+      stopLossPercent,
+      // Fallback: if Haiku didn't return takeProfitPercent, use 2× SL distance
+      takeProfitPercent: parsed.takeProfitPercent ?? stopLossPercent * 2,
       rsiCross: { ...defaults.rsiCross, ...(parsed.rsiCross || {}) },
       rsiZone: { ...defaults.rsiZone, ...(parsed.rsiZone || {}) },
       trendEma: { ...defaults.trendEma, ...(parsed.trendEma || {}) },

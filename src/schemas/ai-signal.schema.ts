@@ -12,6 +12,8 @@ export type SignalStatus =
   | "SKIPPED";
 export type SignalCloseReason =
   | "POSITION_CLOSED"
+  | "TAKE_PROFIT"
+  | "STOP_LOSS"
   | "TTL_EXPIRED"
   | "REPLACED_BY_NEW"
   | "MANUAL";
@@ -39,6 +41,12 @@ export class AiSignal {
   @Prop({ required: true })
   stopLossPercent: number;
 
+  @Prop()
+  takeProfitPrice?: number; // Absolute TP price target (Haiku-decided)
+
+  @Prop()
+  takeProfitPercent?: number; // % used to calculate takeProfitPrice
+
   @Prop({ required: true })
   strategy: string; // e.g. "RSI_ZONE", "RSI_CROSS", "TREND_EMA", etc.
 
@@ -59,7 +67,14 @@ export class AiSignal {
   status: SignalStatus;
 
   @Prop({
-    enum: ["POSITION_CLOSED", "TTL_EXPIRED", "REPLACED_BY_NEW", "MANUAL"],
+    enum: [
+      "POSITION_CLOSED",
+      "TAKE_PROFIT",
+      "STOP_LOSS",
+      "TTL_EXPIRED",
+      "REPLACED_BY_NEW",
+      "MANUAL",
+    ],
   })
   closeReason?: SignalCloseReason;
 

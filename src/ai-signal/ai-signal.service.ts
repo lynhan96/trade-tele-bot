@@ -21,7 +21,6 @@ import {
 } from "../schemas/ai-coin-profile.schema";
 import { AiTunedParams } from "../strategy/ai-optimizer/ai-tuned-params.interface";
 
-const BOT_TYPE_AI1 = "BOT_FUTURE_AI_1";
 const AI_PAUSED_KEY = "cache:ai:paused";
 const AI_TEST_MODE_KEY = "cache:ai:test-mode";
 
@@ -63,6 +62,24 @@ export class AiSignalService implements OnModuleInit {
         "[AiSignal] Starting in TEST MODE — no real trades will be placed",
       );
     }
+
+    // Register callback so PositionMonitorService can trigger notifications
+    // after a real-time TP/SL resolution (avoids circular dependency).
+    this.positionMonitorService.setResolveCallback(async (info) => {
+      await this.notifyPositionClosed(info).catch(() => {});
+
+      if (info.queuedSignalActivated) {
+        const newActive = await this.signalQueueService.getActiveSignal(
+          info.symbol,
+        );
+        if (newActive) {
+          await this.broadcastSignal(newActive);
+          await this.notifyQueueActivated(newActive, info);
+        }
+      }
+
+      await this.updateCoinProfile(info).catch(() => {});
+    });
 
     try {
       await this.coinFilterService.scanAndFilter();
@@ -258,20 +275,6 @@ export class AiSignalService implements OnModuleInit {
   // ─── Broadcast to execution layer (live mode only) ────────────────────────
 
   async broadcastSignal(signal: AiSignalDocument): Promise<void> {
-    const incomingSignal = {
-      coin: signal.coin,
-      currency: signal.currency,
-      equity: signal.direction as "LONG" | "SHORT",
-      entry: signal.entryPrice,
-      stopLoss: signal.stopLossPrice,
-      botType: BOT_TYPE_AI1,
-      tradingPairType: "FUTURE" as const,
-      period: signal.primaryKline || "15m",
-      isManual: false,
-    };
-
-    await this.telegramService.handleIncomingSignal(incomingSignal);
-
     await this.aiSignalModel
       .findByIdAndUpdate(signal._id, { $inc: { sentToUsers: 1 } })
       .catch(() => {});
@@ -338,7 +341,7 @@ export class AiSignalService implements OnModuleInit {
       await this.signalQueueService.resolveActiveSignal(
         signal.symbol,
         currentPrice,
-        "POSITION_CLOSED",
+        "STOP_LOSS",
       );
 
       // Notify admin about simulated SL
@@ -471,8 +474,18 @@ export class AiSignalService implements OnModuleInit {
     const pnlSign = info.pnlPercent >= 0 ? "+" : "";
     const pnlEmoji = info.pnlPercent >= 0 ? "🟢" : "🔴";
 
+    // Header line differs by close reason
+    let headerLine: string;
+    if (info.closeReason === "TAKE_PROFIT") {
+      headerLine = `🎯 *${info.symbol} ${info.direction} Take Profit!*`;
+    } else if (info.closeReason === "STOP_LOSS") {
+      headerLine = `🛑 *${info.symbol} ${info.direction} Stop Loss*`;
+    } else {
+      headerLine = `${pnlEmoji} *${info.symbol} ${info.direction} Đã đóng*`;
+    }
+
     const text =
-      `${pnlEmoji} *${info.symbol} ${info.direction} Đã đóng*\n\n` +
+      `${headerLine}\n\n` +
       `├ Vào: $${info.entryPrice.toLocaleString()}\n` +
       `├ Ra: $${info.exitPrice.toLocaleString()}\n` +
       `└ PnL: *${pnlSign}${info.pnlPercent.toFixed(2)}%*`;
@@ -485,7 +498,7 @@ export class AiSignalService implements OnModuleInit {
     }
 
     this.logger.log(
-      `[AiSignal] ${info.symbol} ${info.direction} CLOSED: ${pnlSign}${info.pnlPercent.toFixed(2)}%`,
+      `[AiSignal] ${info.symbol} ${info.direction} ${info.closeReason}: ${pnlSign}${info.pnlPercent.toFixed(2)}%`,
     );
   }
 

@@ -141,7 +141,7 @@ export class SignalQueueService {
   async resolveActiveSignal(
     symbol: string,
     exitPrice: number,
-    reason: "POSITION_CLOSED" | "MANUAL" = "POSITION_CLOSED",
+    reason: "POSITION_CLOSED" | "TAKE_PROFIT" | "STOP_LOSS" | "MANUAL" = "POSITION_CLOSED",
   ): Promise<AiSignalDocument | null> {
     const activeId = await this.redisService.get<string>(ACTIVE_KEY(symbol));
     if (!activeId) return null;
@@ -278,11 +278,16 @@ export class SignalQueueService {
   ): Promise<AiSignalDocument> {
     const symbol = `${coin.toUpperCase()}${currency.toUpperCase()}`;
     const stopLossPercent = params.stopLossPercent;
+    const takeProfitPercent = params.takeProfitPercent ?? stopLossPercent * 2;
     const entryPrice = signalResult.entryPrice;
 
     const stopLossPrice = signalResult.isLong
       ? entryPrice * (1 - stopLossPercent / 100)
       : entryPrice * (1 + stopLossPercent / 100);
+
+    const takeProfitPrice = signalResult.isLong
+      ? entryPrice * (1 + takeProfitPercent / 100)
+      : entryPrice * (1 - takeProfitPercent / 100);
 
     const profile = params.timeframeProfile || "INTRADAY";
     const ttl =
@@ -304,6 +309,8 @@ export class SignalQueueService {
       entryPrice,
       stopLossPrice: parseFloat(stopLossPrice.toFixed(8)),
       stopLossPercent,
+      takeProfitPrice: parseFloat(takeProfitPrice.toFixed(8)),
+      takeProfitPercent,
       strategy: signalResult.strategy,
       regime,
       aiConfidence: params.confidence,
