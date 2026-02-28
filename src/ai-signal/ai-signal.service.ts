@@ -288,6 +288,21 @@ export class AiSignalService implements OnModuleInit {
     const slPct = signal.stopLossPercent.toFixed(1);
     const profileTag = this.getProfileTag(signal);
 
+    // Generate AI risk advice
+    const advice = await this.aiOptimizerService
+      .generateSignalAdvice({
+        symbol: signal.symbol,
+        direction: signal.direction,
+        entryPrice: signal.entryPrice,
+        stopLossPrice: signal.stopLossPrice,
+        stopLossPercent: signal.stopLossPercent,
+        strategy: signal.strategy,
+        regime: signal.regime,
+        aiConfidence: signal.aiConfidence,
+        reason: (signal.indicatorSnapshot as any)?.reason,
+      })
+      .catch(() => "");
+
     const text =
       `🧪 *\\[TEST\\] AI Signal — ${symbol}*\n\n` +
       `${dirEmoji} *${signal.direction}* vào $${signal.entryPrice.toLocaleString()}\n` +
@@ -295,7 +310,8 @@ export class AiSignalService implements OnModuleInit {
       `├ Profile: *${profileTag}*\n` +
       `├ Strategy: *${signal.strategy}*\n` +
       `├ Regime: *${signal.regime}* (${signal.aiConfidence}%)\n` +
-      `└ _Không đặt lệnh thật (chế độ test)_`;
+      `└ _Không đặt lệnh thật (chế độ test)_` +
+      advice;
 
     const subscribers = await this.subscriptionService.findAllActive();
     let notified = 0;
@@ -389,6 +405,21 @@ export class AiSignalService implements OnModuleInit {
     const slPct = signal.stopLossPercent.toFixed(1);
     const testTag = isTestMode ? " `[TEST]`" : "";
 
+    // Generate AI risk advice
+    const advice = await this.aiOptimizerService
+      .generateSignalAdvice({
+        symbol: signal.symbol,
+        direction: signal.direction,
+        entryPrice: signal.entryPrice,
+        stopLossPrice: signal.stopLossPrice,
+        stopLossPercent: signal.stopLossPercent,
+        strategy: signal.strategy,
+        regime: signal.regime,
+        aiConfidence: signal.aiConfidence,
+        reason: (signal.indicatorSnapshot as any)?.reason,
+      })
+      .catch(() => "");
+
     const profileTag = this.getProfileTag(signal);
     const text =
       `📡 *Bot AI Signal Nhận Được*${testTag}\n\n` +
@@ -400,7 +431,8 @@ export class AiSignalService implements OnModuleInit {
       `🧠 *AI Analysis:*\n` +
       `├ Strategy: *${signal.strategy}*\n` +
       `├ Regime: *${signal.regime}* (${signal.aiConfidence}%)\n` +
-      `└ _${(signal.indicatorSnapshot as any)?.reason || ""}_ `;
+      `└ _${(signal.indicatorSnapshot as any)?.reason || ""}_ ` +
+      advice;
 
     if (!isTestMode) {
       // In live mode, send to all subscribed users as an info notification

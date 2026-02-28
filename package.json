@@ -7,7 +7,7 @@
     "build": "nest build",
     "format": "prettier --write \"src/**/*.ts\"",
     "start": "nest start",
-    "start:dev": "nest start --watch",
+    "start:dev": "nest start --watch 2>&1 | tee /tmp/bot.log",
     "start:debug": "nest start --debug --watch",
     "start:prod": "node dist/main",
     "test:safety": "npx ts-node run-simulator.ts",

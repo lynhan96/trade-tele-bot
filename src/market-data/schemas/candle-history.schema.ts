@@ -54,3 +54,6 @@ CandleHistorySchema.index(
 
 /** Fast descending time-range queries for debugging / analysis. */
 CandleHistorySchema.index({ symbol: 1, interval: 1, closeTime: -1 });
+
+/** Auto-expire candles older than 30 days to prevent unbounded collection growth. */
+CandleHistorySchema.index({ createdAt: 1 }, { expireAfterSeconds: 30 * 24 * 60 * 60 });

@@ -33,6 +33,5 @@ export const UserSignalSubscriptionSchema = SchemaFactory.createForClass(
   UserSignalSubscription,
 );
 
-// Fast lookup by telegramId and isActive status
-UserSignalSubscriptionSchema.index({ telegramId: 1 }, { unique: true });
+// Fast lookup by isActive status (telegramId index already created by unique: true)
 UserSignalSubscriptionSchema.index({ isActive: 1 });

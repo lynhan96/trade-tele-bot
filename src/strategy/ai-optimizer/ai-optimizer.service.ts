@@ -102,7 +102,9 @@ Choose the regime based on:
       await this.incrementRateLimit(SONNET_RATE_KEY);
 
       const text = (response.content[0] as any).text;
-      const parsed = JSON.parse(text);
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) throw new Error("No JSON in Sonnet response");
+      const parsed = JSON.parse(jsonMatch[0]);
       const regime = parsed.regime || "MIXED";
 
       await this.redisService.set(cacheKey, regime, AI_REGIME_TTL);
@@ -386,10 +388,10 @@ takeProfitPercent guide: set based on regime/volatility. STRONG_TREND→2×-3× 
       timeframeProfile: "INTRADAY",
       regime: regime as any,
       strategy: "RSI_CROSS",
-      confidence: 65,
+      confidence: 55,
       stopLossPercent: 2.0,
       takeProfitPercent: 4.0, // default 2:1 reward:risk
-      minConfidenceToTrade: 60,
+      minConfidenceToTrade: 45,
       rsiCross: {
         primaryKline: "15m",
         rsiPeriod: 14,
@@ -479,6 +481,106 @@ takeProfitPercent guide: set based on regime/volatility. STRONG_TREND→2×-3× 
       },
       stochEmaKdj: { ...defaults.stochEmaKdj, ...(parsed.stochEmaKdj || {}) },
     };
+  }
+
+  // ─── AI risk advice for signal notifications ────────────────────────────
+
+  async generateSignalAdvice(signal: {
+    symbol: string;
+    direction: string;
+    entryPrice: number;
+    stopLossPrice: number;
+    stopLossPercent: number;
+    strategy: string;
+    regime: string;
+    aiConfidence: number;
+    reason?: string;
+  }): Promise<string> {
+    if (!this.enabled) return "";
+
+    if (
+      !(await this.checkRateLimit(HAIKU_RATE_KEY, this.maxHaikuPerHour))
+    ) {
+      return "";
+    }
+
+    try {
+      const coin = signal.symbol.replace("USDT", "");
+      const indicators = await this.preComputeIndicators(coin.toLowerCase());
+
+      const indicatorText = Object.entries(indicators)
+        .map(([k, v]) => `  ${k}: ${v}`)
+        .join("\n");
+
+      const prompt = `You are a crypto trading advisor. A trading signal has been generated. Provide a brief risk assessment and recommendation for the user.
+
+Signal Details:
+- Symbol: ${signal.symbol}
+- Direction: ${signal.direction}
+- Entry Price: $${signal.entryPrice}
+- Stop Loss: $${signal.stopLossPrice} (-${signal.stopLossPercent.toFixed(1)}%)
+- Strategy: ${signal.strategy}
+- Market Regime: ${signal.regime}
+- AI Confidence: ${signal.aiConfidence}%
+- Signal Reason: ${signal.reason || "N/A"}
+
+Current Market Indicators:
+${indicatorText}
+
+Return ONLY valid JSON:
+{
+  "riskLevel": "LOW|MEDIUM|HIGH",
+  "advice": "<2-3 sentences in Vietnamese: brief risk assessment, what to watch, position sizing suggestion>",
+  "keyRisks": ["<risk1>", "<risk2>"],
+  "suggestedLeverage": "<1x-5x based on risk>"
+}
+
+Guidelines:
+- LOW risk: strong trend alignment, high confidence, clear signals
+- MEDIUM risk: mixed signals, moderate confidence, some conflicting indicators
+- HIGH risk: counter-trend, low confidence, high volatility, conflicting timeframes
+- Always warn about key price levels to watch
+- Keep advice practical and actionable`;
+
+      const response = await this.anthropic.messages.create({
+        model: HAIKU_MODEL,
+        max_tokens: 300,
+        messages: [{ role: "user", content: prompt }],
+      });
+
+      await this.incrementRateLimit(HAIKU_RATE_KEY);
+
+      const text = (response.content[0] as any).text;
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) return "";
+
+      const parsed = JSON.parse(jsonMatch[0]);
+
+      const riskEmoji =
+        parsed.riskLevel === "LOW"
+          ? "🟢"
+          : parsed.riskLevel === "HIGH"
+            ? "🔴"
+            : "🟡";
+
+      const risksText = (parsed.keyRisks || [])
+        .map((r: string) => `  ⚠️ ${r}`)
+        .join("\n");
+
+      return (
+        `\n\n💡 *Khuyến nghị AI:*\n` +
+        `${riskEmoji} Rủi ro: *${parsed.riskLevel}*\n` +
+        `├ Leverage đề xuất: *${parsed.suggestedLeverage || "2x"}*\n` +
+        `├ ${parsed.advice || ""}\n` +
+        (risksText ? `${risksText}\n` : "") +
+        `└ _Lưu ý: Đây là phân tích AI, không phải lời khuyên tài chính_`
+      );
+    } catch (err) {
+      this.logger.debug(
+        `[AiOptimizer] generateSignalAdvice failed: ${err?.message}`,
+      );
+      return "";
+    }
   }
 
   // ─── Rate limiting ────────────────────────────────────────────────────────

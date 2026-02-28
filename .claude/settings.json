@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm run start:dev)",
+      "Bash(yarn start:dev)",
+      "Bash(mongosh --eval \"db.adminCommand\\(''ping''\\)\")",
+      "Bash(docker ps --format \"table {{.Names}}\\\\t{{.Image}}\\\\t{{.Ports}}\")",
+      "Bash(docker exec mongo mongosh --eval \"db.adminCommand\\(''ping''\\)\")",
+      "Bash(docker exec mongo mongosh -u admin -p admin123 --authenticationDatabase admin --eval \"use\\(''binance-tele-bot''\\); db.stats\\(\\)\")",
+      "Read(//tmp/**)"
+    ],
+    "additionalDirectories": [
+      "/Users/elvislee/.claude/projects/-Users-elvislee-Workspace-DTS-binance-tele-bot"
+    ]
+  }
+}
