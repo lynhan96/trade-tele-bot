@@ -155,7 +155,7 @@ export class AiCommandService implements OnModuleInit {
           for (const s of actives) {
             const dirIcon = s.direction === "LONG" ? "📈" : "📉";
             const testTag = s.isTestMode ? " 🧪" : "";
-            const held = Math.floor((Date.now() - s.executedAt.getTime()) / 3600000);
+            const held = s.executedAt ? Math.floor((Date.now() - s.executedAt.getTime()) / 3600000) : 0;
             const heldStr = held >= 24 ? `${Math.floor(held / 24)}d ${held % 24}h` : `${held}h`;
 
             // Fetch current price for PnL estimate

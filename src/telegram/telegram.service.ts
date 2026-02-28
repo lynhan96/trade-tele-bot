@@ -79,6 +79,10 @@ export class TelegramBotService implements OnModuleInit {
         { command: "ai_signals", description: "Xem tín hiệu đang chạy" },
         { command: "ai_status", description: "Trạng thái hệ thống" },
         { command: "ai_check", description: "Kiểm tra tín hiệu coin" },
+        { command: "ai_stats", description: "Thống kê hiệu suất" },
+        { command: "ai_test", description: "Bật/tắt chế độ test" },
+        { command: "ai_pause", description: "Tạm dừng tín hiệu" },
+        { command: "ai_resume", description: "Tiếp tục tín hiệu" },
       ]);
       this.logger.log("[Telegram] Bot command menu updated successfully (old commands cleared)");
     } catch (err) {

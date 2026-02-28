@@ -18,7 +18,8 @@
     ],
     "additionalDirectories": [
       "/Users/elvislee/.claude/projects/-Users-elvislee-Workspace-DTS-binance-tele-bot",
-      "/Users/elvislee/Workspace/DTS/binance-tele-bot/.claude/skills"
+      "/Users/elvislee/Workspace/DTS/binance-tele-bot/.claude/skills",
+      "/tmp"
     ]
   }
 }
