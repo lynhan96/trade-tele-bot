@@ -21,6 +21,7 @@ export class TelegramBotService implements OnModuleInit {
 
     this.bot = new TelegramBot(token, { polling: true });
     this.setupCommands();
+    await this.registerBotMenu();
   }
 
   private setupCommands() {
@@ -30,27 +31,59 @@ export class TelegramBotService implements OnModuleInit {
       await this.sendTelegramMessage(
         chatId,
         `👋 Xin chào *${firstName}*!\n\n` +
-          `🧠 *AI Signal Bot* — Hệ thống phân tích thị trường crypto tự động.\n\n` +
-          `Bot sử dụng AI để:\n` +
+          `🧠 *AI Signal Bot* — Hệ thống phân tích thị trường crypto tự động bằng AI.\n\n` +
+          `Bot sử dụng Claude AI để:\n` +
           `• Phân tích xu hướng thị trường theo thời gian thực\n` +
           `• Chọn chiến lược phù hợp (RSI, EMA, Stoch, BB...)\n` +
-          `• Phát tín hiệu LONG/SHORT kèm Stop Loss & Take Profit\n` +
+          `• Phát tín hiệu LONG/SHORT kèm Stop Loss\n` +
+          `• Đánh giá rủi ro và khuyến nghị leverage cho mỗi tín hiệu\n` +
           `• Hỗ trợ 2 khung thời gian: Intraday (15m) và Swing (4h)\n\n` +
           `─────────────────────\n` +
           `📋 *Lệnh sử dụng:*\n\n` +
           `📬 *Đăng ký tín hiệu*\n` +
-          `/ai subscribe — Đăng ký nhận tín hiệu mới\n` +
+          `/ai subscribe — Đăng ký nhận tín hiệu AI\n` +
           `/ai unsubscribe — Hủy đăng ký\n\n` +
+          `🌍 *Phân tích thị trường*\n` +
+          `/ai market — Xem phân tích thị trường AI\n\n` +
           `📊 *Xem thông tin*\n` +
+          `/ai status — Trạng thái hệ thống\n` +
+          `/ai check <SYMBOL> — Kiểm tra tín hiệu coin\n` +
           `/ai — Danh sách tất cả lệnh\n\n` +
           `─────────────────────\n` +
           `💡 *Hướng dẫn nhanh:*\n` +
           `1. Dùng /ai subscribe để bắt đầu nhận tín hiệu\n` +
-          `2. Khi có tín hiệu mới, bot sẽ gửi thông báo kèm entry, SL, TP\n` +
-          `3. Theo dõi và tự quản lý lệnh theo tín hiệu\n\n` +
-          `⚠️ _Lưu ý: Tín hiệu chỉ mang tính tham khảo. Giao dịch tiềm ẩn rủi ro._`,
+          `2. Dùng /ai market để xem AI đánh giá thị trường\n` +
+          `3. Khi có tín hiệu, bot gửi thông báo kèm entry, SL và khuyến nghị AI\n` +
+          `4. Theo dõi và tự quản lý lệnh theo tín hiệu\n\n` +
+          `⚠️ _Lưu ý: Tín hiệu và phân tích AI chỉ mang tính tham khảo. Giao dịch tiềm ẩn rủi ro._`,
       );
     });
+  }
+
+  /**
+   * Register bot command menu with Telegram (BotFather setMyCommands).
+   * Auto-updates the command autocomplete menu on every startup.
+   */
+  private async registerBotMenu() {
+    try {
+      // First delete ALL existing commands (including ones set via BotFather)
+      await this.bot.deleteMyCommands();
+
+      // Then set the new command menu
+      await this.bot.setMyCommands([
+        { command: "start", description: "Giới thiệu bot và hướng dẫn sử dụng" },
+        { command: "ai", description: "Danh sách tất cả lệnh AI" },
+        { command: "ai_subscribe", description: "Đăng ký nhận tín hiệu AI" },
+        { command: "ai_unsubscribe", description: "Hủy đăng ký tín hiệu AI" },
+        { command: "ai_market", description: "Phân tích thị trường AI" },
+        { command: "ai_signals", description: "Xem tín hiệu đang chạy" },
+        { command: "ai_status", description: "Trạng thái hệ thống" },
+        { command: "ai_check", description: "Kiểm tra tín hiệu coin" },
+      ]);
+      this.logger.log("[Telegram] Bot command menu updated successfully (old commands cleared)");
+    } catch (err) {
+      this.logger.warn(`[Telegram] Failed to set bot commands: ${err?.message}`);
+    }
   }
 
   // ─── Public helpers for external modules ─────────────────────────────────
@@ -90,6 +123,23 @@ export class TelegramBotService implements OnModuleInit {
     try {
       await this.bot.sendMessage(chatId, text, options);
     } catch (err) {
+      // If Markdown parsing fails, retry as plain text
+      if (
+        options.parse_mode &&
+        err?.message?.includes("parse")
+      ) {
+        this.logger.warn(
+          `[Telegram] Markdown parse failed for ${chatId}, retrying as plain text`,
+        );
+        try {
+          await this.bot.sendMessage(chatId, text);
+        } catch (retryErr) {
+          this.logger.warn(
+            `[Telegram] Plain text retry also failed: ${retryErr?.message}`,
+          );
+        }
+        return;
+      }
       this.logger.warn(
         `[Telegram] Failed to send message to ${chatId}: ${err?.message}`,
       );

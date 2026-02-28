@@ -20,6 +20,7 @@ import {
   AiCoinProfileDocument,
 } from "../schemas/ai-coin-profile.schema";
 import { AiTunedParams } from "../strategy/ai-optimizer/ai-tuned-params.interface";
+import { FuturesAnalyticsService } from "../market-data/futures-analytics.service";
 
 const AI_PAUSED_KEY = "cache:ai:paused";
 const AI_TEST_MODE_KEY = "cache:ai:test-mode";
@@ -41,6 +42,7 @@ export class AiSignalService implements OnModuleInit {
     private readonly signalQueueService: SignalQueueService,
     private readonly positionMonitorService: PositionMonitorService,
     private readonly subscriptionService: UserSignalSubscriptionService,
+    private readonly futuresAnalyticsService: FuturesAnalyticsService,
     @InjectModel(AiSignal.name)
     private readonly aiSignalModel: Model<AiSignalDocument>,
     @InjectModel(AiCoinProfile.name)
@@ -97,6 +99,113 @@ export class AiSignalService implements OnModuleInit {
       await this.coinFilterService.scanAndFilter();
     } catch (err) {
       this.logger.error(`[AiSignal] refreshCoinFilter error: ${err?.message}`);
+    }
+  }
+
+  // ─── Cron: money flow monitor (every 5 minutes, offset 2.5 min) ───────────
+
+  @Cron("2-59/5 * * * *")
+  async monitorMoneyFlow() {
+    try {
+      const shortlist = await this.coinFilterService.getShortlist();
+      if (shortlist.length === 0) return;
+
+      const symbols = shortlist.map((s) => s.symbol);
+      const analytics = await this.futuresAnalyticsService.fetchAnalytics(symbols);
+
+      const priceVolData = shortlist.map((s) => ({
+        symbol: s.symbol,
+        lastPrice: s.lastPrice,
+        quoteVolume: s.quoteVolume,
+        priceChangePercent: s.priceChangePercent,
+      }));
+
+      const alerts = await this.futuresAnalyticsService.detectMoneyFlowAlerts(analytics, priceVolData);
+
+      if (alerts.length === 0) return;
+
+      // Build alert message — group by coin for readability
+      const highAlerts = alerts.filter((a) => a.severity === "HIGH");
+      const medAlerts = alerts.filter((a) => a.severity === "MEDIUM");
+
+      // Only send if there are HIGH alerts, or at least 3 MEDIUM alerts
+      if (highAlerts.length === 0 && medAlerts.length < 3) return;
+
+      const fmtVol = (v: number) =>
+        v >= 1e9 ? `$${(v / 1e9).toFixed(1)}B` :
+        v >= 1e6 ? `$${(v / 1e6).toFixed(0)}M` : `$${(v / 1e3).toFixed(0)}K`;
+
+      const fmtPrice = (p: number) =>
+        p >= 1000 ? `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :
+        p >= 1 ? `$${p.toFixed(2)}` :
+        p >= 0.01 ? `$${p.toFixed(4)}` : `$${p.toFixed(6)}`;
+
+      // Group alerts by symbol
+      const coinAlertMap = new Map<string, typeof alerts>();
+      for (const a of alerts) {
+        if (!coinAlertMap.has(a.symbol)) coinAlertMap.set(a.symbol, []);
+        coinAlertMap.get(a.symbol)!.push(a);
+      }
+
+      // Sort: HIGH severity coins first, then by volume
+      const sortedCoins = [...coinAlertMap.entries()].sort((a, b) => {
+        const aHigh = a[1].some((x) => x.severity === "HIGH") ? 1 : 0;
+        const bHigh = b[1].some((x) => x.severity === "HIGH") ? 1 : 0;
+        return bHigh - aHigh;
+      });
+
+      let text = `🚨 *Cảnh Báo Dòng Tiền*\n`;
+      text += `━━━━━━━━━━━━━━━━━━\n\n`;
+
+      for (const [symbol, coinAlerts] of sortedCoins.slice(0, 8)) {
+        const coin = symbol.replace("USDT", "");
+        const entry = shortlist.find((s) => s.symbol === symbol);
+        if (!entry) continue;
+
+        const hasHigh = coinAlerts.some((a) => a.severity === "HIGH");
+        const icon = hasHigh ? "🔴" : "🟡";
+        const changeSign = entry.priceChangePercent >= 0 ? "+" : "";
+        const changeIcon = entry.priceChangePercent > 5 ? "🟢" : entry.priceChangePercent < -5 ? "🔴" : "";
+
+        text += `${icon} *${coin}* ${fmtPrice(entry.lastPrice)} ${changeIcon}${changeSign}${entry.priceChangePercent.toFixed(1)}%\n`;
+        text += `   Vol: ${fmtVol(entry.quoteVolume)}`;
+
+        const fa = analytics.get(symbol);
+        if (fa) {
+          const fundPct = (fa.fundingRate * 100);
+          text += ` | F: ${fundPct >= 0 ? "+" : ""}${fundPct.toFixed(3)}%`;
+          text += ` | L${fa.longPercent.toFixed(0)}/S${fa.shortPercent.toFixed(0)}`;
+        }
+        text += `\n`;
+
+        // Show alert details as tags
+        const tags: string[] = [];
+        for (const a of coinAlerts) {
+          if (a.alertType === "VOLUME_SPIKE") tags.push("💰 Volume bất thường");
+          if (a.alertType === "FUNDING_EXTREME" && a.data.fundingRate > 0) tags.push("⚠️ Long trả phí cao");
+          if (a.alertType === "FUNDING_EXTREME" && a.data.fundingRate < 0) tags.push("⚠️ Short trả phí cao");
+          if (a.alertType === "OI_SURGE") tags.push(`📈 OI tăng ${a.data.oiChange.toFixed(0)}%`);
+          if (a.alertType === "OI_DROP") tags.push(`📉 OI giảm ${Math.abs(a.data.oiChange).toFixed(0)}%`);
+          if (a.alertType === "LONG_SHORT_EXTREME" && a.data.lsRatio > 1) tags.push("⚡ Rủi ro Long Squeeze");
+          if (a.alertType === "LONG_SHORT_EXTREME" && a.data.lsRatio < 1) tags.push("⚡ Rủi ro Short Squeeze");
+        }
+        text += `   ${tags.join(" • ")}\n\n`;
+      }
+
+      text += `━━━━━━━━━━━━━━━━━━\n`;
+      text += `_${new Date().toLocaleTimeString("vi-VN")} • Binance Futures_`;
+
+      // Broadcast to all subscribers
+      const subscribers = await this.subscriptionService.findAllActive();
+      for (const sub of subscribers) {
+        await this.telegramService.sendTelegramMessage(sub.chatId, text);
+      }
+
+      this.logger.log(
+        `[AiSignal] Money flow alert sent: ${highAlerts.length} HIGH, ${medAlerts.length} MEDIUM to ${subscribers.length} subscribers`,
+      );
+    } catch (err) {
+      this.logger.warn(`[AiSignal] monitorMoneyFlow error: ${err?.message}`);
     }
   }
 
@@ -288,30 +397,37 @@ export class AiSignalService implements OnModuleInit {
     const slPct = signal.stopLossPercent.toFixed(1);
     const profileTag = this.getProfileTag(signal);
 
-    // Generate AI risk advice
-    const advice = await this.aiOptimizerService
-      .generateSignalAdvice({
-        symbol: signal.symbol,
-        direction: signal.direction,
-        entryPrice: signal.entryPrice,
-        stopLossPrice: signal.stopLossPrice,
-        stopLossPercent: signal.stopLossPercent,
-        strategy: signal.strategy,
-        regime: signal.regime,
-        aiConfidence: signal.aiConfidence,
-        reason: (signal.indicatorSnapshot as any)?.reason,
-      })
-      .catch(() => "");
+    // Generate AI risk advice (only for high-confidence signals to save API budget)
+    const advice = signal.aiConfidence >= 65
+      ? await this.aiOptimizerService
+          .generateSignalAdvice({
+            symbol: signal.symbol,
+            direction: signal.direction,
+            entryPrice: signal.entryPrice,
+            stopLossPrice: signal.stopLossPrice,
+            stopLossPercent: signal.stopLossPercent,
+            strategy: signal.strategy,
+            regime: signal.regime,
+            aiConfidence: signal.aiConfidence,
+            reason: (signal.indicatorSnapshot as any)?.reason,
+          })
+          .catch(() => "")
+      : "";
+
+    const fmtPrice = (p: number) =>
+      p >= 1000 ? `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :
+      p >= 1 ? `$${p.toFixed(2)}` :
+      p >= 0.01 ? `$${p.toFixed(4)}` : `$${p.toFixed(6)}`;
 
     const text =
-      `🧪 *\\[TEST\\] AI Signal — ${symbol}*\n\n` +
-      `${dirEmoji} *${signal.direction}* vào $${signal.entryPrice.toLocaleString()}\n` +
-      `├ Stop Loss: $${signal.stopLossPrice.toLocaleString()} (-${slPct}%)\n` +
-      `├ Profile: *${profileTag}*\n` +
-      `├ Strategy: *${signal.strategy}*\n` +
-      `├ Regime: *${signal.regime}* (${signal.aiConfidence}%)\n` +
-      `└ _Không đặt lệnh thật (chế độ test)_` +
-      advice;
+      `${dirEmoji} *AI Signal — ${symbol}* 🧪\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `${signal.direction === "LONG" ? "🟢" : "🔴"} *${signal.direction}* vào ${fmtPrice(signal.entryPrice)}\n` +
+      `🛡 SL: ${fmtPrice(signal.stopLossPrice)} (-${slPct}%)\n\n` +
+      `⚡ ${profileTag}\n` +
+      `🎯 ${signal.strategy} • ${signal.regime} (${signal.aiConfidence}%)\n\n` +
+      `_Chế độ test — không đặt lệnh thật_` +
+      (advice ? `\n\n━━━━━━━━━━━━━━━━━━\n${advice}` : "");
 
     const subscribers = await this.subscriptionService.findAllActive();
     let notified = 0;
@@ -365,11 +481,17 @@ export class AiSignalService implements OnModuleInit {
         ? ((currentPrice - signal.entryPrice) / signal.entryPrice) * 100
         : ((signal.entryPrice - currentPrice) / signal.entryPrice) * 100;
 
+      const fmtPrice = (p: number) =>
+        p >= 1000 ? `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :
+        p >= 1 ? `$${p.toFixed(2)}` :
+        p >= 0.01 ? `$${p.toFixed(4)}` : `$${p.toFixed(6)}`;
+
       const text =
-        `🧪 *\\[TEST\\] SL Triggered: ${signal.symbol}*\n\n` +
-        `${isLong ? "📈" : "📉"} *${signal.direction}* $${signal.entryPrice} → $${currentPrice}\n` +
-        `├ PnL: *${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}%* (SL hit)\n` +
-        `└ Strategy: ${signal.strategy}`;
+        `🛑 *${signal.symbol} ${signal.direction} — SL Hit* 🧪\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `${fmtPrice(signal.entryPrice)} → ${fmtPrice(currentPrice)}\n` +
+        `PnL: *${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}%*\n` +
+        `🎯 ${signal.strategy}`;
 
       await this.notifyAdminOnly(text);
 
@@ -403,39 +525,41 @@ export class AiSignalService implements OnModuleInit {
   ): Promise<void> {
     const dirEmoji = signal.direction === "LONG" ? "📈" : "📉";
     const slPct = signal.stopLossPercent.toFixed(1);
-    const testTag = isTestMode ? " `[TEST]`" : "";
 
-    // Generate AI risk advice
-    const advice = await this.aiOptimizerService
-      .generateSignalAdvice({
-        symbol: signal.symbol,
-        direction: signal.direction,
-        entryPrice: signal.entryPrice,
-        stopLossPrice: signal.stopLossPrice,
-        stopLossPercent: signal.stopLossPercent,
-        strategy: signal.strategy,
-        regime: signal.regime,
-        aiConfidence: signal.aiConfidence,
-        reason: (signal.indicatorSnapshot as any)?.reason,
-      })
-      .catch(() => "");
+    // Generate AI risk advice (only for high-confidence signals to save API budget)
+    const advice = signal.aiConfidence >= 65
+      ? await this.aiOptimizerService
+          .generateSignalAdvice({
+            symbol: signal.symbol,
+            direction: signal.direction,
+            entryPrice: signal.entryPrice,
+            stopLossPrice: signal.stopLossPrice,
+            stopLossPercent: signal.stopLossPercent,
+            strategy: signal.strategy,
+            regime: signal.regime,
+            aiConfidence: signal.aiConfidence,
+            reason: (signal.indicatorSnapshot as any)?.reason,
+          })
+          .catch(() => "")
+      : "";
 
     const profileTag = this.getProfileTag(signal);
+    const fmtPrice = (p: number) =>
+      p >= 1000 ? `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :
+      p >= 1 ? `$${p.toFixed(2)}` :
+      p >= 0.01 ? `$${p.toFixed(4)}` : `$${p.toFixed(6)}`;
+
     const text =
-      `📡 *Bot AI Signal Nhận Được*${testTag}\n\n` +
-      `${dirEmoji} *${signal.symbol}* ${signal.direction}\n` +
-      `├ Bot: AI1\n` +
-      `├ Giá vào: $${signal.entryPrice.toLocaleString()}\n` +
-      `├ Stop Loss: $${signal.stopLossPrice.toLocaleString()} (-${slPct}%)\n` +
-      `├ Profile: *${profileTag}*\n\n` +
-      `🧠 *AI Analysis:*\n` +
-      `├ Strategy: *${signal.strategy}*\n` +
-      `├ Regime: *${signal.regime}* (${signal.aiConfidence}%)\n` +
-      `└ _${(signal.indicatorSnapshot as any)?.reason || ""}_ ` +
-      advice;
+      `${dirEmoji} *AI Signal — ${signal.symbol}* 📡\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `${signal.direction === "LONG" ? "🟢" : "🔴"} *${signal.direction}* vào ${fmtPrice(signal.entryPrice)}\n` +
+      `🛡 SL: ${fmtPrice(signal.stopLossPrice)} (-${slPct}%)\n\n` +
+      `⚡ ${profileTag}\n` +
+      `🎯 ${signal.strategy} • ${signal.regime} (${signal.aiConfidence}%)\n\n` +
+      `_Đã đặt lệnh tự động_` +
+      (advice ? `\n\n━━━━━━━━━━━━━━━━━━\n${advice}` : "");
 
     if (!isTestMode) {
-      // In live mode, send to all subscribed users as an info notification
       const subscribers = await this.subscriptionService.findAllActive();
       for (const sub of subscribers) {
         await this.telegramService
@@ -443,7 +567,6 @@ export class AiSignalService implements OnModuleInit {
           .catch(() => {});
       }
     }
-    // In test mode, notification was already sent in notifySignalTestMode()
   }
 
   private async notifySignalQueued(
@@ -455,16 +578,21 @@ export class AiSignalService implements OnModuleInit {
       0,
       (signal.expiresAt.getTime() - Date.now()) / 3600000,
     );
-    const testTag = isTestMode ? " `[TEST]`" : "";
     const profileTag = this.getProfileTag(signal);
+    const testLabel = isTestMode ? " 🧪" : "";
+    const fmtPrice = (p: number) =>
+      p >= 1000 ? `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :
+      p >= 1 ? `$${p.toFixed(2)}` :
+      p >= 0.01 ? `$${p.toFixed(4)}` : `$${p.toFixed(6)}`;
 
     const text =
-      `📋 *AI Signal — Xếp hàng chờ*${testTag}\n\n` +
-      `${dirEmoji} *${signal.symbol}* ${signal.direction} $${signal.entryPrice.toLocaleString()}\n` +
-      `├ Profile: *${profileTag}*\n` +
-      `├ Đang chờ lệnh hiện tại đóng\n` +
-      `├ Strategy: *${signal.strategy}*\n` +
-      `└ ⏰ Hết hạn sau: *${hoursLeft.toFixed(1)}h*`;
+      `${dirEmoji} *AI Signal — ${signal.symbol}* 📋${testLabel}\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `${signal.direction === "LONG" ? "🟢" : "🔴"} *${signal.direction}* vào ${fmtPrice(signal.entryPrice)}\n\n` +
+      `⚡ ${profileTag}\n` +
+      `🎯 ${signal.strategy} • ${signal.regime} (${signal.aiConfidence}%)\n\n` +
+      `⏳ _Đang chờ lệnh hiện tại đóng_\n` +
+      `⏰ Hết hạn sau: *${hoursLeft.toFixed(1)}h*`;
 
     const subscribers = await this.subscriptionService.findAllActive();
     for (const sub of subscribers) {
@@ -479,20 +607,25 @@ export class AiSignalService implements OnModuleInit {
     closedInfo: ResolvedSignalInfo,
   ): Promise<void> {
     const dirEmoji = signal.direction === "LONG" ? "📈" : "📉";
-    const prevDirEmoji = closedInfo.direction === "LONG" ? "📈" : "📉";
     const pnlSign = closedInfo.pnlPercent >= 0 ? "+" : "";
-    const testTag = signal.isTestMode ? " `[TEST]`" : "";
+    const pnlEmoji = closedInfo.pnlPercent >= 0 ? "🟢" : "🔴";
+    const testLabel = signal.isTestMode ? " 🧪" : "";
 
     const profileTag = this.getProfileTag(signal);
+    const fmtPrice = (p: number) =>
+      p >= 1000 ? `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :
+      p >= 1 ? `$${p.toFixed(2)}` :
+      p >= 0.01 ? `$${p.toFixed(4)}` : `$${p.toFixed(6)}`;
+
     const text =
-      `✅ *${closedInfo.symbol} ${closedInfo.direction} đã đóng*\n` +
-      `${prevDirEmoji} Entry: $${closedInfo.entryPrice} → Exit: $${closedInfo.exitPrice} (*${pnlSign}${closedInfo.pnlPercent.toFixed(2)}%*)\n\n` +
-      `⚡ *Tự động kích hoạt lệnh chờ:*${testTag}\n\n` +
-      `${dirEmoji} *${signal.symbol}* ${signal.direction} $${signal.entryPrice.toLocaleString()}\n` +
-      `├ Bot: AI1\n` +
-      `├ Profile: *${profileTag}*\n` +
-      `├ SL: $${signal.stopLossPrice.toLocaleString()} (-${signal.stopLossPercent.toFixed(1)}%)\n` +
-      `└ Strategy: *${signal.strategy}*`;
+      `${pnlEmoji} *${closedInfo.symbol} ${closedInfo.direction} đã đóng*\n` +
+      `${fmtPrice(closedInfo.entryPrice)} → ${fmtPrice(closedInfo.exitPrice)} (*${pnlSign}${closedInfo.pnlPercent.toFixed(2)}%*)\n\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `${dirEmoji} *Kích hoạt lệnh chờ — ${signal.symbol}*${testLabel}\n\n` +
+      `${signal.direction === "LONG" ? "🟢" : "🔴"} *${signal.direction}* vào ${fmtPrice(signal.entryPrice)}\n` +
+      `🛡 SL: ${fmtPrice(signal.stopLossPrice)} (-${signal.stopLossPercent.toFixed(1)}%)\n\n` +
+      `⚡ ${profileTag}\n` +
+      `🎯 ${signal.strategy}`;
 
     const subscribers = await this.subscriptionService.findAllActive();
     for (const sub of subscribers) {
@@ -506,21 +639,30 @@ export class AiSignalService implements OnModuleInit {
     const pnlSign = info.pnlPercent >= 0 ? "+" : "";
     const pnlEmoji = info.pnlPercent >= 0 ? "🟢" : "🔴";
 
-    // Header line differs by close reason
-    let headerLine: string;
+    let headerIcon: string;
+    let headerLabel: string;
     if (info.closeReason === "TAKE_PROFIT") {
-      headerLine = `🎯 *${info.symbol} ${info.direction} Take Profit!*`;
+      headerIcon = "🎯";
+      headerLabel = "Take Profit!";
     } else if (info.closeReason === "STOP_LOSS") {
-      headerLine = `🛑 *${info.symbol} ${info.direction} Stop Loss*`;
+      headerIcon = "🛑";
+      headerLabel = "Stop Loss";
     } else {
-      headerLine = `${pnlEmoji} *${info.symbol} ${info.direction} Đã đóng*`;
+      headerIcon = pnlEmoji;
+      headerLabel = "Đã đóng";
     }
 
+    const fmtPrice = (p: number) =>
+      p >= 1000 ? `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :
+      p >= 1 ? `$${p.toFixed(2)}` :
+      p >= 0.01 ? `$${p.toFixed(4)}` : `$${p.toFixed(6)}`;
+
     const text =
-      `${headerLine}\n\n` +
-      `├ Vào: $${info.entryPrice.toLocaleString()}\n` +
-      `├ Ra: $${info.exitPrice.toLocaleString()}\n` +
-      `└ PnL: *${pnlSign}${info.pnlPercent.toFixed(2)}%*`;
+      `${headerIcon} *${info.symbol} ${info.direction} — ${headerLabel}*\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `Vào: ${fmtPrice(info.entryPrice)}\n` +
+      `Ra: ${fmtPrice(info.exitPrice)}\n` +
+      `PnL: *${pnlSign}${info.pnlPercent.toFixed(2)}%*`;
 
     const subscribers = await this.subscriptionService.findAllActive();
     for (const sub of subscribers) {
@@ -644,6 +786,64 @@ export class AiSignalService implements OnModuleInit {
   async getParamsForSymbol(coin: string, currency: string): Promise<any> {
     const symbol = `${coin.toUpperCase()}${currency.toUpperCase()}`;
     return this.redisService.get(`cache:ai:params:${symbol}`);
+  }
+
+  async getAllCoinParams(): Promise<
+    {
+      symbol: string;
+      confidence: number;
+      regime: string;
+      strategy: string;
+      lastPrice: number;
+      quoteVolume: number;
+      priceChangePercent: number;
+    }[]
+  > {
+    const shortlist = await this.coinFilterService.getShortlist();
+    const results: {
+      symbol: string;
+      confidence: number;
+      regime: string;
+      strategy: string;
+      lastPrice: number;
+      quoteVolume: number;
+      priceChangePercent: number;
+    }[] = [];
+
+    for (const entry of shortlist) {
+      const params = await this.redisService.get<any>(
+        `cache:ai:params:${entry.symbol}`,
+      );
+      if (params) {
+        results.push({
+          symbol: entry.symbol,
+          confidence: params.confidence || 0,
+          regime: params.regime || "UNKNOWN",
+          strategy: params.strategy || "N/A",
+          lastPrice: entry.lastPrice || 0,
+          quoteVolume: entry.quoteVolume || 0,
+          priceChangePercent: entry.priceChangePercent || 0,
+        });
+      }
+    }
+    return results;
+  }
+
+  async generateMarketOverview(): Promise<string> {
+    const coinData = await this.getAllCoinParams();
+
+    // Fetch futures analytics (funding, OI, L/S) for top coins
+    const topSymbols = coinData
+      .sort((a, b) => b.quoteVolume - a.quoteVolume)
+      .slice(0, 10)
+      .map((c) => c.symbol);
+    const analytics = await this.futuresAnalyticsService.fetchAnalytics(topSymbols);
+
+    // Convert to plain object for ai-optimizer
+    const analyticsObj: Record<string, any> = {};
+    analytics.forEach((v, k) => { analyticsObj[k] = v; });
+
+    return this.aiOptimizerService.generateMarketOverview(coinData, analyticsObj);
   }
 
   async overrideStrategy(

@@ -1,6 +1,7 @@
 import { Module } from "@nestjs/common";
 import { MongooseModule } from "@nestjs/mongoose";
 import { MarketDataService } from "./market-data.service";
+import { FuturesAnalyticsService } from "./futures-analytics.service";
 import { RedisModule } from "../redis/redis.module";
 import {
   CandleHistory,
@@ -14,7 +15,7 @@ import {
       { name: CandleHistory.name, schema: CandleHistorySchema },
     ]),
   ],
-  providers: [MarketDataService],
-  exports: [MarketDataService],
+  providers: [MarketDataService, FuturesAnalyticsService],
+  exports: [MarketDataService, FuturesAnalyticsService],
 })
 export class MarketDataModule {}

@@ -1,5 +1,92 @@
 # Changelog
 
+## 2026-02-28 (4) - AI Features: Futures Analytics, Money Flow Monitor, Notification Formatting
+
+### Feature: BotFather Auto-Registration
+
+Added `registerBotMenu()` in `telegram.service.ts` that programmatically updates the Telegram bot command menu on startup:
+- Calls `bot.deleteMyCommands()` to clear legacy commands
+- Calls `bot.setMyCommands()` with current AI command list
+- All `/ai` subcommands now accept underscore format (`/ai_subscribe`) via `[_ ]` regex in `ai-command.service.ts`
+
+### Feature: Futures Analytics Service
+
+**New file**: `src/market-data/futures-analytics.service.ts`
+
+Fetches real-time futures data from Binance free APIs (no API key needed):
+- Funding rate (`/fapi/v1/fundingRate`)
+- Open Interest (`/fapi/v1/openInterest`)
+- Long/Short ratio (`/futures/data/globalLongShortAccountRatio`)
+- Taker buy/sell ratio (`/futures/data/takerlongshortRatio`)
+
+Batches requests 10 at a time to avoid rate limits. Results cached in Redis (5 min TTL).
+
+### Feature: Money Flow Monitor (Real-time Alerts)
+
+Added `monitorMoneyFlow()` cron in `ai-signal.service.ts` — runs every 5 minutes:
+- Fetches futures analytics for all shortlisted coins (50 coins)
+- Compares current OI vs previous (stored in Redis, 10 min TTL)
+- Detects alerts: OI surge >15%, OI drop >15%, extreme funding >0.1%, L/S ratio >2.5 or <0.4, volume spike >$500M + >15% price change
+- Groups alerts by coin (avoids duplicate entries for same coin)
+- Broadcasts formatted alert to all subscribers
+
+### Feature: Real-time Prices in /ai market
+
+Enriched `getAllCoinParams()` with `lastPrice`, `quoteVolume`, `priceChangePercent` from coin filter shortlist data. `/ai market` now shows price table with real-time data, market stats, and futures analytics section.
+
+### Enhancement: Coin Monitoring Expansion
+
+Updated `.env` settings:
+- `AI_MAX_SHORTLIST_SIZE`: 30 → 50
+- `AI_MIN_COIN_VOLUME_USD`: $20M → $10M
+- `AI_MIN_PRICE_CHANGE_PCT`: 0.5 → 0.3
+
+### Enhancement: Notification Formatting Overhaul
+
+Rewrote all Telegram notification methods with consistent clean style:
+
+**Style guide:**
+- Emoji header with coin name + type icon
+- `━━━━━━━━━━━━━━━━━━` separator line
+- Smart `fmtPrice()`: $1000+ no decimals, $1-999 two decimals, <$0.01 four-six decimals
+- No tree characters (`├└`), no backslash-escaped brackets
+- `🧪` emoji for test mode (replaces `\[TEST\]`)
+
+**Methods updated:**
+- `notifySignalTestMode()` — test signal notification
+- `notifySignalActive()` — live signal notification
+- `notifySignalQueued()` — queued signal notification
+- `notifyQueueActivated()` — queue → active transition
+- `notifyPositionClosed()` — TP/SL/close notification
+- `checkTestModeSignal()` SL notification — admin SL alert
+- Money flow alert builder — grouped by coin, emoji tags
+
+### Bug Fix: JSON Parse Error in Market Overview
+
+Haiku sometimes returns malformed JSON (trailing commas, control chars, missing commas). Added repair logic:
+```typescript
+const repaired = jsonMatch[0]
+  .replace(/,\s*([\]}])/g, "$1")        // trailing commas
+  .replace(/[\x00-\x1F]/g, " ")          // control chars
+  .replace(/(["\w])\s*\n\s*(")/g, "$1,$2"); // missing commas
+```
+Also increased `max_tokens` from 500 → 800 in `ai-optimizer.service.ts`.
+
+### Bug Fix: BotFather Old Commands
+
+`setMyCommands()` alone didn't replace manually-set BotFather commands. Fixed by calling `deleteMyCommands()` first.
+
+### Files Modified
+- `src/telegram/telegram.service.ts` — `registerBotMenu()`
+- `src/ai-signal/ai-command.service.ts` — all regex patterns updated to `[_ ]`
+- `src/ai-signal/ai-signal.service.ts` — money flow monitor, enriched params, all notification formatting
+- `src/strategy/ai-optimizer/ai-optimizer.service.ts` — market overview with analytics, JSON repair, max_tokens
+- `src/market-data/futures-analytics.service.ts` — NEW (Binance futures analytics)
+- `src/market-data/market-data.module.ts` — registered FuturesAnalyticsService
+- `.env` — updated coin filter settings
+
+---
+
 ## 2026-02-28 (3) - Refactor: Extract Domain Services from TelegramBotService
 
 ### Refactor: `telegram.service.ts` reduced from 4,537 → ~200 lines

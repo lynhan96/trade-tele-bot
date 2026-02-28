@@ -40,8 +40,10 @@ export class AiCommandService implements OnModuleInit {
         `🤖 *AI Signal Commands*\n\n` +
         `/ai subscribe — Đăng ký nhận tín hiệu AI\n` +
         `/ai unsubscribe — Hủy đăng ký tín hiệu AI\n` +
-        `/ai status — Trạng thái tín hiệu hiện tại\n` +
-        `/ai check \\<SYMBOL\\> — Kiểm tra tín hiệu đang chạy\n`;
+        `/ai market — Phân tích thị trường AI\n` +
+        `/ai signals — Xem tất cả tín hiệu đang chạy\n` +
+        `/ai status — Trạng thái hệ thống\n` +
+        `/ai check \\<SYMBOL\\> — Kiểm tra tín hiệu coin\n`;
       if (isAdmin) {
         text +=
           `\n*Admin:*\n` +
@@ -54,8 +56,8 @@ export class AiCommandService implements OnModuleInit {
       await this.telegramService.sendTelegramMessage(chatId, text);
     });
 
-    // /ai subscribe — any user can subscribe
-    this.telegramService.registerBotCommand(/^\/ai subscribe/, async (msg) => {
+    // /ai subscribe — any user can subscribe (also handles /ai_subscribe from menu)
+    this.telegramService.registerBotCommand(/^\/ai[_ ]subscribe/, async (msg) => {
       const chatId = msg.chat.id;
       const telegramId = msg.from?.id;
       if (!telegramId) return;
@@ -82,8 +84,8 @@ export class AiCommandService implements OnModuleInit {
       }
     });
 
-    // /ai unsubscribe — any user can unsubscribe
-    this.telegramService.registerBotCommand(/^\/ai unsubscribe/, async (msg) => {
+    // /ai unsubscribe — any user can unsubscribe (also handles /ai_unsubscribe from menu)
+    this.telegramService.registerBotCommand(/^\/ai[_ ]unsubscribe/, async (msg) => {
       const chatId = msg.chat.id;
       const telegramId = msg.from?.id;
       if (!telegramId) return;
@@ -106,8 +108,97 @@ export class AiCommandService implements OnModuleInit {
       }
     });
 
-    // /ai status
-    this.telegramService.registerBotCommand(/^\/ai status/, async (msg) => {
+    // /ai market — AI market overview (available to all users, also handles /ai_market)
+    this.telegramService.registerBotCommand(/^\/ai[_ ]market/, async (msg) => {
+      const chatId = msg.chat.id;
+
+      try {
+        await this.telegramService.sendTelegramMessage(
+          chatId,
+          "🔄 _Đang phân tích thị trường..._",
+        );
+        const overview = await this.aiSignalService.generateMarketOverview();
+        await this.telegramService.sendTelegramMessage(chatId, overview);
+      } catch (err) {
+        await this.telegramService.sendTelegramMessage(
+          chatId,
+          `❌ Lỗi phân tích thị trường: ${err?.message}`,
+        );
+      }
+    });
+
+    // /ai signals — view all active + queued signals (available to all subscribers)
+    this.telegramService.registerBotCommand(/^\/ai[_ ]signals/, async (msg) => {
+      const chatId = msg.chat.id;
+
+      try {
+        const actives = await this.signalQueueService.getAllActiveSignals();
+        const queued = await this.signalQueueService.getAllQueuedSignals();
+
+        if (actives.length === 0 && queued.length === 0) {
+          await this.telegramService.sendTelegramMessage(
+            chatId,
+            `📊 *AI Signals*\n━━━━━━━━━━━━━━━━━━\n\n_Không có tín hiệu nào đang chạy._`,
+          );
+          return;
+        }
+
+        const fmtPrice = (p: number) =>
+          p >= 1000 ? `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :
+          p >= 1 ? `$${p.toFixed(2)}` :
+          p >= 0.01 ? `$${p.toFixed(4)}` : `$${p.toFixed(6)}`;
+
+        let text = `📊 *AI Signals*\n━━━━━━━━━━━━━━━━━━\n\n`;
+
+        if (actives.length > 0) {
+          text += `🟢 *Active (${actives.length}):*\n\n`;
+          for (const s of actives) {
+            const dirIcon = s.direction === "LONG" ? "📈" : "📉";
+            const testTag = s.isTestMode ? " 🧪" : "";
+            const held = Math.floor((Date.now() - s.executedAt.getTime()) / 3600000);
+            const heldStr = held >= 24 ? `${Math.floor(held / 24)}d ${held % 24}h` : `${held}h`;
+
+            // Fetch current price for PnL estimate
+            let pnlStr = "";
+            try {
+              const health = await this.statsService.checkSignalHealth(s.symbol);
+              if (health) {
+                const pnl = health.unrealizedPnl;
+                pnlStr = ` (${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}%)`;
+              }
+            } catch {}
+
+            text += `${dirIcon} *${s.symbol}* ${s.direction}${testTag}\n`;
+            text += `   Vào: ${fmtPrice(s.entryPrice)}${pnlStr}\n`;
+            text += `   SL: ${fmtPrice(s.stopLossPrice)} | ${s.strategy}\n`;
+            text += `   ⏱ ${heldStr} | ${s.aiConfidence}% confidence\n\n`;
+          }
+        }
+
+        if (queued.length > 0) {
+          text += `⏳ *Queued (${queued.length}):*\n\n`;
+          for (const s of queued) {
+            const dirIcon = s.direction === "LONG" ? "📈" : "📉";
+            const testTag = s.isTestMode ? " 🧪" : "";
+            const hoursLeft = Math.max(0, (s.expiresAt.getTime() - Date.now()) / 3600000);
+
+            text += `${dirIcon} *${s.symbol}* ${s.direction}${testTag}\n`;
+            text += `   Vào: ${fmtPrice(s.entryPrice)} | ${s.strategy}\n`;
+            text += `   ⏰ Hết hạn: ${hoursLeft.toFixed(1)}h\n\n`;
+          }
+        }
+
+        text += `━━━━━━━━━━━━━━━━━━\n`;
+        text += `_${new Date().toLocaleTimeString("vi-VN")}_`;
+
+        await this.telegramService.sendTelegramMessage(chatId, text);
+      } catch (err) {
+        await this.telegramService.sendTelegramMessage(chatId, `❌ Lỗi: ${err?.message}`);
+      }
+    });
+
+    // /ai status (also handles /ai_status from menu)
+    this.telegramService.registerBotCommand(/^\/ai[_ ]status/, async (msg) => {
       const chatId = msg.chat.id;
       if (!this.isAdmin(msg.from?.id)) return;
 
@@ -159,8 +250,8 @@ export class AiCommandService implements OnModuleInit {
       }
     });
 
-    // /ai stats [days]
-    this.telegramService.registerBotCommand(/^\/ai stats(.*)/, async (msg, match) => {
+    // /ai stats [days] (also handles /ai_stats)
+    this.telegramService.registerBotCommand(/^\/ai[_ ]stats(.*)/, async (msg, match) => {
       const chatId = msg.chat.id;
       if (!this.isAdmin(msg.from?.id)) return;
 
@@ -175,8 +266,8 @@ export class AiCommandService implements OnModuleInit {
       }
     });
 
-    // /ai check <SYMBOL>
-    this.telegramService.registerBotCommand(/^\/ai check\s+(\S+)/, async (msg, match) => {
+    // /ai check <SYMBOL> (also handles /ai_check)
+    this.telegramService.registerBotCommand(/^\/ai[_ ]check\s+(\S+)/, async (msg, match) => {
       const chatId = msg.chat.id;
       if (!this.isAdmin(msg.from?.id)) return;
 
@@ -202,8 +293,8 @@ export class AiCommandService implements OnModuleInit {
       }
     });
 
-    // /ai params <SYMBOL>
-    this.telegramService.registerBotCommand(/^\/ai params\s+(\S+)/, async (msg, match) => {
+    // /ai params <SYMBOL> (also handles /ai_params)
+    this.telegramService.registerBotCommand(/^\/ai[_ ]params\s+(\S+)/, async (msg, match) => {
       const chatId = msg.chat.id;
       if (!this.isAdmin(msg.from?.id)) return;
 
@@ -236,8 +327,8 @@ export class AiCommandService implements OnModuleInit {
       }
     });
 
-    // /ai test on|off
-    this.telegramService.registerBotCommand(/^\/ai test\s*(on|off)?/, async (msg, match) => {
+    // /ai test on|off (also handles /ai_test)
+    this.telegramService.registerBotCommand(/^\/ai[_ ]test\s*(on|off)?/, async (msg, match) => {
       const chatId = msg.chat.id;
       if (!this.isAdmin(msg.from?.id)) return;
 
@@ -266,8 +357,8 @@ export class AiCommandService implements OnModuleInit {
       }
     });
 
-    // /ai pause
-    this.telegramService.registerBotCommand(/^\/ai pause/, async (msg) => {
+    // /ai pause (also handles /ai_pause)
+    this.telegramService.registerBotCommand(/^\/ai[_ ]pause/, async (msg) => {
       const chatId = msg.chat.id;
       if (!this.isAdmin(msg.from?.id)) return;
 
@@ -278,8 +369,8 @@ export class AiCommandService implements OnModuleInit {
       );
     });
 
-    // /ai resume
-    this.telegramService.registerBotCommand(/^\/ai resume/, async (msg) => {
+    // /ai resume (also handles /ai_resume)
+    this.telegramService.registerBotCommand(/^\/ai[_ ]resume/, async (msg) => {
       const chatId = msg.chat.id;
       if (!this.isAdmin(msg.from?.id)) return;
 
@@ -290,9 +381,9 @@ export class AiCommandService implements OnModuleInit {
       );
     });
 
-    // /ai override <SYMBOL> <STRATEGY>
+    // /ai override <SYMBOL> <STRATEGY> (also handles /ai_override)
     this.telegramService.registerBotCommand(
-      /^\/ai override\s+(\S+)\s+(\S+)/,
+      /^\/ai[_ ]override\s+(\S+)\s+(\S+)/,
       async (msg, match) => {
         const chatId = msg.chat.id;
         if (!this.isAdmin(msg.from?.id)) return;

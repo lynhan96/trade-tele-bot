@@ -20,9 +20,14 @@ const HAIKU_OUTPUT_COST = 4.0;
 const SONNET_INPUT_COST = 15.0;
 const SONNET_OUTPUT_COST = 75.0;
 
-const AI_PARAMS_TTL = 60 * 60; // 1h
+const AI_PARAMS_TTL = 2 * 60 * 60; // 2h (was 1h — reduces calls by 50%)
+const AI_PARAMS_JITTER = 30 * 60; // ±15 min random offset to stagger expiry
 const AI_REGIME_TTL = 4 * 60 * 60; // 4h
-const HAIKU_RATE_KEY = "cache:ai:rate:haiku";
+const HAIKU_TUNE_RATE_KEY = "cache:ai:rate:haiku:tune"; // tuning pool (80%)
+const HAIKU_DEMAND_RATE_KEY = "cache:ai:rate:haiku:demand"; // on-demand pool (20%)
+const HAIKU_SCAN_BURST_KEY = "cache:ai:rate:haiku:burst"; // per-scan burst limiter
+const MAX_RETUNES_PER_SCAN = 5; // max fresh Haiku calls per 30s scan cycle
+const SCAN_BURST_TTL = 35; // slightly longer than 30s scan interval
 const SONNET_RATE_KEY = "cache:ai:rate:sonnet";
 const RATE_WINDOW = 60 * 60; // 1h window
 
@@ -31,7 +36,8 @@ export class AiOptimizerService {
   private readonly logger = new Logger(AiOptimizerService.name);
   private anthropic: Anthropic;
   private readonly enabled: boolean;
-  private readonly maxHaikuPerHour: number;
+  private readonly maxHaikuTunePerHour: number; // 80% budget for tuning
+  private readonly maxHaikuDemandPerHour: number; // 20% budget for on-demand
   private readonly maxSonnetPerHour: number;
 
   constructor(
@@ -42,9 +48,11 @@ export class AiOptimizerService {
     private readonly regimeHistoryModel: Model<AiRegimeHistoryDocument>,
   ) {
     this.enabled = configService.get("AI_ENABLED", "true") === "true";
-    this.maxHaikuPerHour = parseInt(
-      configService.get("AI_MAX_HAIKU_PER_HOUR", "30"),
+    const totalHaiku = parseInt(
+      configService.get("AI_MAX_HAIKU_PER_HOUR", "60"),
     );
+    this.maxHaikuTunePerHour = Math.floor(totalHaiku * 0.8); // 80% for tuning
+    this.maxHaikuDemandPerHour = Math.max(5, totalHaiku - this.maxHaikuTunePerHour); // 20% for on-demand (min 5)
     this.maxSonnetPerHour = parseInt(
       configService.get("AI_MAX_SONNET_PER_HOUR", "2"),
     );
@@ -129,7 +137,7 @@ Choose the regime based on:
     }
   }
 
-  // ─── Per-coin parameter tuning (Haiku, every 1h) ─────────────────────────
+  // ─── Per-coin parameter tuning (Haiku, cached 2h with jitter) ───────────
 
   async tuneParamsForSymbol(
     coin: string,
@@ -142,13 +150,16 @@ Choose the regime based on:
     const cached = await this.redisService.get<AiTunedParams>(cacheKey);
     if (cached) return cached;
 
+    // Check: AI enabled, hourly budget, and per-scan burst limit
+    const burstCount = (await this.redisService.get<number>(HAIKU_SCAN_BURST_KEY)) || 0;
     if (
       !this.enabled ||
-      !(await this.checkRateLimit(HAIKU_RATE_KEY, this.maxHaikuPerHour))
+      burstCount >= MAX_RETUNES_PER_SCAN ||
+      !(await this.checkRateLimit(HAIKU_TUNE_RATE_KEY, this.maxHaikuTunePerHour))
     ) {
       const defaultParams = this.getDefaultParams(globalRegime);
       this.logger.debug(
-        `[AiOptimizer] Using default params for ${symbol} (AI unavailable)`,
+        `[AiOptimizer] Using default params for ${symbol} (${burstCount >= MAX_RETUNES_PER_SCAN ? "burst limit" : "rate limit"})`,
       );
       return defaultParams;
     }
@@ -157,8 +168,12 @@ Choose the regime based on:
       const indicators = await this.preComputeIndicators(coin);
       const params = await this.callHaiku(symbol, globalRegime, indicators);
 
-      await this.redisService.set(cacheKey, params, AI_PARAMS_TTL);
-      await this.incrementRateLimit(HAIKU_RATE_KEY);
+      // Stagger cache expiry: TTL + 0-30 min random offset to avoid thundering herd
+      const jitter = Math.floor(Math.random() * AI_PARAMS_JITTER);
+      await this.redisService.set(cacheKey, params, AI_PARAMS_TTL + jitter);
+      await this.incrementRateLimit(HAIKU_TUNE_RATE_KEY);
+      // Increment per-scan burst counter (resets every 35s)
+      await this.redisService.set(HAIKU_SCAN_BURST_KEY, burstCount + 1, SCAN_BURST_TTL);
 
       // Log to MongoDB
       await this.saveRegimeHistory(
@@ -499,7 +514,7 @@ takeProfitPercent guide: set based on regime/volatility. STRONG_TREND→2×-3× 
     if (!this.enabled) return "";
 
     if (
-      !(await this.checkRateLimit(HAIKU_RATE_KEY, this.maxHaikuPerHour))
+      !(await this.checkRateLimit(HAIKU_DEMAND_RATE_KEY, this.maxHaikuDemandPerHour))
     ) {
       return "";
     }
@@ -548,13 +563,17 @@ Guidelines:
         messages: [{ role: "user", content: prompt }],
       });
 
-      await this.incrementRateLimit(HAIKU_RATE_KEY);
+      await this.incrementRateLimit(HAIKU_DEMAND_RATE_KEY);
 
       const text = (response.content[0] as any).text;
       const jsonMatch = text.match(/\{[\s\S]*\}/);
       if (!jsonMatch) return "";
 
       const parsed = JSON.parse(jsonMatch[0]);
+
+      // Sanitize AI text for Telegram Markdown
+      const sanitize = (s: string) =>
+        (s || "").replace(/[*_`\[\]]/g, "");
 
       const riskEmoji =
         parsed.riskLevel === "LOW"
@@ -564,14 +583,14 @@ Guidelines:
             : "🟡";
 
       const risksText = (parsed.keyRisks || [])
-        .map((r: string) => `  ⚠️ ${r}`)
+        .map((r: string) => `  ⚠️ ${sanitize(r)}`)
         .join("\n");
 
       return (
         `\n\n💡 *Khuyến nghị AI:*\n` +
-        `${riskEmoji} Rủi ro: *${parsed.riskLevel}*\n` +
+        `${riskEmoji} Rủi ro: *${parsed.riskLevel || "MEDIUM"}*\n` +
         `├ Leverage đề xuất: *${parsed.suggestedLeverage || "2x"}*\n` +
-        `├ ${parsed.advice || ""}\n` +
+        `├ ${sanitize(parsed.advice)}\n` +
         (risksText ? `${risksText}\n` : "") +
         `└ _Lưu ý: Đây là phân tích AI, không phải lời khuyên tài chính_`
       );
@@ -580,6 +599,200 @@ Guidelines:
         `[AiOptimizer] generateSignalAdvice failed: ${err?.message}`,
       );
       return "";
+    }
+  }
+
+  // ─── AI market overview (for /ai market command) ────────────────────────
+
+  async generateMarketOverview(
+    coinData: {
+      symbol: string;
+      confidence: number;
+      regime: string;
+      strategy: string;
+      lastPrice: number;
+      quoteVolume: number;
+      priceChangePercent: number;
+    }[],
+    analyticsData?: Record<string, any>,
+  ): Promise<string> {
+    if (!this.enabled) {
+      return "⚠️ AI không khả dụng (thiếu API key).";
+    }
+
+    if (
+      !(await this.checkRateLimit(HAIKU_DEMAND_RATE_KEY, this.maxHaikuDemandPerHour))
+    ) {
+      return "⚠️ Đã đạt giới hạn API. Thử lại sau.";
+    }
+
+    // Helper to format large numbers
+    const fmtVol = (v: number) =>
+      v >= 1e9 ? (v / 1e9).toFixed(1) + "B" :
+      v >= 1e6 ? (v / 1e6).toFixed(1) + "M" :
+      v >= 1e3 ? (v / 1e3).toFixed(0) + "K" : v.toFixed(0);
+
+    const fmtPrice = (p: number) =>
+      p >= 1000 ? p.toLocaleString("en-US", { maximumFractionDigits: 0 }) :
+      p >= 1 ? p.toFixed(2) :
+      p >= 0.01 ? p.toFixed(4) : p.toFixed(6);
+
+    try {
+      // Gather indicators for top coins (max 5 to keep prompt small)
+      const topCoins = coinData
+        .sort((a, b) => b.confidence - a.confidence)
+        .slice(0, 5);
+
+      const coinSummaries: string[] = [];
+      for (const c of topCoins) {
+        const coin = c.symbol.replace("USDT", "").toLowerCase();
+        const indicators = await this.preComputeIndicators(coin);
+        const fa = analyticsData?.[c.symbol];
+        const faStr = fa
+          ? `funding=${(fa.fundingRate * 100).toFixed(3)}%, OI=${fmtVol(fa.openInterest * c.lastPrice)}, ` +
+            `L/S=${fa.longShortRatio.toFixed(2)} (L${fa.longPercent.toFixed(0)}%/S${fa.shortPercent.toFixed(0)}%), ` +
+            `takerBuySell=${fa.takerBuyRatio.toFixed(2)}`
+          : "";
+        coinSummaries.push(
+          `${c.symbol}: price=$${fmtPrice(c.lastPrice)}, 24h_change=${c.priceChangePercent >= 0 ? "+" : ""}${c.priceChangePercent.toFixed(1)}%, ` +
+          `24h_vol=$${fmtVol(c.quoteVolume)}, confidence=${c.confidence}%, regime=${c.regime}, strategy=${c.strategy}, ` +
+          `RSI14_15m=${indicators.rsi14_15m || "N/A"}, RSI14_4h=${indicators.rsi14_4h || "N/A"}, ` +
+          `BBWidth=${indicators.bbWidthPct || "N/A"}%, ATR_15m=${indicators.atrPct_15m || "N/A"}%` +
+          (faStr ? `, ${faStr}` : ""),
+        );
+      }
+
+      // Market-wide stats
+      const totalVolume = coinData.reduce((sum, c) => sum + c.quoteVolume, 0);
+      const avgChange = coinData.length > 0
+        ? coinData.reduce((sum, c) => sum + c.priceChangePercent, 0) / coinData.length
+        : 0;
+      const gainers = coinData.filter((c) => c.priceChangePercent > 0).length;
+      const losers = coinData.filter((c) => c.priceChangePercent < 0).length;
+
+      const globalRegime = await this.redisService.get<string>("cache:ai:regime") || "UNKNOWN";
+
+      const prompt = `You are a professional crypto market analyst. Provide a brief market overview for traders.
+
+Global Regime: ${globalRegime}
+Monitoring ${coinData.length} coins. Total 24h volume: $${fmtVol(totalVolume)}.
+Market: ${gainers} coins up, ${losers} coins down, avg change: ${avgChange >= 0 ? "+" : ""}${avgChange.toFixed(1)}%.
+
+Top coins by AI confidence (with real-time data):
+${coinSummaries.join("\n")}
+
+All coins: ${coinData.map((c) => `${c.symbol} $${fmtPrice(c.lastPrice)} (${c.priceChangePercent >= 0 ? "+" : ""}${c.priceChangePercent.toFixed(1)}%)`).join(", ")}
+
+Return ONLY valid JSON (no trailing commas, no comments):
+{
+  "marketSentiment": "BULLISH|BEARISH|NEUTRAL|MIXED",
+  "overview": "<3-4 sentences in Vietnamese: overall market condition, key trends, what to expect>",
+  "topOpportunities": [
+    {"symbol": "SYMBOL", "note": "short reason in Vietnamese"}
+  ],
+  "warnings": ["warning in Vietnamese"],
+  "recommendation": "1-2 sentences in Vietnamese: should traders be aggressive or conservative right now?"
+}
+
+Be specific about price levels, RSI states, and trend directions. Focus on actionable insights.`;
+
+      const response = await this.anthropic.messages.create({
+        model: HAIKU_MODEL,
+        max_tokens: 800,
+        messages: [{ role: "user", content: prompt }],
+      });
+
+      await this.incrementRateLimit(HAIKU_DEMAND_RATE_KEY);
+
+      const text = (response.content[0] as any).text;
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) return "⚠️ AI không trả về kết quả hợp lệ.";
+
+      let parsed: any;
+      try {
+        parsed = JSON.parse(jsonMatch[0]);
+      } catch {
+        // Attempt to repair common JSON issues from LLM output
+        const repaired = jsonMatch[0]
+          .replace(/,\s*([\]}])/g, "$1")        // trailing commas
+          .replace(/[\x00-\x1F]/g, " ")          // control chars
+          .replace(/(["\w])\s*\n\s*(")/g, "$1,$2"); // missing commas between lines
+        try {
+          parsed = JSON.parse(repaired);
+        } catch {
+          this.logger.warn(`[AiOptimizer] JSON repair failed, raw: ${jsonMatch[0].slice(0, 200)}`);
+          return "⚠️ AI trả về dữ liệu không hợp lệ. Vui lòng thử lại.";
+        }
+      }
+
+      // Sanitize AI text: remove stray * and _ that break Telegram Markdown
+      const sanitize = (s: string) =>
+        (s || "").replace(/[*_`\[\]]/g, "");
+
+      const sentimentEmoji =
+        parsed.marketSentiment === "BULLISH" ? "🟢" :
+        parsed.marketSentiment === "BEARISH" ? "🔴" :
+        parsed.marketSentiment === "NEUTRAL" ? "⚪" : "🟡";
+
+      // ── Build the message with real-time market data ──
+      let result =
+        `🌍 *Phân Tích Thị Trường AI*\n\n` +
+        `${sentimentEmoji} Xu hướng: *${parsed.marketSentiment || "MIXED"}*\n` +
+        `🏛 Regime: *${globalRegime}*\n` +
+        `📊 Theo dõi: *${coinData.length} coins* | Vol: *$${fmtVol(totalVolume)}*\n` +
+        `📈 Tăng: *${gainers}* | 📉 Giảm: *${losers}* | TB: *${avgChange >= 0 ? "+" : ""}${avgChange.toFixed(1)}%*\n\n`;
+
+      // Real-time price table for top coins
+      result += `💰 *Giá & Volume (real-time):*\n`;
+      const displayCoins = coinData
+        .sort((a, b) => b.quoteVolume - a.quoteVolume)
+        .slice(0, 8);
+      for (const c of displayCoins) {
+        const changeIcon = c.priceChangePercent > 0 ? "🟢" : c.priceChangePercent < 0 ? "🔴" : "⚪";
+        const sign = c.priceChangePercent >= 0 ? "+" : "";
+        result += `  ${changeIcon} ${c.symbol.replace("USDT", "")} $${fmtPrice(c.lastPrice)} (${sign}${c.priceChangePercent.toFixed(1)}%) Vol:$${fmtVol(c.quoteVolume)}\n`;
+      }
+
+      // Futures analytics section
+      if (analyticsData && Object.keys(analyticsData).length > 0) {
+        result += `\n🏦 *Futures Analytics:*\n`;
+        const topByVol = displayCoins.slice(0, 5);
+        for (const c of topByVol) {
+          const fa = analyticsData[c.symbol];
+          if (!fa) continue;
+          const coin = c.symbol.replace("USDT", "");
+          const fundPct = (fa.fundingRate * 100).toFixed(3);
+          const fundIcon = fa.fundingRate > 0.0005 ? "🔴" : fa.fundingRate < -0.0005 ? "🟢" : "⚪";
+          const oiUsd = fa.openInterest * c.lastPrice;
+          result += `  ${coin}: ${fundIcon}F:${fundPct}% | OI:$${fmtVol(oiUsd)} | L${fa.longPercent.toFixed(0)}/S${fa.shortPercent.toFixed(0)}\n`;
+        }
+      }
+
+      result += `\n📝 *Tổng quan:*\n${sanitize(parsed.overview)}\n`;
+
+      if (parsed.topOpportunities?.length > 0) {
+        result += `\n🎯 *Cơ hội nổi bật:*\n`;
+        for (const opp of parsed.topOpportunities) {
+          result += `  • *${opp.symbol}*: ${sanitize(opp.note)}\n`;
+        }
+      }
+
+      if (parsed.warnings?.length > 0) {
+        result += `\n⚠️ *Cảnh báo:*\n`;
+        for (const w of parsed.warnings) {
+          result += `  • ${sanitize(w)}\n`;
+        }
+      }
+
+      result +=
+        `\n💬 *Khuyến nghị:*\n${sanitize(parsed.recommendation)}\n\n` +
+        `_Cập nhật lúc: ${new Date().toLocaleTimeString("vi-VN")}_\n` +
+        `_Đây là phân tích AI, không phải lời khuyên tài chính._`;
+
+      return result;
+    } catch (err) {
+      this.logger.warn(`[AiOptimizer] generateMarketOverview failed: ${err?.message}`);
+      return `⚠️ Lỗi khi phân tích thị trường: ${err?.message}`;
     }
   }
 

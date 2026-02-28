@@ -58,6 +58,9 @@ export class MarketDataService implements OnModuleInit, OnModuleDestroy {
   // Callbacks are fired on every kline tick (including non-final) at ~250ms resolution.
   private priceListeners = new Map<string, Set<(price: number) => void>>();
 
+  // Shutdown flag to prevent Redis calls during module destroy
+  private isShuttingDown = false;
+
   constructor(
     private readonly redisService: RedisService,
     private readonly configService: ConfigService,
@@ -72,6 +75,7 @@ export class MarketDataService implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleDestroy() {
+    this.isShuttingDown = true;
     this.closeAllSockets();
   }
 
@@ -256,6 +260,8 @@ export class MarketDataService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async handleKlineMessage(klineData: any): Promise<void> {
+    if (this.isShuttingDown) return;
+
     const { s: symbol, k } = klineData;
     const {
       i: interval,
