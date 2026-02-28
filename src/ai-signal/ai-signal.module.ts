@@ -27,6 +27,10 @@ import {
   UserSignalSubscription,
   UserSignalSubscriptionSchema,
 } from "../schemas/user-signal-subscription.schema";
+import {
+  DailyMarketSnapshot,
+  DailyMarketSnapshotSchema,
+} from "../schemas/daily-market-snapshot.schema";
 
 @Module({
   imports: [
@@ -43,6 +47,10 @@ import {
       {
         name: UserSignalSubscription.name,
         schema: UserSignalSubscriptionSchema,
+      },
+      {
+        name: DailyMarketSnapshot.name,
+        schema: DailyMarketSnapshotSchema,
       },
     ]),
   ],

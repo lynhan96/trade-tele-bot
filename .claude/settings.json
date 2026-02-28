@@ -14,7 +14,10 @@
       "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(f''OI: {float\\(d[\"\"openInterest\"\"]\\):,.0f} contracts''\\)\" echo \"=== Long/Short Ratio ===\" curl -s \"https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol=SAHARAUSDT&period=1h&limit=1\")",
       "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(f''L/S Ratio: {float\\(d[0][\"\"longShortRatio\"\"]\\):.2f} \\(Long: {float\\(d[0][\"\"longAccount\"\"]\\)*100:.1f}%, Short: {float\\(d[0][\"\"shortAccount\"\"]\\)*100:.1f}%\\)''\\)\")",
       "Read(//Users/elvislee/**)",
-      "Bash(grep -n \"executedAt\\\\.getTime\\(\\)\" src/ai-signal/*.ts src/schemas/*.ts)"
+      "Bash(grep -n \"executedAt\\\\.getTime\\(\\)\" src/ai-signal/*.ts src/schemas/*.ts)",
+      "Bash(lsof -i :3000)",
+      "Bash(kill 61943 61942)",
+      "Bash(kill 64694)"
     ],
     "additionalDirectories": [
       "/Users/elvislee/.claude/projects/-Users-elvislee-Workspace-DTS-binance-tele-bot",

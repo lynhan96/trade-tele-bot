@@ -21,6 +21,10 @@ import {
 } from "../schemas/ai-coin-profile.schema";
 import { AiTunedParams } from "../strategy/ai-optimizer/ai-tuned-params.interface";
 import { FuturesAnalyticsService } from "../market-data/futures-analytics.service";
+import {
+  DailyMarketSnapshot,
+  DailyMarketSnapshotDocument,
+} from "../schemas/daily-market-snapshot.schema";
 
 const AI_PAUSED_KEY = "cache:ai:paused";
 const AI_TEST_MODE_KEY = "cache:ai:test-mode";
@@ -47,6 +51,8 @@ export class AiSignalService implements OnModuleInit {
     private readonly aiSignalModel: Model<AiSignalDocument>,
     @InjectModel(AiCoinProfile.name)
     private readonly aiCoinProfileModel: Model<AiCoinProfileDocument>,
+    @InjectModel(DailyMarketSnapshot.name)
+    private readonly dailySnapshotModel: Model<DailyMarketSnapshotDocument>,
   ) {
     this.defaultTestMode =
       configService.get("AI_TEST_MODE", "false") === "true";
@@ -122,7 +128,11 @@ export class AiSignalService implements OnModuleInit {
 
       const alerts = await this.futuresAnalyticsService.detectMoneyFlowAlerts(analytics, priceVolData);
 
-      if (alerts.length === 0) return;
+      if (alerts.length === 0) {
+        // Clear last fingerprint when no alerts (so next alert batch is "new")
+        await this.redisService.delete("cache:moneyflow:lastfp");
+        return;
+      }
 
       // Build alert message — group by coin for readability
       const highAlerts = alerts.filter((a) => a.severity === "HIGH");
@@ -130,6 +140,15 @@ export class AiSignalService implements OnModuleInit {
 
       // Only send if there are HIGH alerts, or at least 3 MEDIUM alerts
       if (highAlerts.length === 0 && medAlerts.length < 3) return;
+
+      // Change detection: only send when alert set actually changed
+      const fingerprint = alerts
+        .map((a) => `${a.symbol}:${a.alertType}:${a.severity}`)
+        .sort()
+        .join("|");
+      const lastFp = await this.redisService.get<string>("cache:moneyflow:lastfp");
+      if (fingerprint === lastFp) return; // same alerts — skip
+      await this.redisService.set("cache:moneyflow:lastfp", fingerprint, 30 * 60); // 30 min TTL
 
       const fmtVol = (v: number) =>
         v >= 1e9 ? `$${(v / 1e9).toFixed(1)}B` :
@@ -236,16 +255,21 @@ export class AiSignalService implements OnModuleInit {
 
       const globalRegime = await this.aiOptimizerService.assessGlobalRegime();
 
-      await Promise.allSettled(
-        shortlist.map((entry) =>
-          this.processCoin(entry.coin, entry.currency, globalRegime).catch(
-            (err) =>
-              this.logger.warn(
-                `[AiSignal] processCoin ${entry.symbol} failed: ${err?.message}`,
-              ),
+      // Process coins in batches of 5 to avoid Anthropic concurrent connection limits
+      const BATCH_SIZE = 5;
+      for (let i = 0; i < shortlist.length; i += BATCH_SIZE) {
+        const batch = shortlist.slice(i, i + BATCH_SIZE);
+        await Promise.allSettled(
+          batch.map((entry) =>
+            this.processCoin(entry.coin, entry.currency, globalRegime).catch(
+              (err) =>
+                this.logger.warn(
+                  `[AiSignal] processCoin ${entry.symbol} failed: ${err?.message}`,
+                ),
+            ),
           ),
-        ),
-      );
+        );
+      }
     } catch (err) {
       this.logger.error(`[AiSignal] runSignalScan error: ${err?.message}`);
     }
@@ -321,6 +345,161 @@ export class AiSignalService implements OnModuleInit {
     }
   }
 
+  // ─── Cron: daily market snapshot (once per day at 8:00 AM UTC+7) ────────
+
+  @Cron("0 1 * * *") // 01:00 UTC = 08:00 ICT
+  async generateDailySnapshot() {
+    try {
+      const today = new Date().toISOString().slice(0, 10);
+
+      // Skip if already generated today
+      const existing = await this.dailySnapshotModel.findOne({ date: today });
+      if (existing) return;
+
+      const shortlist = await this.coinFilterService.getShortlist();
+      if (shortlist.length === 0) return;
+
+      const symbols = shortlist.map((s) => s.symbol);
+      const analytics = await this.futuresAnalyticsService.fetchAnalytics(symbols);
+
+      // Build coin data with cached params
+      const coinData = await Promise.all(
+        shortlist.map(async (s) => {
+          const coin = s.symbol.replace("USDT", "").toLowerCase();
+          const cached = await this.redisService.get<AiTunedParams>(`cache:ai:params:${s.symbol}`);
+          return {
+            symbol: s.symbol,
+            lastPrice: s.lastPrice,
+            priceChangePercent: s.priceChangePercent,
+            quoteVolume: s.quoteVolume,
+            confidence: cached?.confidence || 35,
+            regime: cached?.regime || "MIXED",
+            strategy: cached?.strategy || "RSI_CROSS",
+          };
+        }),
+      );
+
+      const totalVolume = coinData.reduce((sum, c) => sum + c.quoteVolume, 0);
+      const avgChange = coinData.length > 0
+        ? coinData.reduce((sum, c) => sum + c.priceChangePercent, 0) / coinData.length
+        : 0;
+      const gainers = coinData.filter((c) => c.priceChangePercent > 0).length;
+      const losers = coinData.filter((c) => c.priceChangePercent < 0).length;
+      const globalRegime = await this.redisService.get<string>("cache:ai:regime") || "MIXED";
+
+      // Determine sentiment
+      let sentiment: string;
+      if (avgChange > 3 && gainers > losers * 2) sentiment = "BULLISH";
+      else if (avgChange < -3 && losers > gainers * 2) sentiment = "BEARISH";
+      else if (Math.abs(avgChange) < 1) sentiment = "NEUTRAL";
+      else sentiment = "MIXED";
+
+      const topCoins = [...coinData].sort((a, b) => b.quoteVolume - a.quoteVolume).slice(0, 10);
+      const topGainers = [...coinData].sort((a, b) => b.priceChangePercent - a.priceChangePercent).slice(0, 5);
+      const topLosers = [...coinData].sort((a, b) => a.priceChangePercent - b.priceChangePercent).slice(0, 5);
+
+      // Futures data
+      const futuresData: any[] = [];
+      for (const c of topCoins) {
+        const fa = analytics.get(c.symbol);
+        if (fa) futuresData.push({
+          symbol: c.symbol,
+          fundingRate: fa.fundingRate,
+          openInterest: fa.openInterest,
+          longPercent: fa.longPercent,
+          shortPercent: fa.shortPercent,
+          takerBuyRatio: fa.takerBuyRatio,
+        });
+      }
+
+      // Warnings
+      const warnings: string[] = [];
+      for (const [sym, fa] of analytics) {
+        if (Math.abs(fa.fundingRate) > 0.001) {
+          warnings.push(`${sym.replace("USDT", "")} funding ${fa.fundingRate > 0 ? "cao" : "âm"} (${(fa.fundingRate * 100).toFixed(3)}%)`);
+        }
+        if (fa.longShortRatio > 2.5) {
+          warnings.push(`${sym.replace("USDT", "")} quá nhiều Long (L/S ${fa.longShortRatio.toFixed(1)})`);
+        }
+      }
+
+      // Build message
+      const fmtVol = (v: number) =>
+        v >= 1e9 ? `$${(v / 1e9).toFixed(1)}B` :
+        v >= 1e6 ? `$${(v / 1e6).toFixed(0)}M` : `$${(v / 1e3).toFixed(0)}K`;
+      const fmtPrice = (p: number) =>
+        p >= 1000 ? `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :
+        p >= 1 ? `$${p.toFixed(2)}` :
+        p >= 0.01 ? `$${p.toFixed(4)}` : `$${p.toFixed(6)}`;
+
+      const sentimentEmoji = sentiment === "BULLISH" ? "🟢" : sentiment === "BEARISH" ? "🔴" : sentiment === "NEUTRAL" ? "⚪" : "🟡";
+
+      let msg = `📊 *Báo Cáo Thị Trường Hàng Ngày*\n`;
+      msg += `━━━━━━━━━━━━━━━━━━\n\n`;
+      msg += `${sentimentEmoji} Xu hướng: *${sentiment}* | Regime: *${globalRegime}*\n`;
+      msg += `📈 Tăng: *${gainers}* | 📉 Giảm: *${losers}* | TB: *${avgChange >= 0 ? "+" : ""}${avgChange.toFixed(1)}%*\n`;
+      msg += `💰 Tổng Vol: *${fmtVol(totalVolume)}* (${coinData.length} coins)\n\n`;
+
+      msg += `🚀 *Top tăng:*\n`;
+      for (const c of topGainers.slice(0, 3)) {
+        msg += `  🟢 ${c.symbol.replace("USDT", "")} +${c.priceChangePercent.toFixed(1)}% (${fmtPrice(c.lastPrice)})\n`;
+      }
+      msg += `\n📉 *Top giảm:*\n`;
+      for (const c of topLosers.slice(0, 3)) {
+        msg += `  🔴 ${c.symbol.replace("USDT", "")} ${c.priceChangePercent.toFixed(1)}% (${fmtPrice(c.lastPrice)})\n`;
+      }
+
+      // High confidence coins
+      const highConf = [...coinData].filter((c) => c.confidence >= 65).sort((a, b) => b.confidence - a.confidence).slice(0, 3);
+      if (highConf.length > 0) {
+        msg += `\n🎯 *Confidence cao:*\n`;
+        for (const c of highConf) {
+          msg += `  • ${c.symbol.replace("USDT", "")} — ${c.confidence}% (${c.strategy})\n`;
+        }
+      }
+
+      if (warnings.length > 0) {
+        msg += `\n⚠️ *Cảnh báo:*\n`;
+        for (const w of warnings.slice(0, 4)) {
+          msg += `  • ${w}\n`;
+        }
+      }
+
+      msg += `\n━━━━━━━━━━━━━━━━━━\n`;
+      msg += `_${today} • Binance Futures_`;
+
+      // Save to MongoDB
+      await this.dailySnapshotModel.create({
+        date: today,
+        sentiment,
+        globalRegime,
+        totalVolume,
+        avgChange,
+        gainers,
+        losers,
+        coinCount: coinData.length,
+        topCoins,
+        futuresData,
+        topGainers: topGainers.slice(0, 5),
+        topLosers: topLosers.slice(0, 5),
+        warnings,
+        messageSent: msg,
+      });
+
+      // Broadcast to subscribers
+      const subscribers = await this.subscriptionService.findAllActive();
+      for (const sub of subscribers) {
+        await this.telegramService.sendTelegramMessage(sub.chatId, msg);
+      }
+
+      this.logger.log(
+        `[AiSignal] Daily snapshot saved: ${today} ${sentiment} (${gainers}↑/${losers}↓) → ${subscribers.length} subscribers`,
+      );
+    } catch (err) {
+      this.logger.error(`[AiSignal] generateDailySnapshot error: ${err?.message}`);
+    }
+  }
+
   // ─── Core: process a single coin ─────────────────────────────────────────
 
   private async processCoin(
@@ -333,6 +512,31 @@ export class AiSignalService implements OnModuleInit {
       currency,
       globalRegime,
     );
+
+    // Adjust confidence using cached futures analytics (no extra API calls)
+    const symbol = `${coin.toUpperCase()}${currency.toUpperCase()}`;
+    const cachedAnalytics = await this.futuresAnalyticsService.getCachedAnalytics();
+    const fa = cachedAnalytics.get(symbol);
+    if (fa) {
+      let adj = 0;
+      // Extreme funding: longs paying high fee → penalize LONG, boost SHORT
+      if (fa.fundingRate > 0.001) adj += params.regime === "STRONG_TREND" ? -5 : -10;
+      else if (fa.fundingRate < -0.001) adj += params.regime === "STRONG_TREND" ? -5 : -10;
+      // Moderate funding confirmation
+      else if (Math.abs(fa.fundingRate) < 0.0003) adj += 3;
+
+      // L/S ratio: too many longs = squeeze risk for longs
+      if (fa.longShortRatio > 2.5) adj -= 10;
+      else if (fa.longShortRatio < 0.4) adj -= 10;
+
+      // Taker buy/sell momentum
+      if (fa.takerBuyRatio > 1.3) adj += 5; // aggressive buying
+      else if (fa.takerBuyRatio < 0.7) adj += 5; // aggressive selling (good for shorts)
+
+      if (adj !== 0) {
+        params.confidence = Math.max(10, Math.min(95, params.confidence + adj));
+      }
+    }
 
     const signalResult = await this.ruleEngineService.evaluate(
       coin,
@@ -355,8 +559,6 @@ export class AiSignalService implements OnModuleInit {
       params.regime,
       isTestMode,
     );
-
-    const symbol = `${coin.toUpperCase()}${currency.toUpperCase()}`;
 
     if (queueResult.action === "EXECUTED") {
       const activeSignal =
@@ -397,22 +599,20 @@ export class AiSignalService implements OnModuleInit {
     const slPct = signal.stopLossPercent.toFixed(1);
     const profileTag = this.getProfileTag(signal);
 
-    // Generate AI risk advice (only for high-confidence signals to save API budget)
-    const advice = signal.aiConfidence >= 65
-      ? await this.aiOptimizerService
-          .generateSignalAdvice({
-            symbol: signal.symbol,
-            direction: signal.direction,
-            entryPrice: signal.entryPrice,
-            stopLossPrice: signal.stopLossPrice,
-            stopLossPercent: signal.stopLossPercent,
-            strategy: signal.strategy,
-            regime: signal.regime,
-            aiConfidence: signal.aiConfidence,
-            reason: (signal.indicatorSnapshot as any)?.reason,
-          })
-          .catch(() => "")
-      : "";
+    // Generate risk advice (algorithmic — no API call)
+    const advice = await this.aiOptimizerService
+      .generateSignalAdvice({
+        symbol: signal.symbol,
+        direction: signal.direction,
+        entryPrice: signal.entryPrice,
+        stopLossPrice: signal.stopLossPrice,
+        stopLossPercent: signal.stopLossPercent,
+        strategy: signal.strategy,
+        regime: signal.regime,
+        aiConfidence: signal.aiConfidence,
+        reason: (signal.indicatorSnapshot as any)?.reason,
+      })
+      .catch(() => "");
 
     const fmtPrice = (p: number) =>
       p >= 1000 ? `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :
@@ -526,22 +726,20 @@ export class AiSignalService implements OnModuleInit {
     const dirEmoji = signal.direction === "LONG" ? "📈" : "📉";
     const slPct = signal.stopLossPercent.toFixed(1);
 
-    // Generate AI risk advice (only for high-confidence signals to save API budget)
-    const advice = signal.aiConfidence >= 65
-      ? await this.aiOptimizerService
-          .generateSignalAdvice({
-            symbol: signal.symbol,
-            direction: signal.direction,
-            entryPrice: signal.entryPrice,
-            stopLossPrice: signal.stopLossPrice,
-            stopLossPercent: signal.stopLossPercent,
-            strategy: signal.strategy,
-            regime: signal.regime,
-            aiConfidence: signal.aiConfidence,
-            reason: (signal.indicatorSnapshot as any)?.reason,
-          })
-          .catch(() => "")
-      : "";
+    // Generate risk advice (algorithmic — no API call)
+    const advice = await this.aiOptimizerService
+      .generateSignalAdvice({
+        symbol: signal.symbol,
+        direction: signal.direction,
+        entryPrice: signal.entryPrice,
+        stopLossPrice: signal.stopLossPrice,
+        stopLossPercent: signal.stopLossPercent,
+        strategy: signal.strategy,
+        regime: signal.regime,
+        aiConfidence: signal.aiConfidence,
+        reason: (signal.indicatorSnapshot as any)?.reason,
+      })
+      .catch(() => "");
 
     const profileTag = this.getProfileTag(signal);
     const fmtPrice = (p: number) =>
