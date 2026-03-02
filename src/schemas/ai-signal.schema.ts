@@ -14,6 +14,7 @@ export type SignalCloseReason =
   | "POSITION_CLOSED"
   | "TAKE_PROFIT"
   | "STOP_LOSS"
+  | "AUTO_TAKE_PROFIT"
   | "TTL_EXPIRED"
   | "REPLACED_BY_NEW"
   | "MANUAL";
@@ -71,6 +72,7 @@ export class AiSignal {
       "POSITION_CLOSED",
       "TAKE_PROFIT",
       "STOP_LOSS",
+      "AUTO_TAKE_PROFIT",
       "TTL_EXPIRED",
       "REPLACED_BY_NEW",
       "MANUAL",
@@ -89,6 +91,9 @@ export class AiSignal {
 
   @Prop({ default: false })
   isTestMode: boolean; // true = signal generated in test mode (no real trades placed)
+
+  @Prop({ default: false })
+  slMovedToEntry?: boolean; // true = SL moved to entry (break-even protection)
 
   @Prop()
   exitPrice?: number; // Filled when status → COMPLETED

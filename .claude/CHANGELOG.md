@@ -1,5 +1,87 @@
 # Changelog
 
+## 2026-03-02 (1) - Signals UI Redesign, Auto-Push, Auto Risk Management, Orphan Cleanup
+
+### Feature: Redesigned /ai signals UI
+
+New box layout with `┌│└` borders for better readability. Entry/TP/SL on separate lines. Total PnL summary at top showing sum, average, and win/loss count. Extracted into reusable `formatSignalsMessage()` method.
+
+### Feature: Auto-Push Signals (/ai push on|off)
+
+Per-user opt-in auto-push: broadcasts signal updates every 10 minutes to subscribers who enable it. `signalsPushEnabled` field on subscription schema (default: false). 10-min cron in ai-command.service.ts.
+
+### Feature: Auto Risk Management
+
+Automatic profit protection for fast-moving markets:
+- PnL >= 4%: SL moves to entry price (break-even), notification sent
+- PnL >= 5%: auto-close signal as `AUTO_TAKE_PROFIT`, notification sent
+- Works in both real-time listeners and test mode simulation
+- `slMovedToEntry` field on AiSignal schema, `AUTO_TAKE_PROFIT` close reason added
+
+### Bug Fix: Duplicate ACTIVE Signals (Orphan Cleanup)
+
+Root cause: Redis TTL (8h) expires but MongoDB keeps `status: "ACTIVE"` → next scan creates new ACTIVE → duplicates. Fixed with:
+- `cleanupOrphanedActives()` runs on startup before registering listeners
+- `cancelOrphanedActives()` runs before every new signal creation
+- Orphan check added to 5-min cleanup cron
+- Display-level dedup in `formatSignalsMessage()` as safety net
+
+### Files Modified
+- `src/ai-signal/ai-command.service.ts` — new UI, `/ai push` command, 10-min cron, `formatSignalsMessage()`
+- `src/ai-signal/position-monitor.service.ts` — auto risk management in `handlePriceTick()`, startup orphan cleanup
+- `src/ai-signal/ai-signal.service.ts` — test mode risk management, `notifySlMovedToEntry()`, AUTO_TAKE_PROFIT notifications
+- `src/ai-signal/signal-queue.service.ts` — `moveStopLossToEntry()`, `cleanupOrphanedActives()`, `cancelOrphanedActives()`
+- `src/ai-signal/user-signal-subscription.service.ts` — `findSignalsPushSubscribers()`, `toggleSignalsPush()`
+- `src/schemas/ai-signal.schema.ts` — `slMovedToEntry`, `AUTO_TAKE_PROFIT` close reason
+- `src/schemas/user-signal-subscription.schema.ts` — `signalsPushEnabled` field
+- `src/telegram/telegram.service.ts` — `/start` + BotFather menu updated with `/ai push`
+
+---
+
+## 2026-03-01 (1) - Dual Timeframe, Daily Snapshot Fix, Money Flow Toggle, Notification Simplification
+
+### Feature: BTC/ETH Dual Timeframe Strategy
+
+BTC and ETH now run both INTRADAY (15m) and SWING (4h) strategies simultaneously. Profile-aware Redis keys (`BTCUSDT:INTRADAY`, `BTCUSDT:SWING`) keep them as separate active signals.
+
+- `DUAL_TIMEFRAME_COINS` constant in ai-signal.service.ts + signal-queue.service.ts
+- `getSignalKey()` helper returns `SYMBOL:PROFILE` for dual coins
+- `processCoin()` accepts `forceProfile` param for profile-specific locks/cooldowns
+- `tuneParamsForSymbol()` accepts `forceProfile` with `applyForcedProfile()` override
+- Position monitor resolves both INTRADAY and SWING keys for dual coins
+
+### Feature: Daily Market Snapshot Fix
+
+The daily snapshot (`@Cron("0 1 * * *")`) never saved because the bot wasn't running at 01:00 UTC. Fixed with:
+- Startup check: generates snapshot if today's is missing (30s delay)
+- `forceRegenerate` param on `generateDailySnapshot()`
+- `/ai snapshot` admin command for manual regeneration
+- `/ai market` auto-saves snapshot if today's is missing
+
+### Feature: Money Flow Toggle Per User
+
+Users can now opt out of money flow alerts with `/ai moneyflow off`:
+- Added `moneyFlowEnabled` field to `UserSignalSubscription` schema (default: true)
+- `findMoneyFlowSubscribers()` — filters subscribers by moneyFlowEnabled
+- `toggleMoneyFlow(telegramId, enabled)` method
+- `/ai moneyflow on|off` command with status display
+
+### Enhancement: Simplified Signal Notifications
+
+Removed all analytics, risk advice, strategy/regime/confidence from notifications. Now shows only essential trade info: direction, entry, TP, SL, timeframe, timestamp.
+
+### Files Modified
+- `src/ai-signal/ai-signal.service.ts` — Dual scan loop, processCoin forceProfile, getSignalKey, startup snapshot, simplified notifications, money flow filtered broadcast
+- `src/strategy/ai-optimizer/ai-optimizer.service.ts` — tuneParamsForSymbol forceProfile, applyForcedProfile, profile-aware cache
+- `src/ai-signal/signal-queue.service.ts` — handleNewSignal forceProfile, profile-aware Redis keys, docSignalKey helper
+- `src/ai-signal/ai-command.service.ts` — `/ai snapshot` command, `/ai moneyflow` command, updated help text
+- `src/ai-signal/position-monitor.service.ts` — Multi-key resolution for dual coins, expandToSignalKeys
+- `src/ai-signal/user-signal-subscription.service.ts` — findMoneyFlowSubscribers, toggleMoneyFlow, getSubscription
+- `src/schemas/user-signal-subscription.schema.ts` — moneyFlowEnabled field
+- `src/telegram/telegram.service.ts` — BotFather menu + /start updated
+
+---
+
 ## 2026-02-28 (4) - AI Features: Futures Analytics, Money Flow Monitor, Notification Formatting
 
 ### Feature: BotFather Auto-Registration

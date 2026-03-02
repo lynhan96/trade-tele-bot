@@ -11,8 +11,11 @@ export interface SignalHandleResult {
   signalId?: string;
 }
 
-const ACTIVE_KEY = (symbol: string) => `cache:ai-signal:active:${symbol}`;
-const QUEUED_KEY = (symbol: string) => `cache:ai-signal:queued:${symbol}`;
+const ACTIVE_KEY = (signalKey: string) => `cache:ai-signal:active:${signalKey}`;
+const QUEUED_KEY = (signalKey: string) => `cache:ai-signal:queued:${signalKey}`;
+
+/** Coins that run BOTH INTRADAY and SWING strategies simultaneously. */
+const DUAL_TIMEFRAME_COINS = ["BTC", "ETH"];
 
 // TTLs per timeframe profile
 const INTRADAY_ACTIVE_TTL = 8 * 60 * 60; // 8h
@@ -50,12 +53,19 @@ export class SignalQueueService {
     params: AiTunedParams,
     regime: string,
     isTestMode = false,
+    forceProfile?: string,
   ): Promise<SignalHandleResult> {
     const symbol = `${coin.toUpperCase()}${currency.toUpperCase()}`;
+    // For dual-timeframe coins, use profile-aware Redis key
+    const signalKey = forceProfile ? `${symbol}:${forceProfile}` : symbol;
 
-    const active = await this.getActiveSignal(symbol);
+    const active = await this.getActiveSignal(signalKey);
 
     if (!active) {
+      // No Redis key — but there might be orphaned ACTIVE docs in MongoDB
+      // (happens when Redis TTL expires before signal is resolved)
+      await this.cancelOrphanedActives(symbol, signalKey);
+
       // No active signal — execute immediately
       const doc = await this.saveSignal(
         coin,
@@ -67,12 +77,12 @@ export class SignalQueueService {
         isTestMode,
       );
       await this.redisService.set(
-        ACTIVE_KEY(symbol),
+        ACTIVE_KEY(signalKey),
         doc._id.toString(),
         getActiveTtl(params.timeframeProfile),
       );
       this.logger.log(
-        `[SignalQueue] ${symbol} ${signalResult.isLong ? "LONG" : "SHORT"} → ACTIVE [${params.timeframeProfile || "INTRADAY"}] (id: ${doc._id})${isTestMode ? " [TEST]" : ""}`,
+        `[SignalQueue] ${signalKey} ${signalResult.isLong ? "LONG" : "SHORT"} → ACTIVE [${params.timeframeProfile || "INTRADAY"}] (id: ${doc._id})${isTestMode ? " [TEST]" : ""}`,
       );
       return { action: "EXECUTED", signalId: doc._id.toString() };
     }
@@ -81,32 +91,20 @@ export class SignalQueueService {
       (active.direction === "LONG") === signalResult.isLong;
 
     if (isSameDirection) {
-      // Same direction as active — skip silently
-      await this.saveSignal(
-        coin,
-        currency,
-        signalResult,
-        params,
-        regime,
-        "SKIPPED",
-        isTestMode,
-      );
-      this.logger.debug(
-        `[SignalQueue] ${symbol} SKIPPED — same direction as active`,
-      );
+      // Same direction as active — skip without saving to DB (avoids junk records)
       return { action: "SKIPPED" };
     }
 
     // Opposite direction — queue it (replacing existing queue if any)
-    const existingQueued = await this.getQueuedSignal(symbol);
+    const existingQueued = await this.getQueuedSignal(signalKey);
     if (existingQueued) {
       await this.aiSignalModel.findByIdAndUpdate(existingQueued._id, {
         status: "CANCELLED",
         closeReason: "REPLACED_BY_NEW",
       });
-      await this.redisService.delete(QUEUED_KEY(symbol));
+      await this.redisService.delete(QUEUED_KEY(signalKey));
       this.logger.log(
-        `[SignalQueue] ${symbol} replaced existing queued signal`,
+        `[SignalQueue] ${signalKey} replaced existing queued signal`,
       );
     }
 
@@ -122,12 +120,12 @@ export class SignalQueueService {
       isTestMode,
     );
     await this.redisService.set(
-      QUEUED_KEY(symbol),
+      QUEUED_KEY(signalKey),
       doc._id.toString(),
       queuedTtl,
     );
     this.logger.log(
-      `[SignalQueue] ${symbol} ${signalResult.isLong ? "LONG" : "SHORT"} → QUEUED [${params.timeframeProfile || "INTRADAY"}] (id: ${doc._id}, expires in ${queuedTtlHours}h)${isTestMode ? " [TEST]" : ""}`,
+      `[SignalQueue] ${signalKey} ${signalResult.isLong ? "LONG" : "SHORT"} → QUEUED [${params.timeframeProfile || "INTRADAY"}] (id: ${doc._id}, expires in ${queuedTtlHours}h)${isTestMode ? " [TEST]" : ""}`,
     );
     return { action: "QUEUED", signalId: doc._id.toString() };
   }
@@ -141,7 +139,7 @@ export class SignalQueueService {
   async resolveActiveSignal(
     symbol: string,
     exitPrice: number,
-    reason: "POSITION_CLOSED" | "TAKE_PROFIT" | "STOP_LOSS" | "MANUAL" = "POSITION_CLOSED",
+    reason: "POSITION_CLOSED" | "TAKE_PROFIT" | "STOP_LOSS" | "AUTO_TAKE_PROFIT" | "MANUAL" = "POSITION_CLOSED",
   ): Promise<AiSignalDocument | null> {
     const activeId = await this.redisService.get<string>(ACTIVE_KEY(symbol));
     if (!activeId) return null;
@@ -217,30 +215,156 @@ export class SignalQueueService {
     return updated;
   }
 
+  /**
+   * Move stop loss to entry price (break-even protection).
+   * Called when unrealized PnL reaches the threshold.
+   */
+  async moveStopLossToEntry(signalId: string): Promise<void> {
+    const signal = await this.aiSignalModel.findById(signalId);
+    if (!signal || signal.status !== "ACTIVE") return;
+
+    await this.aiSignalModel.findByIdAndUpdate(signalId, {
+      stopLossPrice: signal.entryPrice,
+      slMovedToEntry: true,
+    });
+    this.logger.log(
+      `[SignalQueue] ${signal.symbol} SL moved to entry ${signal.entryPrice} (break-even)`,
+    );
+  }
+
+  // ─── Helpers ──────────────────────────────────────────────────────────────
+
+  /** Get the profile-aware signal key from a document. */
+  private docSignalKey(doc: AiSignalDocument): string {
+    const coin = doc.coin.toUpperCase();
+    const profile = (doc as any).timeframeProfile;
+    if (DUAL_TIMEFRAME_COINS.includes(coin) && profile) {
+      return `${doc.symbol}:${profile}`;
+    }
+    return doc.symbol;
+  }
+
   // ─── TTL cleanup ──────────────────────────────────────────────────────────
 
   /**
    * Cancel all QUEUED signals that have passed their expiresAt.
+   * Also cleans up orphaned ACTIVE signals (Redis TTL expired but MongoDB still ACTIVE).
    * Called every 5 minutes.
    */
   async cleanupExpiredQueued(): Promise<number> {
-    const expired = await this.aiSignalModel.find({
+    let count = 0;
+
+    // Clean expired QUEUED
+    const expiredQueued = await this.aiSignalModel.find({
       status: "QUEUED",
       expiresAt: { $lt: new Date() },
     });
 
-    for (const doc of expired) {
+    for (const doc of expiredQueued) {
+      const sigKey = this.docSignalKey(doc);
       await this.aiSignalModel.findByIdAndUpdate(doc._id, {
         status: "CANCELLED",
         closeReason: "TTL_EXPIRED",
       });
-      await this.redisService.delete(QUEUED_KEY(doc.symbol));
+      await this.redisService.delete(QUEUED_KEY(sigKey));
       this.logger.log(
-        `[SignalQueue] Expired QUEUED signal for ${doc.symbol} (id: ${doc._id})`,
+        `[SignalQueue] Expired QUEUED signal for ${sigKey} (id: ${doc._id})`,
       );
     }
+    count += expiredQueued.length;
 
-    return expired.length;
+    // Clean orphaned ACTIVE (Redis key expired but MongoDB still ACTIVE)
+    const activeSignals = await this.aiSignalModel.find({ status: "ACTIVE" });
+    for (const doc of activeSignals) {
+      const sigKey = this.docSignalKey(doc);
+      const redisId = await this.redisService.get<string>(ACTIVE_KEY(sigKey));
+      if (!redisId) {
+        // Redis key gone → signal expired, cancel it
+        await this.aiSignalModel.findByIdAndUpdate(doc._id, {
+          status: "CANCELLED",
+          closeReason: "TTL_EXPIRED",
+        });
+        this.logger.log(
+          `[SignalQueue] Orphaned ACTIVE signal cancelled: ${sigKey} (id: ${doc._id})`,
+        );
+        count++;
+      }
+    }
+
+    return count;
+  }
+
+  /**
+   * Clean ALL orphaned ACTIVE signals globally.
+   * Called on startup before registering listeners.
+   * For each ACTIVE doc, keeps only the one matching its Redis key; cancels the rest.
+   */
+  async cleanupOrphanedActives(): Promise<number> {
+    let count = 0;
+    const allActives = await this.aiSignalModel.find({ status: "ACTIVE" });
+
+    // Group by symbol to find duplicates
+    const bySymbol = new Map<string, AiSignalDocument[]>();
+    for (const doc of allActives) {
+      const key = doc.symbol;
+      if (!bySymbol.has(key)) bySymbol.set(key, []);
+      bySymbol.get(key)!.push(doc);
+    }
+
+    for (const [symbol, docs] of bySymbol) {
+      if (docs.length <= 1) {
+        // Single doc — check if its Redis key is still valid
+        const doc = docs[0];
+        const sigKey = this.docSignalKey(doc);
+        const redisId = await this.redisService.get<string>(ACTIVE_KEY(sigKey));
+        if (!redisId) {
+          await this.aiSignalModel.findByIdAndUpdate(doc._id, {
+            status: "CANCELLED",
+            closeReason: "TTL_EXPIRED",
+          });
+          this.logger.log(`[SignalQueue] Startup: cancelled orphan ${sigKey} (no Redis key)`);
+          count++;
+        }
+        continue;
+      }
+
+      // Multiple docs for same symbol — keep the one matching Redis, cancel rest
+      for (const doc of docs) {
+        const sigKey = this.docSignalKey(doc);
+        const redisId = await this.redisService.get<string>(ACTIVE_KEY(sigKey));
+        if (!redisId || redisId !== doc._id.toString()) {
+          await this.aiSignalModel.findByIdAndUpdate(doc._id, {
+            status: "CANCELLED",
+            closeReason: "TTL_EXPIRED",
+          });
+          this.logger.log(`[SignalQueue] Startup: cancelled duplicate ${sigKey} (id: ${doc._id})`);
+          count++;
+        }
+      }
+    }
+
+    return count;
+  }
+
+  /**
+   * Cancel any orphaned ACTIVE documents in MongoDB for a symbol
+   * that no longer have a corresponding Redis key.
+   */
+  private async cancelOrphanedActives(symbol: string, signalKey: string): Promise<void> {
+    const orphans = await this.aiSignalModel.find({ symbol, status: "ACTIVE" });
+    for (const doc of orphans) {
+      const docKey = this.docSignalKey(doc);
+      const redisId = await this.redisService.get<string>(ACTIVE_KEY(docKey));
+      if (!redisId || redisId !== doc._id.toString()) {
+        await this.aiSignalModel.findByIdAndUpdate(doc._id, {
+          status: "CANCELLED",
+          closeReason: "TTL_EXPIRED",
+        });
+        this.logger.log(
+          `[SignalQueue] Cancelled orphaned ACTIVE: ${docKey} (id: ${doc._id})`,
+        );
+      }
+    }
   }
 
   // ─── Read helpers ─────────────────────────────────────────────────────────
@@ -263,6 +387,68 @@ export class SignalQueueService {
 
   async getAllQueuedSignals(): Promise<AiSignalDocument[]> {
     return this.aiSignalModel.find({ status: "QUEUED" });
+  }
+
+  // ─── Duplicate cleanup (for accurate stats) ─────────────────────────────
+
+  /**
+   * Find and clean duplicate COMPLETED signals — keeps the earliest signal in
+   * each (symbol, direction, timeframeProfile) group where generatedAt is within
+   * 5 minutes.  Duplicates are set to CANCELLED with closeReason "REPLACED_BY_NEW".
+   * Returns the number of duplicates cancelled.
+   */
+  async cleanupDuplicateCompletedSignals(): Promise<number> {
+    let cancelled = 0;
+
+    // Find all COMPLETED signals with pnlPercent (the ones used for stats)
+    const completed = await this.aiSignalModel
+      .find({ status: "COMPLETED", pnlPercent: { $exists: true } })
+      .sort({ generatedAt: 1 })
+      .lean();
+
+    // Group by symbol + direction + timeframeProfile
+    const groups = new Map<string, typeof completed>();
+    for (const doc of completed) {
+      const key = `${doc.symbol}|${doc.direction}|${(doc as any).timeframeProfile || "INTRADAY"}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push(doc);
+    }
+
+    const dupIds: string[] = [];
+
+    for (const [, docs] of groups) {
+      if (docs.length <= 1) continue;
+
+      // Walk through sorted docs and cluster by 5-min windows
+      let anchor = docs[0];
+      for (let i = 1; i < docs.length; i++) {
+        const curr = docs[i];
+        const diffMs =
+          new Date(curr.generatedAt).getTime() -
+          new Date(anchor.generatedAt).getTime();
+
+        if (diffMs < 5 * 60 * 1000) {
+          // Same cluster — curr is a duplicate, keep anchor
+          dupIds.push((curr as any)._id.toString());
+        } else {
+          // New cluster
+          anchor = curr;
+        }
+      }
+    }
+
+    if (dupIds.length > 0) {
+      const result = await this.aiSignalModel.updateMany(
+        { _id: { $in: dupIds } },
+        { status: "CANCELLED", closeReason: "REPLACED_BY_NEW" },
+      );
+      cancelled = result.modifiedCount;
+      this.logger.warn(
+        `[SignalQueue] Cleaned ${cancelled} duplicate COMPLETED signals from DB`,
+      );
+    }
+
+    return cancelled;
   }
 
   // ─── Internal: save a signal to MongoDB ──────────────────────────────────

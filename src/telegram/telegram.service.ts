@@ -43,6 +43,10 @@ export class TelegramBotService implements OnModuleInit {
           `📬 *Đăng ký tín hiệu*\n` +
           `/ai subscribe — Đăng ký nhận tín hiệu AI\n` +
           `/ai unsubscribe — Hủy đăng ký\n\n` +
+          `⚙️ *Cài đặt*\n` +
+          `/ai settings — Xem cài đặt của bạn\n` +
+          `/ai moneyflow on|off — Bật/tắt cảnh báo dòng tiền\n` +
+          `/ai push on|off — Auto push signals mỗi 10 phút\n\n` +
           `🌍 *Phân tích thị trường*\n` +
           `/ai market — Xem phân tích thị trường AI\n\n` +
           `📊 *Xem thông tin*\n` +
@@ -75,10 +79,14 @@ export class TelegramBotService implements OnModuleInit {
         { command: "ai", description: "Danh sách tất cả lệnh AI" },
         { command: "ai_subscribe", description: "Đăng ký nhận tín hiệu AI" },
         { command: "ai_unsubscribe", description: "Hủy đăng ký tín hiệu AI" },
+        { command: "ai_settings", description: "Xem cài đặt của bạn" },
+        { command: "ai_moneyflow", description: "Bật/tắt cảnh báo dòng tiền" },
+        { command: "ai_push", description: "Auto push signals mỗi 10 phút" },
         { command: "ai_market", description: "Phân tích thị trường AI" },
         { command: "ai_signals", description: "Xem tín hiệu đang chạy" },
         { command: "ai_status", description: "Trạng thái hệ thống" },
         { command: "ai_check", description: "Kiểm tra tín hiệu coin" },
+        { command: "ai_snapshot", description: "Tạo/cập nhật daily snapshot" },
         { command: "ai_stats", description: "Thống kê hiệu suất" },
         { command: "ai_test", description: "Bật/tắt chế độ test" },
         { command: "ai_pause", description: "Tạm dừng tín hiệu" },

@@ -1,4 +1,5 @@
 import { Injectable, Logger, OnModuleInit } from "@nestjs/common";
+import { Cron } from "@nestjs/schedule";
 import { ConfigService } from "@nestjs/config";
 import { TelegramBotService } from "../telegram/telegram.service";
 import { AiSignalService } from "./ai-signal.service";
@@ -40,6 +41,9 @@ export class AiCommandService implements OnModuleInit {
         `🤖 *AI Signal Commands*\n\n` +
         `/ai subscribe — Đăng ký nhận tín hiệu AI\n` +
         `/ai unsubscribe — Hủy đăng ký tín hiệu AI\n` +
+        `/ai settings — Xem cài đặt của bạn\n` +
+        `/ai moneyflow on|off — Bật/tắt cảnh báo dòng tiền\n` +
+        `/ai push on|off — Auto push signals mỗi 10 phút\n` +
         `/ai market — Phân tích thị trường AI\n` +
         `/ai signals — Xem tất cả tín hiệu đang chạy\n` +
         `/ai status — Trạng thái hệ thống\n` +
@@ -49,6 +53,7 @@ export class AiCommandService implements OnModuleInit {
           `\n*Admin:*\n` +
           `/ai stats — Thống kê hiệu suất theo chiến lược\n` +
           `/ai params \\<SYMBOL\\> — Xem tham số AI của coin\n` +
+          `/ai snapshot — Tạo/cập nhật daily snapshot\n` +
           `/ai test on|off — Bật/tắt chế độ test\n` +
           `/ai pause — Tạm dừng sinh tín hiệu\n` +
           `/ai resume — Tiếp tục sinh tín hiệu`;
@@ -108,6 +113,94 @@ export class AiCommandService implements OnModuleInit {
       }
     });
 
+    // /ai moneyflow on|off — toggle money flow alerts (also handles /ai_moneyflow)
+    this.telegramService.registerBotCommand(/^\/ai[_ ]moneyflow(?:\s+(on|off))?$/i, async (msg) => {
+      const chatId = msg.chat.id;
+      const telegramId = msg.from?.id;
+      if (!telegramId) return;
+
+      const match = msg.text?.match(/^\/ai[_ ]moneyflow(?:\s+(on|off))?$/i);
+      const toggle = match?.[1]?.toLowerCase();
+
+      try {
+        const sub = await this.subscriptionService.getSubscription(telegramId);
+        if (!sub) {
+          await this.telegramService.sendTelegramMessage(
+            chatId,
+            `ℹ️ Ban chua đăng ký. Dùng /ai subscribe trước.`,
+          );
+          return;
+        }
+
+        if (!toggle) {
+          // Show current status
+          const enabled = (sub as any).moneyFlowEnabled !== false;
+          await this.telegramService.sendTelegramMessage(
+            chatId,
+            `🚨 *Cảnh Báo Dòng Tiền*\n\n` +
+            `Trạng thái: ${enabled ? "✅ Đang bật" : "❌ Đang tắt"}\n\n` +
+            `Dùng /ai moneyflow on để bật\n` +
+            `Dùng /ai moneyflow off để tắt`,
+          );
+          return;
+        }
+
+        const enabled = toggle === "on";
+        await this.subscriptionService.toggleMoneyFlow(telegramId, enabled);
+        await this.telegramService.sendTelegramMessage(
+          chatId,
+          enabled
+            ? `✅ *Đã bật cảnh báo dòng tiền.*\n\nBạn sẽ nhận thông báo khi có biến động lớn.`
+            : `✅ *Đã tắt cảnh báo dòng tiền.*\n\nBạn sẽ không nhận thông báo dòng tiền nữa.\nDùng /ai moneyflow on để bật lại.`,
+        );
+      } catch (err) {
+        await this.telegramService.sendTelegramMessage(chatId, `❌ Lỗi: ${err?.message}`);
+      }
+    });
+
+    // /ai settings — show user's current settings (also handles /ai_settings)
+    this.telegramService.registerBotCommand(/^\/ai[_ ]settings$/, async (msg) => {
+      const chatId = msg.chat.id;
+      const telegramId = msg.from?.id;
+      if (!telegramId) return;
+
+      try {
+        const sub = await this.subscriptionService.getSubscription(telegramId);
+        if (!sub) {
+          await this.telegramService.sendTelegramMessage(
+            chatId,
+            `⚙️ *Cài đặt của bạn*\n` +
+            `━━━━━━━━━━━━━━━━━━\n\n` +
+            `📬 Đăng ký tín hiệu: ❌ Chưa đăng ký\n\n` +
+            `Dùng /ai subscribe để bắt đầu nhận tín hiệu AI.`,
+          );
+          return;
+        }
+
+        const moneyFlow = (sub as any).moneyFlowEnabled !== false;
+        const pushEnabled = (sub as any).signalsPushEnabled === true;
+        const subscribedAt = sub.subscribedAt
+          ? new Date(sub.subscribedAt).toLocaleDateString("vi-VN")
+          : "N/A";
+
+        await this.telegramService.sendTelegramMessage(
+          chatId,
+          `⚙️ *Cài đặt của bạn*\n` +
+          `━━━━━━━━━━━━━━━━━━\n\n` +
+          `📬 Đăng ký tín hiệu: ✅ Đang hoạt động\n` +
+          `🚨 Cảnh báo dòng tiền: ${moneyFlow ? "✅ Bật" : "❌ Tắt"}\n` +
+          `📡 Auto push signals: ${pushEnabled ? "✅ Bật (10 phút)" : "❌ Tắt"}\n` +
+          `📅 Ngày đăng ký: ${subscribedAt}\n\n` +
+          `*Thay đổi cài đặt:*\n` +
+          `/ai moneyflow ${moneyFlow ? "off" : "on"} — ${moneyFlow ? "Tắt" : "Bật"} cảnh báo dòng tiền\n` +
+          `/ai push ${pushEnabled ? "off" : "on"} — ${pushEnabled ? "Tắt" : "Bật"} auto push signals\n` +
+          `/ai unsubscribe — Hủy đăng ký tất cả`,
+        );
+      } catch (err) {
+        await this.telegramService.sendTelegramMessage(chatId, `❌ Lỗi: ${err?.message}`);
+      }
+    });
+
     // /ai market — AI market overview (available to all users, also handles /ai_market)
     this.telegramService.registerBotCommand(/^\/ai[_ ]market/, async (msg) => {
       const chatId = msg.chat.id;
@@ -127,71 +220,81 @@ export class AiCommandService implements OnModuleInit {
       }
     });
 
+    // /ai snapshot — admin: generate/regenerate daily snapshot (also handles /ai_snapshot)
+    this.telegramService.registerBotCommand(/^\/ai[_ ]snapshot/, async (msg) => {
+      const chatId = msg.chat.id;
+      if (!this.isAdmin(msg.from?.id)) return;
+
+      try {
+        await this.telegramService.sendTelegramMessage(
+          chatId,
+          "🔄 _Đang tạo daily snapshot..._",
+        );
+        await this.aiSignalService.generateDailySnapshot(true);
+        await this.telegramService.sendTelegramMessage(
+          chatId,
+          "✅ *Daily snapshot đã được tạo/cập nhật thành công!*",
+        );
+      } catch (err) {
+        await this.telegramService.sendTelegramMessage(
+          chatId,
+          `❌ Lỗi tạo snapshot: ${err?.message}`,
+        );
+      }
+    });
+
     // /ai signals — view all active + queued signals (available to all subscribers)
     this.telegramService.registerBotCommand(/^\/ai[_ ]signals/, async (msg) => {
       const chatId = msg.chat.id;
 
       try {
-        const actives = await this.signalQueueService.getAllActiveSignals();
-        const queued = await this.signalQueueService.getAllQueuedSignals();
+        const text = await this.formatSignalsMessage();
+        await this.telegramService.sendTelegramMessage(chatId, text);
+      } catch (err) {
+        await this.telegramService.sendTelegramMessage(chatId, `❌ Lỗi: ${err?.message}`);
+      }
+    });
 
-        if (actives.length === 0 && queued.length === 0) {
+    // /ai push on|off — toggle auto-push signals every 10 min (also handles /ai_push)
+    this.telegramService.registerBotCommand(/^\/ai[_ ]push(?:\s+(on|off))?$/i, async (msg) => {
+      const chatId = msg.chat.id;
+      const telegramId = msg.from?.id;
+      if (!telegramId) return;
+
+      const match = msg.text?.match(/^\/ai[_ ]push(?:\s+(on|off))?$/i);
+      const toggle = match?.[1]?.toLowerCase();
+
+      try {
+        const sub = await this.subscriptionService.getSubscription(telegramId);
+        if (!sub) {
           await this.telegramService.sendTelegramMessage(
             chatId,
-            `📊 *AI Signals*\n━━━━━━━━━━━━━━━━━━\n\n_Không có tín hiệu nào đang chạy._`,
+            `ℹ️ Ban chua đăng ký. Dùng /ai subscribe trước.`,
           );
           return;
         }
 
-        const fmtPrice = (p: number) =>
-          p >= 1000 ? `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :
-          p >= 1 ? `$${p.toFixed(2)}` :
-          p >= 0.01 ? `$${p.toFixed(4)}` : `$${p.toFixed(6)}`;
-
-        let text = `📊 *AI Signals*\n━━━━━━━━━━━━━━━━━━\n\n`;
-
-        if (actives.length > 0) {
-          text += `🟢 *Active (${actives.length}):*\n\n`;
-          for (const s of actives) {
-            const dirIcon = s.direction === "LONG" ? "📈" : "📉";
-            const testTag = s.isTestMode ? " 🧪" : "";
-            const held = s.executedAt ? Math.floor((Date.now() - s.executedAt.getTime()) / 3600000) : 0;
-            const heldStr = held >= 24 ? `${Math.floor(held / 24)}d ${held % 24}h` : `${held}h`;
-
-            // Fetch current price for PnL estimate
-            let pnlStr = "";
-            try {
-              const health = await this.statsService.checkSignalHealth(s.symbol);
-              if (health) {
-                const pnl = health.unrealizedPnl;
-                pnlStr = ` (${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}%)`;
-              }
-            } catch {}
-
-            text += `${dirIcon} *${s.symbol}* ${s.direction}${testTag}\n`;
-            text += `   Vào: ${fmtPrice(s.entryPrice)}${pnlStr}\n`;
-            text += `   SL: ${fmtPrice(s.stopLossPrice)} | ${s.strategy}\n`;
-            text += `   ⏱ ${heldStr} | ${s.aiConfidence}% confidence\n\n`;
-          }
+        if (!toggle) {
+          const enabled = (sub as any).signalsPushEnabled === true;
+          await this.telegramService.sendTelegramMessage(
+            chatId,
+            `📡 *Auto Push Signals*\n\n` +
+            `Trạng thái: ${enabled ? "✅ Đang bật" : "❌ Đang tắt"}\n` +
+            `Tần suất: mỗi 10 phút\n\n` +
+            `Dùng /ai push on để bật\n` +
+            `Dùng /ai push off để tắt`,
+          );
+          return;
         }
 
-        if (queued.length > 0) {
-          text += `⏳ *Queued (${queued.length}):*\n\n`;
-          for (const s of queued) {
-            const dirIcon = s.direction === "LONG" ? "📈" : "📉";
-            const testTag = s.isTestMode ? " 🧪" : "";
-            const hoursLeft = Math.max(0, (s.expiresAt.getTime() - Date.now()) / 3600000);
-
-            text += `${dirIcon} *${s.symbol}* ${s.direction}${testTag}\n`;
-            text += `   Vào: ${fmtPrice(s.entryPrice)} | ${s.strategy}\n`;
-            text += `   ⏰ Hết hạn: ${hoursLeft.toFixed(1)}h\n\n`;
-          }
-        }
-
-        text += `━━━━━━━━━━━━━━━━━━\n`;
-        text += `_${new Date().toLocaleTimeString("vi-VN")}_`;
-
-        await this.telegramService.sendTelegramMessage(chatId, text);
+        const enabled = toggle === "on";
+        await this.subscriptionService.toggleSignalsPush(telegramId, enabled);
+        await this.telegramService.sendTelegramMessage(
+          chatId,
+          enabled
+            ? `✅ *Đã bật auto push signals.*\n\nBạn sẽ nhận cập nhật tín hiệu mỗi 10 phút.`
+            : `✅ *Đã tắt auto push signals.*\n\nDùng /ai push on để bật lại.`,
+        );
       } catch (err) {
         await this.telegramService.sendTelegramMessage(chatId, `❌ Lỗi: ${err?.message}`);
       }
@@ -216,14 +319,21 @@ export class AiCommandService implements OnModuleInit {
         text += `Coins theo dõi: ${status.shortlist.join(", ") || "_(trống)_"}\n\n`;
 
         if (actives.length > 0) {
+          const healthResults = await Promise.allSettled(
+            actives.map((s) => this.statsService.checkSignalHealth(s.symbol)),
+          );
           text += `📈 *Active (${actives.length}):*\n`;
-          for (const s of actives) {
-            const health = await this.statsService.checkSignalHealth(s.symbol);
+          for (let i = 0; i < actives.length; i++) {
+            const s = actives[i];
+            const health = healthResults[i].status === "fulfilled"
+              ? (healthResults[i] as PromiseFulfilledResult<any>).value
+              : null;
             const pnl = health
               ? (health.unrealizedPnl >= 0 ? "+" : "") + health.unrealizedPnl.toFixed(2) + "%"
               : "N/A";
-            const testTag = s.isTestMode ? " `[T]`" : "";
-            text += `  ${s.direction === "LONG" ? "📈" : "📉"} ${s.symbol} ${s.direction} $${s.entryPrice.toLocaleString()} → ${pnl}${testTag}\n`;
+            const pnlIcon = health ? (health.unrealizedPnl >= 0 ? "📗" : "📕") : "";
+            const testTag = s.isTestMode ? " 🧪" : "";
+            text += `  ${pnlIcon} ${s.symbol} ${s.direction} → *${pnl}*${testTag}\n`;
           }
           text += "\n";
         } else {
@@ -410,6 +520,142 @@ export class AiCommandService implements OnModuleInit {
     );
 
     this.logger.log("[AiCommand] /ai commands registered");
+  }
+
+  private pushRunning = false;
+
+  @Cron("0 */10 * * * *") // every 10 min at :00 second
+  async pushSignalsToSubscribers() {
+    if (this.pushRunning) return;
+    this.pushRunning = true;
+    try {
+      const subscribers = await this.subscriptionService.findSignalsPushSubscribers();
+      if (subscribers.length === 0) return;
+
+      const text = await this.formatSignalsMessage();
+      // Skip push if no active signals (don't spam empty messages)
+      if (text.includes("Không có tín hiệu")) return;
+
+      for (const sub of subscribers) {
+        await this.telegramService.sendTelegramMessage(sub.chatId, text).catch(() => {});
+      }
+      this.logger.log(`[AiCommand] Signals push sent to ${subscribers.length} subscribers`);
+    } catch (err) {
+      this.logger.warn(`[AiCommand] pushSignalsToSubscribers error: ${err?.message}`);
+    } finally {
+      this.pushRunning = false;
+    }
+  }
+
+  /**
+   * Format all active + queued signals into a readable message.
+   * Reused by /ai signals command and auto-push cron.
+   */
+  async formatSignalsMessage(): Promise<string> {
+    const rawActives = await this.signalQueueService.getAllActiveSignals();
+    const queued = await this.signalQueueService.getAllQueuedSignals();
+
+    // Deduplicate by symbol (keep earliest executedAt)
+    const seenSymbols = new Map<string, typeof rawActives[0]>();
+    for (const s of rawActives) {
+      const existing = seenSymbols.get(s.symbol);
+      if (!existing || (s.executedAt && existing.executedAt && s.executedAt < existing.executedAt)) {
+        seenSymbols.set(s.symbol, s);
+      }
+    }
+    const actives = Array.from(seenSymbols.values());
+
+    if (actives.length === 0 && queued.length === 0) {
+      return `📊 *AI Signals*\n━━━━━━━━━━━━━━━━━━\n\n_Không có tín hiệu nào đang chạy._`;
+    }
+
+    const fmtPrice = (p: number) =>
+      p >= 1000 ? `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :
+      p >= 1 ? `$${p.toFixed(2)}` :
+      p >= 0.01 ? `$${p.toFixed(4)}` : `$${p.toFixed(6)}`;
+
+    let text = `📊 *AI Signals* (${actives.length} active`;
+    if (queued.length > 0) text += `, ${queued.length} queued`;
+    text += `)\n━━━━━━━━━━━━━━━━━━\n`;
+
+    if (actives.length > 0) {
+      const healthResults = await Promise.allSettled(
+        actives.map((s) => this.statsService.checkSignalHealth(s.symbol)),
+      );
+
+      // Compute summary
+      let totalPnl = 0;
+      let winning = 0;
+      let losing = 0;
+      let healthCount = 0;
+      for (let i = 0; i < actives.length; i++) {
+        const health = healthResults[i].status === "fulfilled"
+          ? (healthResults[i] as PromiseFulfilledResult<any>).value
+          : null;
+        if (health) {
+          totalPnl += health.unrealizedPnl;
+          healthCount++;
+          if (health.unrealizedPnl >= 0) winning++;
+          else losing++;
+        }
+      }
+
+      if (healthCount > 0) {
+        const avgPnl = totalPnl / healthCount;
+        const totalIcon = totalPnl >= 0 ? "📗" : "📕";
+        const totalSign = totalPnl >= 0 ? "+" : "";
+        text += `\n${totalIcon} Tong PnL: *${totalSign}${totalPnl.toFixed(2)}%* (avg ${totalSign}${avgPnl.toFixed(2)}%)`;
+        text += ` · ✅ ${winning} 🟢  ❌ ${losing} 🔴\n`;
+      }
+
+      for (let i = 0; i < actives.length; i++) {
+        const s = actives[i];
+        const health = healthResults[i].status === "fulfilled"
+          ? (healthResults[i] as PromiseFulfilledResult<any>).value
+          : null;
+        const dirIcon = s.direction === "LONG" ? "🟢" : "🔴";
+        const held = s.executedAt ? Math.floor((Date.now() - s.executedAt.getTime()) / 3600000) : 0;
+        const heldStr = held >= 24 ? `${Math.floor(held / 24)}d${held % 24}h` : `${held}h`;
+
+        text += `\n┌ ${dirIcon} *${s.symbol}* ${s.direction} · ${heldStr}\n`;
+
+        if (health) {
+          const pnl = health.unrealizedPnl;
+          const pnlIcon = pnl >= 0 ? "📗" : "📕";
+          const pnlSign = pnl >= 0 ? "+" : "";
+          const distToTp = s.direction === "LONG"
+            ? ((s.takeProfitPrice - health.currentPrice) / health.currentPrice) * 100
+            : ((health.currentPrice - s.takeProfitPrice) / health.currentPrice) * 100;
+          const distToSl = s.direction === "LONG"
+            ? ((health.currentPrice - s.stopLossPrice) / health.currentPrice) * 100
+            : ((s.stopLossPrice - health.currentPrice) / health.currentPrice) * 100;
+
+          text += `│ ${pnlIcon} *${pnlSign}${pnl.toFixed(2)}%* · Now ${fmtPrice(health.currentPrice)}\n`;
+          text += `│ Entry  ${fmtPrice(s.entryPrice)}\n`;
+          text += `│ TP     ${fmtPrice(s.takeProfitPrice)} _(${distToTp.toFixed(1)}% away)_\n`;
+          text += `│ SL     ${fmtPrice(s.stopLossPrice)} _(${distToSl.toFixed(1)}% away)_\n`;
+        } else {
+          text += `│ Entry  ${fmtPrice(s.entryPrice)}\n`;
+          text += `│ TP     ${fmtPrice(s.takeProfitPrice)}\n`;
+          text += `│ SL     ${fmtPrice(s.stopLossPrice)}\n`;
+        }
+        text += `└─────────────────\n`;
+      }
+    }
+
+    if (queued.length > 0) {
+      text += `\n⏳ *Queued (${queued.length})*\n`;
+      for (const s of queued) {
+        const dirIcon = s.direction === "LONG" ? "🟢" : "🔴";
+        const hoursLeft = Math.max(0, (s.expiresAt.getTime() - Date.now()) / 3600000);
+        text += `${dirIcon} *${s.symbol}* ${s.direction} · ${fmtPrice(s.entryPrice)} · _${hoursLeft.toFixed(1)}h left_\n`;
+      }
+    }
+
+    text += `━━━━━━━━━━━━━━━━━━\n`;
+    text += `_${new Date().toLocaleTimeString("vi-VN")}_`;
+
+    return text;
   }
 
   private isAdmin(telegramId?: number): boolean {

@@ -80,11 +80,66 @@ export class UserSignalSubscriptionService {
   }
 
   /**
+   * Get active subscribers who have money flow alerts enabled.
+   */
+  async findMoneyFlowSubscribers(): Promise<SubscriberInfo[]> {
+    const docs = await this.subscriptionModel
+      .find({ isActive: true, moneyFlowEnabled: { $ne: false } })
+      .lean();
+    return docs.map((d) => ({
+      telegramId: d.telegramId,
+      chatId: d.chatId,
+      username: d.username,
+    }));
+  }
+
+  /**
+   * Toggle money flow alerts for a user. Returns new state.
+   */
+  async toggleMoneyFlow(telegramId: number, enabled: boolean): Promise<boolean | null> {
+    const doc = await this.subscriptionModel.findOne({ telegramId, isActive: true });
+    if (!doc) return null; // not subscribed
+    await this.subscriptionModel.findByIdAndUpdate(doc._id, { moneyFlowEnabled: enabled });
+    return enabled;
+  }
+
+  /**
+   * Get active subscribers who have signals push enabled.
+   */
+  async findSignalsPushSubscribers(): Promise<SubscriberInfo[]> {
+    const docs = await this.subscriptionModel
+      .find({ isActive: true, signalsPushEnabled: true })
+      .lean();
+    return docs.map((d) => ({
+      telegramId: d.telegramId,
+      chatId: d.chatId,
+      username: d.username,
+    }));
+  }
+
+  /**
+   * Toggle signals push for a user. Returns new state.
+   */
+  async toggleSignalsPush(telegramId: number, enabled: boolean): Promise<boolean | null> {
+    const doc = await this.subscriptionModel.findOne({ telegramId, isActive: true });
+    if (!doc) return null;
+    await this.subscriptionModel.findByIdAndUpdate(doc._id, { signalsPushEnabled: enabled });
+    return enabled;
+  }
+
+  /**
    * Check subscription status for a given user.
    */
   async isSubscribed(telegramId: number): Promise<boolean> {
     const doc = await this.subscriptionModel.findOne({ telegramId, isActive: true });
     return !!doc;
+  }
+
+  /**
+   * Get subscription details for a given user.
+   */
+  async getSubscription(telegramId: number): Promise<UserSignalSubscriptionDocument | null> {
+    return this.subscriptionModel.findOne({ telegramId, isActive: true });
   }
 
   /**

@@ -28,10 +28,17 @@ import {
 
 const AI_PAUSED_KEY = "cache:ai:paused";
 const AI_TEST_MODE_KEY = "cache:ai:test-mode";
+const AI_SCANNING_KEY = "cache:ai:scanning";
+
+/** Coins that run BOTH INTRADAY (15m) and SWING (4h) strategies simultaneously. */
+const DUAL_TIMEFRAME_COINS = ["BTC", "ETH"];
 
 @Injectable()
 export class AiSignalService implements OnModuleInit {
   private readonly logger = new Logger(AiSignalService.name);
+
+  // Track coins being processed in current scan to prevent race conditions
+  private readonly processingCoins = new Set<string>();
 
   // Whether test mode is enabled at startup (can be toggled at runtime)
   private readonly defaultTestMode: boolean;
@@ -74,11 +81,14 @@ export class AiSignalService implements OnModuleInit {
     // Register callback so PositionMonitorService can trigger notifications
     // after a real-time TP/SL resolution (avoids circular dependency).
     this.positionMonitorService.setResolveCallback(async (info) => {
+      // Use profile-aware key for cooldown on dual-timeframe coins
+      const signalKey = info.signalKey || info.symbol;
+      await this.redisService.set(`cache:ai:cooldown:${signalKey}`, true, 30 * 60);
       await this.notifyPositionClosed(info).catch(() => {});
 
       if (info.queuedSignalActivated) {
         const newActive = await this.signalQueueService.getActiveSignal(
-          info.symbol,
+          signalKey,
         );
         if (newActive) {
           await this.broadcastSignal(newActive);
@@ -89,11 +99,37 @@ export class AiSignalService implements OnModuleInit {
       await this.updateCoinProfile(info).catch(() => {});
     });
 
+    // Register callback for SL-moved-to-entry notifications
+    this.positionMonitorService.setSlMovedCallback(async (symbol, entryPrice) => {
+      await this.notifySlMovedToEntry(symbol, entryPrice);
+    });
+
+    // Cleanup orphaned actives + duplicate completed signals on startup
+    try {
+      const orphans = await this.signalQueueService.cleanupOrphanedActives();
+      if (orphans > 0) this.logger.warn(`[AiSignal] Startup: cancelled ${orphans} orphaned ACTIVE signals`);
+
+      const dups = await this.signalQueueService.cleanupDuplicateCompletedSignals();
+      if (dups > 0) this.logger.warn(`[AiSignal] Startup: cleaned ${dups} duplicate COMPLETED signals`);
+    } catch (err) {
+      this.logger.error(`[AiSignal] Startup cleanup error: ${err?.message}`);
+    }
+
     try {
       await this.coinFilterService.scanAndFilter();
       await this.aiOptimizerService.assessGlobalRegime();
     } catch (err) {
       this.logger.error(`[AiSignal] onModuleInit error: ${err?.message}`);
+    }
+
+    // Generate daily snapshot if missing (delay 30s to let data populate)
+    const today = new Date().toISOString().slice(0, 10);
+    const snap = await this.dailySnapshotModel.findOne({ date: today });
+    if (!snap) {
+      setTimeout(() => this.generateDailySnapshot().catch(() => {}), 30_000);
+      this.logger.log(
+        "[AiSignal] Daily snapshot missing — will generate in 30s",
+      );
     }
   }
 
@@ -214,8 +250,8 @@ export class AiSignalService implements OnModuleInit {
       text += `━━━━━━━━━━━━━━━━━━\n`;
       text += `_${new Date().toLocaleTimeString("vi-VN")} • Binance Futures_`;
 
-      // Broadcast to all subscribers
-      const subscribers = await this.subscriptionService.findAllActive();
+      // Broadcast to subscribers who have money flow enabled
+      const subscribers = await this.subscriptionService.findMoneyFlowSubscribers();
       for (const sub of subscribers) {
         await this.telegramService.sendTelegramMessage(sub.chatId, text);
       }
@@ -249,22 +285,39 @@ export class AiSignalService implements OnModuleInit {
     const paused = await this.redisService.get<boolean>(AI_PAUSED_KEY);
     if (paused) return;
 
+    // Prevent overlapping scans (100 coins in batches of 5 can take >30s)
+    const scanning = await this.redisService.get<boolean>(AI_SCANNING_KEY);
+    if (scanning) return;
+
+    await this.redisService.set(AI_SCANNING_KEY, true, 300); // 5 min safety TTL
     try {
       const shortlist = await this.coinFilterService.getShortlist();
       if (shortlist.length === 0) return;
 
       const globalRegime = await this.aiOptimizerService.assessGlobalRegime();
 
-      // Process coins in batches of 5 to avoid Anthropic concurrent connection limits
+      // Build work items: BTC/ETH get TWO entries (INTRADAY + SWING), others get ONE
+      const workItems: { coin: string; currency: string; forceProfile?: string }[] = [];
+      for (const entry of shortlist) {
+        const coinUpper = entry.coin.toUpperCase();
+        if (DUAL_TIMEFRAME_COINS.includes(coinUpper)) {
+          workItems.push({ coin: entry.coin, currency: entry.currency, forceProfile: "INTRADAY" });
+          workItems.push({ coin: entry.coin, currency: entry.currency, forceProfile: "SWING" });
+        } else {
+          workItems.push({ coin: entry.coin, currency: entry.currency });
+        }
+      }
+
+      // Process in batches of 5 to avoid Anthropic concurrent connection limits
       const BATCH_SIZE = 5;
-      for (let i = 0; i < shortlist.length; i += BATCH_SIZE) {
-        const batch = shortlist.slice(i, i + BATCH_SIZE);
+      for (let i = 0; i < workItems.length; i += BATCH_SIZE) {
+        const batch = workItems.slice(i, i + BATCH_SIZE);
         await Promise.allSettled(
-          batch.map((entry) =>
-            this.processCoin(entry.coin, entry.currency, globalRegime).catch(
+          batch.map((item) =>
+            this.processCoin(item.coin, item.currency, globalRegime, item.forceProfile).catch(
               (err) =>
                 this.logger.warn(
-                  `[AiSignal] processCoin ${entry.symbol} failed: ${err?.message}`,
+                  `[AiSignal] processCoin ${item.coin.toUpperCase()}${item.currency.toUpperCase()}${item.forceProfile ? `:${item.forceProfile}` : ""} failed: ${err?.message}`,
                 ),
             ),
           ),
@@ -272,6 +325,8 @@ export class AiSignalService implements OnModuleInit {
       }
     } catch (err) {
       this.logger.error(`[AiSignal] runSignalScan error: ${err?.message}`);
+    } finally {
+      await this.redisService.delete(AI_SCANNING_KEY);
     }
   }
 
@@ -287,11 +342,15 @@ export class AiSignalService implements OnModuleInit {
       const resolved = await this.positionMonitorService.checkAndResolve();
 
       for (const info of resolved) {
+        // Use profile-aware key for cooldown on dual-timeframe coins
+        const signalKey = info.signalKey || info.symbol;
+        // Cooldown to prevent ping-pong recreation (30 min)
+        await this.redisService.set(`cache:ai:cooldown:${signalKey}`, true, 30 * 60);
         await this.notifyPositionClosed(info).catch(() => {});
 
         if (info.queuedSignalActivated) {
           const newActive = await this.signalQueueService.getActiveSignal(
-            info.symbol,
+            signalKey,
           );
           if (newActive) {
             await this.broadcastSignal(newActive);
@@ -311,11 +370,15 @@ export class AiSignalService implements OnModuleInit {
   // ─── Cron: test-mode simulation check (every 30 seconds) ─────────────────
   // In test mode, simulate TP/SL by checking current price against signal entry
 
+  private testSimRunning = false;
+
   @Cron("*/30 * * * * *")
   async runTestModeSimulation() {
     const isTestMode = await this.isTestModeEnabled();
     if (!isTestMode) return;
+    if (this.testSimRunning) return; // prevent overlap
 
+    this.testSimRunning = true;
     try {
       const actives = await this.signalQueueService.getAllActiveSignals();
       for (const signal of actives) {
@@ -324,6 +387,8 @@ export class AiSignalService implements OnModuleInit {
       }
     } catch (err) {
       this.logger.error(`[AiSignal] testModeSimulation error: ${err?.message}`);
+    } finally {
+      this.testSimRunning = false;
     }
   }
 
@@ -348,13 +413,17 @@ export class AiSignalService implements OnModuleInit {
   // ─── Cron: daily market snapshot (once per day at 8:00 AM UTC+7) ────────
 
   @Cron("0 1 * * *") // 01:00 UTC = 08:00 ICT
-  async generateDailySnapshot() {
+  async generateDailySnapshot(forceRegenerate = false) {
     try {
       const today = new Date().toISOString().slice(0, 10);
 
-      // Skip if already generated today
+      // Skip if already generated today (unless forced)
       const existing = await this.dailySnapshotModel.findOne({ date: today });
-      if (existing) return;
+      if (existing && !forceRegenerate) return;
+      if (existing && forceRegenerate) {
+        await this.dailySnapshotModel.deleteOne({ _id: existing._id });
+        this.logger.log(`[AiSignal] Deleted old snapshot for ${today} — regenerating`);
+      }
 
       const shortlist = await this.coinFilterService.getShortlist();
       if (shortlist.length === 0) return;
@@ -506,15 +575,38 @@ export class AiSignalService implements OnModuleInit {
     coin: string,
     currency: string,
     globalRegime: string,
+    forceProfile?: string,
   ): Promise<void> {
+    // Early exit: skip coins that already have an active signal (saves compute + avoids SKIPPED spam)
+    const symbol = `${coin.toUpperCase()}${currency.toUpperCase()}`;
+    const coinUpper = coin.toUpperCase();
+    const isDual = DUAL_TIMEFRAME_COINS.includes(coinUpper);
+
+    // For dual-timeframe coins, use profile-aware lock key
+    const lockKey = isDual && forceProfile ? `${symbol}:${forceProfile}` : symbol;
+
+    // In-memory lock to prevent same coin+profile being processed concurrently
+    if (this.processingCoins.has(lockKey)) return;
+    this.processingCoins.add(lockKey);
+
+    try {
+    // For dual coins, check active signal using profile-aware key
+    const signalKey = isDual && forceProfile ? `${symbol}:${forceProfile}` : symbol;
+    const hasActive = await this.signalQueueService.getActiveSignal(signalKey);
+    if (hasActive) return;
+
+    // Cooldown after SL/TP — prevent ping-pong recreation
+    const cooldown = await this.redisService.get<boolean>(`cache:ai:cooldown:${signalKey}`);
+    if (cooldown) return;
+
     const params = await this.aiOptimizerService.tuneParamsForSymbol(
       coin,
       currency,
       globalRegime,
+      forceProfile,
     );
 
     // Adjust confidence using cached futures analytics (no extra API calls)
-    const symbol = `${coin.toUpperCase()}${currency.toUpperCase()}`;
     const cachedAnalytics = await this.futuresAnalyticsService.getCachedAnalytics();
     const fa = cachedAnalytics.get(symbol);
     if (fa) {
@@ -558,11 +650,12 @@ export class AiSignalService implements OnModuleInit {
       params,
       params.regime,
       isTestMode,
+      forceProfile,
     );
 
     if (queueResult.action === "EXECUTED") {
       const activeSignal =
-        await this.signalQueueService.getActiveSignal(symbol);
+        await this.signalQueueService.getActiveSignal(signalKey);
       if (activeSignal) {
         if (isTestMode) {
           // Test mode: send "[TEST]" notification instead of placing real trades
@@ -575,12 +668,15 @@ export class AiSignalService implements OnModuleInit {
       }
     } else if (queueResult.action === "QUEUED") {
       const queuedSignal =
-        await this.signalQueueService.getQueuedSignal(symbol);
+        await this.signalQueueService.getQueuedSignal(signalKey);
       if (queuedSignal) {
         await this.notifySignalQueued(queuedSignal, isTestMode);
       }
     }
     // SKIPPED — silent
+    } finally {
+      this.processingCoins.delete(lockKey);
+    }
   }
 
   // ─── Broadcast to execution layer (live mode only) ────────────────────────
@@ -595,39 +691,19 @@ export class AiSignalService implements OnModuleInit {
 
   private async notifySignalTestMode(signal: AiSignalDocument): Promise<void> {
     const dirEmoji = signal.direction === "LONG" ? "📈" : "📉";
-    const symbol = signal.symbol;
-    const slPct = signal.stopLossPercent.toFixed(1);
-    const profileTag = this.getProfileTag(signal);
-
-    // Generate risk advice (algorithmic — no API call)
-    const advice = await this.aiOptimizerService
-      .generateSignalAdvice({
-        symbol: signal.symbol,
-        direction: signal.direction,
-        entryPrice: signal.entryPrice,
-        stopLossPrice: signal.stopLossPrice,
-        stopLossPercent: signal.stopLossPercent,
-        strategy: signal.strategy,
-        regime: signal.regime,
-        aiConfidence: signal.aiConfidence,
-        reason: (signal.indicatorSnapshot as any)?.reason,
-      })
-      .catch(() => "");
-
-    const fmtPrice = (p: number) =>
-      p >= 1000 ? `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :
-      p >= 1 ? `$${p.toFixed(2)}` :
-      p >= 0.01 ? `$${p.toFixed(4)}` : `$${p.toFixed(6)}`;
+    const dirColor = signal.direction === "LONG" ? "🟢" : "🔴";
+    const fmtP = this.fmtPrice;
+    const time = new Date().toLocaleString("vi-VN", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "2-digit" });
 
     const text =
-      `${dirEmoji} *AI Signal — ${symbol}* 🧪\n` +
+      `${dirEmoji} *AI Signal — ${signal.symbol}* 🧪\n` +
       `━━━━━━━━━━━━━━━━━━\n\n` +
-      `${signal.direction === "LONG" ? "🟢" : "🔴"} *${signal.direction}* vào ${fmtPrice(signal.entryPrice)}\n` +
-      `🛡 SL: ${fmtPrice(signal.stopLossPrice)} (-${slPct}%)\n\n` +
-      `⚡ ${profileTag}\n` +
-      `🎯 ${signal.strategy} • ${signal.regime} (${signal.aiConfidence}%)\n\n` +
-      `_Chế độ test — không đặt lệnh thật_` +
-      (advice ? `\n\n━━━━━━━━━━━━━━━━━━\n${advice}` : "");
+      `${dirColor} *${signal.direction}*\n` +
+      `Entry: ${fmtP(signal.entryPrice)}\n` +
+      `TP: ${fmtP(signal.takeProfitPrice)}\n` +
+      `SL: ${fmtP(signal.stopLossPrice)}\n\n` +
+      `${this.getProfileTag(signal)}\n` +
+      `_${time} • Test mode_`;
 
     const subscribers = await this.subscriptionService.findAllActive();
     let notified = 0;
@@ -645,7 +721,6 @@ export class AiSignalService implements OnModuleInit {
 
   /**
    * In test mode, periodically check if current price would have hit TP or SL.
-   * Uses a simple approach: check if SL would have been hit.
    */
   private async checkTestModeSignal(signal: AiSignalDocument): Promise<void> {
     const axios = require("axios");
@@ -662,50 +737,118 @@ export class AiSignalService implements OnModuleInit {
     if (!currentPrice || currentPrice <= 0) return;
 
     const isLong = signal.direction === "LONG";
+
+    // ─── Auto risk management ─────────────────────────────────────────────
+    const pnlPct = isLong
+      ? ((currentPrice - signal.entryPrice) / signal.entryPrice) * 100
+      : ((signal.entryPrice - currentPrice) / signal.entryPrice) * 100;
+
+    // Move SL to entry (break-even) at >= 4% profit
+    if (pnlPct >= 4 && !(signal as any).slMovedToEntry) {
+      await this.signalQueueService.moveStopLossToEntry((signal as any)._id.toString());
+      (signal as any).stopLossPrice = signal.entryPrice;
+      (signal as any).slMovedToEntry = true;
+      this.logger.log(
+        `[AiSignal] [TEST] 🛡️ ${signal.symbol} SL moved to entry ${signal.entryPrice} (PnL: ${pnlPct.toFixed(2)}%)`,
+      );
+      // Notify subscribers of SL move
+      await this.notifySlMovedToEntry(signal.symbol, signal.entryPrice);
+    }
+
+    // Auto-close at >= 5% profit
+    const autoClose = pnlPct >= 5;
+
+    // Check both TP and SL
+    const tpHit = isLong
+      ? currentPrice >= signal.takeProfitPrice
+      : currentPrice <= signal.takeProfitPrice;
     const slHit = isLong
       ? currentPrice <= signal.stopLossPrice
       : currentPrice >= signal.stopLossPrice;
 
-    if (slHit) {
-      this.logger.log(
-        `[AiSignal] [TEST] ${signal.symbol} SL hit at $${currentPrice}`,
-      );
-      await this.signalQueueService.resolveActiveSignal(
-        signal.symbol,
-        currentPrice,
-        "STOP_LOSS",
-      );
+    if (!tpHit && !slHit && !autoClose) return;
 
-      // Notify admin about simulated SL
-      const pnl = isLong
-        ? ((currentPrice - signal.entryPrice) / signal.entryPrice) * 100
-        : ((signal.entryPrice - currentPrice) / signal.entryPrice) * 100;
+    const reason = autoClose ? "AUTO_TAKE_PROFIT" : tpHit ? "TAKE_PROFIT" : "STOP_LOSS";
+    const pnl = isLong
+      ? ((currentPrice - signal.entryPrice) / signal.entryPrice) * 100
+      : ((signal.entryPrice - currentPrice) / signal.entryPrice) * 100;
 
-      const fmtPrice = (p: number) =>
-        p >= 1000 ? `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :
-        p >= 1 ? `$${p.toFixed(2)}` :
-        p >= 0.01 ? `$${p.toFixed(4)}` : `$${p.toFixed(6)}`;
+    this.logger.log(
+      `[AiSignal] [TEST] ${signal.symbol} ${reason} at $${currentPrice} (PnL: ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}%)`,
+    );
 
-      const text =
-        `🛑 *${signal.symbol} ${signal.direction} — SL Hit* 🧪\n` +
-        `━━━━━━━━━━━━━━━━━━\n\n` +
-        `${fmtPrice(signal.entryPrice)} → ${fmtPrice(currentPrice)}\n` +
-        `PnL: *${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}%*\n` +
-        `🎯 ${signal.strategy}`;
+    // Use profile-aware signal key for dual-timeframe coins
+    const sigKey = this.getSignalKey(signal);
 
-      await this.notifyAdminOnly(text);
+    // Mark COMPLETED directly in MongoDB (don't rely on Redis key existing)
+    await this.aiSignalModel.findByIdAndUpdate(signal._id, {
+      status: "COMPLETED",
+      closeReason: reason,
+      exitPrice: currentPrice,
+      pnlPercent: pnl,
+      positionClosedAt: new Date(),
+    });
+    // Also clean Redis active key if it exists
+    await this.signalQueueService.resolveActiveSignal(
+      sigKey,
+      currentPrice,
+      reason as any,
+    ).catch(() => {});
 
-      // Activate queued if any
-      const queued = await this.signalQueueService.activateQueuedSignal(
-        signal.symbol,
-      );
-      if (queued) {
-        await this.notifySignalTestMode(queued);
-      }
+    // Set cooldown to prevent ping-pong recreation (30 min)
+    await this.redisService.set(
+      `cache:ai:cooldown:${sigKey}`,
+      true,
+      30 * 60,
+    );
+
+    // Notify subscribers (only once — not every 30s)
+    const fmtP = this.fmtPrice;
+    const time = new Date().toLocaleString("vi-VN", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "2-digit" });
+
+    const icon = autoClose ? "💰" : tpHit ? "🎯" : "🛑";
+    const label = autoClose ? "Auto Close +5%!" : tpHit ? "Take Profit!" : "Stop Loss";
+    const text =
+      `${icon} *${signal.symbol} ${signal.direction} — ${label}* 🧪\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `Entry: ${fmtP(signal.entryPrice)}\n` +
+      `Exit: ${fmtP(currentPrice)}\n` +
+      `PnL: *${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}%*\n\n` +
+      `_${time}_`;
+
+    const subscribers = await this.subscriptionService.findAllActive();
+    for (const sub of subscribers) {
+      await this.telegramService.sendTelegramMessage(sub.chatId, text).catch(() => {});
+    }
+
+    // Activate queued if any
+    const queued = await this.signalQueueService.activateQueuedSignal(sigKey);
+    if (queued) {
+      await this.notifySignalTestMode(queued);
     }
   }
 
   // ─── Telegram notifications ───────────────────────────────────────────────
+
+  /**
+   * For dual-timeframe coins (BTC/ETH), returns `SYMBOL:PROFILE` so both
+   * INTRADAY and SWING can coexist as separate active signals.
+   * For all other coins, returns just the symbol.
+   */
+  private getSignalKey(signal: AiSignalDocument): string {
+    const coin = signal.coin.toUpperCase();
+    const profile = (signal as any).timeframeProfile;
+    if (DUAL_TIMEFRAME_COINS.includes(coin) && profile) {
+      return `${signal.symbol}:${profile}`;
+    }
+    return signal.symbol;
+  }
+
+  /** Format price for Telegram display */
+  private fmtPrice = (p: number): string =>
+    p >= 1000 ? `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :
+    p >= 1 ? `$${p.toFixed(2)}` :
+    p >= 0.01 ? `$${p.toFixed(4)}` : `$${p.toFixed(6)}`;
 
   /** Returns a display tag like "⚡ Intraday (15m)" or "🌊 Swing (4h)" */
   private getProfileTag(signal: AiSignalDocument): string {
@@ -714,56 +857,35 @@ export class AiSignalService implements OnModuleInit {
   }
 
   /**
-   * Notify ALL users with BOT_FUTURE_AI_1 enabled about a new ACTIVE signal.
-   * Sent in addition to the "Bot Signal Executed" message from handleIncomingSignal().
-   * This provides AI context (strategy, regime, confidence) that the generic message lacks.
+   * Notify subscribers about a new ACTIVE signal (live mode only).
    */
   private async notifySignalActive(
     signal: AiSignalDocument,
-    params: AiTunedParams,
+    _params: AiTunedParams,
     isTestMode: boolean,
   ): Promise<void> {
+    if (isTestMode) return; // Test mode uses notifySignalTestMode instead
+
     const dirEmoji = signal.direction === "LONG" ? "📈" : "📉";
-    const slPct = signal.stopLossPercent.toFixed(1);
-
-    // Generate risk advice (algorithmic — no API call)
-    const advice = await this.aiOptimizerService
-      .generateSignalAdvice({
-        symbol: signal.symbol,
-        direction: signal.direction,
-        entryPrice: signal.entryPrice,
-        stopLossPrice: signal.stopLossPrice,
-        stopLossPercent: signal.stopLossPercent,
-        strategy: signal.strategy,
-        regime: signal.regime,
-        aiConfidence: signal.aiConfidence,
-        reason: (signal.indicatorSnapshot as any)?.reason,
-      })
-      .catch(() => "");
-
-    const profileTag = this.getProfileTag(signal);
-    const fmtPrice = (p: number) =>
-      p >= 1000 ? `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :
-      p >= 1 ? `$${p.toFixed(2)}` :
-      p >= 0.01 ? `$${p.toFixed(4)}` : `$${p.toFixed(6)}`;
+    const dirColor = signal.direction === "LONG" ? "🟢" : "🔴";
+    const fmtP = this.fmtPrice;
+    const time = new Date().toLocaleString("vi-VN", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "2-digit" });
 
     const text =
-      `${dirEmoji} *AI Signal — ${signal.symbol}* 📡\n` +
+      `${dirEmoji} *AI Signal — ${signal.symbol}*\n` +
       `━━━━━━━━━━━━━━━━━━\n\n` +
-      `${signal.direction === "LONG" ? "🟢" : "🔴"} *${signal.direction}* vào ${fmtPrice(signal.entryPrice)}\n` +
-      `🛡 SL: ${fmtPrice(signal.stopLossPrice)} (-${slPct}%)\n\n` +
-      `⚡ ${profileTag}\n` +
-      `🎯 ${signal.strategy} • ${signal.regime} (${signal.aiConfidence}%)\n\n` +
-      `_Đã đặt lệnh tự động_` +
-      (advice ? `\n\n━━━━━━━━━━━━━━━━━━\n${advice}` : "");
+      `${dirColor} *${signal.direction}*\n` +
+      `Entry: ${fmtP(signal.entryPrice)}\n` +
+      `TP: ${fmtP(signal.takeProfitPrice)}\n` +
+      `SL: ${fmtP(signal.stopLossPrice)}\n\n` +
+      `${this.getProfileTag(signal)}\n` +
+      `_${time}_`;
 
-    if (!isTestMode) {
-      const subscribers = await this.subscriptionService.findAllActive();
-      for (const sub of subscribers) {
-        await this.telegramService
-          .sendTelegramMessage(sub.chatId, text)
-          .catch(() => {});
-      }
+    const subscribers = await this.subscriptionService.findAllActive();
+    for (const sub of subscribers) {
+      await this.telegramService
+        .sendTelegramMessage(sub.chatId, text)
+        .catch(() => {});
     }
   }
 
@@ -772,25 +894,21 @@ export class AiSignalService implements OnModuleInit {
     isTestMode: boolean,
   ): Promise<void> {
     const dirEmoji = signal.direction === "LONG" ? "📈" : "📉";
-    const hoursLeft = Math.max(
-      0,
-      (signal.expiresAt.getTime() - Date.now()) / 3600000,
-    );
-    const profileTag = this.getProfileTag(signal);
+    const dirColor = signal.direction === "LONG" ? "🟢" : "🔴";
     const testLabel = isTestMode ? " 🧪" : "";
-    const fmtPrice = (p: number) =>
-      p >= 1000 ? `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :
-      p >= 1 ? `$${p.toFixed(2)}` :
-      p >= 0.01 ? `$${p.toFixed(4)}` : `$${p.toFixed(6)}`;
+    const fmtP = this.fmtPrice;
+    const hoursLeft = Math.max(0, (signal.expiresAt.getTime() - Date.now()) / 3600000);
+    const time = new Date().toLocaleString("vi-VN", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "2-digit" });
 
     const text =
       `${dirEmoji} *AI Signal — ${signal.symbol}* 📋${testLabel}\n` +
       `━━━━━━━━━━━━━━━━━━\n\n` +
-      `${signal.direction === "LONG" ? "🟢" : "🔴"} *${signal.direction}* vào ${fmtPrice(signal.entryPrice)}\n\n` +
-      `⚡ ${profileTag}\n` +
-      `🎯 ${signal.strategy} • ${signal.regime} (${signal.aiConfidence}%)\n\n` +
-      `⏳ _Đang chờ lệnh hiện tại đóng_\n` +
-      `⏰ Hết hạn sau: *${hoursLeft.toFixed(1)}h*`;
+      `${dirColor} *${signal.direction}*\n` +
+      `Entry: ${fmtP(signal.entryPrice)}\n` +
+      `TP: ${fmtP(signal.takeProfitPrice)}\n` +
+      `SL: ${fmtP(signal.stopLossPrice)}\n\n` +
+      `⏳ _Đang chờ — hết hạn ${hoursLeft.toFixed(1)}h_\n` +
+      `_${time}_`;
 
     const subscribers = await this.subscriptionService.findAllActive();
     for (const sub of subscribers) {
@@ -805,25 +923,23 @@ export class AiSignalService implements OnModuleInit {
     closedInfo: ResolvedSignalInfo,
   ): Promise<void> {
     const dirEmoji = signal.direction === "LONG" ? "📈" : "📉";
+    const dirColor = signal.direction === "LONG" ? "🟢" : "🔴";
     const pnlSign = closedInfo.pnlPercent >= 0 ? "+" : "";
     const pnlEmoji = closedInfo.pnlPercent >= 0 ? "🟢" : "🔴";
     const testLabel = signal.isTestMode ? " 🧪" : "";
-
-    const profileTag = this.getProfileTag(signal);
-    const fmtPrice = (p: number) =>
-      p >= 1000 ? `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :
-      p >= 1 ? `$${p.toFixed(2)}` :
-      p >= 0.01 ? `$${p.toFixed(4)}` : `$${p.toFixed(6)}`;
+    const fmtP = this.fmtPrice;
+    const time = new Date().toLocaleString("vi-VN", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "2-digit" });
 
     const text =
       `${pnlEmoji} *${closedInfo.symbol} ${closedInfo.direction} đã đóng*\n` +
-      `${fmtPrice(closedInfo.entryPrice)} → ${fmtPrice(closedInfo.exitPrice)} (*${pnlSign}${closedInfo.pnlPercent.toFixed(2)}%*)\n\n` +
+      `${fmtP(closedInfo.entryPrice)} → ${fmtP(closedInfo.exitPrice)} (*${pnlSign}${closedInfo.pnlPercent.toFixed(2)}%*)\n\n` +
       `━━━━━━━━━━━━━━━━━━\n\n` +
-      `${dirEmoji} *Kích hoạt lệnh chờ — ${signal.symbol}*${testLabel}\n\n` +
-      `${signal.direction === "LONG" ? "🟢" : "🔴"} *${signal.direction}* vào ${fmtPrice(signal.entryPrice)}\n` +
-      `🛡 SL: ${fmtPrice(signal.stopLossPrice)} (-${signal.stopLossPercent.toFixed(1)}%)\n\n` +
-      `⚡ ${profileTag}\n` +
-      `🎯 ${signal.strategy}`;
+      `${dirEmoji} *Lệnh chờ — ${signal.symbol}*${testLabel}\n\n` +
+      `${dirColor} *${signal.direction}*\n` +
+      `Entry: ${fmtP(signal.entryPrice)}\n` +
+      `TP: ${fmtP(signal.takeProfitPrice)}\n` +
+      `SL: ${fmtP(signal.stopLossPrice)}\n\n` +
+      `_${time}_`;
 
     const subscribers = await this.subscriptionService.findAllActive();
     for (const sub of subscribers) {
@@ -833,34 +949,49 @@ export class AiSignalService implements OnModuleInit {
     }
   }
 
+  private async notifySlMovedToEntry(symbol: string, entryPrice: number): Promise<void> {
+    const fmtP = this.fmtPrice;
+    const text =
+      `🛡️ *${symbol} — SL → Break-even*\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `Profit dat 4%, SL da chuyen ve gia entry ${fmtP(entryPrice)}\n` +
+      `Bao ve loi nhuan, khong con rui ro!\n\n` +
+      `_${new Date().toLocaleTimeString("vi-VN")}_`;
+
+    const subscribers = await this.subscriptionService.findAllActive();
+    for (const sub of subscribers) {
+      await this.telegramService.sendTelegramMessage(sub.chatId, text).catch(() => {});
+    }
+  }
+
   private async notifyPositionClosed(info: ResolvedSignalInfo): Promise<void> {
     const pnlSign = info.pnlPercent >= 0 ? "+" : "";
-    const pnlEmoji = info.pnlPercent >= 0 ? "🟢" : "🔴";
+    const fmtP = this.fmtPrice;
+    const time = new Date().toLocaleString("vi-VN", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "2-digit" });
 
     let headerIcon: string;
     let headerLabel: string;
-    if (info.closeReason === "TAKE_PROFIT") {
+    if (info.closeReason === "AUTO_TAKE_PROFIT") {
+      headerIcon = "💰";
+      headerLabel = "Auto Close +5%!";
+    } else if (info.closeReason === "TAKE_PROFIT") {
       headerIcon = "🎯";
       headerLabel = "Take Profit!";
     } else if (info.closeReason === "STOP_LOSS") {
       headerIcon = "🛑";
       headerLabel = "Stop Loss";
     } else {
-      headerIcon = pnlEmoji;
+      headerIcon = info.pnlPercent >= 0 ? "🟢" : "🔴";
       headerLabel = "Đã đóng";
     }
-
-    const fmtPrice = (p: number) =>
-      p >= 1000 ? `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :
-      p >= 1 ? `$${p.toFixed(2)}` :
-      p >= 0.01 ? `$${p.toFixed(4)}` : `$${p.toFixed(6)}`;
 
     const text =
       `${headerIcon} *${info.symbol} ${info.direction} — ${headerLabel}*\n` +
       `━━━━━━━━━━━━━━━━━━\n\n` +
-      `Vào: ${fmtPrice(info.entryPrice)}\n` +
-      `Ra: ${fmtPrice(info.exitPrice)}\n` +
-      `PnL: *${pnlSign}${info.pnlPercent.toFixed(2)}%*`;
+      `Entry: ${fmtP(info.entryPrice)}\n` +
+      `Exit: ${fmtP(info.exitPrice)}\n` +
+      `PnL: *${pnlSign}${info.pnlPercent.toFixed(2)}%*\n\n` +
+      `_${time}_`;
 
     const subscribers = await this.subscriptionService.findAllActive();
     for (const sub of subscribers) {
@@ -1028,6 +1159,9 @@ export class AiSignalService implements OnModuleInit {
   }
 
   async generateMarketOverview(): Promise<string> {
+    // Fire-and-forget: save daily snapshot if today's is missing
+    this.generateDailySnapshot().catch(() => {});
+
     const coinData = await this.getAllCoinParams();
 
     // Fetch futures analytics (funding, OI, L/S) for top coins

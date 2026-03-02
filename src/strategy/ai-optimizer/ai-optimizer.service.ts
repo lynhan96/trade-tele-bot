@@ -120,9 +120,13 @@ export class AiOptimizerService {
     coin: string,
     currency: string,
     globalRegime: string,
+    forceProfile?: string,
   ): Promise<AiTunedParams> {
     const symbol = `${coin.toUpperCase()}${currency.toUpperCase()}`;
-    const cacheKey = `cache:ai:params:${symbol}`;
+    // For dual-timeframe coins, use profile-aware cache key
+    const cacheKey = forceProfile
+      ? `cache:ai:params:${symbol}:${forceProfile}`
+      : `cache:ai:params:${symbol}`;
 
     const cached = await this.redisService.get<AiTunedParams>(cacheKey);
     if (cached) return cached;
@@ -134,16 +138,26 @@ export class AiOptimizerService {
       burstCount >= MAX_RETUNES_PER_SCAN ||
       !(await this.checkRateLimit(HAIKU_RATE_KEY, this.maxHaikuPerHour))
     ) {
-      const defaultParams = this.getDefaultParams(globalRegime);
+      // Use ATR-adjusted defaults when Haiku is unavailable
+      let defaultParams = await this.getAtrAdjustedDefaults(coin, globalRegime);
+      // If forceProfile is set, override the timeframe settings
+      if (forceProfile) {
+        defaultParams = this.applyForcedProfile(defaultParams, forceProfile);
+      }
       this.logger.debug(
-        `[AiOptimizer] Using default params for ${symbol} (${burstCount >= MAX_RETUNES_PER_SCAN ? "burst limit" : "rate limit"})`,
+        `[AiOptimizer] Using default params for ${symbol}${forceProfile ? `:${forceProfile}` : ""} (${burstCount >= MAX_RETUNES_PER_SCAN ? "burst limit" : "rate limit"}) SL=${defaultParams.stopLossPercent}%`,
       );
       return defaultParams;
     }
 
     try {
       const indicators = await this.preComputeIndicators(coin);
-      const params = await this.callHaiku(symbol, globalRegime, indicators);
+      let params = await this.callHaiku(symbol, globalRegime, indicators);
+
+      // If forceProfile is set, override the timeframe settings from Haiku
+      if (forceProfile) {
+        params = this.applyForcedProfile(params, forceProfile);
+      }
 
       // Stagger cache expiry: TTL + 0-30 min random offset to avoid thundering herd
       const jitter = Math.floor(Math.random() * AI_PARAMS_JITTER);
@@ -163,15 +177,50 @@ export class AiOptimizerService {
       );
 
       this.logger.log(
-        `[AiOptimizer] ${symbol}: regime=${params.regime} strategy=${params.strategy} confidence=${params.confidence}%`,
+        `[AiOptimizer] ${symbol}${forceProfile ? `:${forceProfile}` : ""}: regime=${params.regime} strategy=${params.strategy} confidence=${params.confidence}%`,
       );
       return params;
     } catch (err) {
       this.logger.warn(
         `[AiOptimizer] Haiku call failed for ${symbol}: ${err?.message}`,
       );
-      return this.getDefaultParams(globalRegime);
+      let defaults = this.getDefaultParams(globalRegime);
+      if (forceProfile) {
+        defaults = this.applyForcedProfile(defaults, forceProfile);
+      }
+      return defaults;
     }
+  }
+
+  /**
+   * Override timeframe settings for a forced profile (INTRADAY or SWING).
+   * No extra Haiku call — reuses base params and only adjusts kline settings.
+   */
+  private applyForcedProfile(params: AiTunedParams, profile: string): AiTunedParams {
+    const result = { ...params };
+    result.timeframeProfile = profile as any;
+
+    if (profile === "SWING") {
+      // SWING: 4h primary, 1d HTF, wider SL
+      result.stopLossPercent = Math.max(1.5, result.stopLossPercent);
+      result.takeProfitPercent = Math.max(result.stopLossPercent * 2, result.takeProfitPercent);
+      if (result.rsiCross) {
+        result.rsiCross = { ...result.rsiCross, primaryKline: "4h", htfKline: "1d", candleKline: "4h" };
+      }
+      if (result.rsiZone) {
+        result.rsiZone = { ...result.rsiZone, primaryKline: "4h", htfKline: "1d" };
+      }
+    } else {
+      // INTRADAY: 15m primary, 1h HTF
+      if (result.rsiCross) {
+        result.rsiCross = { ...result.rsiCross, primaryKline: "15m", htfKline: "1h", candleKline: "15m" };
+      }
+      if (result.rsiZone) {
+        result.rsiZone = { ...result.rsiZone, primaryKline: "15m", htfKline: "1h" };
+      }
+    }
+
+    return result;
   }
 
   // ─── Emergency override (re-tune immediately) ────────────────────────────
@@ -451,6 +500,31 @@ takeProfitPercent guide: set based on regime/volatility. STRONG_TREND→2×-3× 
     };
   }
 
+  /**
+   * When Haiku is rate-limited, compute ATR-adjusted SL instead of flat 2%.
+   * Volatile coins (ALICE, DOGE) get wider stops; stable coins (BTC) get tighter.
+   */
+  private async getAtrAdjustedDefaults(
+    coin: string,
+    regime: string,
+  ): Promise<AiTunedParams> {
+    const defaults = this.getDefaultParams(regime);
+    try {
+      const ohlc = await this.indicatorService.getOhlc(coin, "15m");
+      if (ohlc.closes.length < 20) return defaults;
+
+      const atrPct = this.indicatorService.getAtrPercent(ohlc.highs, ohlc.lows, ohlc.closes, 14);
+
+      // SL = 1.5× ATR, clamped to [1.5%, 6%]
+      const slPct = Math.max(1.5, Math.min(6, atrPct * 1.5));
+      defaults.stopLossPercent = parseFloat(slPct.toFixed(1));
+      defaults.takeProfitPercent = parseFloat((slPct * 2).toFixed(1));
+    } catch {
+      // fallback to static defaults
+    }
+    return defaults;
+  }
+
   private mergeWithDefaults(parsed: Partial<AiTunedParams>): AiTunedParams {
     const defaults = this.getDefaultParams(parsed.regime || "MIXED");
     const stopLossPercent = parsed.stopLossPercent ?? defaults.stopLossPercent;
@@ -563,18 +637,33 @@ takeProfitPercent guide: set based on regime/volatility. STRONG_TREND→2×-3× 
     }[],
     analyticsData?: Record<string, any>,
   ): Promise<string> {
+    // ── Helpers ──
     const fmtVol = (v: number) =>
-      v >= 1e9 ? (v / 1e9).toFixed(1) + "B" :
-      v >= 1e6 ? (v / 1e6).toFixed(1) + "M" :
-      v >= 1e3 ? (v / 1e3).toFixed(0) + "K" : v.toFixed(0);
+      v >= 1e9 ? `$${(v / 1e9).toFixed(1)}B` :
+      v >= 1e6 ? `$${(v / 1e6).toFixed(0)}M` :
+      v >= 1e3 ? `$${(v / 1e3).toFixed(0)}K` : `$${v.toFixed(0)}`;
 
     const fmtPrice = (p: number) =>
-      p >= 1000 ? p.toLocaleString("en-US", { maximumFractionDigits: 0 }) :
-      p >= 1 ? p.toFixed(2) :
-      p >= 0.01 ? p.toFixed(4) : p.toFixed(6);
+      p >= 1000 ? `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :
+      p >= 1 ? `$${p.toFixed(2)}` :
+      p >= 0.01 ? `$${p.toFixed(4)}` : `$${p.toFixed(6)}`;
+
+    const pad = (s: string, len: number) => s.length >= len ? s.slice(0, len) : s + " ".repeat(len - s.length);
+    const padL = (s: string, len: number) => s.length >= len ? s.slice(0, len) : " ".repeat(len - s.length) + s;
+
+    const bar = (value: number, max: number, width = 12) => {
+      if (max <= 0) return "░".repeat(width);
+      const filled = Math.round(Math.min(Math.abs(value) / max, 1) * width);
+      return "█".repeat(filled) + "░".repeat(width - filled);
+    };
+
+    const lsBar = (longPct: number, width = 10) => {
+      const filled = Math.round((longPct / 100) * width);
+      return "█".repeat(filled) + "░".repeat(width - filled);
+    };
 
     try {
-      // Market-wide stats
+      // ── Market-wide stats ──
       const totalVolume = coinData.reduce((sum, c) => sum + c.quoteVolume, 0);
       const avgChange = coinData.length > 0
         ? coinData.reduce((sum, c) => sum + c.priceChangePercent, 0) / coinData.length
@@ -582,7 +671,6 @@ takeProfitPercent guide: set based on regime/volatility. STRONG_TREND→2×-3× 
       const gainers = coinData.filter((c) => c.priceChangePercent > 0).length;
       const losers = coinData.filter((c) => c.priceChangePercent < 0).length;
 
-      // Determine sentiment from data
       let sentiment: string;
       let sentimentEmoji: string;
       if (avgChange > 3 && gainers > losers * 2) {
@@ -597,88 +685,145 @@ takeProfitPercent guide: set based on regime/volatility. STRONG_TREND→2×-3× 
 
       const globalRegime = await this.redisService.get<string>("cache:ai:regime") || "MIXED";
 
-      // ── Build the message with real-time market data ──
-      let result =
-        `🌍 *Phân Tích Thị Trường*\n` +
-        `━━━━━━━━━━━━━━━━━━\n\n` +
-        `${sentimentEmoji} Xu hướng: *${sentiment}*\n` +
-        `🏛 Regime: *${globalRegime}*\n` +
-        `📊 Theo dõi: *${coinData.length} coins* | Vol: *$${fmtVol(totalVolume)}*\n` +
-        `📈 Tăng: *${gainers}* | 📉 Giảm: *${losers}* | TB: *${avgChange >= 0 ? "+" : ""}${avgChange.toFixed(1)}%*\n\n`;
+      // ── Header ──
+      let msg =
+        `📊 *PHAN TICH THI TRUONG*\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n\n` +
+        `${sentimentEmoji} *${sentiment}* · Regime: *${globalRegime}*\n` +
+        `📈 ${gainers} tang · 📉 ${losers} giam · TB: ${avgChange >= 0 ? "+" : ""}${avgChange.toFixed(1)}%\n` +
+        `💰 ${coinData.length} coins · Vol: ${fmtVol(totalVolume)}\n`;
 
-      // Real-time price table — top by volume
-      result += `💰 *Giá & Volume:*\n`;
-      const displayCoins = [...coinData]
-        .sort((a, b) => b.quoteVolume - a.quoteVolume)
-        .slice(0, 8);
-      for (const c of displayCoins) {
-        const changeIcon = c.priceChangePercent > 0 ? "🟢" : c.priceChangePercent < 0 ? "🔴" : "⚪";
-        const sign = c.priceChangePercent >= 0 ? "+" : "";
-        result += `  ${changeIcon} ${c.symbol.replace("USDT", "")} $${fmtPrice(c.lastPrice)} (${sign}${c.priceChangePercent.toFixed(1)}%) Vol:$${fmtVol(c.quoteVolume)}\n`;
-      }
+      // ── BTC & ETH detail ──
+      const btc = coinData.find((c) => c.symbol === "BTCUSDT");
+      const eth = coinData.find((c) => c.symbol === "ETHUSDT");
+      const btcFa = analyticsData?.["BTCUSDT"];
+      const ethFa = analyticsData?.["ETHUSDT"];
 
-      // Futures analytics section
-      if (analyticsData && Object.keys(analyticsData).length > 0) {
-        result += `\n🏦 *Futures Analytics:*\n`;
-        const topByVol = displayCoins.slice(0, 5);
-        for (const c of topByVol) {
-          const fa = analyticsData[c.symbol];
-          if (!fa) continue;
-          const coin = c.symbol.replace("USDT", "");
-          const fundPct = (fa.fundingRate * 100).toFixed(3);
-          const fundIcon = fa.fundingRate > 0.0005 ? "🔴" : fa.fundingRate < -0.0005 ? "🟢" : "⚪";
-          const oiUsd = fa.openInterest * c.lastPrice;
-          result += `  ${coin}: ${fundIcon}F:${fundPct}% | OI:$${fmtVol(oiUsd)} | L${fa.longPercent.toFixed(0)}/S${fa.shortPercent.toFixed(0)}\n`;
+      if (btc) {
+        const sign = btc.priceChangePercent >= 0 ? "+" : "";
+        msg += `\n₿ *BITCOIN (BTC)*\n`;
+        msg += "```\n";
+        msg += ` Gia:    ${fmtPrice(btc.lastPrice)}\n`;
+        msg += ` 24h:    ${sign}${btc.priceChangePercent.toFixed(2)}%\n`;
+        msg += ` Vol:    ${fmtVol(btc.quoteVolume)}\n`;
+        if (btcFa) {
+          const oiUsd = btcFa.openInterest * btc.lastPrice;
+          msg += ` Fund:   ${(btcFa.fundingRate * 100).toFixed(4)}%\n`;
+          msg += ` OI:     ${fmtVol(oiUsd)}\n`;
+          msg += ` L/S:    ${lsBar(btcFa.longPercent)} ${Math.round(btcFa.longPercent)}/${Math.round(btcFa.shortPercent)}\n`;
         }
+        msg += "```\n";
       }
 
-      // Top movers
-      const topGainers = [...coinData].sort((a, b) => b.priceChangePercent - a.priceChangePercent).slice(0, 3);
-      const topLosers = [...coinData].sort((a, b) => a.priceChangePercent - b.priceChangePercent).slice(0, 3);
-
-      result += `\n🚀 *Top tăng:*\n`;
-      for (const c of topGainers) {
-        result += `  🟢 ${c.symbol.replace("USDT", "")} +${c.priceChangePercent.toFixed(1)}% ($${fmtPrice(c.lastPrice)})\n`;
+      if (eth) {
+        const sign = eth.priceChangePercent >= 0 ? "+" : "";
+        msg += `\nΞ *ETHEREUM (ETH)*\n`;
+        msg += "```\n";
+        msg += ` Gia:    ${fmtPrice(eth.lastPrice)}\n`;
+        msg += ` 24h:    ${sign}${eth.priceChangePercent.toFixed(2)}%\n`;
+        msg += ` Vol:    ${fmtVol(eth.quoteVolume)}\n`;
+        if (ethFa) {
+          const oiUsd = ethFa.openInterest * eth.lastPrice;
+          msg += ` Fund:   ${(ethFa.fundingRate * 100).toFixed(4)}%\n`;
+          msg += ` OI:     ${fmtVol(oiUsd)}\n`;
+          msg += ` L/S:    ${lsBar(ethFa.longPercent)} ${Math.round(ethFa.longPercent)}/${Math.round(ethFa.shortPercent)}\n`;
+        }
+        msg += "```\n";
       }
-      result += `\n📉 *Top giảm:*\n`;
-      for (const c of topLosers) {
-        result += `  🔴 ${c.symbol.replace("USDT", "")} ${c.priceChangePercent.toFixed(1)}% ($${fmtPrice(c.lastPrice)})\n`;
+
+      // ── Market Forecast ──
+      msg += `\n🔮 *DU DOAN THI TRUONG*\n`;
+      msg += `━━━━━━━━━━━━━━━━━━━━\n`;
+
+      // Build forecast from data signals
+      const forecasts: string[] = [];
+
+      // BTC-based forecast
+      if (btc && btcFa) {
+        const btcBias = btc.priceChangePercent > 0 ? "tang" : "giam";
+        const btcStrength = Math.abs(btc.priceChangePercent) > 3 ? "manh" : "nhe";
+        const fundBias = btcFa.fundingRate > 0.0005 ? "qua nhieu Long (can than)" :
+          btcFa.fundingRate < -0.0005 ? "Short chiem uu the" : "can bang";
+        const lsBias = btcFa.longPercent > 65 ? "⚠️ Long crowded" :
+          btcFa.shortPercent > 65 ? "⚠️ Short crowded" : "L/S can bang";
+
+        forecasts.push(`₿ BTC dang ${btcBias} ${btcStrength} (${btc.priceChangePercent >= 0 ? "+" : ""}${btc.priceChangePercent.toFixed(1)}%)`);
+        forecasts.push(`   Funding: ${fundBias}`);
+        forecasts.push(`   ${lsBias}`);
       }
 
-      // High-confidence coins — opportunities
+      // Market-wide forecast
+      if (sentiment === "BULLISH") {
+        forecasts.push(`\n📈 Thi truong dang *BULLISH*`);
+        forecasts.push(`   Altcoin co the tiep tuc tang theo BTC`);
+        if (btcFa && btcFa.fundingRate > 0.0005)
+          forecasts.push(`   ⚠️ Funding cao — rui ro long squeeze`);
+        else
+          forecasts.push(`   ✅ Funding binh thuong — xu huong on dinh`);
+      } else if (sentiment === "BEARISH") {
+        forecasts.push(`\n📉 Thi truong dang *BEARISH*`);
+        forecasts.push(`   Nen han che mo Long, uu tien Short`);
+        if (btcFa && btcFa.fundingRate < -0.0005)
+          forecasts.push(`   ⚠️ Funding am — rui ro short squeeze`);
+        else
+          forecasts.push(`   Chua co dau hieu dao chieu`);
+      } else if (sentiment === "NEUTRAL") {
+        forecasts.push(`\n⚪ Thi truong dang *SIDEWAY*`);
+        forecasts.push(`   Bien do hep — cho breakout truoc khi vao lenh`);
+        forecasts.push(`   Uu tien chien luoc Mean Revert`);
+      } else {
+        forecasts.push(`\n🟡 Thi truong *MIXED* — chua ro xu huong`);
+        if (gainers > losers * 1.5)
+          forecasts.push(`   Nhieu coin tang nhung chua dong nhat`);
+        else if (losers > gainers * 1.5)
+          forecasts.push(`   Ap luc ban nhieu hon — can than`);
+        else
+          forecasts.push(`   Cho tin hieu ro hon truoc khi vao lenh`);
+      }
+
+      // Volume insight
+      const btcDominanceByVol = btc ? (btc.quoteVolume / totalVolume * 100) : 0;
+      if (btcDominanceByVol > 30)
+        forecasts.push(`\n💡 BTC dominance cao (${btcDominanceByVol.toFixed(0)}% vol) — altcoin phu thuoc BTC`);
+
+      // High confidence opportunities summary
       const highConf = [...coinData].filter((c) => c.confidence >= 65).sort((a, b) => b.confidence - a.confidence).slice(0, 3);
       if (highConf.length > 0) {
-        result += `\n🎯 *Confidence cao:*\n`;
+        forecasts.push(`\n🎯 *Co hoi:*`);
         for (const c of highConf) {
-          result += `  • ${c.symbol.replace("USDT", "")} — ${c.confidence}% (${c.strategy}, ${c.regime})\n`;
+          const coin = c.symbol.replace("USDT", "");
+          const strat = c.strategy.replace("MEAN_REVERT_RSI", "Mean Revert").replace("RSI_CROSS", "RSI Cross").replace("RSI_ZONE", "RSI Zone").replace("TREND_EMA", "Trend EMA");
+          forecasts.push(`   • ${coin} — ${c.confidence}% (${strat})`);
         }
       }
 
-      // Warnings from futures data
+      msg += forecasts.join("\n") + "\n";
+
+      // ── Warnings ──
       const warnings: string[] = [];
       if (analyticsData) {
         for (const [sym, fa] of Object.entries(analyticsData) as any[]) {
           if (Math.abs(fa.fundingRate) > 0.001) {
             const coin = sym.replace("USDT", "");
-            warnings.push(`${coin} funding ${fa.fundingRate > 0 ? "cao" : "âm"} (${(fa.fundingRate * 100).toFixed(3)}%)`);
+            warnings.push(`${coin} funding ${fa.fundingRate > 0 ? "cao" : "am"} (${(fa.fundingRate * 100).toFixed(3)}%)`);
           }
         }
       }
       if (warnings.length > 0) {
-        result += `\n⚠️ *Cảnh báo:*\n`;
+        msg += `\n⚠️ *CANH BAO*\n`;
         for (const w of warnings.slice(0, 4)) {
-          result += `  • ${w}\n`;
+          msg += `• ${w}\n`;
         }
       }
 
-      result +=
-        `\n━━━━━━━━━━━━━━━━━━\n` +
-        `_${new Date().toLocaleTimeString("vi-VN")} • Binance Futures_`;
+      msg +=
+        `\n━━━━━━━━━━━━━━━━━━━━\n` +
+        `_${new Date().toLocaleTimeString("vi-VN")} · Binance Futures_`;
 
-      return result;
+      return msg;
     } catch (err) {
       this.logger.warn(`[AiOptimizer] generateMarketOverview failed: ${err?.message}`);
-      return `⚠️ Lỗi khi phân tích thị trường: ${err?.message}`;
+      return `⚠️ Loi khi phan tich thi truong: ${err?.message}`;
     }
   }
 

@@ -76,6 +76,17 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     return result === 1;
   }
 
+  /** Atomic SET-if-NOT-EXISTS with TTL. Returns true if key was set (lock acquired). */
+  async setNX(key: string, value: any, ttl: number): Promise<boolean> {
+    const fullKey = this.getKey(key);
+    const serialized = JSON.stringify(value);
+    const result = await this.client.set(fullKey, serialized, {
+      NX: true,
+      EX: ttl,
+    });
+    return result === "OK";
+  }
+
   async keys(pattern: string): Promise<string[]> {
     const fullPattern = this.getKey(pattern);
     const allKeys: string[] = [];
