@@ -10,11 +10,21 @@ This skill updates all project documentation after completing a task. Run it wit
 
 ## What Gets Updated
 
+### 0. `/start` Command & BotFather Menu (MANDATORY if new commands added)
+**Path**: `src/telegram/telegram.service.ts`
+
+**If ANY new `/ai` command was added or renamed this session**, you MUST:
+1. Add it to the `/start` welcome message in `setupCommands()` — the long message grouped by section (Dang ky, Real Mode, Cai dat, Phan tich, Quan tri)
+2. Add it to `registerBotMenu()` `setMyCommands([...])` array so BotFather autocomplete shows it
+3. Then rebuild: `yarn build && pm2 restart binance-bot`
+
+**Do NOT skip this step.** The `/start` guide is the primary user reference — it must stay in sync with all commands.
+
 ### 1. MEMORY.md (Persistent AI Memory)
 **Path**: `/Users/elvislee/.claude/projects/-Users-elvislee-Workspace-DTS-binance-tele-bot/memory/MEMORY.md`
 
 Update these sections as needed:
-- **Current Commands** — if new commands were added
+- **Current AI Commands** — add the new command with its exact syntax
 - **Key Files** — if new important files were created
 - **Module Architecture** — if new modules were added
 - **Important Patterns** — if new conventions were established
@@ -81,10 +91,11 @@ Format:
 1. **Read current MEMORY.md** to understand what's already documented
 2. **Review git diff** (`git diff HEAD~1` or `git status`) to see what changed
 3. **Read the session conversation** to understand the full context of changes
-4. **Update MEMORY.md** — add new commands, files, patterns, settings
-5. **Add CHANGELOG.md entry** — detailed entry at top of file
-6. **Update session changelog** — brief summary in memory/changelog.md
-7. **Verify** — ensure no duplicates, outdated info removed
+4. **Update `/start` + BotFather menu** — if any command was added/changed, update `telegram.service.ts` now (Step 0 above), then `yarn build && pm2 restart binance-bot`
+5. **Update MEMORY.md** — add new commands, files, patterns, settings
+6. **Add CHANGELOG.md entry** — detailed entry at top of file
+7. **Update session changelog** — brief summary in memory/changelog.md
+8. **Verify** — ensure no duplicates, outdated info removed
 
 ## Important Notes
 

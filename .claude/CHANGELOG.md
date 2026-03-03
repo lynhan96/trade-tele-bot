@@ -1,5 +1,197 @@
 # Changelog
 
+## 2026-03-03 (8) - Reset All Signals + Balance Display + Cost Reduction
+
+### Feature: `/ai resetall` Admin Command
+
+New admin command to cleanly wipe all active/queued signals before going live. Calls `cancelAllSignals()` which does:
+- MongoDB `updateMany({ status: $in ["ACTIVE","QUEUED"] }, { status: "CANCELLED", closeReason: "ADMIN_RESET" })`
+- Scans and deletes all `cache:ai-signal:*` Redis keys (using `redisService.keys()`)
+- Returns count of cancelled signals, sends confirmation message
+
+### Feature: Account Balance Display When No Positions
+
+`/ai account` now shows Binance Futures USDT wallet balance when the user has no open positions or closed trades today. Uses new `BinanceService.getFuturesBalance()` which calls `client.futuresAccountBalance()` and returns `{ walletBalance, availableBalance, unrealizedPnl }`. Falls back gracefully if no API keys configured.
+
+### Enhancement: Reduce Sonnet Rate Limit (Cost Reduction)
+
+Lowered `AI_MAX_SONNET_PER_HOUR` from 20 to 10 to reduce costs. With 50 coins and 2h cache:
+- Typical steady state: ~25 calls/h → 10 Sonnet + 15 Haiku
+- Estimated cost: ~$0.095/h = **~$68/month** (down from ~$137/month at 20/h)
+
+### Files Modified
+- `src/ai-signal/ai-command.service.ts` — added `/ai resetall` handler, balance display in `/ai account`, `BinanceService` injected
+- `src/ai-signal/signal-queue.service.ts` — added `cancelAllSignals()` method
+- `src/binance/binance.service.ts` — added `getFuturesBalance()` method
+- `src/telegram/telegram.service.ts` — added `ai_resetall` to `/start` and BotFather menu
+- `.env` — `AI_MAX_SONNET_PER_HOUR=10`
+
+---
+
+## 2026-03-03 (7) - Sonnet 4.6 as Primary AI Model (4-Tier Waterfall)
+
+### Enhancement: Claude Sonnet 4.6 as Primary Parameter Tuning Model
+
+Replaced Haiku as the primary model with **Claude Sonnet 4.6** for best-quality parameter tuning. Full 4-tier waterfall:
+
+1. **Sonnet 4.6** (burst < 3/scan, hourly < `AI_MAX_SONNET_PER_HOUR`) — best market reasoning, strategy selection, nuanced confidence scoring
+2. **Haiku** (burst < 5/scan, hourly < `AI_MAX_HAIKU_PER_HOUR`) — fast secondary fallback
+3. **GPT-4o-mini** (hourly < `AI_MAX_GPT_PER_HOUR`) — covers overflow when both Anthropic models are burst/rate-limited
+4. **Static ATR-adjusted defaults** — last resort, no AI
+
+**Implementation highlights:**
+- Shared `callAnthropic(model, ...)` helper — `callSonnet()` and `callHaiku()` are thin wrappers
+- Indicators pre-computed once before waterfall, reused across all models
+- `saveAndReturn()` closure handles cache, history, log for all 3 AI models
+- Per-model burst keys: `cache:ai:rate:sonnet:burst`, `cache:ai:rate:haiku:burst`
+- New env: `AI_MAX_SONNET_PER_HOUR=20`
+
+**Cost estimate (steady state, 100 coins, 2h cache):**
+- ~50 cold-cache calls/hour
+- 20 Sonnet × $0.008 = $0.16/h → ~$115/month
+- 30 Haiku × $0.001 = $0.03/h → ~$22/month
+- Total: ~$137/month (vs ~$52/month for Haiku-only)
+
+**Confirmed in logs:** `ETHUSDT:INTRADAY (Sonnet): regime=MIXED strategy=RSI_ZONE confidence=48%`
+
+### Files Modified
+- `src/strategy/ai-optimizer/ai-optimizer.service.ts` — `SONNET_MODEL`, `callAnthropic()`, `callSonnet()`, `callHaiku()`, waterfall rewrite
+- `.env` — added `AI_MAX_SONNET_PER_HOUR=20`
+- `.env.example` — added Sonnet cost docs
+
+---
+
+## 2026-03-03 (6) - GPT-4o-mini as Haiku Fallback
+
+### Feature: GPT-4o-mini Fallback When Haiku is Rate-Limited
+
+When Haiku hits the burst limit (5 calls/30s scan) or hourly limit (60/h), the bot now tries GPT-4o-mini before falling back to static ATR defaults. This means all 100 coins get proper AI-tuned parameters instead of ~95 getting mechanical defaults.
+
+**Fallback chain:**
+1. Haiku available (burst < 5, hourly < 60) → `callHaiku()` → cache 2h + jitter
+2. Haiku rate-limited + GPT available (hourly < 60) → `callGpt()` → cache 2h + jitter
+3. Both rate-limited → `getAtrAdjustedDefaults()` (static, not cached)
+
+**Cost comparison:**
+- Haiku: ~$0.0012/call → 60/h = $51.84/month
+- GPT-4o-mini: ~$0.000195/call → 60/h = ~$8.42/month (~6× cheaper)
+
+**Implementation:**
+- Shared `buildTuningPrompt()` method — identical prompt for both models
+- Same `mergeWithDefaults()` call — outputs are interchangeable
+- GPT uses `response_format: { type: "json_object" }` — forces valid JSON, no repair needed
+- Separate rate counter: Redis key `cache:ai:rate:gpt` (1h window, `AI_MAX_GPT_PER_HOUR` cap)
+- Model logged to MongoDB `ai_regime_history.model` as `"gpt-4o-mini"` vs `"claude-haiku-4-5-20251001"`
+- `openai@6.25.0` package installed
+
+**New .env variables:**
+- `OPENAI_API_KEY` — leave blank to disable GPT fallback
+- `AI_MAX_GPT_PER_HOUR=60` — hourly budget (same default as Haiku)
+
+### Files Modified
+- `src/strategy/ai-optimizer/ai-optimizer.service.ts` — new `openai` field, `callGpt()`, `buildTuningPrompt()` extracted, fallback block
+- `.env.example` — added GPT fallback section with `OPENAI_API_KEY` and `AI_MAX_GPT_PER_HOUR`
+- `package.json` / `yarn.lock` — `openai@6.25.0` added
+
+---
+
+## 2026-03-03 (5) - Signal Display Improvements + Signal System Quality Fixes
+
+### Feature: Signal Created Time in Display
+
+Each signal in `/ai signals` now shows the **creation time** (HH:mm local) alongside the held duration:
+- Before: `┌ 🟢 BCHUSDT LONG · 4h · Vol 1,000 USDT`
+- After: `┌ 🟢 BCHUSDT LONG · 4h30m · 10:45 · Vol 1,000 USDT`
+- Held time also improved to show minutes: `0h` → `30m`, `4h` → `4h30m`
+- Time formatted via `toLocaleTimeString("vi-VN")` for Vietnam locale consistency
+
+### Enhancement: `/ai account` Command
+
+New command showing real-mode open positions with unrealized PnL:
+- Shows per-trade: direction icon, symbol, direction, leverage, held time, PnL % and USDT
+- Shows current price from `MarketDataService.getLatestPrice()` (in-memory, no HTTP)
+- Footer: total unrealized PnL, closed-today summary (count + PnL)
+- Added to BotFather menu as `ai_account` and to `/start` Real Mode section
+
+### Enhancement: `/ai close` Confirmation — PnL in USDT + Button Text
+
+Close confirmation dialog now shows USDT amounts:
+- Message body: each position line shows `±X.XX% (±Y.YY USDT)` with correct sign
+- Button text: `✅ +2.5% (+25.00 USDT) Dong BCHUSDT`
+- For "close all": shows average PnL % and total USDT across all positions
+
+### Bug Fix: SL Milestone Ordering in `position-monitor.service.ts`
+
+When PnL jumps from <4% to ≥5% in a single tick, both milestone blocks were firing sequentially. The 5% block set SL to +2%, then the 4% block immediately overwrote it with entry price (break-even). Fixed by setting `slMovedToEntry = true` inside the 5% block to prevent the 4% block from executing on the same tick.
+
+### Bug Fix: Taker Buy Ratio Direction-Agnostic Confidence Boost
+
+Sell pressure (`takerBuyRatio < 0.7`) was adding +5 confidence even in `STRONG_BULL` regime (counter-intuitive). Fixed:
+- `takerBuyRatio > 1.3` (buy pressure): only boosts confidence when regime is not `STRONG_BEAR`
+- `takerBuyRatio < 0.7` (sell pressure): only boosts confidence when regime is not `STRONG_BULL`
+
+### Enhancement: 4h Trend Filter Threshold Raised 0.3% → 1.0%
+
+The per-coin EMA21/EMA50 spread threshold was 0.3%, which was too sensitive — even minor noise in a ranging market blocked 50%+ of valid setups. Raised to 1.0% so only clear directional trends block counter-trend entries. In investigation, found WLFIUSDT was firing a valid LONG signal every 30s but getting blocked by a 1.45% spread — now that would still be blocked (correct), but coins with 0.3-0.9% EMA drift in RANGE_BOUND markets now pass.
+
+### Enhancement: RSI_CROSS Verbose Debug Logging
+
+`evalRsiCross()` in `RuleEngineService` now logs the exact reason each coin returns null:
+- `no cross (RSI=X EMA=Y prev RSI=X EMA=Y)` — no RSI/EMA crossover on latest candle
+- `LONG blocked: RSI=X >= threshold 50` — RSI above mid-line when trying LONG
+- `LONG blocked: HTF(1h) RSI=X bearish (< EMA Y)` — higher-timeframe doesn't confirm
+- `LONG blocked: candle is RED` — candle direction gate failed
+- Enables fast diagnosis of future signal droughts without reading source code
+
+### Bug Fix: Degenerate RSI=100 Skip
+
+Coins with all-green (or all-red) candle history produce RSI=100 (or 0) stuck at EMA — these can never generate a cross. Added early return in `evalRsiCross()` if `rsi.last >= 99.9 && rsiEma.last >= 99.9` (or ≤0.1). Affected coins in investigation: PORT3, UXLINK, VIDT, SXP, AGIX.
+
+### Files Modified
+- `src/ai-signal/ai-command.service.ts` — signal created time in `formatSignalsMessage()`, USDT in close confirmation, `/ai account` command
+- `src/ai-signal/ai-signal.service.ts` — 4h trend filter 0.3%→1.0%, taker ratio direction fix
+- `src/ai-signal/position-monitor.service.ts` — SL milestone ordering fix
+- `src/strategy/rules/rule-engine.service.ts` — RSI_CROSS verbose debug logging + degenerate RSI skip
+- `src/telegram/telegram.service.ts` — `/ai account` in `registerBotMenu()` + `/start` message
+
+---
+
+## 2026-03-03 (4) - Close Positions Command with Inline Keyboard Confirmation
+
+### Feature: `/ai close` Command (Test + Real Mode)
+
+Added `/ai close all` and `/ai close <SYMBOL>` commands that show a live PnL preview and require inline keyboard confirmation before closing positions.
+
+**How it works:**
+- `/ai close all` — shows all active test signals and user's real open trades with current unrealized PnL; presents `[✅ Dong tat ca (N lenh)] [❌ Huy]` inline buttons
+- `/ai close <SYMBOL>` — shows specific symbol info (test signal and/or real trade); presents `[✅ Dong SYMBOL] [❌ Huy]` inline buttons
+- On confirmation: closes test signals via `resolveActiveSignal(symbol, price, "MANUAL")`; closes real trades via new `closeRealPosition()` method
+- Security: callback handler verifies `query.from.id === telegramId` from callback_data — prevents another user from triggering a close
+- Confirmation message is auto-deleted after callback is processed
+
+### Feature: `closeRealPosition()` method in `UserRealTradingService`
+
+Single-position close method reusing the same pattern as `closeAllRealPositions()`:
+- Cancels existing SL and TP algo orders
+- Places reduce-only MARKET order via `BinanceService.closePosition()`
+- Updates MongoDB trade record with `status: CLOSED`, `exitPrice`, `pnlPercent`, `pnlUsdt`
+- Returns `{ success: boolean; pnlPct?: number }`
+
+### Enhancement: Inline Keyboard Support in `TelegramBotService`
+
+Added three new public methods:
+- `sendMessageWithKeyboard(chatId, text, keyboard)` — sends message with inline keyboard markup
+- `registerCallbackHandler(handler)` — registers a `callback_query` event handler (with bot-ready guard)
+- `answerCallbackQuery(queryId, text?)` — acknowledges button press (dismisses spinner)
+- `deleteMessage(chatId, messageId)` — already existed; used to clean up confirmation messages
+
+### Files Modified
+- `src/telegram/telegram.service.ts` — added `ai_close` to `registerBotMenu()`, added close commands to `/start` message
+- `src/ai-signal/ai-command.service.ts` — injected `MarketDataService`, added `/ai close` command + inline callback handler
+- `src/ai-signal/user-real-trading.service.ts` — added `closeRealPosition()` method
+
+---
+
 ## 2026-03-03 (3) - AI Dynamic Coin Filters + Signal Quality Improvements
 
 ### Feature: AI-Decided Dynamic Coin Filter Settings

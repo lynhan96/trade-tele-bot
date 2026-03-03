@@ -3,6 +3,7 @@ import { ConfigService } from "@nestjs/config";
 import { InjectModel } from "@nestjs/mongoose";
 import { Model } from "mongoose";
 import Anthropic from "@anthropic-ai/sdk";
+import OpenAI from "openai";
 import { RedisService } from "../../redis/redis.service";
 import { IndicatorService } from "../indicators/indicator.service";
 import {
@@ -28,12 +29,23 @@ const MAX_RETUNES_PER_SCAN = 5; // max fresh Haiku calls per 30s scan cycle
 const SCAN_BURST_TTL = 35; // slightly longer than 30s scan interval
 const RATE_WINDOW = 60 * 60; // 1h window
 
+const SONNET_MODEL = "claude-sonnet-4-6";
+const SONNET_RATE_KEY = "cache:ai:rate:sonnet";
+const SONNET_SCAN_BURST_KEY = "cache:ai:rate:sonnet:burst";
+const MAX_SONNET_PER_SCAN = 3; // Sonnet is expensive — limit burst per scan
+
+const GPT_MODEL = "gpt-4o-mini";
+const GPT_RATE_KEY = "cache:ai:rate:gpt"; // hourly budget for GPT fallback
+
 @Injectable()
 export class AiOptimizerService {
   private readonly logger = new Logger(AiOptimizerService.name);
   private anthropic: Anthropic;
+  private openai: OpenAI | null = null;
   private readonly enabled: boolean;
   private readonly maxHaikuPerHour: number;
+  private readonly maxGptPerHour: number;
+  private readonly maxSonnetPerHour: number;
 
   constructor(
     private readonly configService: ConfigService,
@@ -48,6 +60,8 @@ export class AiOptimizerService {
     this.maxHaikuPerHour = parseInt(
       configService.get("AI_MAX_HAIKU_PER_HOUR", "60"),
     );
+    this.maxGptPerHour = parseInt(configService.get("AI_MAX_GPT_PER_HOUR", "60"));
+    this.maxSonnetPerHour = parseInt(configService.get("AI_MAX_SONNET_PER_HOUR", "20"));
 
     if (this.enabled) {
       const apiKey = configService.get<string>("ANTHROPIC_API_KEY");
@@ -59,6 +73,12 @@ export class AiOptimizerService {
         );
         this.enabled = false;
       }
+    }
+
+    const openaiKey = configService.get<string>("OPENAI_API_KEY");
+    if (openaiKey) {
+      this.openai = new OpenAI({ apiKey: openaiKey });
+      this.logger.log("[AiOptimizer] GPT-4o-mini fallback enabled");
     }
   }
 
@@ -281,7 +301,6 @@ Reply ONLY with valid JSON (no markdown):
     forceProfile?: string,
   ): Promise<AiTunedParams> {
     const symbol = `${coin.toUpperCase()}${currency.toUpperCase()}`;
-    // For dual-timeframe coins, use profile-aware cache key
     const cacheKey = forceProfile
       ? `cache:ai:params:${symbol}:${forceProfile}`
       : `cache:ai:params:${symbol}`;
@@ -289,65 +308,64 @@ Reply ONLY with valid JSON (no markdown):
     const cached = await this.redisService.get<AiTunedParams>(cacheKey);
     if (cached) return cached;
 
-    // Check: AI enabled, hourly budget, and per-scan burst limit
-    const burstCount = (await this.redisService.get<number>(HAIKU_SCAN_BURST_KEY)) || 0;
-    if (
-      !this.enabled ||
-      burstCount >= MAX_RETUNES_PER_SCAN ||
-      !(await this.checkRateLimit(HAIKU_RATE_KEY, this.maxHaikuPerHour))
-    ) {
-      // Use ATR-adjusted defaults when Haiku is unavailable
-      let defaultParams = await this.getAtrAdjustedDefaults(coin, globalRegime);
-      // If forceProfile is set, override the timeframe settings
-      if (forceProfile) {
-        defaultParams = this.applyForcedProfile(defaultParams, forceProfile);
-      }
-      this.logger.debug(
-        `[AiOptimizer] Using default params for ${symbol}${forceProfile ? `:${forceProfile}` : ""} (${burstCount >= MAX_RETUNES_PER_SCAN ? "burst limit" : "rate limit"}) SL=${defaultParams.stopLossPercent}%`,
-      );
-      return defaultParams;
-    }
+    // Pre-compute indicators once — shared across all AI models in the waterfall
+    const indicators = this.enabled ? await this.preComputeIndicators(coin) : {};
 
-    try {
-      const indicators = await this.preComputeIndicators(coin);
-      let params = await this.callHaiku(symbol, globalRegime, indicators);
-
-      // If forceProfile is set, override the timeframe settings from Haiku
-      if (forceProfile) {
-        params = this.applyForcedProfile(params, forceProfile);
-      }
-
-      // Stagger cache expiry: TTL + 0-30 min random offset to avoid thundering herd
+    // Helper: apply profile override, cache result, save history, log
+    const saveAndReturn = async (params: AiTunedParams, model: string, tag = ""): Promise<AiTunedParams> => {
+      if (forceProfile) params = this.applyForcedProfile(params, forceProfile);
       const jitter = Math.floor(Math.random() * AI_PARAMS_JITTER);
       await this.redisService.set(cacheKey, params, AI_PARAMS_TTL + jitter);
-      await this.incrementRateLimit(HAIKU_RATE_KEY);
-      // Increment per-scan burst counter (resets every 35s)
-      await this.redisService.set(HAIKU_SCAN_BURST_KEY, burstCount + 1, SCAN_BURST_TTL);
-
-      // Log to MongoDB
-      await this.saveRegimeHistory(
-        symbol,
-        params.regime,
-        params.confidence,
-        params,
-        HAIKU_MODEL,
-        null,
-      );
-
-      this.logger.log(
-        `[AiOptimizer] ${symbol}${forceProfile ? `:${forceProfile}` : ""}: regime=${params.regime} strategy=${params.strategy} confidence=${params.confidence}%`,
-      );
+      await this.saveRegimeHistory(symbol, params.regime, params.confidence, params, model, null);
+      this.logger.log(`[AiOptimizer] ${symbol}${forceProfile ? `:${forceProfile}` : ""}${tag}: regime=${params.regime} strategy=${params.strategy} confidence=${params.confidence}%`);
       return params;
-    } catch (err) {
-      this.logger.warn(
-        `[AiOptimizer] Haiku call failed for ${symbol}: ${err?.message}`,
-      );
-      let defaults = this.getDefaultParams(globalRegime);
-      if (forceProfile) {
-        defaults = this.applyForcedProfile(defaults, forceProfile);
+    };
+
+    // ── 1. Sonnet 4.6 (best quality, 3/scan burst) ────────────────────────
+    if (this.enabled) {
+      const sonnetBurst = (await this.redisService.get<number>(SONNET_SCAN_BURST_KEY)) || 0;
+      if (sonnetBurst < MAX_SONNET_PER_SCAN && (await this.checkRateLimit(SONNET_RATE_KEY, this.maxSonnetPerHour))) {
+        try {
+          const params = await this.callSonnet(symbol, globalRegime, indicators);
+          await this.incrementRateLimit(SONNET_RATE_KEY);
+          await this.redisService.set(SONNET_SCAN_BURST_KEY, sonnetBurst + 1, SCAN_BURST_TTL);
+          return saveAndReturn(params, SONNET_MODEL, " (Sonnet)");
+        } catch (err) {
+          this.logger.warn(`[AiOptimizer] Sonnet call failed for ${symbol}: ${err?.message}`);
+        }
       }
-      return defaults;
+
+      // ── 2. Haiku (fast, 5/scan burst — fills remainder after Sonnet) ─────
+      const haikuBurst = (await this.redisService.get<number>(HAIKU_SCAN_BURST_KEY)) || 0;
+      if (haikuBurst < MAX_RETUNES_PER_SCAN && (await this.checkRateLimit(HAIKU_RATE_KEY, this.maxHaikuPerHour))) {
+        try {
+          const params = await this.callHaiku(symbol, globalRegime, indicators);
+          await this.incrementRateLimit(HAIKU_RATE_KEY);
+          await this.redisService.set(HAIKU_SCAN_BURST_KEY, haikuBurst + 1, SCAN_BURST_TTL);
+          return saveAndReturn(params, HAIKU_MODEL);
+        } catch (err) {
+          this.logger.warn(`[AiOptimizer] Haiku call failed for ${symbol}: ${err?.message}`);
+        }
+      }
     }
+
+    // ── 3. GPT-4o-mini (covers overflow when both Anthropic models limited) ─
+    if (this.openai && (await this.checkRateLimit(GPT_RATE_KEY, this.maxGptPerHour))) {
+      try {
+        const gptIndicators = Object.keys(indicators).length > 0 ? indicators : await this.preComputeIndicators(coin);
+        const params = await this.callGpt(symbol, globalRegime, gptIndicators);
+        await this.incrementRateLimit(GPT_RATE_KEY);
+        return saveAndReturn(params, GPT_MODEL, " (GPT)");
+      } catch (err) {
+        this.logger.warn(`[AiOptimizer] GPT fallback failed for ${symbol}: ${err?.message}`);
+      }
+    }
+
+    // ── 4. Static ATR-adjusted defaults ──────────────────────────────────
+    let defaults = await this.getAtrAdjustedDefaults(coin, globalRegime);
+    if (forceProfile) defaults = this.applyForcedProfile(defaults, forceProfile);
+    this.logger.debug(`[AiOptimizer] ${symbol}${forceProfile ? `:${forceProfile}` : ""} using static defaults SL=${defaults.stopLossPercent}%`);
+    return defaults;
   }
 
   /**
@@ -524,16 +542,16 @@ Reply ONLY with valid JSON (no markdown):
     }
   }
 
-  private async callHaiku(
+  private buildTuningPrompt(
     symbol: string,
     globalRegime: string,
     indicators: Record<string, any>,
-  ): Promise<AiTunedParams> {
+  ): string {
     const indicatorText = Object.entries(indicators)
       .map(([k, v]) => `  ${k}: ${v}`)
       .join("\n");
 
-    const prompt = `You are a crypto trading parameter optimizer. Given the market data for ${symbol}, return optimal trading parameters.
+    return `You are a crypto trading parameter optimizer. Given the market data for ${symbol}, return optimal trading parameters.
 
 Current global regime: ${globalRegime}
 
@@ -568,23 +586,53 @@ BB_SCALP guide: very selective — bbTolerance=0.1 (price must be very close to 
 Kline guide: INTRADAY→primaryKline="15m" htfKline="1h"; SWING→primaryKline="4h" htfKline="1d"
 Higher ATR%→wider stop loss. Low BBWidth%→tighter RSI zones. SWING→stopLossPercent 1.5-4.0.
 takeProfitPercent guide: STRONG_TREND→2×-3× SL. RANGE_BOUND→1.5×-2× SL. SIDEWAYS→SL 1.5%, TP 3.0%, minConfidenceToTrade 42-50. VOLATILE→1.5× SL. SWING→3×-4× SL. Minimum 1.5× stopLossPercent.`;
+  }
 
+  private async callAnthropic(
+    model: string,
+    symbol: string,
+    globalRegime: string,
+    indicators: Record<string, any>,
+  ): Promise<AiTunedParams> {
+    const prompt = this.buildTuningPrompt(symbol, globalRegime, indicators);
     const response = await this.anthropic.messages.create({
-      model: HAIKU_MODEL,
+      model,
       max_tokens: 700,
       messages: [{ role: "user", content: prompt }],
     });
-
     const text = (response.content[0] as any).text;
-
-    // Extract JSON (handle markdown code blocks)
     const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error("No JSON in Haiku response");
+    if (!jsonMatch) throw new Error(`No JSON in ${model} response`);
+    return this.mergeWithDefaults(JSON.parse(jsonMatch[0]));
+  }
 
-    const parsed = JSON.parse(jsonMatch[0]);
+  private callSonnet(symbol: string, globalRegime: string, indicators: Record<string, any>) {
+    return this.callAnthropic(SONNET_MODEL, symbol, globalRegime, indicators);
+  }
 
-    // Validate and merge with defaults
-    return this.mergeWithDefaults(parsed);
+  private callHaiku(symbol: string, globalRegime: string, indicators: Record<string, any>) {
+    return this.callAnthropic(HAIKU_MODEL, symbol, globalRegime, indicators);
+  }
+
+  private async callGpt(
+    symbol: string,
+    globalRegime: string,
+    indicators: Record<string, any>,
+  ): Promise<AiTunedParams> {
+    const prompt = this.buildTuningPrompt(symbol, globalRegime, indicators);
+
+    const response = await this.openai!.chat.completions.create({
+      model: GPT_MODEL,
+      max_tokens: 700,
+      messages: [{ role: "user", content: prompt }],
+      response_format: { type: "json_object" }, // Forces valid JSON — no repair needed
+    });
+
+    const text = response.choices[0].message.content || "";
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error("No JSON in GPT response");
+
+    return this.mergeWithDefaults(JSON.parse(jsonMatch[0]));
   }
 
   // ─── Default params (F8 Config 2 baseline) ───────────────────────────────

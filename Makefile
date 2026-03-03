@@ -2,7 +2,7 @@ ccred=\033[0;31m
 ccyellow=\033[0;33m
 ccend=\033[0m
 
-SERVER_IP = 171.244.48.220
+SERVER_IP = 171.244.48.10
 DEPLOY_BRANCH = master
 
 deploy_develop: print_detail deploy_backend clean
@@ -14,10 +14,10 @@ deploy_backend:
 	@echo "...${ccyellow}Pushing to BACKEND SERVER server${ccend}..."
 	@git push origin ${DEPLOY_BRANCH}
 	@echo "...${ccyellow}Connecting SERVER server${ccend}..."
-	@ssh -p 2222 ubuntu@${SERVER_IP} -t "source .nvm/nvm.sh \
+	@ssh ubuntu@${SERVER_IP} -t "source .nvm/nvm.sh \
 		&& source .profile \
 		&& source .bashrc \
-		&& cd ~/projects/tele-bot  \
+		&& cd ~/projects/binance-tele-bot  \
 		&& git pull origin ${DEPLOY_BRANCH} \
 		&& yarn install \
 		&& yarn build \

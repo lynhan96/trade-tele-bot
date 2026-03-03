@@ -341,6 +341,59 @@ export class UserRealTradingService implements OnModuleInit {
     return this.userTradeModel.find({ telegramId, status: "OPEN" }).lean() as any;
   }
 
+  /**
+   * Close a single real trade by symbol for a user.
+   * Cancels existing SL/TP algo orders and places a market-close order on Binance.
+   */
+  async closeRealPosition(
+    telegramId: number,
+    chatId: number,
+    symbol: string,
+    reason: string,
+  ): Promise<{ success: boolean; pnlPct?: number }> {
+    const trade = await this.userTradeModel.findOne({ telegramId, symbol, status: "OPEN" }).lean();
+    if (!trade) return { success: false };
+
+    const keys = await this.userSettingsService.getApiKeys(telegramId, "binance");
+    if (!keys?.apiKey) return { success: false };
+
+    try {
+      if (trade.binanceSlAlgoId) {
+        await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, trade.binanceSlAlgoId).catch(() => {});
+      }
+      if (trade.binanceTpAlgoId) {
+        await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, trade.binanceTpAlgoId).catch(() => {});
+      }
+
+      const closeOrder = await this.binanceService.closePosition(
+        keys.apiKey, keys.apiSecret, symbol, trade.quantity, trade.direction,
+      );
+      const exitPrice = parseFloat(closeOrder.avgPrice) || (await this.fetchCurrentPrice(symbol)) || trade.entryPrice;
+
+      const pnlPct = trade.direction === "LONG"
+        ? ((exitPrice - trade.entryPrice) / trade.entryPrice) * 100
+        : ((trade.entryPrice - exitPrice) / trade.entryPrice) * 100;
+      const pnlUsdt = (pnlPct / 100) * trade.notionalUsdt;
+
+      await this.userTradeModel.findByIdAndUpdate((trade as any)._id, {
+        status: "CLOSED",
+        closeReason: reason,
+        exitPrice,
+        pnlPercent: pnlPct,
+        pnlUsdt,
+        closedAt: new Date(),
+      });
+
+      this.logger.log(
+        `[RealTrading] closeRealPosition: ${symbol} ${trade.direction} @ ${exitPrice} for user ${telegramId} (${reason})`,
+      );
+      return { success: true, pnlPct };
+    } catch (err) {
+      this.logger.error(`[RealTrading] closeRealPosition error ${symbol} for user ${telegramId}: ${err?.message}`);
+      return { success: false };
+    }
+  }
+
   // ─── Daily stats + close-all ───────────────────────────────────────────────
 
   /**

@@ -194,12 +194,14 @@ export class PositionMonitorService implements OnModuleInit {
         : ((entryPrice - price) / entryPrice) * 100;
 
     // At >= 5% profit — raise SL to lock in 2% profit (trailing stop milestone, don't auto-close)
+    // NOTE: must check 5% BEFORE 4% so the higher milestone wins on the same tick
     if (pnlPct >= 5 && !(signal as any).sl5PctRaised) {
       const newSl = direction === "LONG"
         ? entryPrice * 1.02
         : entryPrice * 0.98;
       (signal as any).stopLossPrice = newSl;
       (signal as any).sl5PctRaised = true;
+      (signal as any).slMovedToEntry = true; // prevents the 4% block from overwriting this SL on same tick
       await this.signalQueueService.raiseStopLoss((signal as any)._id.toString(), newSl);
       this.logger.log(
         `[PositionMonitor] 🚀 ${sigKey} SL raised to +2% (${newSl.toFixed(4)}) at ${pnlPct.toFixed(2)}% profit — still running`,
@@ -211,7 +213,7 @@ export class PositionMonitorService implements OnModuleInit {
       this.userRealTradingService.moveStopLossForRealUsers(symbol, newSl, direction).catch(() => {});
     }
 
-    // Move SL to entry (break-even) at >= 4% profit
+    // Move SL to entry (break-even) at >= 4% profit (skipped if 5% milestone already triggered)
     if (pnlPct >= 4 && !(signal as any).slMovedToEntry) {
       (signal as any).stopLossPrice = entryPrice;
       (signal as any).slMovedToEntry = true;

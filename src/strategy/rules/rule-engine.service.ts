@@ -74,17 +74,30 @@ export class RuleEngineService {
     const rsi = this.indicatorService.getRsi(closes, cfg.rsiPeriod);
     const rsiEma = this.indicatorService.getRsiEma(closes, cfg.rsiPeriod, cfg.rsiEmaPeriod);
 
+    // Skip coins with degenerate RSI (all-up or all-down — no cross possible)
+    if (rsi.last >= 99.9 && rsiEma.last >= 99.9) return null;
+    if (rsi.last <= 0.1 && rsiEma.last <= 0.1) return null;
+
     const isCrossAbove = this.indicatorService.crossedAbove(rsi, rsiEma);
     const isCrossBelow = this.indicatorService.crossedBelow(rsi, rsiEma);
 
-    if (!isCrossAbove && !isCrossBelow) return null;
+    if (!isCrossAbove && !isCrossBelow) {
+      this.logger.debug(`[RuleEngine] ${coin} RSI_CROSS: no cross (RSI=${rsi.last.toFixed(1)} EMA=${rsiEma.last.toFixed(1)} prev RSI=${rsi.secondLast?.toFixed(1)} EMA=${rsiEma.secondLast?.toFixed(1)})`);
+      return null;
+    }
 
     const isLong = isCrossAbove;
 
     // RSI threshold gate
     if (cfg.enableThreshold) {
-      if (isLong && rsi.last >= cfg.rsiThreshold) return null; // LONG needs RSI below threshold
-      if (!isLong && rsi.last <= cfg.rsiThreshold) return null; // SHORT needs RSI above threshold
+      if (isLong && rsi.last >= cfg.rsiThreshold) {
+        this.logger.debug(`[RuleEngine] ${coin} RSI_CROSS LONG blocked: RSI=${rsi.last.toFixed(1)} >= threshold ${cfg.rsiThreshold}`);
+        return null; // LONG needs RSI below threshold
+      }
+      if (!isLong && rsi.last <= cfg.rsiThreshold) {
+        this.logger.debug(`[RuleEngine] ${coin} RSI_CROSS SHORT blocked: RSI=${rsi.last.toFixed(1)} <= threshold ${cfg.rsiThreshold}`);
+        return null; // SHORT needs RSI above threshold
+      }
     }
 
     // HTF RSI confirmation
@@ -94,8 +107,14 @@ export class RuleEngineService {
         const htfRsi = this.indicatorService.getRsi(htfCloses, cfg.rsiPeriod);
         const htfRsiEma = this.indicatorService.getRsiEma(htfCloses, cfg.rsiPeriod, cfg.rsiEmaPeriod);
         const htfIsBullish = htfRsi.last > htfRsiEma.last;
-        if (isLong && !htfIsBullish) return null;
-        if (!isLong && htfIsBullish) return null;
+        if (isLong && !htfIsBullish) {
+          this.logger.debug(`[RuleEngine] ${coin} RSI_CROSS LONG blocked: HTF(${cfg.htfKline}) RSI=${htfRsi.last.toFixed(1)} bearish (< EMA ${htfRsiEma.last.toFixed(1)})`);
+          return null;
+        }
+        if (!isLong && htfIsBullish) {
+          this.logger.debug(`[RuleEngine] ${coin} RSI_CROSS SHORT blocked: HTF(${cfg.htfKline}) RSI=${htfRsi.last.toFixed(1)} bullish (> EMA ${htfRsiEma.last.toFixed(1)})`);
+          return null;
+        }
       }
     }
 
@@ -106,8 +125,14 @@ export class RuleEngineService {
         const lastClose = ohlc.closes[ohlc.closes.length - 1];
         const lastOpen = ohlc.opens[ohlc.opens.length - 1];
         const isGreen = lastClose > lastOpen;
-        if (isLong && !isGreen) return null;
-        if (!isLong && isGreen) return null;
+        if (isLong && !isGreen) {
+          this.logger.debug(`[RuleEngine] ${coin} RSI_CROSS LONG blocked: candle is RED`);
+          return null;
+        }
+        if (!isLong && isGreen) {
+          this.logger.debug(`[RuleEngine] ${coin} RSI_CROSS SHORT blocked: candle is GREEN`);
+          return null;
+        }
       }
     }
 

@@ -48,7 +48,8 @@ export class TelegramBotService implements OnModuleInit {
           `/ai realmode leverage AI|MAX|10 — Chon he so don bay\n` +
           `/ai realmode target 5 — Dat muc tieu loi nhuan +5%/ngay\n` +
           `/ai realmode stoploss 3 — Dat gioi han lo -3%/ngay\n` +
-          `/ai realmode stats — Chi tiet lenh va P&L hom nay\n\n` +
+          `/ai realmode stats — Chi tiet lenh va P&L hom nay\n` +
+          `/ai account — Vi the mo & unrealized PnL\n\n` +
           `⚙️ *Cai dat*\n` +
           `/ai settings — Xem cai dat hien tai\n` +
           `/ai balance <so> — Set balance mac dinh (USDT/lenh)\n` +
@@ -56,7 +57,9 @@ export class TelegramBotService implements OnModuleInit {
           `🌍 *Phan tich thi truong*\n` +
           `/ai market — Phan tich thi truong AI\n` +
           `/ai signals — Xem tat ca tin hieu dang chay\n` +
-          `/ai check <SYMBOL> — Kiem tra tin hieu (vd: BTC)\n\n` +
+          `/ai check <SYMBOL> — Kiem tra tin hieu (vd: BTC)\n` +
+          `/ai close all — Dong tat ca lenh (co xac nhan)\n` +
+          `/ai close <SYMBOL> — Dong mot lenh cu the\n\n` +
           `📊 *Quan tri (Admin)*\n` +
           `/ai status — Trang thai he thong\n` +
           `/ai stats — Thong ke hieu suat tin hieu\n` +
@@ -64,7 +67,8 @@ export class TelegramBotService implements OnModuleInit {
           `/ai snapshot — Tao/cap nhat daily snapshot\n` +
           `/ai test on|off — Bat/tat che do test\n` +
           `/ai pause / /ai resume — Tam dung/tiep tuc\n` +
-          `/ai override — Override chien luoc\n\n` +
+          `/ai override — Override chien luoc\n` +
+          `/ai resetall — Reset tat ca tin hieu\n\n` +
           `─────────────────────\n` +
           `💡 *Huong dan nhanh:*\n` +
           `1. /ai subscribe — bat dau nhan tin hieu\n` +
@@ -104,6 +108,8 @@ export class TelegramBotService implements OnModuleInit {
         { command: "ai_market", description: "Phan tich thi truong AI" },
         { command: "ai_signals", description: "Xem tin hieu dang chay" },
         { command: "ai_check", description: "Kiem tra tin hieu coin" },
+        { command: "ai_account", description: "Vi the mo va PnL real mode" },
+        { command: "ai_close", description: "Dong lenh (all hoac SYMBOL)" },
         // Admin
         { command: "ai_status", description: "Trang thai he thong (admin)" },
         { command: "ai_stats", description: "Thong ke hieu suat (admin)" },
@@ -113,6 +119,7 @@ export class TelegramBotService implements OnModuleInit {
         { command: "ai_test", description: "Bat/tat che do test (admin)" },
         { command: "ai_pause", description: "Tam dung tin hieu (admin)" },
         { command: "ai_resume", description: "Tiep tuc tin hieu (admin)" },
+        { command: "ai_resetall", description: "Reset tat ca tin hieu (admin)" },
       ]);
       this.logger.log("[Telegram] Bot command menu updated successfully (old commands cleared)");
     } catch (err) {
@@ -177,6 +184,56 @@ export class TelegramBotService implements OnModuleInit {
       this.logger.warn(
         `[Telegram] Failed to send message to ${chatId}: ${err?.message}`,
       );
+    }
+  }
+
+  /**
+   * Send a message with an inline keyboard (for confirmation dialogs).
+   */
+  public async sendMessageWithKeyboard(
+    chatId: number,
+    text: string,
+    keyboard: { text: string; callback_data: string }[][],
+  ): Promise<void> {
+    if (!this.bot || !chatId) return;
+    try {
+      await this.bot.sendMessage(chatId, text, {
+        parse_mode: "Markdown",
+        reply_markup: JSON.stringify({ inline_keyboard: keyboard }),
+      } as any);
+    } catch (err) {
+      this.logger.warn(`[Telegram] sendMessageWithKeyboard failed: ${err?.message}`);
+    }
+  }
+
+  /**
+   * Register a callback_query handler (for inline keyboard button presses).
+   */
+  public registerCallbackHandler(
+    handler: (query: TelegramBot.CallbackQuery) => Promise<void>,
+  ): void {
+    if (!this.bot) {
+      const interval = setInterval(() => {
+        if (this.bot) {
+          clearInterval(interval);
+          this.bot.on("callback_query", handler);
+        }
+      }, 500);
+      return;
+    }
+    this.bot.on("callback_query", handler);
+  }
+
+  /**
+   * Acknowledge a callback_query (removes the loading spinner on the button).
+   * Pass optional text to show a toast notification to the user.
+   */
+  public async answerCallbackQuery(queryId: string, text?: string): Promise<void> {
+    if (!this.bot) return;
+    try {
+      await this.bot.answerCallbackQuery(queryId, text ? { text, show_alert: false } : {});
+    } catch {
+      // ignore — query may have already expired
     }
   }
 

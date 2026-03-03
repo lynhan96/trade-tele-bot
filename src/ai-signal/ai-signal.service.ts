@@ -637,9 +637,9 @@ export class AiSignalService implements OnModuleInit {
       if (fa.longShortRatio > 2.5) adj -= 10;
       else if (fa.longShortRatio < 0.4) adj -= 10;
 
-      // Taker buy/sell momentum
-      if (fa.takerBuyRatio > 1.3) adj += 5; // aggressive buying
-      else if (fa.takerBuyRatio < 0.7) adj += 5; // aggressive selling (good for shorts)
+      // Taker buy/sell momentum — only boost confidence when momentum aligns with regime
+      if (fa.takerBuyRatio > 1.3 && params.regime !== "STRONG_BEAR") adj += 5; // buy pressure, skip in bear regime
+      else if (fa.takerBuyRatio < 0.7 && params.regime !== "STRONG_BULL") adj += 5; // sell pressure, skip in bull regime
 
       if (adj !== 0) {
         params.confidence = Math.max(10, Math.min(95, params.confidence + adj));
@@ -687,7 +687,9 @@ export class AiSignalService implements OnModuleInit {
 
     // ── Per-coin 4h EMA trend alignment ─────────────────────────────────────
     // Block signals that go against the coin's own 4h trend, regardless of global regime.
-    // Neutral zone (EMA21/EMA50 spread < 0.3%) = no clear trend → both directions allowed.
+    // Neutral zone (EMA21/EMA50 spread < 1.0%) = no clear trend → both directions allowed.
+    // 1.0% threshold avoids over-filtering in RANGE_BOUND/SIDEWAYS markets where coins
+    // drift slightly without a meaningful trend (was 0.3% — too sensitive, blocked ~50% of valid setups).
     try {
       const htf4hCloses = await this.indicatorService.getCloses(coin, "4h");
       if (htf4hCloses.length >= 55) {
@@ -695,7 +697,7 @@ export class AiSignalService implements OnModuleInit {
         const ema50 = this.indicatorService.getEma(htf4hCloses, 50);
         const spreadPct = (Math.abs(ema21.last - ema50.last) / ema50.last) * 100;
 
-        if (spreadPct > 0.3) {
+        if (spreadPct > 1.0) {
           const coinTrendUp = ema21.last > ema50.last;
           if (signalResult.isLong && !coinTrendUp) {
             this.logger.log(

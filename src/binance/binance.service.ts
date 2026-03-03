@@ -299,6 +299,29 @@ export class BinanceService {
   }
 
   /**
+   * Get Binance Futures USDT balance for a user.
+   */
+  async getFuturesBalance(
+    apiKey: string,
+    apiSecret: string,
+  ): Promise<{ walletBalance: number; availableBalance: number; unrealizedPnl: number } | null> {
+    try {
+      const client = this.createClient(apiKey, apiSecret);
+      const balances = await client.futuresAccountBalance();
+      const usdt = (balances as any[]).find((b: any) => b.asset === "USDT");
+      if (!usdt) return null;
+      return {
+        walletBalance: parseFloat(usdt.balance),
+        availableBalance: parseFloat(usdt.availableBalance),
+        unrealizedPnl: parseFloat(usdt.crossUnPnl || "0"),
+      };
+    } catch (err) {
+      this.logger.warn(`[Binance] getFuturesBalance failed: ${err?.message}`);
+      return null;
+    }
+  }
+
+  /**
    * Cancel an algo order by algoId.
    */
   async cancelAlgoOrder(

@@ -423,6 +423,30 @@ export class SignalQueueService {
     return this.aiSignalModel.find({ status: "QUEUED" });
   }
 
+  /**
+   * Cancel ALL active and queued signals (admin reset).
+   * Also clears all Redis signal state keys.
+   * Returns count of cancelled documents.
+   */
+  async cancelAllSignals(): Promise<number> {
+    // Cancel in MongoDB
+    const result = await this.aiSignalModel.updateMany(
+      { status: { $in: ["ACTIVE", "QUEUED"] } },
+      { status: "CANCELLED", closeReason: "ADMIN_RESET" },
+    );
+    // Clear all Redis signal keys
+    const keys = await this.redisService.keys("cache:ai-signal:*");
+    const prefix = "binance-bot:";
+    await Promise.all(
+      keys.map((k) => {
+        const unprefixed = k.startsWith(prefix) ? k.slice(prefix.length) : k;
+        return this.redisService.delete(unprefixed);
+      }),
+    );
+    this.logger.log(`[SignalQueue] Admin reset: cancelled ${result.modifiedCount} signals, cleared ${keys.length} Redis keys`);
+    return result.modifiedCount;
+  }
+
   // ─── Duplicate cleanup (for accurate stats) ─────────────────────────────
 
   /**
