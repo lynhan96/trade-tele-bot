@@ -263,7 +263,9 @@ Reply ONLY with valid JSON (no markdown):
 
     const minVolumeUsd = Number(parsed.minVolumeUsd);
     const minPriceChangePct = Number(parsed.minPriceChangePct);
-    const maxShortlistSize = Number(parsed.maxShortlistSize);
+    // Clamp to at least the user-configured minimum from .env
+    const configuredMin = parseInt(this.configService.get("AI_MAX_SHORTLIST_SIZE", "50"));
+    const maxShortlistSize = Math.max(Number(parsed.maxShortlistSize), configuredMin);
 
     // 4. Store in MongoDB
     await this.marketConfigModel.create({

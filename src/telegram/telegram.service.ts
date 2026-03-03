@@ -57,6 +57,7 @@ export class TelegramBotService implements OnModuleInit {
           `🌍 *Phan tich thi truong*\n` +
           `/ai market — Phan tich thi truong AI\n` +
           `/ai signals — Xem tat ca tin hieu dang chay\n` +
+          `/ai coins — Xem danh sach coin dang theo doi\n` +
           `/ai check <SYMBOL> — Kiem tra tin hieu (vd: BTC)\n` +
           `/ai close all — Dong tat ca lenh (co xac nhan)\n` +
           `/ai close <SYMBOL> — Dong mot lenh cu the\n\n` +
@@ -107,6 +108,7 @@ export class TelegramBotService implements OnModuleInit {
         // Market & signals
         { command: "ai_market", description: "Phan tich thi truong AI" },
         { command: "ai_signals", description: "Xem tin hieu dang chay" },
+        { command: "ai_coins", description: "Xem danh sach coin dang theo doi" },
         { command: "ai_check", description: "Kiem tra tin hieu coin" },
         { command: "ai_account", description: "Vi the mo va PnL real mode" },
         { command: "ai_close", description: "Dong lenh (all hoac SYMBOL)" },

@@ -63,6 +63,7 @@ export class AiCommandService implements OnModuleInit {
         `/ai account — Vi the mo va PnL real mode\n` +
         `/ai market — Phân tích thị trường AI\n` +
         `/ai signals — Xem tất cả tín hiệu đang chạy\n` +
+        `/ai coins — Xem danh sach coin dang theo doi\n` +
         `/ai status — Trạng thái hệ thống\n` +
         `/ai check \\<SYMBOL\\> — Kiểm tra tín hiệu coin\n`;
       if (isAdmin) {
@@ -287,6 +288,37 @@ export class AiCommandService implements OnModuleInit {
           chatId,
           `❌ Lỗi tạo snapshot: ${err?.message}`,
         );
+      }
+    });
+
+    // /ai coins — show how many coins are currently being listened to
+    this.telegramService.registerBotCommand(/^\/ai[_ ]coins/, async (msg) => {
+      const chatId = msg.chat.id;
+      try {
+        const status = await this.aiSignalService.getStatus();
+        const coins = status.shortlist;
+        const count = coins.length;
+
+        if (count === 0) {
+          await this.telegramService.sendTelegramMessage(chatId, `📡 *Coins dang theo doi*\n\n_Chua co coin nao duoc load. Thu lai sau._`);
+          return;
+        }
+
+        // Group into rows of 5 for readability
+        const rows: string[] = [];
+        for (let i = 0; i < coins.length; i += 5) {
+          rows.push(coins.slice(i, i + 5).map(s => s.replace("USDT", "")).join(" · "));
+        }
+
+        const text =
+          `📡 *Coins dang theo doi: ${count} coin*\n` +
+          `━━━━━━━━━━━━━━━━━━\n` +
+          rows.join("\n") +
+          `\n\n_Danh sach cap nhat moi 5 phut theo volume & bien dong gia._`;
+
+        await this.telegramService.sendTelegramMessage(chatId, text);
+      } catch (err) {
+        await this.telegramService.sendTelegramMessage(chatId, `❌ Loi: ${err?.message}`);
       }
     });
 
