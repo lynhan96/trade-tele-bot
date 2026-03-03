@@ -18,21 +18,16 @@ import { AiTunedParams } from "./ai-tuned-params.interface";
 
 const HAIKU_MODEL = "claude-haiku-4-5-20251001";
 
-const AI_PARAMS_TTL = 2 * 60 * 60; // 2h cache for tuned params
-const AI_PARAMS_JITTER = 30 * 60; // ±15 min random offset to stagger expiry
+const AI_PARAMS_TTL = 4 * 60 * 60; // 4h cache for tuned params (saves ~50% API calls)
+const AI_PARAMS_JITTER = 45 * 60; // ±22.5 min random offset to stagger expiry
 const AI_REGIME_TTL = 4 * 60 * 60; // 4h cache for global regime
 const HAIKU_RATE_KEY = "cache:ai:rate:haiku"; // single rate limiter (only tuning uses AI now)
 const AI_MARKET_FILTERS_KEY = "cache:ai:market-filters"; // AI-decided coin filter settings
 const AI_MARKET_FILTERS_TTL = 8 * 60 * 60; // 8h — re-evaluated on regime change
 const HAIKU_SCAN_BURST_KEY = "cache:ai:rate:haiku:burst"; // per-scan burst limiter
-const MAX_RETUNES_PER_SCAN = 5; // max fresh Haiku calls per 30s scan cycle
+const MAX_RETUNES_PER_SCAN = 10; // up to 10 Haiku calls per 30s scan (covers 100-coin shortlist faster)
 const SCAN_BURST_TTL = 35; // slightly longer than 30s scan interval
 const RATE_WINDOW = 60 * 60; // 1h window
-
-const SONNET_MODEL = "claude-sonnet-4-6";
-const SONNET_RATE_KEY = "cache:ai:rate:sonnet";
-const SONNET_SCAN_BURST_KEY = "cache:ai:rate:sonnet:burst";
-const MAX_SONNET_PER_SCAN = 3; // Sonnet is expensive — limit burst per scan
 
 const GPT_MODEL = "gpt-4o-mini";
 const GPT_RATE_KEY = "cache:ai:rate:gpt"; // hourly budget for GPT fallback
@@ -45,7 +40,6 @@ export class AiOptimizerService {
   private readonly enabled: boolean;
   private readonly maxHaikuPerHour: number;
   private readonly maxGptPerHour: number;
-  private readonly maxSonnetPerHour: number;
 
   constructor(
     private readonly configService: ConfigService,
@@ -61,7 +55,6 @@ export class AiOptimizerService {
       configService.get("AI_MAX_HAIKU_PER_HOUR", "60"),
     );
     this.maxGptPerHour = parseInt(configService.get("AI_MAX_GPT_PER_HOUR", "60"));
-    this.maxSonnetPerHour = parseInt(configService.get("AI_MAX_SONNET_PER_HOUR", "20"));
 
     if (this.enabled) {
       const apiKey = configService.get<string>("ANTHROPIC_API_KEY");
@@ -323,21 +316,8 @@ Reply ONLY with valid JSON (no markdown):
       return params;
     };
 
-    // ── 1. Sonnet 4.6 (best quality, 3/scan burst) ────────────────────────
+    // ── 1. Haiku (primary — fast, cheap, sufficient for structured JSON param selection) ─────
     if (this.enabled) {
-      const sonnetBurst = (await this.redisService.get<number>(SONNET_SCAN_BURST_KEY)) || 0;
-      if (sonnetBurst < MAX_SONNET_PER_SCAN && (await this.checkRateLimit(SONNET_RATE_KEY, this.maxSonnetPerHour))) {
-        try {
-          const params = await this.callSonnet(symbol, globalRegime, indicators);
-          await this.incrementRateLimit(SONNET_RATE_KEY);
-          await this.redisService.set(SONNET_SCAN_BURST_KEY, sonnetBurst + 1, SCAN_BURST_TTL);
-          return saveAndReturn(params, SONNET_MODEL, " (Sonnet)");
-        } catch (err) {
-          this.logger.warn(`[AiOptimizer] Sonnet call failed for ${symbol}: ${err?.message}`);
-        }
-      }
-
-      // ── 2. Haiku (fast, 5/scan burst — fills remainder after Sonnet) ─────
       const haikuBurst = (await this.redisService.get<number>(HAIKU_SCAN_BURST_KEY)) || 0;
       if (haikuBurst < MAX_RETUNES_PER_SCAN && (await this.checkRateLimit(HAIKU_RATE_KEY, this.maxHaikuPerHour))) {
         try {
@@ -553,41 +533,11 @@ Reply ONLY with valid JSON (no markdown):
       .map(([k, v]) => `  ${k}: ${v}`)
       .join("\n");
 
-    return `You are a crypto trading parameter optimizer. Given the market data for ${symbol}, return optimal trading parameters.
-
-Current global regime: ${globalRegime}
-
-Indicators (15m=intraday, 4h=swing):
-${indicatorText}
-
-Choose timeframeProfile:
-- INTRADAY: 15m primary, 1h HTF — for volatile/choppy markets or when 4h trend is unclear
-- SWING: 4h primary, 1d HTF — when 4h trend is strong and clear, low atrPct_15m vs atrPct_4h
-
-Return ONLY valid JSON (no extra fields, no comments):
-{
-  "timeframeProfile": "INTRADAY|SWING",
-  "regime": "STRONG_BULL|STRONG_BEAR|RANGE_BOUND|SIDEWAYS|VOLATILE|BTC_CORRELATION|MIXED",
-  "strategy": "RSI_CROSS|RSI_ZONE|TREND_EMA|MEAN_REVERT_RSI|STOCH_BB_PATTERN|STOCH_EMA_KDJ|BB_SCALP",
-  "confidence": <0-100>,
-  "stopLossPercent": <0.5-5.0>,
-  "takeProfitPercent": <0.5-15.0>,
-  "minConfidenceToTrade": <38-80>,
-  "rsiCross": { "primaryKline": "<15m|4h>", "rsiPeriod": 14, "rsiEmaPeriod": 9, "enableThreshold": true, "rsiThreshold": 50, "enableHtfRsi": true, "htfKline": "<1h|1d>", "enableCandleDir": false, "candleKline": "<15m|4h>" },
-  "rsiZone": { "primaryKline": "<15m|4h>", "rsiPeriod": 14, "rsiEmaPeriod": 9, "rsiTop": 70, "rsiBottom": 30, "enableHtfRsi": true, "htfKline": "<1h|1d>", "enableInitialCandle": true, "excludeLatestCandle": true },
-  "bbScalp": { "primaryKline": "15m", "bbPeriod": 20, "bbStdDev": 2.0, "bbTolerance": 0.1, "rsiPeriod": 14, "rsiLongMax": 45, "rsiShortMin": 55 }
-}
-
-Strategy guide: STRONG_BULL→RSI_CROSS/TREND_EMA (LONG only), STRONG_BEAR→RSI_CROSS/TREND_EMA (SHORT only), RANGE_BOUND→STOCH_BB_PATTERN/MEAN_REVERT_RSI, SIDEWAYS→RSI_CROSS/STOCH_BB_PATTERN/MEAN_REVERT_RSI (prefer RSI_CROSS), VOLATILE→RSI_ZONE, BTC_CORRELATION→RSI_CROSS, MIXED→RSI_ZONE
-SIDEWAYS regime: bbWidth 3-4.5%, RSI 40-60, low ATR. PREFER RSI_CROSS — it has higher win rate in ranging markets. Only use BB_SCALP if RSI is clearly at an extreme (≤40 for LONG, ≥60 for SHORT) and price is touching the band.
-- RSI_CROSS: best default, works well in sideways (higher win rate than BB_SCALP)
-- STOCH_BB_PATTERN: good when stochastic confirms the reversal (lower false-positive rate)
-- MEAN_REVERT_RSI: good when price is near EMA200 and RSI is at an extreme (30/70)
-- BB_SCALP: only when RSI is at clear extreme (rsiLongMax≤45, rsiShortMin≥55) and bbTolerance≤0.1
-BB_SCALP guide: very selective — bbTolerance=0.1 (price must be very close to band), rsiLongMax=45, rsiShortMin=55.
-Kline guide: INTRADAY→primaryKline="15m" htfKline="1h"; SWING→primaryKline="4h" htfKline="1d"
-Higher ATR%→wider stop loss. Low BBWidth%→tighter RSI zones. SWING→stopLossPercent 1.5-4.0.
-takeProfitPercent guide: STRONG_TREND→2×-3× SL. RANGE_BOUND→1.5×-2× SL. SIDEWAYS→SL 1.5%, TP 3.0%, minConfidenceToTrade 42-50. VOLATILE→1.5× SL. SWING→3×-4× SL. Minimum 1.5× stopLossPercent.`;
+    return `Crypto param optimizer for ${symbol}. Global regime: ${globalRegime}.
+Indicators: ${indicatorText}
+Reply ONLY with JSON:
+{"timeframeProfile":"INTRADAY|SWING","regime":"STRONG_BULL|STRONG_BEAR|RANGE_BOUND|SIDEWAYS|VOLATILE|BTC_CORRELATION|MIXED","strategy":"RSI_CROSS|RSI_ZONE|TREND_EMA|MEAN_REVERT_RSI|STOCH_BB_PATTERN|STOCH_EMA_KDJ|BB_SCALP","confidence":0-100,"stopLossPercent":0.5-5.0,"takeProfitPercent":0.5-15.0,"minConfidenceToTrade":38-80,"rsiCross":{"primaryKline":"15m|4h","rsiPeriod":14,"rsiEmaPeriod":9,"enableThreshold":true,"rsiThreshold":50,"enableHtfRsi":true,"htfKline":"1h|1d","enableCandleDir":false,"candleKline":"15m|4h"},"rsiZone":{"primaryKline":"15m|4h","rsiPeriod":14,"rsiEmaPeriod":9,"rsiTop":70,"rsiBottom":30,"enableHtfRsi":true,"htfKline":"1h|1d","enableInitialCandle":true,"excludeLatestCandle":true},"bbScalp":{"primaryKline":"15m","bbPeriod":20,"bbStdDev":2.0,"bbTolerance":0.1,"rsiPeriod":14,"rsiLongMax":45,"rsiShortMin":55}}
+Rules: STRONG_BULL→RSI_CROSS/TREND_EMA LONG; STRONG_BEAR→RSI_CROSS/TREND_EMA SHORT; SIDEWAYS→RSI_CROSS(prefer); RANGE_BOUND→STOCH_BB/MEAN_REVERT; VOLATILE→RSI_ZONE; MIXED→RSI_ZONE. SWING→SL 1.5-4%, TP 3-4×SL; TREND→TP 2-3×SL; higher ATR%→wider SL. INTRADAY→klines 15m/1h; SWING→4h/1d.`;
   }
 
   private async callAnthropic(
@@ -599,17 +549,13 @@ takeProfitPercent guide: STRONG_TREND→2×-3× SL. RANGE_BOUND→1.5×-2× SL. 
     const prompt = this.buildTuningPrompt(symbol, globalRegime, indicators);
     const response = await this.anthropic.messages.create({
       model,
-      max_tokens: 700,
+      max_tokens: 400,
       messages: [{ role: "user", content: prompt }],
     });
     const text = (response.content[0] as any).text;
     const jsonMatch = text.match(/\{[\s\S]*\}/);
     if (!jsonMatch) throw new Error(`No JSON in ${model} response`);
     return this.mergeWithDefaults(JSON.parse(jsonMatch[0]));
-  }
-
-  private callSonnet(symbol: string, globalRegime: string, indicators: Record<string, any>) {
-    return this.callAnthropic(SONNET_MODEL, symbol, globalRegime, indicators);
   }
 
   private callHaiku(symbol: string, globalRegime: string, indicators: Record<string, any>) {
@@ -625,7 +571,7 @@ takeProfitPercent guide: STRONG_TREND→2×-3× SL. RANGE_BOUND→1.5×-2× SL. 
 
     const response = await this.openai!.chat.completions.create({
       model: GPT_MODEL,
-      max_tokens: 700,
+      max_tokens: 400,
       messages: [{ role: "user", content: prompt }],
       response_format: { type: "json_object" }, // Forces valid JSON — no repair needed
     });

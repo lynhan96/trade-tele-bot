@@ -628,6 +628,97 @@ export class UserRealTradingService implements OnModuleInit {
     }
   }
 
+  /**
+   * Every 3 minutes: scan all OPEN trades and ensure each has a live SL and TP on Binance.
+   * If SL or TP is missing (failed at placement or silently dropped), place it immediately.
+   * This protects clients from unprotected open positions.
+   */
+  @Cron("0 */3 * * * *")
+  async protectOpenTrades(): Promise<void> {
+    try {
+      const openTrades = await this.userTradeModel.find({ status: "OPEN" }).exec();
+      if (openTrades.length === 0) return;
+
+      // Group by user to do one algo-order API call per user
+      const byUser = new Map<number, typeof openTrades>();
+      for (const trade of openTrades) {
+        if (!byUser.has(trade.telegramId)) byUser.set(trade.telegramId, []);
+        byUser.get(trade.telegramId)!.push(trade);
+      }
+
+      for (const [telegramId, trades] of byUser) {
+        try {
+          const keys = await this.userSettingsService.getApiKeys(telegramId, "binance");
+          if (!keys?.apiKey) continue;
+
+          // One call to get all open algo orders for this user
+          const algoMap = await this.binanceService.getOpenAlgoOrders(keys.apiKey, keys.apiSecret);
+
+          const ppCache = new Map<string, number>();
+          const getPP = async (sym: string) => {
+            if (!ppCache.has(sym)) ppCache.set(sym, await this.getPricePrecision(sym));
+            return ppCache.get(sym)!;
+          };
+
+          for (const trade of trades) {
+            const { symbol, direction, slPrice, tpPrice, chatId } = trade;
+            const algo = algoMap.get(symbol);
+            const fmtP = (p: number) =>
+              p >= 1000 ? `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :
+              p >= 1 ? `$${p.toFixed(2)}` : `$${p.toFixed(4)}`;
+            const pp = await getPP(symbol);
+            const round = (p: number) => parseFloat(p.toFixed(pp));
+
+            // ── SL missing ──────────────────────────────────────────────────
+            if (!algo?.hasSl) {
+              this.logger.warn(`[RealTrading] ${symbol} user ${telegramId}: SL missing — placing at $${slPrice}`);
+              try {
+                const roundedSl = round(slPrice);
+                const slOrder = await this.binanceService.setStopLoss(
+                  keys.apiKey, keys.apiSecret, symbol, roundedSl,
+                  direction as "LONG" | "SHORT", trade.quantity,
+                );
+                const newId = slOrder?.algoId?.toString() ?? slOrder?.orderId?.toString();
+                await this.userTradeModel.updateOne({ _id: trade._id }, { $set: { binanceSlAlgoId: newId } });
+                await this.telegramService.sendTelegramMessage(chatId,
+                  `🛡️ *Bao Ve Vi The: SL Duoc Dat Lai*\n\n${symbol} ${direction}\nSL: *${fmtP(roundedSl)}*\n_SL bi mat — da tu dong dat lai de bao ve vi the._`
+                ).catch(() => {});
+              } catch (err) {
+                this.logger.error(`[RealTrading] ${symbol} user ${telegramId}: SL re-place FAILED: ${err?.message}`);
+                await this.telegramService.sendTelegramMessage(chatId,
+                  `🚨 *CANH BAO: ${symbol} Khong Co SL!*\n\nKhong the tu dong dat SL tai ${fmtP(slPrice)}.\n*Hay dong lenh hoac dat SL thu cong tren Binance ngay!*\nLoi: ${err?.message}`
+                ).catch(() => {});
+              }
+            }
+
+            // ── TP missing ──────────────────────────────────────────────────
+            if (tpPrice && !algo?.hasTp) {
+              this.logger.warn(`[RealTrading] ${symbol} user ${telegramId}: TP missing — placing at $${tpPrice}`);
+              try {
+                const roundedTp = round(tpPrice);
+                const tpOrder = await this.binanceService.setTakeProfitAtPrice(
+                  keys.apiKey, keys.apiSecret, symbol, roundedTp,
+                  direction as "LONG" | "SHORT",
+                );
+                const newId = tpOrder?.algoId?.toString() ?? tpOrder?.orderId?.toString();
+                await this.userTradeModel.updateOne({ _id: trade._id }, { $set: { binanceTpAlgoId: newId } });
+                await this.telegramService.sendTelegramMessage(chatId,
+                  `🛡️ *Bao Ve Vi The: TP Duoc Dat Lai*\n\n${symbol} ${direction}\nTP: *${fmtP(roundedTp)}*\n_TP bi mat — da tu dong dat lai._`
+                ).catch(() => {});
+              } catch (err) {
+                this.logger.warn(`[RealTrading] ${symbol} user ${telegramId}: TP re-place failed: ${err?.message}`);
+              }
+            }
+          }
+        } catch (err) {
+          this.logger.error(`[RealTrading] protectOpenTrades error for user ${telegramId}: ${err?.message}`);
+        }
+      }
+    } catch (err) {
+      this.logger.error(`[RealTrading] protectOpenTrades outer error: ${err?.message}`);
+    }
+  }
+
   // ─── Private helpers ──────────────────────────────────────────────────────
 
   private async resolveLeverage(

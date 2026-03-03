@@ -322,6 +322,40 @@ export class BinanceService {
   }
 
   /**
+   * Fetch all open algo orders (SL/TP) for a user.
+   * Returns a map: symbol → { hasSl, hasTp, slAlgoId, tpAlgoId }
+   */
+  async getOpenAlgoOrders(
+    apiKey: string,
+    apiSecret: string,
+  ): Promise<Map<string, { hasSl: boolean; hasTp: boolean; slAlgoId?: string; tpAlgoId?: string }>> {
+    const result = new Map<string, { hasSl: boolean; hasTp: boolean; slAlgoId?: string; tpAlgoId?: string }>();
+    try {
+      const client = this.createClient(apiKey, apiSecret);
+      const orders: any[] = await (client as any)
+        .privateRequest('GET', '/fapi/v1/openAlgoOrders', {})
+        .catch(() => []);
+      if (!Array.isArray(orders)) return result;
+      for (const o of orders) {
+        const sym = o.symbol as string;
+        if (!result.has(sym)) result.set(sym, { hasSl: false, hasTp: false });
+        const entry = result.get(sym)!;
+        if (o.orderType === 'STOP_MARKET' || o.orderType === 'STOP') {
+          entry.hasSl = true;
+          entry.slAlgoId = o.algoId?.toString();
+        }
+        if (o.orderType === 'TAKE_PROFIT_MARKET' || o.orderType === 'TAKE_PROFIT') {
+          entry.hasTp = true;
+          entry.tpAlgoId = o.algoId?.toString();
+        }
+      }
+    } catch (err) {
+      this.logger.warn(`getOpenAlgoOrders failed: ${err?.message}`);
+    }
+    return result;
+  }
+
+  /**
    * Cancel an algo order by algoId.
    */
   async cancelAlgoOrder(
