@@ -27,39 +27,51 @@ export class TelegramBotService implements OnModuleInit {
   private setupCommands() {
     this.bot.onText(/\/start/, async (msg) => {
       const chatId = msg.chat.id;
-      const firstName = msg.from?.first_name || "bạn";
+      const firstName = msg.from?.first_name || "ban";
       await this.sendTelegramMessage(
         chatId,
-        `👋 Xin chào *${firstName}*!\n\n` +
-          `🧠 *AI Signal Bot* — Hệ thống phân tích thị trường crypto tự động bằng AI.\n\n` +
-          `Bot sử dụng Claude AI để:\n` +
-          `• Phân tích xu hướng thị trường theo thời gian thực\n` +
-          `• Chọn chiến lược phù hợp (RSI, EMA, Stoch, BB...)\n` +
-          `• Phát tín hiệu LONG/SHORT kèm Stop Loss\n` +
-          `• Đánh giá rủi ro và khuyến nghị leverage cho mỗi tín hiệu\n` +
-          `• Hỗ trợ 2 khung thời gian: Intraday (15m) và Swing (4h)\n\n` +
+        `👋 Xin chao *${firstName}*!\n\n` +
+          `🧠 *AI Signal Bot* — He thong phan tich thi truong crypto tu dong bang AI.\n\n` +
+          `Bot su dung Claude AI de:\n` +
+          `• Phan tich xu huong thi truong theo thoi gian thuc\n` +
+          `• Chon chien luoc phu hop (RSI, EMA, Stoch, BB...)\n` +
+          `• Phat tin hieu LONG/SHORT kem Stop Loss & Take Profit\n` +
+          `• Ho tro 2 khung thoi gian: Intraday (15m) va Swing (4h)\n\n` +
           `─────────────────────\n` +
-          `📋 *Lệnh sử dụng:*\n\n` +
-          `📬 *Đăng ký tín hiệu*\n` +
-          `/ai subscribe — Đăng ký nhận tín hiệu AI\n` +
-          `/ai unsubscribe — Hủy đăng ký\n\n` +
-          `⚙️ *Cài đặt*\n` +
-          `/ai settings — Xem cài đặt của bạn\n` +
-          `/ai moneyflow on|off — Bật/tắt cảnh báo dòng tiền\n` +
-          `/ai push on|off — Auto push signals mỗi 10 phút\n\n` +
-          `🌍 *Phân tích thị trường*\n` +
-          `/ai market — Xem phân tích thị trường AI\n\n` +
-          `📊 *Xem thông tin*\n` +
-          `/ai status — Trạng thái hệ thống\n` +
-          `/ai check <SYMBOL> — Kiểm tra tín hiệu coin\n` +
-          `/ai — Danh sách tất cả lệnh\n\n` +
+          `📬 *Dang ky tin hieu*\n` +
+          `/ai subscribe — Dang ky nhan tin hieu\n` +
+          `/ai unsubscribe — Huy dang ky\n` +
+          `/ai push on|off — Auto push tin hieu moi 10 phut\n\n` +
+          `💹 *Giao dich that (Real Mode)*\n` +
+          `/ai setkeys — Luu Binance API keys\n` +
+          `/ai realmode — Xem/bat/tat dat lenh that\n` +
+          `/ai realmode leverage AI|MAX|10 — Chon he so don bay\n` +
+          `/ai realmode target 5 — Dat muc tieu loi nhuan +5%/ngay\n` +
+          `/ai realmode stoploss 3 — Dat gioi han lo -3%/ngay\n` +
+          `/ai realmode stats — Chi tiet lenh va P&L hom nay\n\n` +
+          `⚙️ *Cai dat*\n` +
+          `/ai settings — Xem cai dat hien tai\n` +
+          `/ai balance <so> — Set balance mac dinh (USDT/lenh)\n` +
+          `/ai moneyflow on|off — Bat/tat canh bao dong tien\n\n` +
+          `🌍 *Phan tich thi truong*\n` +
+          `/ai market — Phan tich thi truong AI\n` +
+          `/ai signals — Xem tat ca tin hieu dang chay\n` +
+          `/ai check <SYMBOL> — Kiem tra tin hieu (vd: BTC)\n\n` +
+          `📊 *Quan tri (Admin)*\n` +
+          `/ai status — Trang thai he thong\n` +
+          `/ai stats — Thong ke hieu suat tin hieu\n` +
+          `/ai params <SYMBOL> — Xem tham so AI cua coin\n` +
+          `/ai snapshot — Tao/cap nhat daily snapshot\n` +
+          `/ai test on|off — Bat/tat che do test\n` +
+          `/ai pause / /ai resume — Tam dung/tiep tuc\n` +
+          `/ai override — Override chien luoc\n\n` +
           `─────────────────────\n` +
-          `💡 *Hướng dẫn nhanh:*\n` +
-          `1. Dùng /ai subscribe để bắt đầu nhận tín hiệu\n` +
-          `2. Dùng /ai market để xem AI đánh giá thị trường\n` +
-          `3. Khi có tín hiệu, bot gửi thông báo kèm entry, SL và khuyến nghị AI\n` +
-          `4. Theo dõi và tự quản lý lệnh theo tín hiệu\n\n` +
-          `⚠️ _Lưu ý: Tín hiệu và phân tích AI chỉ mang tính tham khảo. Giao dịch tiềm ẩn rủi ro._`,
+          `💡 *Huong dan nhanh:*\n` +
+          `1. /ai subscribe — bat dau nhan tin hieu\n` +
+          `2. /ai market — xem AI danh gia thi truong\n` +
+          `3. (Tuy chon) /ai setkeys + /ai realmode on — dat lenh that tu dong\n` +
+          `4. /ai signals — theo doi tat ca tin hieu dang chay\n\n` +
+          `⚠️ _Tin hieu AI chi mang tinh tham khao. Giao dich tiem an rui ro._`,
       );
     });
   }
@@ -75,22 +87,32 @@ export class TelegramBotService implements OnModuleInit {
 
       // Then set the new command menu
       await this.bot.setMyCommands([
-        { command: "start", description: "Giới thiệu bot và hướng dẫn sử dụng" },
-        { command: "ai", description: "Danh sách tất cả lệnh AI" },
-        { command: "ai_subscribe", description: "Đăng ký nhận tín hiệu AI" },
-        { command: "ai_unsubscribe", description: "Hủy đăng ký tín hiệu AI" },
-        { command: "ai_settings", description: "Xem cài đặt của bạn" },
-        { command: "ai_moneyflow", description: "Bật/tắt cảnh báo dòng tiền" },
-        { command: "ai_push", description: "Auto push signals mỗi 10 phút" },
-        { command: "ai_market", description: "Phân tích thị trường AI" },
-        { command: "ai_signals", description: "Xem tín hiệu đang chạy" },
-        { command: "ai_status", description: "Trạng thái hệ thống" },
-        { command: "ai_check", description: "Kiểm tra tín hiệu coin" },
-        { command: "ai_snapshot", description: "Tạo/cập nhật daily snapshot" },
-        { command: "ai_stats", description: "Thống kê hiệu suất" },
-        { command: "ai_test", description: "Bật/tắt chế độ test" },
-        { command: "ai_pause", description: "Tạm dừng tín hiệu" },
-        { command: "ai_resume", description: "Tiếp tục tín hiệu" },
+        { command: "start", description: "Gioi thieu bot va huong dan su dung" },
+        { command: "ai", description: "Danh sach tat ca lenh AI" },
+        // Signal subscription
+        { command: "ai_subscribe", description: "Dang ky nhan tin hieu AI" },
+        { command: "ai_unsubscribe", description: "Huy dang ky tin hieu AI" },
+        { command: "ai_push", description: "Auto push tin hieu moi 10 phut" },
+        // Real trading mode
+        { command: "ai_setkeys", description: "Luu Binance API keys" },
+        { command: "ai_realmode", description: "Xem/bat/tat dat lenh that" },
+        // Settings
+        { command: "ai_settings", description: "Xem cai dat hien tai" },
+        { command: "ai_balance", description: "Set balance mac dinh (USDT/lenh)" },
+        { command: "ai_moneyflow", description: "Bat/tat canh bao dong tien" },
+        // Market & signals
+        { command: "ai_market", description: "Phan tich thi truong AI" },
+        { command: "ai_signals", description: "Xem tin hieu dang chay" },
+        { command: "ai_check", description: "Kiem tra tin hieu coin" },
+        // Admin
+        { command: "ai_status", description: "Trang thai he thong (admin)" },
+        { command: "ai_stats", description: "Thong ke hieu suat (admin)" },
+        { command: "ai_params", description: "Xem tham so AI cua coin (admin)" },
+        { command: "ai_snapshot", description: "Tao/cap nhat daily snapshot (admin)" },
+        { command: "ai_override", description: "Override chien luoc (admin)" },
+        { command: "ai_test", description: "Bat/tat che do test (admin)" },
+        { command: "ai_pause", description: "Tam dung tin hieu (admin)" },
+        { command: "ai_resume", description: "Tiep tuc tin hieu (admin)" },
       ]);
       this.logger.log("[Telegram] Bot command menu updated successfully (old commands cleared)");
     } catch (err) {

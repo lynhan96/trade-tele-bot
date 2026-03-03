@@ -14,14 +14,11 @@ export interface CoinShortlistEntry {
 
 const SHORTLIST_CACHE_KEY = "cache:filter:shortlist";
 const SHORTLIST_TTL = 360; // 6 minutes
+const AI_MARKET_FILTERS_KEY = "cache:ai:market-filters";
 
 @Injectable()
 export class CoinFilterService {
   private readonly logger = new Logger(CoinFilterService.name);
-
-  private readonly minVolumeUsd: number;
-  private readonly minPriceChangePct: number;
-  private readonly maxShortlistSize: number;
 
   // Fixed priority coins that are always included if on USDT futures
   private readonly priorityCoins = ["BTC", "ETH", "SOL", "BNB", "XRP"];
@@ -30,16 +27,36 @@ export class CoinFilterService {
     private readonly redisService: RedisService,
     private readonly marketDataService: MarketDataService,
     private readonly configService: ConfigService,
-  ) {
-    this.minVolumeUsd = parseFloat(
-      this.configService.get("AI_MIN_COIN_VOLUME_USD", "50000000"),
-    );
-    this.minPriceChangePct = parseFloat(
-      this.configService.get("AI_MIN_PRICE_CHANGE_PCT", "1.0"),
-    );
-    this.maxShortlistSize = parseInt(
-      this.configService.get("AI_MAX_SHORTLIST_SIZE", "10"),
-    );
+  ) {}
+
+  private async getEffectiveFilterConfig(): Promise<{
+    minVolumeUsd: number;
+    minPriceChangePct: number;
+    maxShortlistSize: number;
+    source: "ai" | "env";
+  }> {
+    const aiConfig = await this.redisService.get<{
+      minVolumeUsd: number;
+      minPriceChangePct: number;
+      maxShortlistSize: number;
+    }>(AI_MARKET_FILTERS_KEY);
+
+    if (aiConfig?.minVolumeUsd) {
+      return { ...aiConfig, source: "ai" };
+    }
+
+    return {
+      minVolumeUsd: parseFloat(
+        this.configService.get("AI_MIN_COIN_VOLUME_USD", "10000000"),
+      ),
+      minPriceChangePct: parseFloat(
+        this.configService.get("AI_MIN_PRICE_CHANGE_PCT", "0.3"),
+      ),
+      maxShortlistSize: parseInt(
+        this.configService.get("AI_MAX_SHORTLIST_SIZE", "50"),
+      ),
+      source: "env",
+    };
   }
 
   /**
@@ -53,12 +70,15 @@ export class CoinFilterService {
       return this.getShortlist();
     }
 
+    const { minVolumeUsd, minPriceChangePct, maxShortlistSize, source } =
+      await this.getEffectiveFilterConfig();
+
     // Filter: only USDT pairs with sufficient volume
     const usdtPairs = tickers.filter(
       (t) =>
         t.symbol.endsWith("USDT") &&
         !t.symbol.includes("_") && // exclude delivery contracts
-        parseFloat(t.quoteVolume) >= this.minVolumeUsd,
+        parseFloat(t.quoteVolume) >= minVolumeUsd,
     );
 
     // Score each coin: prioritize volume, then price change
@@ -85,12 +105,12 @@ export class CoinFilterService {
         shortlist.push(entry);
         addedSymbols.add(entry.symbol);
       }
-      if (shortlist.length >= this.maxShortlistSize) break;
+      if (shortlist.length >= maxShortlistSize) break;
     }
 
     // Fill remaining slots with top-volume coins
     for (const entry of scored) {
-      if (shortlist.length >= this.maxShortlistSize) break;
+      if (shortlist.length >= maxShortlistSize) break;
       if (!addedSymbols.has(entry.symbol)) {
         shortlist.push(entry);
         addedSymbols.add(entry.symbol);
@@ -104,7 +124,7 @@ export class CoinFilterService {
     await this.marketDataService.updateSubscriptions(coins);
 
     this.logger.log(
-      `[CoinFilter] Shortlist (${shortlist.length}): ${shortlist.map((s) => s.symbol).join(", ")}`,
+      `[CoinFilter] Shortlist (${shortlist.length}, src=${source}, vol>=$${(minVolumeUsd / 1e6).toFixed(0)}M, chg>=${minPriceChangePct}%): ${shortlist.map((s) => s.symbol).join(", ")}`,
     );
 
     return shortlist;

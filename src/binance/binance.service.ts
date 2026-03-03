@@ -32,12 +32,6 @@ export interface PositionInfo {
   liquidationPrice: number;
 }
 
-export interface AccountBalance {
-  totalBalance: number;
-  availableBalance: number;
-  totalUnrealizedProfit: number;
-}
-
 @Injectable()
 export class BinanceService {
   private readonly logger = new Logger(BinanceService.name);
@@ -47,25 +41,6 @@ export class BinanceService {
       apiKey,
       apiSecret,
     });
-  }
-
-  async getAccountBalance(
-    apiKey: string,
-    apiSecret: string,
-  ): Promise<AccountBalance> {
-    try {
-      const client = this.createClient(apiKey, apiSecret);
-      const account = await client.futuresAccountInfo();
-
-      return {
-        totalBalance: parseFloat(account.totalWalletBalance),
-        availableBalance: parseFloat(account.availableBalance),
-        totalUnrealizedProfit: parseFloat(account.totalUnrealizedProfit),
-      };
-    } catch (error) {
-      this.logger.error("Error fetching account balance:", error.message);
-      throw error;
-    }
   }
 
   async getOpenPositions(
@@ -153,84 +128,6 @@ export class BinanceService {
     }
   }
 
-  async setTakeProfit(
-    apiKey: string,
-    apiSecret: string,
-    symbol: string,
-    percentage: number,
-  ): Promise<any> {
-    try {
-      const client = this.createClient(apiKey, apiSecret);
-
-      // Get current position
-      const positions = await client.futuresPositionRisk();
-      const position = positions.find(
-        (p) => p.symbol === symbol && parseFloat(p.positionAmt) !== 0,
-      );
-
-      if (!position) {
-        throw new Error(`No open position found for ${symbol}`);
-      }
-
-      const entryPrice = parseFloat(position.entryPrice);
-      const isLong = parseFloat(position.positionAmt) > 0;
-
-      // Calculate TP price based on percentage
-      let tpPrice: number;
-      if (isLong) {
-        tpPrice = entryPrice * (1 + percentage / 100);
-      } else {
-        tpPrice = entryPrice * (1 - percentage / 100);
-      }
-
-      // Round to appropriate precision
-      const symbolInfo = await client.futuresExchangeInfo();
-      const symbolData = symbolInfo.symbols.find((s) => s.symbol === symbol);
-      const pricePrecision = symbolData?.pricePrecision || 2;
-      tpPrice = parseFloat(tpPrice.toFixed(pricePrecision));
-
-      // Cancel existing TP algo orders (new endpoint since Binance migration 2025-12-09)
-      const openAlgoOrders: any[] = await (client as any)
-        .privateRequest('GET', '/fapi/v1/openAlgoOrders', { symbol })
-        .catch(() => []);
-      if (Array.isArray(openAlgoOrders)) {
-        for (const order of openAlgoOrders) {
-          if (
-            order.orderType === "TAKE_PROFIT_MARKET" ||
-            order.orderType === "TAKE_PROFIT"
-          ) {
-            await (client as any)
-              .privateRequest('DELETE', '/fapi/v1/algoOrder', { algoId: order.algoId })
-              .catch(() => {});
-          }
-        }
-      }
-
-      // Place new TP order via Algo Order API (required since Binance migration 2025-12-09)
-      const tpOrder = await (client as any).privateRequest('POST', '/fapi/v1/algoOrder', {
-        algoType: 'CONDITIONAL',
-        symbol,
-        side: isLong ? "SELL" : "BUY",
-        type: "TAKE_PROFIT_MARKET",
-        triggerPrice: tpPrice.toString(),
-        closePosition: "true",
-      });
-
-      return {
-        success: true,
-        symbol,
-        side: isLong ? "LONG" : "SHORT",
-        entryPrice,
-        tpPrice,
-        percentage,
-        order: tpOrder,
-      };
-    } catch (error) {
-      this.logger.error("Error setting take profit:", error.message);
-      throw error;
-    }
-  }
-
   async closePosition(
     apiKey: string,
     apiSecret: string,
@@ -254,30 +151,6 @@ export class BinanceService {
       return order;
     } catch (error) {
       this.logger.error(`Error closing position ${symbol}:`, error.message);
-      throw error;
-    }
-  }
-
-  async getCurrentPrice(
-    apiKey: string,
-    apiSecret: string,
-    symbol: string,
-  ): Promise<number> {
-    try {
-      const client = this.createClient(apiKey, apiSecret);
-      const prices = await client.futuresMarkPrice();
-      const ticker = prices.find((p) => p.symbol === symbol);
-
-      if (!ticker) {
-        throw new Error(`Symbol ${symbol} not found`);
-      }
-
-      return parseFloat(ticker.markPrice);
-    } catch (error) {
-      this.logger.error(
-        `Error fetching current price for ${symbol}:`,
-        error.message,
-      );
       throw error;
     }
   }
@@ -394,6 +267,50 @@ export class BinanceService {
         error.message,
       );
       throw error;
+    }
+  }
+
+  /**
+   * Place a take profit algo order at a specific price (no position fetch needed).
+   */
+  async setTakeProfitAtPrice(
+    apiKey: string,
+    apiSecret: string,
+    symbol: string,
+    tpPrice: number,
+    side: "LONG" | "SHORT",
+  ): Promise<any> {
+    try {
+      const client = this.createClient(apiKey, apiSecret);
+      const order = await (client as any).privateRequest('POST', '/fapi/v1/algoOrder', {
+        algoType: 'CONDITIONAL',
+        symbol,
+        side: side === "LONG" ? "SELL" : "BUY",
+        type: "TAKE_PROFIT_MARKET",
+        triggerPrice: tpPrice.toString(),
+        closePosition: "true",
+      });
+      this.logger.log(`Set take profit for ${symbol} at $${tpPrice} (${side})`);
+      return order;
+    } catch (error) {
+      this.logger.error(`Error setting take profit for ${symbol}:`, error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Cancel an algo order by algoId.
+   */
+  async cancelAlgoOrder(
+    apiKey: string,
+    apiSecret: string,
+    algoId: string,
+  ): Promise<void> {
+    try {
+      const client = this.createClient(apiKey, apiSecret);
+      await (client as any).privateRequest('DELETE', '/fapi/v1/algoOrder', { algoId });
+    } catch (error) {
+      this.logger.warn(`cancelAlgoOrder ${algoId}: ${error.message}`);
     }
   }
 }

@@ -18,7 +18,7 @@ const QUEUED_KEY = (signalKey: string) => `cache:ai-signal:queued:${signalKey}`;
 const DUAL_TIMEFRAME_COINS = ["BTC", "ETH"];
 
 // TTLs per timeframe profile
-const INTRADAY_ACTIVE_TTL = 8 * 60 * 60; // 8h
+const INTRADAY_ACTIVE_TTL = 24 * 60 * 60; // 24h (was 8h — 8h was too short for long-running signals)
 const INTRADAY_QUEUED_TTL = 4 * 60 * 60; // 4h
 const SWING_ACTIVE_TTL = 72 * 60 * 60; // 72h
 const SWING_QUEUED_TTL = 48 * 60 * 60; // 48h
@@ -60,6 +60,20 @@ export class SignalQueueService {
     const signalKey = forceProfile ? `${symbol}:${forceProfile}` : symbol;
 
     const active = await this.getActiveSignal(signalKey);
+
+    // For dual-timeframe coins: if same direction already active in another profile, skip
+    if (!active && DUAL_TIMEFRAME_COINS.includes(coin.toUpperCase()) && forceProfile) {
+      const otherProfiles = ["INTRADAY", "SWING"].filter((p) => p !== forceProfile);
+      for (const profile of otherProfiles) {
+        const otherActive = await this.getActiveSignal(`${symbol}:${profile}`);
+        if (otherActive && (otherActive.direction === "LONG") === signalResult.isLong) {
+          this.logger.debug(
+            `[SignalQueue] ${signalKey} skip — same direction (${otherActive.direction}) already active in ${profile}`,
+          );
+          return { action: "SKIPPED" };
+        }
+      }
+    }
 
     if (!active) {
       // No Redis key — but there might be orphaned ACTIVE docs in MongoDB
@@ -232,6 +246,23 @@ export class SignalQueueService {
     );
   }
 
+  /**
+   * Raise stop loss to lock in profit (trailing stop milestone).
+   * Called when unrealized PnL reaches 5% — moves SL to +2% profit.
+   */
+  async raiseStopLoss(signalId: string, newStopLoss: number): Promise<void> {
+    const signal = await this.aiSignalModel.findById(signalId);
+    if (!signal || signal.status !== "ACTIVE") return;
+
+    await this.aiSignalModel.findByIdAndUpdate(signalId, {
+      stopLossPrice: newStopLoss,
+      sl5PctRaised: true,
+    });
+    this.logger.log(
+      `[SignalQueue] ${signal.symbol} SL raised to ${newStopLoss.toFixed(4)} (+2% lock-in at 5% milestone)`,
+    );
+  }
+
   // ─── Helpers ──────────────────────────────────────────────────────────────
 
   /** Get the profile-aware signal key from a document. */
@@ -250,9 +281,11 @@ export class SignalQueueService {
    * Cancel all QUEUED signals that have passed their expiresAt.
    * Also cleans up orphaned ACTIVE signals (Redis TTL expired but MongoDB still ACTIVE).
    * Called every 5 minutes.
+   * Returns cancelled ACTIVE signals so the caller can send notifications.
    */
-  async cleanupExpiredQueued(): Promise<number> {
+  async cleanupExpiredQueued(): Promise<{ count: number; cancelledActives: AiSignalDocument[] }> {
     let count = 0;
+    const cancelledActives: AiSignalDocument[] = [];
 
     // Clean expired QUEUED
     const expiredQueued = await this.aiSignalModel.find({
@@ -284,6 +317,7 @@ export class SignalQueueService {
           status: "CANCELLED",
           closeReason: "TTL_EXPIRED",
         });
+        cancelledActives.push(doc); // return to caller for notification
         this.logger.log(
           `[SignalQueue] Orphaned ACTIVE signal cancelled: ${sigKey} (id: ${doc._id})`,
         );
@@ -291,7 +325,7 @@ export class SignalQueueService {
       }
     }
 
-    return count;
+    return { count, cancelledActives };
   }
 
   /**
@@ -463,8 +497,9 @@ export class SignalQueueService {
     isTestMode = false,
   ): Promise<AiSignalDocument> {
     const symbol = `${coin.toUpperCase()}${currency.toUpperCase()}`;
-    const stopLossPercent = params.stopLossPercent;
-    const takeProfitPercent = params.takeProfitPercent ?? stopLossPercent * 2;
+    const MIN_PERCENT = 2.0; // minimum SL and TP to avoid noise-triggered exits
+    const stopLossPercent = Math.max(params.stopLossPercent, MIN_PERCENT);
+    const takeProfitPercent = Math.max(params.takeProfitPercent ?? stopLossPercent * 2, MIN_PERCENT);
     const entryPrice = signalResult.entryPrice;
 
     const stopLossPrice = signalResult.isLong

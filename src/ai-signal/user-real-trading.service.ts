@@ -1,0 +1,650 @@
+import { Injectable, Logger, OnModuleInit } from "@nestjs/common";
+import { Cron } from "@nestjs/schedule";
+import { InjectModel } from "@nestjs/mongoose";
+import { Model } from "mongoose";
+import { RedisService } from "../redis/redis.service";
+import { BinanceService } from "../binance/binance.service";
+import { TelegramBotService } from "../telegram/telegram.service";
+import { UserSettingsService } from "../user/user-settings.service";
+import { MarketDataService } from "../market-data/market-data.service";
+import { SubscriberInfo, UserSignalSubscriptionService } from "./user-signal-subscription.service";
+import { UserTrade, UserTradeDocument } from "../schemas/user-trade.schema";
+import { AiSignalDocument } from "../schemas/ai-signal.schema";
+import { AiTunedParams } from "../strategy/ai-optimizer/ai-tuned-params.interface";
+
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const axios = require("axios");
+
+/** Tolerance for signal entry price vs current market price (0.5%). */
+const ENTRY_PRICE_TOLERANCE = 0.005;
+
+/** Redis key for caching symbol quantity precision. */
+const QTY_PRECISION_KEY = (symbol: string) => `cache:binance:qty-precision:${symbol}`;
+
+@Injectable()
+export class UserRealTradingService implements OnModuleInit {
+  private readonly logger = new Logger(UserRealTradingService.name);
+
+  /** Injected lazily to break circular dep with UserDataStreamService. */
+  private userDataStreamService: any;
+
+  constructor(
+    private readonly subscriptionService: UserSignalSubscriptionService,
+    private readonly userSettingsService: UserSettingsService,
+    private readonly binanceService: BinanceService,
+    private readonly telegramService: TelegramBotService,
+    private readonly redisService: RedisService,
+    private readonly marketDataService: MarketDataService,
+    @InjectModel(UserTrade.name)
+    private readonly userTradeModel: Model<UserTradeDocument>,
+  ) {}
+
+  async onModuleInit(): Promise<void> {
+    // Re-open data streams for any users with OPEN trades (bot restart recovery)
+    // Delayed to allow UserDataStreamService to initialize first
+    setTimeout(() => this.reRegisterOpenTradeStreams().catch(() => {}), 5_000);
+  }
+
+  /** Set the UserDataStreamService (called by UserDataStreamService.onModuleInit to avoid circular dep). */
+  setDataStreamService(svc: any): void {
+    this.userDataStreamService = svc;
+  }
+
+  // ─── Signal activated: place real orders ─────────────────────────────────
+
+  /**
+   * Called when a new signal becomes ACTIVE.
+   * Places MARKET orders on Binance for all users with realModeEnabled = true.
+   */
+  async onSignalActivated(signal: AiSignalDocument, params: AiTunedParams): Promise<void> {
+    const subscribers = await this.subscriptionService.findRealModeSubscribers();
+    if (subscribers.length === 0) return;
+
+    const { symbol, direction, entryPrice, stopLossPrice, takeProfitPrice } = signal;
+    const currentPrice = await this.fetchCurrentPrice(symbol);
+    if (!currentPrice) {
+      this.logger.warn(`[RealTrading] ${symbol}: cannot fetch current price, skipping real orders`);
+      return;
+    }
+
+    const priceDeviation = Math.abs(currentPrice - entryPrice) / entryPrice;
+    if (priceDeviation > ENTRY_PRICE_TOLERANCE) {
+      this.logger.log(
+        `[RealTrading] ${symbol} price deviation ${(priceDeviation * 100).toFixed(2)}% > 0.5% — skipping real orders`,
+      );
+      // Notify all real-mode subscribers about the skip
+      for (const sub of subscribers) {
+        const msg =
+          `⚠️ *Real Mode: Bo qua lenh*\n\n` +
+          `${symbol} ${direction}\n` +
+          `Gia tin hieu: $${entryPrice.toFixed(4)}\n` +
+          `Gia hien tai: $${currentPrice.toFixed(4)}\n` +
+          `Lech: ${(priceDeviation * 100).toFixed(2)}% > 0.5%\n\n` +
+          `_Lenh khong duoc dat do gia di qua xa diem vao._`;
+        await this.telegramService.sendTelegramMessage(sub.chatId, msg).catch(() => {});
+      }
+      return;
+    }
+
+    const precision = await this.getQuantityPrecision(symbol);
+
+    await Promise.allSettled(
+      subscribers.map((sub) =>
+        this.placeOrderForUser(sub, signal, params, currentPrice, precision),
+      ),
+    );
+  }
+
+  private async placeOrderForUser(
+    sub: SubscriberInfo,
+    signal: AiSignalDocument,
+    params: AiTunedParams,
+    currentPrice: number,
+    quantityPrecision: number,
+  ): Promise<void> {
+    const { telegramId, chatId } = sub;
+    const { symbol, direction, entryPrice, stopLossPrice, takeProfitPrice } = signal;
+
+    try {
+      const keys = await this.userSettingsService.getApiKeys(telegramId, "binance");
+      if (!keys?.apiKey) {
+        this.logger.debug(`[RealTrading] ${symbol}: user ${telegramId} has no Binance API keys`);
+        return;
+      }
+
+      const leverage = await this.resolveLeverage(sub, params, keys.apiKey, keys.apiSecret, symbol);
+      const vol = this.getVolForSymbol(symbol, sub.coinVolumes, sub.tradingBalance);
+      const rawQty = vol / currentPrice;
+      const quantity = parseFloat(rawQty.toFixed(quantityPrecision));
+      if (quantity <= 0) {
+        this.logger.warn(`[RealTrading] ${symbol}: computed quantity ${quantity} <= 0 for user ${telegramId}`);
+        return;
+      }
+
+      // Place market order
+      const order = await this.binanceService.openPosition(keys.apiKey, keys.apiSecret, {
+        symbol,
+        side: direction as "LONG" | "SHORT",
+        quantity,
+        leverage,
+      });
+
+      const fillPrice = parseFloat(order.avgPrice) || currentPrice;
+      const binanceOrderId = order.orderId?.toString() ?? "";
+
+      // Place SL algo order
+      let binanceSlAlgoId: string | undefined;
+      try {
+        const slOrder = await this.binanceService.setStopLoss(
+          keys.apiKey,
+          keys.apiSecret,
+          symbol,
+          stopLossPrice,
+          direction as "LONG" | "SHORT",
+          quantity,
+        );
+        binanceSlAlgoId = slOrder?.algoId?.toString() ?? slOrder?.orderId?.toString();
+      } catch (err) {
+        this.logger.error(`[RealTrading] ${symbol} SL order failed for user ${telegramId}: ${err?.message}`);
+      }
+
+      // Place TP algo order (if signal has TP price)
+      let binanceTpAlgoId: string | undefined;
+      if (takeProfitPrice) {
+        try {
+          const tpOrder = await this.binanceService.setTakeProfitAtPrice(
+            keys.apiKey,
+            keys.apiSecret,
+            symbol,
+            takeProfitPrice,
+            direction as "LONG" | "SHORT",
+          );
+          binanceTpAlgoId = tpOrder?.algoId?.toString() ?? tpOrder?.orderId?.toString();
+        } catch (err) {
+          this.logger.warn(`[RealTrading] ${symbol} TP order failed for user ${telegramId}: ${err?.message}`);
+        }
+      }
+
+      // Save UserTrade to MongoDB
+      const trade = await this.userTradeModel.create({
+        telegramId,
+        chatId,
+        symbol,
+        direction,
+        entryPrice: fillPrice,
+        quantity,
+        leverage,
+        notionalUsdt: quantity * fillPrice,
+        slPrice: stopLossPrice,
+        tpPrice: takeProfitPrice ?? undefined,
+        binanceOrderId,
+        binanceSlAlgoId,
+        binanceTpAlgoId,
+        status: "OPEN",
+        openedAt: new Date(),
+        aiSignalId: (signal as any)._id?.toString(),
+      });
+
+      this.logger.log(
+        `[RealTrading] ${symbol} REAL order placed for user ${telegramId}: ${direction} ×${quantity} @ $${fillPrice} (×${leverage} lev)`,
+      );
+
+      // Send confirmation to user
+      const fmtP = (p: number) =>
+        p >= 1000 ? `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :
+        p >= 1 ? `$${p.toFixed(2)}` : `$${p.toFixed(4)}`;
+      const dirEmoji = direction === "LONG" ? "📈" : "📉";
+      const msg =
+        `${dirEmoji} *Real Mode: Dat Lenh Thanh Cong*\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `Symbol: *${symbol}* ${direction}\n` +
+        `So luong: *×${quantity}* (${leverage}x)\n` +
+        `Gia vao: *${fmtP(fillPrice)}*\n` +
+        `Stop Loss: *${fmtP(stopLossPrice)}*\n` +
+        (takeProfitPrice ? `Take Profit: *${fmtP(takeProfitPrice)}*\n` : "") +
+        `Volume: *${vol.toLocaleString()} USDT*`;
+      await this.telegramService.sendTelegramMessage(chatId, msg).catch(() => {});
+
+      // Register data stream to monitor fills/closings
+      if (this.userDataStreamService) {
+        await this.userDataStreamService.registerUser(telegramId, keys.apiKey, keys.apiSecret).catch(() => {});
+      }
+    } catch (err) {
+      this.logger.error(`[RealTrading] ${symbol} order failed for user ${telegramId}: ${err?.message}`);
+      const errMsg = `❌ *Real Mode: Dat Lenh That Bai*\n\n${symbol} ${direction}\nLoi: ${err?.message ?? "unknown"}`;
+      await this.telegramService.sendTelegramMessage(chatId, errMsg).catch(() => {});
+    }
+  }
+
+  // ─── Move stop loss for real users ───────────────────────────────────────
+
+  /**
+   * Called when the global SL milestone (break-even or trailing stop) fires.
+   * Moves the SL on Binance for all users with an OPEN trade for this symbol.
+   */
+  async moveStopLossForRealUsers(
+    symbol: string,
+    newSlPrice: number,
+    direction: string,
+  ): Promise<void> {
+    const openTrades = await this.userTradeModel.find({ symbol, status: "OPEN" }).lean();
+    if (openTrades.length === 0) return;
+
+    for (const trade of openTrades) {
+      try {
+        const keys = await this.userSettingsService.getApiKeys(trade.telegramId, "binance");
+        if (!keys?.apiKey) continue;
+
+        // Cancel existing SL algo order
+        if (trade.binanceSlAlgoId) {
+          await this.binanceService.cancelAlgoOrder(
+            keys.apiKey,
+            keys.apiSecret,
+            trade.binanceSlAlgoId,
+          );
+        }
+
+        // Place new SL
+        const slOrder = await this.binanceService.setStopLoss(
+          keys.apiKey,
+          keys.apiSecret,
+          symbol,
+          newSlPrice,
+          direction as "LONG" | "SHORT",
+          trade.quantity,
+        );
+        const newAlgoId = slOrder?.algoId?.toString() ?? slOrder?.orderId?.toString();
+
+        await this.userTradeModel.findByIdAndUpdate((trade as any)._id, {
+          slPrice: newSlPrice,
+          binanceSlAlgoId: newAlgoId,
+        });
+
+        const isBreakEven = Math.abs(newSlPrice - trade.entryPrice) / trade.entryPrice < 0.001;
+        const label = isBreakEven ? "hoa von (break-even)" : "+2% profit (trailing stop)";
+        const fmtP = (p: number) =>
+          p >= 1000 ? `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :
+          p >= 1 ? `$${p.toFixed(2)}` : `$${p.toFixed(4)}`;
+        const msg =
+          `🔒 *Real Mode: SL Duoc Chuyen*\n\n` +
+          `${symbol} ${direction}\n` +
+          `SL moi: *${fmtP(newSlPrice)}* (${label})`;
+        await this.telegramService.sendTelegramMessage(trade.chatId, msg).catch(() => {});
+
+        this.logger.log(
+          `[RealTrading] ${symbol} SL moved to ${newSlPrice} for user ${trade.telegramId} (${label})`,
+        );
+      } catch (err) {
+        this.logger.error(
+          `[RealTrading] moveStopLoss failed for user ${trade.telegramId} ${symbol}: ${err?.message}`,
+        );
+      }
+    }
+  }
+
+  // ─── Trade close handler ──────────────────────────────────────────────────
+
+  /**
+   * Called by UserDataStreamService when a position close is detected.
+   */
+  async onTradeClose(
+    telegramId: number,
+    symbol: string,
+    exitPrice: number,
+    reason: string,
+  ): Promise<void> {
+    const trade = await this.userTradeModel.findOne({ telegramId, symbol, status: "OPEN" });
+    if (!trade) return;
+
+    const pnlPct =
+      trade.direction === "LONG"
+        ? ((exitPrice - trade.entryPrice) / trade.entryPrice) * 100
+        : ((trade.entryPrice - exitPrice) / trade.entryPrice) * 100;
+    const pnlUsdt = (pnlPct / 100) * trade.notionalUsdt;
+
+    await this.userTradeModel.findByIdAndUpdate((trade as any)._id, {
+      status: "CLOSED",
+      closeReason: reason,
+      exitPrice,
+      pnlPercent: pnlPct,
+      pnlUsdt,
+      closedAt: new Date(),
+    });
+
+    const sign = pnlPct >= 0 ? "+" : "";
+    const emoji = pnlPct >= 0 ? "✅" : "❌";
+    const reasonVi =
+      reason === "TAKE_PROFIT" ? "Take Profit" :
+      reason === "STOP_LOSS" ? "Stop Loss" : "Dong viet";
+    const fmtP = (p: number) =>
+      p >= 1000 ? `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :
+      p >= 1 ? `$${p.toFixed(2)}` : `$${p.toFixed(4)}`;
+    const msg =
+      `${emoji} *Real Mode: Lenh Da Dong*\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `${symbol} ${trade.direction}\n` +
+      `Gia vao: ${fmtP(trade.entryPrice)}\n` +
+      `Gia ra: ${fmtP(exitPrice)}\n` +
+      `PnL: *${sign}${pnlPct.toFixed(2)}% (${sign}${pnlUsdt.toFixed(2)} USDT)*\n` +
+      `Ly do: ${reasonVi}`;
+    await this.telegramService.sendTelegramMessage(trade.chatId, msg).catch(() => {});
+
+    this.logger.log(
+      `[RealTrading] Trade closed: user ${telegramId} ${symbol} ${trade.direction} @ ${exitPrice} — ${reason} — PnL: ${sign}${pnlPct.toFixed(2)}%`,
+    );
+  }
+
+  // ─── Query helpers ────────────────────────────────────────────────────────
+
+  /** Get OPEN trades for a user. */
+  async getOpenTrades(telegramId: number): Promise<UserTradeDocument[]> {
+    return this.userTradeModel.find({ telegramId, status: "OPEN" }).lean() as any;
+  }
+
+  // ─── Daily stats + close-all ───────────────────────────────────────────────
+
+  /**
+   * Compute today's trading stats for a user.
+   * Returns open trades with unrealized PnL and closed trades since start of UTC day.
+   */
+  async getDailyStats(telegramId: number): Promise<{
+    openTrades: Array<{
+      symbol: string; direction: string; entryPrice: number;
+      quantity: number; leverage: number; notionalUsdt: number;
+      unrealizedPnlPct: number; unrealizedPnlUsdt: number; openedAt: Date;
+    }>;
+    closedToday: Array<{
+      symbol: string; direction: string; closeReason?: string;
+      pnlPercent: number; pnlUsdt: number; closedAt?: Date;
+    }>;
+    totalPnlUsdt: number;
+    totalNotionalUsdt: number;
+    dailyPnlPct: number;
+  }> {
+    const startOfToday = new Date();
+    startOfToday.setUTCHours(0, 0, 0, 0);
+
+    const [openDocs, closedDocs] = await Promise.all([
+      this.userTradeModel.find({ telegramId, status: "OPEN" }).lean(),
+      this.userTradeModel.find({
+        telegramId, status: "CLOSED",
+        closedAt: { $gte: startOfToday },
+      }).lean(),
+    ]);
+
+    // Fetch current prices for open trades
+    const openTrades = await Promise.all(openDocs.map(async (t) => {
+      const currentPrice = (await this.fetchCurrentPrice(t.symbol)) ?? t.entryPrice;
+      const unrealizedPnlPct = t.direction === "LONG"
+        ? ((currentPrice - t.entryPrice) / t.entryPrice) * 100
+        : ((t.entryPrice - currentPrice) / t.entryPrice) * 100;
+      const unrealizedPnlUsdt = (unrealizedPnlPct / 100) * t.notionalUsdt;
+      return {
+        symbol: t.symbol, direction: t.direction,
+        entryPrice: t.entryPrice, quantity: t.quantity, leverage: t.leverage,
+        notionalUsdt: t.notionalUsdt,
+        unrealizedPnlPct, unrealizedPnlUsdt,
+        openedAt: t.openedAt,
+      };
+    }));
+
+    const closedToday = closedDocs.map((t) => ({
+      symbol: t.symbol, direction: t.direction, closeReason: t.closeReason,
+      pnlPercent: t.pnlPercent ?? 0, pnlUsdt: t.pnlUsdt ?? 0,
+      closedAt: t.closedAt,
+    }));
+
+    const totalPnlUsdt =
+      openTrades.reduce((s, t) => s + t.unrealizedPnlUsdt, 0) +
+      closedToday.reduce((s, t) => s + t.pnlUsdt, 0);
+
+    const totalNotionalUsdt =
+      openTrades.reduce((s, t) => s + t.notionalUsdt, 0) +
+      closedDocs.reduce((s, t) => s + t.notionalUsdt, 0);
+
+    const dailyPnlPct = totalNotionalUsdt > 0 ? (totalPnlUsdt / totalNotionalUsdt) * 100 : 0;
+
+    return { openTrades, closedToday, totalPnlUsdt, totalNotionalUsdt, dailyPnlPct };
+  }
+
+  /**
+   * Cancel all SL/TP algo orders and market-close all open positions for a user.
+   * Used when daily target or daily stop loss is triggered.
+   * Returns the number of positions closed.
+   */
+  async closeAllRealPositions(telegramId: number, chatId: number, reason: string): Promise<number> {
+    const openTrades = await this.userTradeModel.find({ telegramId, status: "OPEN" }).lean();
+    if (openTrades.length === 0) return 0;
+
+    const keys = await this.userSettingsService.getApiKeys(telegramId, "binance");
+    if (!keys?.apiKey) return 0;
+
+    let closed = 0;
+    for (const trade of openTrades) {
+      try {
+        // Cancel existing SL algo order
+        if (trade.binanceSlAlgoId) {
+          await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, trade.binanceSlAlgoId).catch(() => {});
+        }
+        // Cancel existing TP algo order
+        if (trade.binanceTpAlgoId) {
+          await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, trade.binanceTpAlgoId).catch(() => {});
+        }
+
+        // Place reduce-only market order to close
+        const closeOrder = await this.binanceService.closePosition(
+          keys.apiKey, keys.apiSecret, trade.symbol, trade.quantity, trade.direction,
+        );
+        const exitPrice = parseFloat(closeOrder.avgPrice) || (await this.fetchCurrentPrice(trade.symbol)) || trade.entryPrice;
+
+        const pnlPct = trade.direction === "LONG"
+          ? ((exitPrice - trade.entryPrice) / trade.entryPrice) * 100
+          : ((trade.entryPrice - exitPrice) / trade.entryPrice) * 100;
+        const pnlUsdt = (pnlPct / 100) * trade.notionalUsdt;
+
+        await this.userTradeModel.findByIdAndUpdate((trade as any)._id, {
+          status: "CLOSED",
+          closeReason: reason,
+          exitPrice,
+          pnlPercent: pnlPct,
+          pnlUsdt,
+          closedAt: new Date(),
+        });
+
+        this.logger.log(
+          `[RealTrading] closeAllRealPositions: closed ${trade.symbol} ${trade.direction} @ ${exitPrice} for user ${telegramId} (${reason})`,
+        );
+        closed++;
+      } catch (err) {
+        this.logger.error(
+          `[RealTrading] closeAllRealPositions error ${trade.symbol} for user ${telegramId}: ${err?.message}`,
+        );
+      }
+    }
+    return closed;
+  }
+
+  // ─── Daily P&L limit crons ────────────────────────────────────────────────
+
+  /**
+   * Every 5 minutes: check daily P&L limits for real-mode users.
+   * If a user's daily profit target or stop loss is hit → close all + disable real mode.
+   */
+  @Cron("0 */5 * * * *")
+  async checkDailyLimits(): Promise<void> {
+    try {
+      const users = await this.subscriptionService.findRealModeSubscribersWithDailyLimits();
+      if (users.length === 0) return;
+
+      for (const user of users) {
+        try {
+          const stats = await this.getDailyStats(user.telegramId);
+          if (stats.totalNotionalUsdt === 0) continue; // no trades today
+
+          const pnlPct = stats.dailyPnlPct;
+          const targetHit = user.realModeDailyTargetPct != null && pnlPct >= user.realModeDailyTargetPct;
+          const slHit = user.realModeDailyStopLossPct != null && pnlPct <= -user.realModeDailyStopLossPct;
+
+          if (!targetHit && !slHit) continue;
+
+          const reason = targetHit ? "DAILY_TARGET" : "DAILY_STOP_LOSS";
+          const sign = stats.totalPnlUsdt >= 0 ? "+" : "";
+
+          // Close all open positions
+          const closedCount = await this.closeAllRealPositions(user.telegramId, user.chatId, reason);
+
+          // Disable real mode
+          await this.subscriptionService.setRealMode(user.telegramId, false);
+          await this.subscriptionService.setRealModeDailyDisabled(user.telegramId, new Date());
+
+          const emoji = targetHit ? "🎯" : "🛑";
+          const titleVi = targetHit ? "Dat Muc Tieu Ngay" : "Dung Lo Ngay";
+          const msg =
+            `${emoji} *Real Mode: ${titleVi}*\n` +
+            `━━━━━━━━━━━━━━━━━━\n\n` +
+            `PnL hom nay: *${sign}${stats.totalPnlUsdt.toFixed(2)} USDT* (*${sign}${pnlPct.toFixed(2)}%*)\n` +
+            (targetHit ? `Muc tieu: *+${user.realModeDailyTargetPct}%*\n` : ``) +
+            (slHit ? `Gioi han lo: *-${user.realModeDailyStopLossPct}%*\n` : ``) +
+            (closedCount > 0 ? `Da dong: *${closedCount} lenh*\n` : ``) +
+            `\nReal mode da *TAT*. Se tu dong BAT lai vao ngay mai 00:01 UTC.`;
+          await this.telegramService.sendTelegramMessage(user.chatId, msg).catch(() => {});
+
+          this.logger.log(
+            `[RealTrading] Daily limit hit for user ${user.telegramId}: ${reason} — PnL ${sign}${pnlPct.toFixed(2)}%`,
+          );
+        } catch (err) {
+          this.logger.error(`[RealTrading] checkDailyLimits error for user ${user.telegramId}: ${err?.message}`);
+        }
+      }
+    } catch (err) {
+      this.logger.error(`[RealTrading] checkDailyLimits outer error: ${err?.message}`);
+    }
+  }
+
+  /**
+   * At 00:01 UTC daily: re-enable real mode for users who were auto-disabled by a daily limit yesterday.
+   */
+  @Cron("0 1 0 * * *")
+  async resetDailyLimits(): Promise<void> {
+    try {
+      const users = await this.subscriptionService.findUsersForDailyReset();
+      if (users.length === 0) return;
+
+      for (const user of users) {
+        try {
+          await this.subscriptionService.setRealMode(user.telegramId, true);
+          await this.subscriptionService.setRealModeDailyDisabled(user.telegramId, null);
+
+          const targetLine = user.realModeDailyTargetPct != null
+            ? `Muc tieu: *+${user.realModeDailyTargetPct}%*\n` : ``;
+          const slLine = user.realModeDailyStopLossPct != null
+            ? `Gioi han lo: *-${user.realModeDailyStopLossPct}%*\n` : ``;
+
+          const msg =
+            `🌅 *Real Mode: Ngay Moi Bat Dau*\n` +
+            `━━━━━━━━━━━━━━━━━━\n\n` +
+            `Real mode da duoc *BAT lai* cho ngay hom nay.\n` +
+            targetLine + slLine +
+            `\nDung /ai realmode off de tat neu can.`;
+          await this.telegramService.sendTelegramMessage(user.chatId, msg).catch(() => {});
+
+          this.logger.log(`[RealTrading] Daily reset: re-enabled real mode for user ${user.telegramId}`);
+        } catch (err) {
+          this.logger.error(`[RealTrading] resetDailyLimits error for user ${user.telegramId}: ${err?.message}`);
+        }
+      }
+    } catch (err) {
+      this.logger.error(`[RealTrading] resetDailyLimits outer error: ${err?.message}`);
+    }
+  }
+
+  // ─── Private helpers ──────────────────────────────────────────────────────
+
+  private async resolveLeverage(
+    sub: SubscriberInfo,
+    params: AiTunedParams,
+    apiKey: string,
+    apiSecret: string,
+    symbol: string,
+  ): Promise<number> {
+    const mode = sub.realModeLeverageMode ?? "AI";
+    if (mode === "FIXED") return sub.realModeLeverage ?? 10;
+    if (mode === "MAX") {
+      try {
+        const client = this.binanceService.createClient(apiKey, apiSecret);
+        const brackets = await (client as any).futuresLeverageBracket({ symbol, recvWindow: 5000 });
+        return (brackets as any)[0]?.brackets?.[0]?.initialLeverage ?? 20;
+      } catch {
+        return 20;
+      }
+    }
+    // "AI" mode
+    return (params as any).leverage ?? 10;
+  }
+
+  private getVolForSymbol(
+    symbol: string,
+    coinVolumes?: Record<string, number>,
+    tradingBalance?: number,
+  ): number {
+    const base = symbol.replace(/USDT$/, "");
+    return coinVolumes?.[base] ?? coinVolumes?.[symbol] ?? tradingBalance ?? 1000;
+  }
+
+  private async getQuantityPrecision(symbol: string): Promise<number> {
+    const cached = await this.redisService.get<number>(QTY_PRECISION_KEY(symbol));
+    if (cached != null) return cached;
+
+    try {
+      const res = await axios.get("https://fapi.binance.com/fapi/v1/exchangeInfo", {
+        timeout: 5_000,
+      });
+      const info = res.data.symbols?.find((s: any) => s.symbol === symbol);
+      const precision = info?.quantityPrecision ?? 3;
+      await this.redisService.set(QTY_PRECISION_KEY(symbol), precision, 24 * 3600);
+      return precision;
+    } catch {
+      return 3; // safe default
+    }
+  }
+
+  private async fetchCurrentPrice(symbol: string): Promise<number | null> {
+    // Prefer the live WebSocket price (already subscribed for signal monitoring)
+    const wsPrice = this.marketDataService.getLatestPrice(symbol);
+    if (wsPrice && wsPrice > 0) return wsPrice;
+
+    // Fallback: HTTP fetch if symbol not in current shortlist/WS feed
+    try {
+      const res = await axios.get(
+        `https://fapi.binance.com/fapi/v1/ticker/price?symbol=${symbol}`,
+        { timeout: 5_000 },
+      );
+      return parseFloat(res.data.price);
+    } catch {
+      return null;
+    }
+  }
+
+  /** Re-register data streams for users with OPEN trades (called on module init). */
+  private async reRegisterOpenTradeStreams(): Promise<void> {
+    if (!this.userDataStreamService) return;
+    try {
+      const telegramIds = await this.userTradeModel
+        .distinct("telegramId", { status: "OPEN" })
+        .exec();
+      for (const telegramId of telegramIds) {
+        const keys = await this.userSettingsService.getApiKeys(telegramId, "binance");
+        if (keys?.apiKey) {
+          await this.userDataStreamService.registerUser(telegramId, keys.apiKey, keys.apiSecret).catch(() => {});
+        }
+      }
+      if (telegramIds.length > 0) {
+        this.logger.log(
+          `[RealTrading] Re-registered data streams for ${telegramIds.length} user(s) with open trades`,
+        );
+      }
+    } catch (err) {
+      this.logger.warn(`[RealTrading] reRegisterOpenTradeStreams error: ${err?.message}`);
+    }
+  }
+}

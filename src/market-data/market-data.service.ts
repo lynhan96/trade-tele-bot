@@ -58,6 +58,9 @@ export class MarketDataService implements OnModuleInit, OnModuleDestroy {
   // Callbacks are fired on every kline tick (including non-final) at ~250ms resolution.
   private priceListeners = new Map<string, Set<(price: number) => void>>();
 
+  // Latest price from WebSocket feed (in-memory, updated on every tick)
+  private latestPrices = new Map<string, number>();
+
   // Shutdown flag to prevent Redis calls during module destroy
   private isShuttingDown = false;
 
@@ -88,10 +91,18 @@ export class MarketDataService implements OnModuleInit, OnModuleDestroy {
   async updateSubscriptions(newCoins: string[]): Promise<void> {
     const newSet = new Set(newCoins.map((c) => c.toUpperCase()));
 
-    // Unsubscribe removed coins
+    // Unsubscribe removed coins — but keep WS alive if there are active price listeners
     for (const coin of this.subscribedCoins) {
       if (!newSet.has(coin)) {
-        this.unsubscribeCoin(coin);
+        const symbol = `${coin.toUpperCase()}USDT`;
+        const hasActiveListeners = (this.priceListeners.get(symbol)?.size ?? 0) > 0;
+        if (hasActiveListeners) {
+          // Keep subscribed so real-time TP/SL monitoring continues for active signals
+          newSet.add(coin);
+          this.logger.debug(`[MarketData] Keeping WS for ${coin} — has active signal listeners`);
+        } else {
+          this.unsubscribeCoin(coin);
+        }
       }
     }
 
@@ -186,6 +197,14 @@ export class MarketDataService implements OnModuleInit, OnModuleDestroy {
     this.priceListeners.get(symbol)?.delete(cb);
   }
 
+  /**
+   * Get the latest known price for a symbol from the WebSocket feed.
+   * Returns null if the symbol is not in the current subscription (not in shortlist).
+   */
+  getLatestPrice(symbol: string): number | null {
+    return this.latestPrices.get(symbol) ?? null;
+  }
+
   // ─── Internal: WebSocket subscription ────────────────────────────────────
 
   private async subscribeCoin(coin: string): Promise<void> {
@@ -277,6 +296,7 @@ export class MarketDataService implements OnModuleInit, OnModuleDestroy {
     // Emit live price to registered listeners on every tick (including non-final).
     // This is used by PositionMonitorService for real-time TP/SL checking (~250ms resolution).
     const currentPrice = parseFloat(close);
+    this.latestPrices.set(symbol, currentPrice); // cache for getLatestPrice()
     this.priceListeners.get(symbol)?.forEach((cb) => cb(currentPrice));
 
     // Only process when candle is CLOSED (isFinal = true)

@@ -9,6 +9,10 @@ import {
   AiRegimeHistory,
   AiRegimeHistorySchema,
 } from "../schemas/ai-regime-history.schema";
+import {
+  AiMarketConfig,
+  AiMarketConfigSchema,
+} from "../schemas/ai-market-config.schema";
 
 @Module({
   imports: [
@@ -16,6 +20,7 @@ import {
     MarketDataModule,
     MongooseModule.forFeature([
       { name: AiRegimeHistory.name, schema: AiRegimeHistorySchema },
+      { name: AiMarketConfig.name, schema: AiMarketConfigSchema },
     ]),
   ],
   providers: [IndicatorService, RuleEngineService, AiOptimizerService],

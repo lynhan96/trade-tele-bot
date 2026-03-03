@@ -1,5 +1,192 @@
 # Changelog
 
+## 2026-03-03 (3) - AI Dynamic Coin Filters + Signal Quality Improvements
+
+### Feature: AI-Decided Dynamic Coin Filter Settings
+
+The coin filter settings (`minVolumeUsd`, `minPriceChangePct`, `maxShortlistSize`) are now decided dynamically by Haiku based on market regime. Past decisions are stored in MongoDB as conversation history so the next Haiku call can reference what was recommended before and why.
+
+**How it works:**
+- `AiOptimizerService.tuneMarketFilters()` is called fire-and-forget when regime changes or no cached settings exist
+- Fetches last 5 decisions from MongoDB as conversation history → calls Haiku with regime + BTC indicators + history
+- Saves result to MongoDB (`ai_market_configs` collection) and Redis (`cache:ai:market-filters`, 8h TTL)
+- `CoinFilterService` reads from Redis first → falls back to `.env` values if no AI decision cached
+- `.env` values (`AI_MIN_COIN_VOLUME_USD`, `AI_MIN_PRICE_CHANGE_PCT`, `AI_MAX_SHORTLIST_SIZE`) are now fallback defaults only
+
+### Enhancement: Per-Coin 4h EMA Trend Filter
+
+Individual coins can trend differently from BTC. Added a per-coin trend alignment gate in `processCoin()`:
+- Fetches 4h closes and computes EMA21 vs EMA50
+- If spread > 0.3% (trend is meaningful): blocks LONG signals when coin is in 4h downtrend, blocks SHORT when in 4h uptrend
+- Prevents counter-trend entries caused by global regime being BTC-only
+
+### Enhancement: ADX Gate for TREND_EMA Strategy
+
+The TREND_EMA strategy was generating false entries in choppy, directionless markets. Added ADX (Average Directional Index) gate:
+- `adxMin: 20` default in `AiTunedParams` and defaults
+- `evalTrendEma()` in `RuleEngineService` blocks entry if ADX < threshold
+- `getAdx()` added to `IndicatorService` using Wilder's smoothing algorithm
+
+### Cleanup: Legacy Code Removal
+
+Stripped ~800 lines of dead code left from the old command structure:
+- `user-settings.service.ts` reduced from 835 → 82 lines (only `saveApiKeys` + `getApiKeys` remain)
+- `user-settings.schema.ts` stripped of all TP/bots/retry/migration fields
+- `src/simulator/` directory deleted (8 files, all unused)
+- Unused methods removed from `binance.service.ts`
+
+### Fix: ecosystem.config.js Production Config
+
+Removed hardcoded Mac paths from `ecosystem.config.js` (would have broken on remote Linux server). Set `watch: false` (no hot-reload needed in production).
+
+### Files Modified
+- `src/schemas/ai-market-config.schema.ts` — NEW: MongoDB schema for AI filter decisions
+- `src/strategy/ai-optimizer/ai-optimizer.service.ts` — added `tuneMarketFilters()`, injected `AiMarketConfig` model, call on regime change
+- `src/strategy/strategy.module.ts` — registered `AiMarketConfig` schema
+- `src/coin-filter/coin-filter.service.ts` — dynamic `getEffectiveFilterConfig()` reads Redis first
+- `src/ai-signal/ai-signal.service.ts` — per-coin 4h EMA trend filter in `processCoin()`, `IndicatorService` injected
+- `src/strategy/rules/rule-engine.service.ts` — ADX gate in `evalTrendEma()`
+- `src/strategy/indicators/indicator.service.ts` — added `getAdx()` method
+- `src/strategy/ai-optimizer/ai-tuned-params.interface.ts` — added `adxMin?` to trendEma config
+- `src/user/user-settings.service.ts` — stripped to minimal (saveApiKeys + getApiKeys only)
+- `src/schemas/user-settings.schema.ts` — stripped of legacy fields
+- `ecosystem.config.js` — fixed for production deployment
+
+---
+
+## 2026-03-03 (2) - Daily P&L Limits for Real Trading Mode
+
+### Feature: Daily P&L Limits (Profit Target + Daily Stop Loss)
+
+Users with real trading mode enabled can now configure automatic daily profit targets and stop-loss thresholds. When a limit is hit, all real positions are closed and real mode is auto-disabled until the next day.
+
+**New Commands:**
+- `/ai realmode target <N|off>` — Set daily profit target % (e.g. `target 5` = auto-close all + disable at +5%)
+- `/ai realmode stoploss <N|off>` — Set daily stop loss % (e.g. `stoploss 3` = auto-close all + disable at -3%)
+- `/ai realmode stats` — Detailed today's P&L: open trades with unrealized PnL + closed trades today + combined total
+
+**Daily P&L Calculation:**
+- `dailyPnlPct = (closedPnlToday + unrealizedPnlOpen) / totalNotionalToday × 100`
+- Checked every 5 minutes via `@Cron("0 */5 * * * *")`
+
+**Auto-Disable Behavior:**
+- Limit hit → all algo orders cancelled → all open positions market-closed → real mode disabled → user notified
+- `realModeDailyDisabledAt` field set to current timestamp on disable
+- At 00:01 UTC: midnight reset cron (`@Cron("0 1 0 * * *")`) re-enables users disabled yesterday → notifies them
+- Manual `/ai realmode on` also clears `realModeDailyDisabledAt` (fresh daily counter)
+
+**Enhanced `/ai realmode` Overview:**
+- Now shows current daily limits (target/SL %) alongside leverage and enabled status
+- Shows quick today's PnL summary inline
+
+### Schema Changes
+- `src/schemas/user-signal-subscription.schema.ts` — added `realModeDailyTargetPct`, `realModeDailyStopLossPct`, `realModeDailyDisabledAt`
+
+### Service Changes
+- `src/ai-signal/user-signal-subscription.service.ts` — added `findRealModeSubscribersWithDailyLimits()`, `findUsersForDailyReset()`, `setDailyTargetPct()`, `setDailyStopLossPct()`, `setRealModeDailyDisabled()`
+- `src/ai-signal/user-real-trading.service.ts` — added `getDailyStats()`, `closeAllRealPositions()`, `checkDailyLimits()` cron, `resetDailyLimits()` cron
+
+### Files Modified
+- `src/schemas/user-signal-subscription.schema.ts` — three new daily-limits fields
+- `src/ai-signal/user-signal-subscription.service.ts` — daily-limits query/update methods
+- `src/ai-signal/user-real-trading.service.ts` — daily stats, close-all, two new crons
+- `src/ai-signal/ai-command.service.ts` — `/ai realmode target`, `/ai realmode stoploss`, `/ai realmode stats` handlers; enhanced overview
+
+---
+
+## 2026-03-03 (1) - Per-User Real Trading Mode
+
+### Feature: Per-User Real Trading Mode
+
+Users can now opt in to have real Binance Futures orders placed automatically whenever an AI signal activates.
+
+**New Commands:**
+- `/ai setkeys <key> <secret>` — Save Binance API credentials for real trading
+- `/ai realmode [on|off|leverage AI|MAX|<N>]` — Enable/disable real mode and configure leverage
+
+**Leverage Modes:** `AI` (use signal params leverage), `FIXED` (user-set value), `MAX` (query Binance max per symbol)
+
+**Order Lifecycle:**
+1. Signal activates → 0.5% tolerance check → MARKET open order placed
+2. Algo SL order placed (`POST /fapi/v1/algoOrder`, `STOP_MARKET + closePosition=true`)
+3. Algo TP order placed if signal has TP price (`TAKE_PROFIT_MARKET + closePosition=true`)
+4. PnL ≥ 4% → old SL cancelled, new SL placed at entry (break-even)
+5. PnL ≥ 5% → old SL cancelled, new SL raised to +2% profit (trailing stop)
+6. Position close detected via WebSocket `ORDER_TRADE_UPDATE` → trade recorded + user notified with P&L
+
+**Architecture:**
+- `UserRealTradingService` orchestrates order placement and SL moves
+- `UserDataStreamService` manages per-user Binance WS streams (1 per user); auto-reconnects on close with 10s delay + 30min keepalive
+- Circular dep between the two services broken via `setDataStreamService()` setter injection in `onModuleInit`
+- Price from `MarketDataService.getLatestPrice()` — in-memory WS map (no extra HTTP roundtrip); falls back to REST if symbol not in shortlist
+- Symbol quantity precision cached in Redis (24h TTL) via `/fapi/v1/exchangeInfo`
+- UserTrade documents track entry, SL/TP algo IDs, P&L, and close reason
+
+### Files Added
+- `src/ai-signal/user-real-trading.service.ts` — NEW: real order orchestration
+- `src/ai-signal/user-data-stream.service.ts` — NEW: per-user Binance WS account stream
+- `src/schemas/user-trade.schema.ts` — NEW: UserTrade history schema
+
+### Files Modified
+- `src/schemas/user-signal-subscription.schema.ts` — added `realModeEnabled`, `realModeLeverage`, `realModeLeverageMode`
+- `src/ai-signal/user-signal-subscription.service.ts` — added `findRealModeSubscribers()`, `setRealMode()`, `setRealModeLeverage()`; updated SubscriberInfo
+- `src/binance/binance.service.ts` — added `setTakeProfitAtPrice()`, `cancelAlgoOrder()`
+- `src/ai-signal/ai-command.service.ts` — added `/ai setkeys` and `/ai realmode` handlers; injected new services
+- `src/ai-signal/ai-signal.module.ts` — added UserModule, UserTrade schema, UserRealTradingService, UserDataStreamService
+- `src/ai-signal/ai-signal.service.ts` — calls `userRealTradingService.onSignalActivated()` when signal goes ACTIVE
+- `src/ai-signal/position-monitor.service.ts` — calls `moveStopLossForRealUsers()` at 4% and 5% SL milestones
+- `src/market-data/market-data.service.ts` — added `latestPrices` in-memory map + `getLatestPrice()` method
+
+---
+
+## 2026-03-02 (2) - PnL/Volume Display Overhaul, Trend Filter, BB_SCALP Improvements
+
+### Enhancement: PnL Display in USDT (not $)
+
+All PnL amounts now use `USDT` suffix instead of `$` prefix. Prices keep `$`. Stats and signal displays updated:
+- Stats page: shows cumulative USDT total (sum of all trades × 1000 USDT) + average % per trade
+- Signal display: TP/SL lines show both % and USDT (e.g. `+15.00 USDT / +1.5%`)
+- BTC signals use 5× volume (5,000 USDT) since BTC has small % moves
+- Total PnL summary shows weighted USDT total across all active signals
+
+### Feature: Global Regime Trend Filter (STRONG_BULL / STRONG_BEAR)
+
+Replaced `STRONG_TREND` regime with directional `STRONG_BULL` and `STRONG_BEAR`. Detection uses proper technical indicators:
+- **STRONG_BULL**: RSI(15m) > 58 + price above EMA9 + 4h RSI > 52 + price above EMA200
+- **STRONG_BEAR**: RSI(15m) < 42 + price below EMA9 + 4h RSI < 48 + price below EMA200
+
+Signal direction filter enforced in `ai-signal.service.ts`:
+- `STRONG_BEAR` regime → skip all LONG signals
+- `STRONG_BULL` regime → skip all SHORT signals
+
+### Enhancement: BB_SCALP Strategy Improvements
+
+Based on performance data (RSI_CROSS 63% win rate vs BB_SCALP 37%), tuned BB_SCALP to reduce over-trading:
+- Changed SIDEWAYS default strategy from `BB_SCALP` → `RSI_CROSS`
+- Haiku prompt updated to prefer RSI_CROSS in SIDEWAYS regime
+- Tightened BB_SCALP params: `bbTolerance 0.3→0.1`, `rsiLongMax 52→45`, `rsiShortMin 48→55`
+- Improved logic: requires confirmed bounce (prev candle at band + current candle reversing + RSI turning) instead of simple band touch
+
+### Bug Fix: Duplicate BTCUSDT Dual-Timeframe Signals
+
+When BTCUSDT:SWING had ACTIVE SHORT, BTCUSDT:INTRADAY SHORT would also activate simultaneously. Fixed with cross-profile direction check in `handleNewSignal()`.
+
+### Bug Fix: Delayed SL Detection for Delisted Coins
+
+When coins dropped off shortlist, WebSocket closed → price listeners stopped → TP/SL only caught by 30s polling. Fixed: `marketDataService` keeps WS alive for coins that have active price listeners.
+
+### Files Modified
+- `src/ai-signal/ai-command.service.ts` — USDT display, per-coin vol (BTC=5000), TP/SL USDT amounts, weighted total
+- `src/ai-signal/ai-signal-stats.service.ts` — cumulative USDT PnL, USDT formatting
+- `src/ai-signal/signal-queue.service.ts` — cross-profile direction dedup for dual-timeframe coins
+- `src/market-data/market-data.service.ts` — keep WS alive for coins with active price listeners
+- `src/strategy/ai-optimizer/ai-tuned-params.interface.ts` — `STRONG_BULL`/`STRONG_BEAR` replace `STRONG_TREND`
+- `src/strategy/ai-optimizer/ai-optimizer.service.ts` — regime detection with EMA200, BB_SCALP tightened, SIDEWAYS→RSI_CROSS default, Haiku prompt updated
+- `src/strategy/rules/rule-engine.service.ts` — BB_SCALP improved: confirmed bounce logic, tighter defaults
+- `src/ai-signal/ai-signal.service.ts` — STRONG_BULL/BEAR direction filter, funding rate isTrend fix
+
+---
+
 ## 2026-03-02 (1) - Signals UI Redesign, Auto-Push, Auto Risk Management, Orphan Cleanup
 
 ### Feature: Redesigned /ai signals UI

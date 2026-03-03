@@ -8,6 +8,7 @@ import { TelegramBotService } from "../telegram/telegram.service";
 import { CoinFilterService } from "../coin-filter/coin-filter.service";
 import { AiOptimizerService } from "../strategy/ai-optimizer/ai-optimizer.service";
 import { RuleEngineService } from "../strategy/rules/rule-engine.service";
+import { IndicatorService } from "../strategy/indicators/indicator.service";
 import { SignalQueueService } from "./signal-queue.service";
 import {
   PositionMonitorService,
@@ -25,6 +26,7 @@ import {
   DailyMarketSnapshot,
   DailyMarketSnapshotDocument,
 } from "../schemas/daily-market-snapshot.schema";
+import { UserRealTradingService } from "./user-real-trading.service";
 
 const AI_PAUSED_KEY = "cache:ai:paused";
 const AI_TEST_MODE_KEY = "cache:ai:test-mode";
@@ -50,10 +52,12 @@ export class AiSignalService implements OnModuleInit {
     private readonly coinFilterService: CoinFilterService,
     private readonly aiOptimizerService: AiOptimizerService,
     private readonly ruleEngineService: RuleEngineService,
+    private readonly indicatorService: IndicatorService,
     private readonly signalQueueService: SignalQueueService,
     private readonly positionMonitorService: PositionMonitorService,
     private readonly subscriptionService: UserSignalSubscriptionService,
     private readonly futuresAnalyticsService: FuturesAnalyticsService,
+    private readonly userRealTradingService: UserRealTradingService,
     @InjectModel(AiSignal.name)
     private readonly aiSignalModel: Model<AiSignalDocument>,
     @InjectModel(AiCoinProfile.name)
@@ -104,6 +108,11 @@ export class AiSignalService implements OnModuleInit {
       await this.notifySlMovedToEntry(symbol, entryPrice);
     });
 
+    // Register callback for 5% milestone (SL raised to +2% profit)
+    this.positionMonitorService.setSl5PctCallback(async (symbol, newSl, direction) => {
+      await this.notifySl5PctMilestone(symbol, newSl, direction);
+    });
+
     // Cleanup orphaned actives + duplicate completed signals on startup
     try {
       const orphans = await this.signalQueueService.cleanupOrphanedActives();
@@ -117,6 +126,8 @@ export class AiSignalService implements OnModuleInit {
 
     try {
       await this.coinFilterService.scanAndFilter();
+      // Flush stale coin param caches on startup so any config changes take effect immediately
+      await this.aiOptimizerService.flushParamCaches();
       await this.aiOptimizerService.assessGlobalRegime();
     } catch (err) {
       this.logger.error(`[AiSignal] onModuleInit error: ${err?.message}`);
@@ -397,11 +408,15 @@ export class AiSignalService implements OnModuleInit {
   @Cron("*/5 * * * *")
   async cleanupExpiredQueued() {
     try {
-      const count = await this.signalQueueService.cleanupExpiredQueued();
+      const { count, cancelledActives } = await this.signalQueueService.cleanupExpiredQueued();
       if (count > 0) {
         this.logger.log(
           `[AiSignal] Cleaned up ${count} expired QUEUED signal(s)`,
         );
+      }
+      // Notify subscribers for any ACTIVE signals that were TTL-cancelled
+      for (const signal of cancelledActives) {
+        await this.notifySignalExpired(signal).catch(() => {});
       }
     } catch (err) {
       this.logger.error(
@@ -612,8 +627,9 @@ export class AiSignalService implements OnModuleInit {
     if (fa) {
       let adj = 0;
       // Extreme funding: longs paying high fee → penalize LONG, boost SHORT
-      if (fa.fundingRate > 0.001) adj += params.regime === "STRONG_TREND" ? -5 : -10;
-      else if (fa.fundingRate < -0.001) adj += params.regime === "STRONG_TREND" ? -5 : -10;
+      const isTrend = params.regime === "STRONG_BULL" || params.regime === "STRONG_BEAR";
+      if (fa.fundingRate > 0.001) adj += isTrend ? -5 : -10;
+      else if (fa.fundingRate < -0.001) adj += isTrend ? -5 : -10;
       // Moderate funding confirmation
       else if (Math.abs(fa.fundingRate) < 0.0003) adj += 3;
 
@@ -630,12 +646,74 @@ export class AiSignalService implements OnModuleInit {
       }
     }
 
+    // Cap minConfidenceToTrade per regime — in ranging/sideways markets Haiku sets thresholds
+    // too high (55-65) while confidence is low (35-55), blocking all signals needlessly
+    const regimeThresholdCap: Record<string, number> = {
+      SIDEWAYS: 40,
+      RANGE_BOUND: 48,
+      MIXED: 50,
+      VOLATILE: 55,
+      BTC_CORRELATION: 55,
+      STRONG_BULL: 60,
+      STRONG_BEAR: 60,
+    };
+    const cap = regimeThresholdCap[params.regime] ?? 55;
+    if (params.minConfidenceToTrade > cap) {
+      params.minConfidenceToTrade = cap;
+    }
+
     const signalResult = await this.ruleEngineService.evaluate(
       coin,
       currency,
       params,
     );
     if (!signalResult) return;
+
+    // ── Global regime trend filter ──────────────────────────────────────────
+    // STRONG_BEAR: only SHORT signals. STRONG_BULL: only LONG signals.
+    // All other regimes (MIXED, SIDEWAYS, RANGE_BOUND, VOLATILE, BTC_CORRELATION) allow both.
+    if (params.regime === "STRONG_BEAR" && signalResult.isLong) {
+      this.logger.debug(
+        `[AiSignal] ${coin.toUpperCase()} LONG skipped — regime STRONG_BEAR (shorts only)`,
+      );
+      return;
+    }
+    if (params.regime === "STRONG_BULL" && !signalResult.isLong) {
+      this.logger.debug(
+        `[AiSignal] ${coin.toUpperCase()} SHORT skipped — regime STRONG_BULL (longs only)`,
+      );
+      return;
+    }
+
+    // ── Per-coin 4h EMA trend alignment ─────────────────────────────────────
+    // Block signals that go against the coin's own 4h trend, regardless of global regime.
+    // Neutral zone (EMA21/EMA50 spread < 0.3%) = no clear trend → both directions allowed.
+    try {
+      const htf4hCloses = await this.indicatorService.getCloses(coin, "4h");
+      if (htf4hCloses.length >= 55) {
+        const ema21 = this.indicatorService.getEma(htf4hCloses, 21);
+        const ema50 = this.indicatorService.getEma(htf4hCloses, 50);
+        const spreadPct = (Math.abs(ema21.last - ema50.last) / ema50.last) * 100;
+
+        if (spreadPct > 0.3) {
+          const coinTrendUp = ema21.last > ema50.last;
+          if (signalResult.isLong && !coinTrendUp) {
+            this.logger.log(
+              `[AiSignal] ${signalKey} LONG blocked — 4h downtrend (EMA21 < EMA50, spread=${spreadPct.toFixed(2)}%)`,
+            );
+            return;
+          }
+          if (!signalResult.isLong && coinTrendUp) {
+            this.logger.log(
+              `[AiSignal] ${signalKey} SHORT blocked — 4h uptrend (EMA21 > EMA50, spread=${spreadPct.toFixed(2)}%)`,
+            );
+            return;
+          }
+        }
+      }
+    } catch (err) {
+      this.logger.warn(`[AiSignal] Trend filter error for ${signalKey}: ${err?.message}`);
+    }
 
     const isTestMode = await this.isTestModeEnabled();
 
@@ -665,6 +743,11 @@ export class AiSignalService implements OnModuleInit {
           await this.broadcastSignal(activeSignal);
         }
         await this.notifySignalActive(activeSignal, params, isTestMode);
+
+        // Trigger real order placement for users with real mode enabled (runs independently of test mode)
+        this.userRealTradingService.onSignalActivated(activeSignal, params).catch((err) =>
+          this.logger.error(`[AiSignal] Real trading error: ${err?.message}`),
+        );
       }
     } else if (queueResult.action === "QUEUED") {
       const queuedSignal =
@@ -743,6 +826,20 @@ export class AiSignalService implements OnModuleInit {
       ? ((currentPrice - signal.entryPrice) / signal.entryPrice) * 100
       : ((signal.entryPrice - currentPrice) / signal.entryPrice) * 100;
 
+    // At >= 5% profit — raise SL to lock in 2% profit (trailing stop milestone, don't auto-close)
+    if (pnlPct >= 5 && !(signal as any).sl5PctRaised) {
+      const newSl = isLong
+        ? signal.entryPrice * 1.02
+        : signal.entryPrice * 0.98;
+      await this.signalQueueService.raiseStopLoss((signal as any)._id.toString(), newSl);
+      (signal as any).stopLossPrice = newSl;
+      (signal as any).sl5PctRaised = true;
+      this.logger.log(
+        `[AiSignal] [TEST] 🚀 ${signal.symbol} SL raised to +2% (${newSl.toFixed(4)}) at ${pnlPct.toFixed(2)}% profit — still running`,
+      );
+      await this.notifySl5PctMilestone(signal.symbol, newSl, signal.direction);
+    }
+
     // Move SL to entry (break-even) at >= 4% profit
     if (pnlPct >= 4 && !(signal as any).slMovedToEntry) {
       await this.signalQueueService.moveStopLossToEntry((signal as any)._id.toString());
@@ -755,20 +852,17 @@ export class AiSignalService implements OnModuleInit {
       await this.notifySlMovedToEntry(signal.symbol, signal.entryPrice);
     }
 
-    // Auto-close at >= 5% profit
-    const autoClose = pnlPct >= 5;
-
-    // Check both TP and SL
+    // Check both TP and SL (no auto-close at 5% — we trail instead)
     const tpHit = isLong
       ? currentPrice >= signal.takeProfitPrice
       : currentPrice <= signal.takeProfitPrice;
     const slHit = isLong
-      ? currentPrice <= signal.stopLossPrice
-      : currentPrice >= signal.stopLossPrice;
+      ? currentPrice <= (signal as any).stopLossPrice
+      : currentPrice >= (signal as any).stopLossPrice;
 
-    if (!tpHit && !slHit && !autoClose) return;
+    if (!tpHit && !slHit) return;
 
-    const reason = autoClose ? "AUTO_TAKE_PROFIT" : tpHit ? "TAKE_PROFIT" : "STOP_LOSS";
+    const reason = tpHit ? "TAKE_PROFIT" : "STOP_LOSS";
     const pnl = isLong
       ? ((currentPrice - signal.entryPrice) / signal.entryPrice) * 100
       : ((signal.entryPrice - currentPrice) / signal.entryPrice) * 100;
@@ -806,8 +900,8 @@ export class AiSignalService implements OnModuleInit {
     const fmtP = this.fmtPrice;
     const time = new Date().toLocaleString("vi-VN", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "2-digit" });
 
-    const icon = autoClose ? "💰" : tpHit ? "🎯" : "🛑";
-    const label = autoClose ? "Auto Close +5%!" : tpHit ? "Take Profit!" : "Stop Loss";
+    const icon = tpHit ? "🎯" : (pnl > 0 ? "🔒" : "🛑");
+    const label = tpHit ? "Take Profit!" : (pnl > 0 ? "Trailing Stop - Co loi!" : "Stop Loss");
     const text =
       `${icon} *${signal.symbol} ${signal.direction} — ${label}* 🧪\n` +
       `━━━━━━━━━━━━━━━━━━\n\n` +
@@ -964,6 +1058,61 @@ export class AiSignalService implements OnModuleInit {
     }
   }
 
+  private async notifySignalExpired(signal: AiSignalDocument): Promise<void> {
+    const fmtP = this.fmtPrice;
+    const hoursOpen = ((Date.now() - new Date(signal.generatedAt).getTime()) / 3600000).toFixed(1);
+    const testMark = signal.isTestMode ? " 🧪" : "";
+
+    // Fetch current price to show unrealized PnL at expiry
+    let pnlLine = "";
+    try {
+      const axios = require("axios");
+      const res = await axios.get(
+        `https://fapi.binance.com/fapi/v1/ticker/price?symbol=${signal.symbol}`,
+        { timeout: 5000 },
+      );
+      const currentPrice = parseFloat(res.data.price);
+      if (currentPrice > 0) {
+        const pnl = signal.direction === "LONG"
+          ? ((currentPrice - signal.entryPrice) / signal.entryPrice) * 100
+          : ((signal.entryPrice - currentPrice) / signal.entryPrice) * 100;
+        const pnlSign = pnl >= 0 ? "+" : "";
+        pnlLine = `PnL: *${pnlSign}${pnl.toFixed(2)}%* (gia: ${fmtP(currentPrice)})\n`;
+      }
+    } catch { /* ignore */ }
+
+    const text =
+      `⏰ *${signal.symbol} ${signal.direction} — Het han${testMark}*\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `Lenh het han (${hoursOpen}h) ma chua dat TP/SL\n` +
+      `Entry: ${fmtP(signal.entryPrice)}\n` +
+      `TP: ${fmtP(signal.takeProfitPrice)} | SL: ${fmtP(signal.stopLossPrice)}\n` +
+      pnlLine + `\n` +
+      `_${new Date().toLocaleTimeString("vi-VN")}_`;
+
+    const subscribers = await this.subscriptionService.findAllActive();
+    for (const sub of subscribers) {
+      await this.telegramService.sendTelegramMessage(sub.chatId, text).catch(() => {});
+    }
+  }
+
+  private async notifySl5PctMilestone(symbol: string, newSl: number, direction: string): Promise<void> {
+    const fmtP = this.fmtPrice;
+    const dirLabel = direction === "LONG" ? "LONG" : "SHORT";
+    const text =
+      `🚀 *${symbol} ${dirLabel} — Trailing Stop +2%*\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `Profit dat 5%! SL da nang len +2% loi nhuan\n` +
+      `SL moi: *${fmtP(newSl)}*\n` +
+      `Lenh tiep tuc chay, dam bao loi toi thieu +2%\n\n` +
+      `_${new Date().toLocaleTimeString("vi-VN")}_`;
+
+    const subscribers = await this.subscriptionService.findAllActive();
+    for (const sub of subscribers) {
+      await this.telegramService.sendTelegramMessage(sub.chatId, text).catch(() => {});
+    }
+  }
+
   private async notifyPositionClosed(info: ResolvedSignalInfo): Promise<void> {
     const pnlSign = info.pnlPercent >= 0 ? "+" : "";
     const fmtP = this.fmtPrice;
@@ -971,18 +1120,19 @@ export class AiSignalService implements OnModuleInit {
 
     let headerIcon: string;
     let headerLabel: string;
-    if (info.closeReason === "AUTO_TAKE_PROFIT") {
-      headerIcon = "💰";
-      headerLabel = "Auto Close +5%!";
-    } else if (info.closeReason === "TAKE_PROFIT") {
+    if (info.closeReason === "TAKE_PROFIT") {
       headerIcon = "🎯";
       headerLabel = "Take Profit!";
+    } else if (info.closeReason === "STOP_LOSS" && info.pnlPercent > 0) {
+      // Trailing stop hit while profitable (5% milestone SL raise)
+      headerIcon = "🔒";
+      headerLabel = "Trailing Stop - Co loi!";
     } else if (info.closeReason === "STOP_LOSS") {
       headerIcon = "🛑";
       headerLabel = "Stop Loss";
     } else {
       headerIcon = info.pnlPercent >= 0 ? "🟢" : "🔴";
-      headerLabel = "Đã đóng";
+      headerLabel = "Da dong";
     }
 
     const text =

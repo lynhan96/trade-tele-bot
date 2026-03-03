@@ -5,8 +5,10 @@
 export interface AiTunedParams {
   /** Market regime detected by AI */
   regime:
-    | "STRONG_TREND"
+    | "STRONG_BULL"
+    | "STRONG_BEAR"
     | "RANGE_BOUND"
+    | "SIDEWAYS"
     | "VOLATILE"
     | "BTC_CORRELATION"
     | "MIXED";
@@ -21,7 +23,8 @@ export interface AiTunedParams {
     | "TREND_EMA"
     | "MEAN_REVERT_RSI"
     | "STOCH_BB_PATTERN"
-    | "STOCH_EMA_KDJ";
+    | "STOCH_EMA_KDJ"
+    | "BB_SCALP";
 
   /** AI confidence in this regime assessment (0-100) */
   confidence: number;
@@ -74,6 +77,7 @@ export interface AiTunedParams {
     trendKline: string; // e.g. "4h"
     trendEmaPeriod: number; // default 200
     trendRange: number; // price must be within X% of trend EMA
+    adxMin?: number; // minimum ADX to allow entry (default 20); 0 = disabled
   };
 
   /** MEAN_REVERT_RSI specific params */
@@ -113,5 +117,16 @@ export interface AiTunedParams {
     emaRange: number; // Candle body must straddle EMA within X%
     enableKdj: boolean;
     kdjRangeLength: number;
+  };
+
+  /** BB_SCALP specific params — mean reversion at Bollinger Band extremes (SIDEWAYS regime) */
+  bbScalp?: {
+    primaryKline: string; // default "15m"
+    bbPeriod: number;     // default 20
+    bbStdDev: number;     // default 2.0
+    bbTolerance: number;  // % distance from band still triggers (default 0.3)
+    rsiPeriod: number;    // default 14
+    rsiLongMax: number;   // LONG only when RSI < this (default 52)
+    rsiShortMin: number;  // SHORT only when RSI > this (default 48)
   };
 }

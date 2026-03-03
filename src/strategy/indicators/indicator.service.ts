@@ -197,6 +197,67 @@ export class IndicatorService {
     return (avgTr / closes[closes.length - 1]) * 100;
   }
 
+  /**
+   * ADX (Average Directional Index) — measures trend strength (0–100).
+   * ADX > 20 = trending market; ADX > 30 = strong trend.
+   * Also returns DI+ and DI- for direction context.
+   * Uses Wilder's smoothing (alpha = 1/period).
+   */
+  getAdx(
+    highs: number[],
+    lows: number[],
+    closes: number[],
+    period = 14,
+  ): { adx: number; diPlus: number; diMinus: number } {
+    if (closes.length < 2 * period + 1) return { adx: 0, diPlus: 0, diMinus: 0 };
+
+    const dmPlus: number[] = [];
+    const dmMinus: number[] = [];
+    const trArr: number[] = [];
+
+    for (let i = 1; i < closes.length; i++) {
+      const upMove = highs[i] - highs[i - 1];
+      const downMove = lows[i - 1] - lows[i];
+      dmPlus.push(upMove > downMove && upMove > 0 ? upMove : 0);
+      dmMinus.push(downMove > upMove && downMove > 0 ? downMove : 0);
+      trArr.push(Math.max(
+        highs[i] - lows[i],
+        Math.abs(highs[i] - closes[i - 1]),
+        Math.abs(lows[i] - closes[i - 1]),
+      ));
+    }
+
+    // Wilder's smoothing: seed with sum of first `period` values, then roll
+    const wilder = (arr: number[], p: number): number[] => {
+      const out: number[] = [];
+      let s = arr.slice(0, p).reduce((a, v) => a + v, 0);
+      out.push(s);
+      for (let i = p; i < arr.length; i++) {
+        s = s * (p - 1) / p + arr[i];
+        out.push(s);
+      }
+      return out;
+    };
+
+    const sTr = wilder(trArr, period);
+    const sDmPlus = wilder(dmPlus, period);
+    const sDmMinus = wilder(dmMinus, period);
+
+    const dx = sTr.map((tr, i) => {
+      const diP = tr ? (100 * sDmPlus[i]) / tr : 0;
+      const diM = tr ? (100 * sDmMinus[i]) / tr : 0;
+      const sum = diP + diM;
+      return sum ? (100 * Math.abs(diP - diM)) / sum : 0;
+    });
+
+    const adxArr = wilder(dx, period);
+    const last = sTr.length - 1;
+    const diPlus = sTr[last] ? (100 * sDmPlus[last]) / sTr[last] : 0;
+    const diMinus = sTr[last] ? (100 * sDmMinus[last]) / sTr[last] : 0;
+
+    return { adx: adxArr[adxArr.length - 1], diPlus, diMinus };
+  }
+
   // ─── Cross helpers ───────────────────────────────────────────────────────
 
   crossedAbove(first: CrossValue, second: CrossValue): boolean {

@@ -9,6 +9,10 @@ import {
   AiRegimeHistory,
   AiRegimeHistoryDocument,
 } from "../../schemas/ai-regime-history.schema";
+import {
+  AiMarketConfig,
+  AiMarketConfigDocument,
+} from "../../schemas/ai-market-config.schema";
 import { AiTunedParams } from "./ai-tuned-params.interface";
 
 const HAIKU_MODEL = "claude-haiku-4-5-20251001";
@@ -17,6 +21,8 @@ const AI_PARAMS_TTL = 2 * 60 * 60; // 2h cache for tuned params
 const AI_PARAMS_JITTER = 30 * 60; // ±15 min random offset to stagger expiry
 const AI_REGIME_TTL = 4 * 60 * 60; // 4h cache for global regime
 const HAIKU_RATE_KEY = "cache:ai:rate:haiku"; // single rate limiter (only tuning uses AI now)
+const AI_MARKET_FILTERS_KEY = "cache:ai:market-filters"; // AI-decided coin filter settings
+const AI_MARKET_FILTERS_TTL = 8 * 60 * 60; // 8h — re-evaluated on regime change
 const HAIKU_SCAN_BURST_KEY = "cache:ai:rate:haiku:burst"; // per-scan burst limiter
 const MAX_RETUNES_PER_SCAN = 5; // max fresh Haiku calls per 30s scan cycle
 const SCAN_BURST_TTL = 35; // slightly longer than 30s scan interval
@@ -35,6 +41,8 @@ export class AiOptimizerService {
     private readonly indicatorService: IndicatorService,
     @InjectModel(AiRegimeHistory.name)
     private readonly regimeHistoryModel: Model<AiRegimeHistoryDocument>,
+    @InjectModel(AiMarketConfig.name)
+    private readonly marketConfigModel: Model<AiMarketConfigDocument>,
   ) {
     this.enabled = configService.get("AI_ENABLED", "true") === "true";
     this.maxHaikuPerHour = parseInt(
@@ -54,10 +62,26 @@ export class AiOptimizerService {
     }
   }
 
+  // ─── Flush all coin param caches (e.g. on startup or regime change) ────────
+
+  async flushParamCaches(): Promise<void> {
+    const prefix = "binance-bot:";
+    const keys = await this.redisService.keys("cache:ai:params:*");
+    if (keys.length === 0) return;
+    await Promise.all(
+      keys.map((k) => {
+        const unprefixed = k.startsWith(prefix) ? k.slice(prefix.length) : k;
+        return this.redisService.delete(unprefixed);
+      }),
+    );
+    this.logger.log(`[AiOptimizer] Flushed ${keys.length} coin param cache(s) on startup`);
+  }
+
   // ─── Global regime assessment (algorithmic, based on BTC indicators) ──────
 
   async assessGlobalRegime(): Promise<string> {
     const cacheKey = "cache:ai:regime";
+    const prevRegimeKey = "cache:ai:regime:prev";
     const cached = await this.redisService.get<string>(cacheKey);
     if (cached) return cached;
 
@@ -85,22 +109,61 @@ export class AiOptimizerService {
         regime = "VOLATILE";
         confidence = Math.min(85, 50 + atr15m * 10);
       }
-      // STRONG_TREND: RSI extreme + price far from EMA + 4h RSI confirms
+      // STRONG_BULL: RSI bullish + price above EMA9 + 4h RSI confirms + EMA200 supports uptrend
       else if (
-        (rsi > 65 || rsi < 35) &&
-        Math.abs(priceVsEma9) > 0.5 &&
-        ((rsi > 60 && rsi4h > 55) || (rsi < 40 && rsi4h < 45))
+        rsi > 58 && priceVsEma9 > 0.3 && rsi4h > 52 &&
+        priceVsEma200 > 0 // price above long-term EMA200 = structural uptrend
       ) {
-        regime = "STRONG_TREND";
-        confidence = Math.min(85, 50 + Math.abs(rsi - 50));
+        regime = "STRONG_BULL";
+        confidence = Math.min(85, 45 + (rsi - 50) + (priceVsEma200 > 2 ? 5 : 0));
+      }
+      // STRONG_BEAR: RSI bearish + price below EMA9 + 4h RSI confirms + EMA200 supports downtrend
+      else if (
+        rsi < 42 && priceVsEma9 < -0.3 && rsi4h < 48 &&
+        priceVsEma200 < 0 // price below long-term EMA200 = structural downtrend
+      ) {
+        regime = "STRONG_BEAR";
+        confidence = Math.min(85, 45 + (50 - rsi) + (priceVsEma200 < -2 ? 5 : 0));
       }
       // RANGE_BOUND: tight BB + RSI near middle + low ATR
       else if (bbWidth < 3 && rsi > 40 && rsi < 60 && atr15m < 1.0) {
         regime = "RANGE_BOUND";
         confidence = Math.min(80, 50 + (60 - bbWidth) * 5);
       }
+      // SIDEWAYS: moderately tight BB + mid-range RSI + calm ATR — catches the "gray zone" before MIXED
+      else if (bbWidth < 4.5 && rsi > 40 && rsi < 60 && atr15m < 1.2) {
+        regime = "SIDEWAYS";
+        confidence = Math.min(75, 50 + (4.5 - bbWidth) * 5);
+      }
 
       await this.redisService.set(cacheKey, regime, AI_REGIME_TTL);
+
+      // If regime changed → flush all coin param caches so Haiku re-evaluates with new strategy
+      const prevRegime = await this.redisService.get<string>(prevRegimeKey);
+      if (prevRegime && prevRegime !== regime) {
+        this.logger.log(
+          `[AiOptimizer] Regime changed: ${prevRegime} → ${regime} — flushing coin param caches`,
+        );
+        const paramKeys = await this.redisService.keys("cache:ai:params:*");
+        // keys() returns full prefixed keys (e.g. "binance-bot:cache:ai:params:BTC")
+        // delete() adds prefix itself, so strip it first
+        const prefix = "binance-bot:";
+        await Promise.all(
+          paramKeys.map((k) => {
+            const unprefixed = k.startsWith(prefix) ? k.slice(prefix.length) : k;
+            return this.redisService.delete(unprefixed);
+          }),
+        );
+        this.logger.log(`[AiOptimizer] Flushed ${paramKeys.length} coin param cache(s)`);
+      }
+      await this.redisService.set(prevRegimeKey, regime, AI_REGIME_TTL * 3);
+
+      // Tune market filter settings when regime changes or no cached filters yet
+      if (prevRegime !== regime || !(await this.redisService.get(AI_MARKET_FILTERS_KEY))) {
+        this.tuneMarketFilters(regime, { rsi15m: rsi, atr15m, bbWidth }).catch((e) =>
+          this.logger.warn(`[AiOptimizer] Filter tuning failed: ${e?.message}`),
+        );
+      }
 
       await this.saveRegimeHistory("global", regime, confidence, null, "algo", null);
 
@@ -112,6 +175,101 @@ export class AiOptimizerService {
       this.logger.warn(`[AiOptimizer] assessGlobalRegime algo failed: ${err?.message}`);
       return "MIXED";
     }
+  }
+
+  // ─── AI-decided coin filter settings (saved to MongoDB + Redis) ─────────
+
+  async tuneMarketFilters(
+    regime: string,
+    indicators: { rsi15m: number; atr15m: number; bbWidth: number },
+  ): Promise<void> {
+    if (!this.enabled) return;
+
+    // 1. Fetch last 5 decisions as conversation history
+    const history = await this.marketConfigModel
+      .find()
+      .sort({ assessedAt: -1 })
+      .limit(5)
+      .lean();
+
+    // 2. Format history as conversation context
+    const historyText =
+      history.length > 0
+        ? history
+            .reverse()
+            .map(
+              (h) =>
+                `[${h.assessedAt.toISOString().slice(0, 16)}] Regime=${h.regime} → ` +
+                `minVol=$${(h.minVolumeUsd / 1e6).toFixed(0)}M, ` +
+                `minChange=${h.minPriceChangePct}%, maxCoins=${h.maxShortlistSize}` +
+                (h.reasoning ? ` — "${h.reasoning}"` : ""),
+            )
+            .join("\n")
+        : "No previous decisions.";
+
+    // 3. Call Haiku
+    const prompt = `You decide optimal crypto coin filter settings for trading signals.
+
+Current market: regime=${regime}, BTC RSI(15m)=${indicators.rsi15m.toFixed(1)}, ATR(15m)=${indicators.atr15m.toFixed(2)}%, BB Width=${indicators.bbWidth.toFixed(2)}%
+
+Past decisions (conversation history):
+${historyText}
+
+Constraints:
+- minVolumeUsd: 3000000 to 100000000
+- minPriceChangePct: 0.1 to 3.0
+- maxShortlistSize: 10 to 50
+
+Guidelines:
+- VOLATILE: more coins moving → widen filter, increase shortlist
+- STRONG_BULL/STRONG_BEAR: normal volume, moderate shortlist
+- SIDEWAYS/RANGE_BOUND: lower thresholds to catch subtle moves
+- MIXED: balanced defaults
+
+Reply ONLY with valid JSON (no markdown):
+{"minVolumeUsd":10000000,"minPriceChangePct":0.3,"maxShortlistSize":30,"reasoning":"brief reason"}`;
+
+    const resp = await this.anthropic.messages.create({
+      model: HAIKU_MODEL,
+      max_tokens: 200,
+      messages: [{ role: "user", content: prompt }],
+    });
+
+    const text = ((resp.content[0] as any).text || "").trim();
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error("No JSON in Haiku filter response");
+
+    const parsed = JSON.parse(jsonMatch[0]);
+
+    const minVolumeUsd = Number(parsed.minVolumeUsd);
+    const minPriceChangePct = Number(parsed.minPriceChangePct);
+    const maxShortlistSize = Number(parsed.maxShortlistSize);
+
+    // 4. Store in MongoDB
+    await this.marketConfigModel.create({
+      assessedAt: new Date(),
+      regime,
+      minVolumeUsd,
+      minPriceChangePct,
+      maxShortlistSize,
+      reasoning: parsed.reasoning,
+      model: HAIKU_MODEL,
+      tokensIn: resp.usage.input_tokens,
+      tokensOut: resp.usage.output_tokens,
+    });
+
+    // 5. Cache in Redis (8h)
+    await this.redisService.set(
+      AI_MARKET_FILTERS_KEY,
+      { minVolumeUsd, minPriceChangePct, maxShortlistSize },
+      AI_MARKET_FILTERS_TTL,
+    );
+
+    this.logger.log(
+      `[AiOptimizer] Market filters tuned for ${regime}: ` +
+        `vol=$${(minVolumeUsd / 1e6).toFixed(0)}M, ` +
+        `change=${minPriceChangePct}%, coins=${maxShortlistSize} — ${parsed.reasoning}`,
+    );
   }
 
   // ─── Per-coin parameter tuning (Haiku, cached 2h with jitter) ───────────
@@ -389,20 +547,27 @@ Choose timeframeProfile:
 Return ONLY valid JSON (no extra fields, no comments):
 {
   "timeframeProfile": "INTRADAY|SWING",
-  "regime": "STRONG_TREND|RANGE_BOUND|VOLATILE|BTC_CORRELATION|MIXED",
-  "strategy": "RSI_CROSS|RSI_ZONE|TREND_EMA|MEAN_REVERT_RSI|STOCH_BB_PATTERN|STOCH_EMA_KDJ",
+  "regime": "STRONG_BULL|STRONG_BEAR|RANGE_BOUND|SIDEWAYS|VOLATILE|BTC_CORRELATION|MIXED",
+  "strategy": "RSI_CROSS|RSI_ZONE|TREND_EMA|MEAN_REVERT_RSI|STOCH_BB_PATTERN|STOCH_EMA_KDJ|BB_SCALP",
   "confidence": <0-100>,
   "stopLossPercent": <0.5-5.0>,
   "takeProfitPercent": <0.5-15.0>,
-  "minConfidenceToTrade": <50-80>,
+  "minConfidenceToTrade": <38-80>,
   "rsiCross": { "primaryKline": "<15m|4h>", "rsiPeriod": 14, "rsiEmaPeriod": 9, "enableThreshold": true, "rsiThreshold": 50, "enableHtfRsi": true, "htfKline": "<1h|1d>", "enableCandleDir": false, "candleKline": "<15m|4h>" },
-  "rsiZone": { "primaryKline": "<15m|4h>", "rsiPeriod": 14, "rsiEmaPeriod": 9, "rsiTop": 70, "rsiBottom": 30, "enableHtfRsi": true, "htfKline": "<1h|1d>", "enableInitialCandle": true, "excludeLatestCandle": true }
+  "rsiZone": { "primaryKline": "<15m|4h>", "rsiPeriod": 14, "rsiEmaPeriod": 9, "rsiTop": 70, "rsiBottom": 30, "enableHtfRsi": true, "htfKline": "<1h|1d>", "enableInitialCandle": true, "excludeLatestCandle": true },
+  "bbScalp": { "primaryKline": "15m", "bbPeriod": 20, "bbStdDev": 2.0, "bbTolerance": 0.1, "rsiPeriod": 14, "rsiLongMax": 45, "rsiShortMin": 55 }
 }
 
-Strategy guide: STRONG_TREND→RSI_CROSS/TREND_EMA, RANGE_BOUND→STOCH_BB_PATTERN/MEAN_REVERT_RSI, VOLATILE→RSI_ZONE, BTC_CORRELATION→RSI_CROSS, MIXED→RSI_ZONE
+Strategy guide: STRONG_BULL→RSI_CROSS/TREND_EMA (LONG only), STRONG_BEAR→RSI_CROSS/TREND_EMA (SHORT only), RANGE_BOUND→STOCH_BB_PATTERN/MEAN_REVERT_RSI, SIDEWAYS→RSI_CROSS/STOCH_BB_PATTERN/MEAN_REVERT_RSI (prefer RSI_CROSS), VOLATILE→RSI_ZONE, BTC_CORRELATION→RSI_CROSS, MIXED→RSI_ZONE
+SIDEWAYS regime: bbWidth 3-4.5%, RSI 40-60, low ATR. PREFER RSI_CROSS — it has higher win rate in ranging markets. Only use BB_SCALP if RSI is clearly at an extreme (≤40 for LONG, ≥60 for SHORT) and price is touching the band.
+- RSI_CROSS: best default, works well in sideways (higher win rate than BB_SCALP)
+- STOCH_BB_PATTERN: good when stochastic confirms the reversal (lower false-positive rate)
+- MEAN_REVERT_RSI: good when price is near EMA200 and RSI is at an extreme (30/70)
+- BB_SCALP: only when RSI is at clear extreme (rsiLongMax≤45, rsiShortMin≥55) and bbTolerance≤0.1
+BB_SCALP guide: very selective — bbTolerance=0.1 (price must be very close to band), rsiLongMax=45, rsiShortMin=55.
 Kline guide: INTRADAY→primaryKline="15m" htfKline="1h"; SWING→primaryKline="4h" htfKline="1d"
 Higher ATR%→wider stop loss. Low BBWidth%→tighter RSI zones. SWING→stopLossPercent 1.5-4.0.
-takeProfitPercent guide: set based on regime/volatility. STRONG_TREND→2×-3× SL. RANGE_BOUND→1.5×-2× SL. VOLATILE→1.5× SL. SWING→wider TP (3×-4× SL). Minimum 1.5× stopLossPercent.`;
+takeProfitPercent guide: STRONG_TREND→2×-3× SL. RANGE_BOUND→1.5×-2× SL. SIDEWAYS→SL 1.5%, TP 3.0%, minConfidenceToTrade 42-50. VOLATILE→1.5× SL. SWING→3×-4× SL. Minimum 1.5× stopLossPercent.`;
 
     const response = await this.anthropic.messages.create({
       model: HAIKU_MODEL,
@@ -425,14 +590,17 @@ takeProfitPercent guide: set based on regime/volatility. STRONG_TREND→2×-3× 
   // ─── Default params (F8 Config 2 baseline) ───────────────────────────────
 
   getDefaultParams(regime = "MIXED"): AiTunedParams {
+    const isSideways = regime === "SIDEWAYS";
+    const isTrend = regime === "STRONG_BULL" || regime === "STRONG_BEAR";
     return {
       timeframeProfile: "INTRADAY",
       regime: regime as any,
-      strategy: "RSI_CROSS",
-      confidence: 55,
-      stopLossPercent: 2.0,
-      takeProfitPercent: 4.0, // default 2:1 reward:risk
-      minConfidenceToTrade: 45,
+      // SIDEWAYS uses RSI_CROSS — better performance than BB_SCALP (63% vs 37% win rate in testing)
+      strategy: isTrend ? "TREND_EMA" : "RSI_CROSS",
+      confidence: isSideways ? 45 : isTrend ? 60 : 55,
+      stopLossPercent: isSideways ? 1.5 : isTrend ? 2.5 : 2.0,
+      takeProfitPercent: isSideways ? 3.0 : isTrend ? 5.0 : 4.0,
+      minConfidenceToTrade: isSideways ? 42 : isTrend ? 50 : 45,
       rsiCross: {
         primaryKline: "15m",
         rsiPeriod: 14,
@@ -463,6 +631,7 @@ takeProfitPercent guide: set based on regime/volatility. STRONG_TREND→2×-3× 
         trendKline: "4h",
         trendEmaPeriod: 200,
         trendRange: 5,
+        adxMin: 20,
       },
       meanRevertRsi: {
         primaryKline: "15m",
@@ -496,6 +665,15 @@ takeProfitPercent guide: set based on regime/volatility. STRONG_TREND→2×-3× 
         emaRange: 0.5,
         enableKdj: false,
         kdjRangeLength: 9,
+      },
+      bbScalp: {
+        primaryKline: "15m",
+        bbPeriod: 20,
+        bbStdDev: 2.0,
+        bbTolerance: 0.1, // tighter: price must be within 0.1% of band (was 0.3%)
+        rsiPeriod: 14,
+        rsiLongMax: 45, // stricter: need some oversold condition (was 52)
+        rsiShortMin: 55, // stricter: need some overbought condition (was 48)
       },
     };
   }

@@ -29,18 +29,35 @@ async function bootstrap() {
     startedAt: new Date().toISOString(),
   });
 
-  const acquired = await lockClient.set(LOCK_KEY, lockValue, {
+  let acquired = await lockClient.set(LOCK_KEY, lockValue, {
     NX: true,
     EX: LOCK_TTL,
   });
 
+  // If lock exists, check if the owning PID is still alive — if not, it's a stale lock
   if (acquired !== "OK") {
     const existing = await lockClient.get(LOCK_KEY);
-    logger.error(
-      `❌ Another bot instance is already running! Lock: ${existing}. Exiting to prevent duplicate signals.`,
-    );
-    await lockClient.quit();
-    process.exit(1);
+    let stale = false;
+    try {
+      const parsed = JSON.parse(existing ?? "{}");
+      if (parsed.pid) {
+        process.kill(parsed.pid, 0); // throws if PID is dead
+      }
+    } catch {
+      stale = true; // PID doesn't exist — lock is stale
+    }
+
+    if (stale) {
+      logger.warn(`⚠️  Stale lock from dead process, taking over...`);
+      await lockClient.set(LOCK_KEY, lockValue, { EX: LOCK_TTL });
+      acquired = "OK";
+    } else {
+      logger.error(
+        `❌ Another bot instance is already running! Lock: ${existing}. Exiting to prevent duplicate signals.`,
+      );
+      await lockClient.quit();
+      process.exit(1);
+    }
   }
 
   logger.log(`🔒 Process lock acquired (pid: ${process.pid})`);
@@ -82,4 +99,4 @@ async function bootstrap() {
   });
 }
 
-bootstrap();
+bootstrap(); // v2

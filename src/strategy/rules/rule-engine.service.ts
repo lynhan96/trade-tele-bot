@@ -51,6 +51,8 @@ export class RuleEngineService {
         return this.evalStochBbPattern(coin, currency, params);
       case "STOCH_EMA_KDJ":
         return this.evalStochEmaKdj(coin, currency, params);
+      case "BB_SCALP":
+        return this.evalBbScalp(coin, currency, params);
       default:
         return null;
     }
@@ -219,6 +221,19 @@ export class RuleEngineService {
         if (distPct > cfg.trendRange) return null; // price too far from trend EMA
         if (isLong && currentPrice < trendEma.last) return null; // price below trend = no LONG
         if (!isLong && currentPrice > trendEma.last) return null; // price above trend = no SHORT
+      }
+    }
+
+    // ADX trend strength gate — skip EMA crossovers in choppy/weak trend conditions
+    const adxMin = cfg.adxMin ?? 20;
+    if (adxMin > 0) {
+      const adxOhlc = await this.indicatorService.getOhlc(coin, cfg.primaryKline);
+      const { adx } = this.indicatorService.getAdx(adxOhlc.highs, adxOhlc.lows, adxOhlc.closes, 14);
+      if (adx < adxMin) {
+        this.logger.debug(
+          `[RuleEngine] ${coin} TREND_EMA blocked — ADX=${adx.toFixed(1)} < ${adxMin} (trend too weak)`,
+        );
+        return null;
       }
     }
 
@@ -509,5 +524,80 @@ export class RuleEngineService {
       strategy: "STOCH_EMA_KDJ",
       reason: `Stoch cross in ${patternState.isLong ? "oversold" : "overbought"} zone + EMA(${cfg.emaPeriod}) body pierce on ${cfg.primaryKline}`,
     };
+  }
+
+  // ─── BB_SCALP (mean reversion at Bollinger Band extremes, SIDEWAYS regime) ─
+
+  private async evalBbScalp(
+    coin: string,
+    currency: string,
+    params: AiTunedParams,
+  ): Promise<SignalResult | null> {
+    const cfg = params.bbScalp ?? {
+      primaryKline: "15m",
+      bbPeriod: 20,
+      bbStdDev: 2.0,
+      bbTolerance: 0.1, // tight: price must be within 0.1% of band
+      rsiPeriod: 14,
+      rsiLongMax: 45, // must be somewhat oversold (not just mid-range RSI)
+      rsiShortMin: 55, // must be somewhat overbought
+    };
+
+    const ohlc = await this.indicatorService.getOhlc(coin, cfg.primaryKline);
+    if (ohlc.closes.length < cfg.bbPeriod + cfg.rsiPeriod + 5) return null;
+
+    const closes = ohlc.closes;
+    const opens = ohlc.opens;
+    const lastClose = closes[closes.length - 1];
+    const prevClose = closes[closes.length - 2];
+    const prev2Close = closes[closes.length - 3];
+
+    // Bollinger Bands
+    const { upper, lower } = this.indicatorService.getBollingerBands(
+      closes,
+      cfg.bbPeriod,
+      cfg.bbStdDev,
+    );
+
+    // RSI
+    const rsiSeries = this.indicatorService.getRsi(closes, cfg.rsiPeriod);
+    const rsi = rsiSeries.last;
+    const rsiPrev = rsiSeries.secondLast ?? rsi;
+
+    const toleranceFactor = cfg.bbTolerance / 100;
+
+    // ── LONG: confirmed bounce off lower band ──────────────────────────────
+    // 1. Previous candle was at/below lower band (band was actually touched)
+    // 2. Current candle is closing ABOVE previous close (bounce has started)
+    // 3. RSI is in oversold territory and turning up
+    const prevAtLowerBand = prevClose <= lower * (1 + toleranceFactor);
+    const bouncingUp = lastClose > prevClose && lastClose > prev2Close;
+    const rsiTurningUp = rsi > rsiPrev; // RSI starting to recover
+    if (prevAtLowerBand && bouncingUp && rsi < cfg.rsiLongMax && rsiTurningUp) {
+      return {
+        isLong: true,
+        entryPrice: lastClose,
+        strategy: "BB_SCALP",
+        reason: `BB bounce LONG: prev=${prevClose.toFixed(4)} at lower BB=${lower.toFixed(4)}, RSI ${rsiPrev.toFixed(0)}→${rsi.toFixed(0)} on ${cfg.primaryKline}`,
+      };
+    }
+
+    // ── SHORT: confirmed rejection at upper band ───────────────────────────
+    // 1. Previous candle was at/above upper band (band was actually touched)
+    // 2. Current candle is closing BELOW previous close (rejection has started)
+    // 3. RSI is in overbought territory and turning down
+    const prevAtUpperBand = prevClose >= upper * (1 - toleranceFactor);
+    const rejectingDown = lastClose < prevClose && lastClose < prev2Close;
+    const rsiTurningDown = rsi < rsiPrev; // RSI starting to drop
+    if (prevAtUpperBand && rejectingDown && rsi > cfg.rsiShortMin && rsiTurningDown) {
+      return {
+        isLong: false,
+        entryPrice: lastClose,
+        strategy: "BB_SCALP",
+        reason: `BB rejection SHORT: prev=${prevClose.toFixed(4)} at upper BB=${upper.toFixed(4)}, RSI ${rsiPrev.toFixed(0)}→${rsi.toFixed(0)} on ${cfg.primaryKline}`,
+      };
+    }
+
+    return null;
   }
 }

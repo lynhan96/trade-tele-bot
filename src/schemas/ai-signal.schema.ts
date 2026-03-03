@@ -95,6 +95,9 @@ export class AiSignal {
   @Prop({ default: false })
   slMovedToEntry?: boolean; // true = SL moved to entry (break-even protection)
 
+  @Prop({ default: false })
+  sl5PctRaised?: boolean; // true = SL raised to +2% profit at 5% milestone (trailing stop)
+
   @Prop()
   exitPrice?: number; // Filled when status → COMPLETED
 

@@ -5,7 +5,10 @@ import { TelegramBotService } from "../telegram/telegram.service";
 import { AiSignalService } from "./ai-signal.service";
 import { AiSignalStatsService } from "./ai-signal-stats.service";
 import { SignalQueueService } from "./signal-queue.service";
-import { UserSignalSubscriptionService } from "./user-signal-subscription.service";
+import { SubscriberInfo, UserSignalSubscriptionService } from "./user-signal-subscription.service";
+import { UserSettingsService } from "../user/user-settings.service";
+import { UserRealTradingService } from "./user-real-trading.service";
+import { UserDataStreamService } from "./user-data-stream.service";
 
 @Injectable()
 export class AiCommandService implements OnModuleInit {
@@ -19,6 +22,9 @@ export class AiCommandService implements OnModuleInit {
     private readonly signalQueueService: SignalQueueService,
     private readonly subscriptionService: UserSignalSubscriptionService,
     private readonly configService: ConfigService,
+    private readonly userSettingsService: UserSettingsService,
+    private readonly userRealTradingService: UserRealTradingService,
+    private readonly userDataStreamService: UserDataStreamService,
   ) {
     const adminIdStr = this.configService.get<string>("AI_ADMIN_TELEGRAM_ID", "");
     this.adminIds = adminIdStr
@@ -44,6 +50,12 @@ export class AiCommandService implements OnModuleInit {
         `/ai settings — Xem cài đặt của bạn\n` +
         `/ai moneyflow on|off — Bật/tắt cảnh báo dòng tiền\n` +
         `/ai push on|off — Auto push signals mỗi 10 phút\n` +
+        `/ai balance <so> — Set balance mac dinh (USDT/lenh)\n` +
+        `/ai vol <COIN> <so> — Set vol rieng cho tung coin\n` +
+        `/ai tpsl <tp%> <sl%> — Set TP/SL tuy chinh\n` +
+        `/ai tpsl off — Dung TP/SL tu AI\n` +
+        `/ai setkeys <key> <secret> — Luu Binance API keys\n` +
+        `/ai realmode — Xem/bat/tat che do dat lenh that\n` +
         `/ai market — Phân tích thị trường AI\n` +
         `/ai signals — Xem tất cả tín hiệu đang chạy\n` +
         `/ai status — Trạng thái hệ thống\n` +
@@ -134,7 +146,7 @@ export class AiCommandService implements OnModuleInit {
 
         if (!toggle) {
           // Show current status
-          const enabled = (sub as any).moneyFlowEnabled !== false;
+          const enabled = sub.moneyFlowEnabled !== false;
           await this.telegramService.sendTelegramMessage(
             chatId,
             `🚨 *Cảnh Báo Dòng Tiền*\n\n` +
@@ -177,11 +189,27 @@ export class AiCommandService implements OnModuleInit {
           return;
         }
 
-        const moneyFlow = (sub as any).moneyFlowEnabled !== false;
-        const pushEnabled = (sub as any).signalsPushEnabled === true;
+        const moneyFlow = sub.moneyFlowEnabled !== false;
+        const pushEnabled = sub.signalsPushEnabled === true;
         const subscribedAt = sub.subscribedAt
           ? new Date(sub.subscribedAt).toLocaleDateString("vi-VN")
           : "N/A";
+        const balance = sub.tradingBalance ?? 1000;
+        const coinVols = sub.coinVolumes ?? {};
+        const coinVolLines = Object.entries(coinVols).map(([c, v]) => `  • ${c}: ${v.toLocaleString()} USDT`).join("\n");
+        const customTp = sub.customTpPct;
+        const customSl = sub.customSlPct;
+        const tpSlLine = (customTp && customSl)
+          ? `TP ${customTp}% / SL ${customSl}% _(tuy chinh)_`
+          : "_Dung TP/SL tu AI_";
+
+        const realMode = sub.realModeEnabled === true;
+        const leverageMode = sub.realModeLeverageMode ?? "AI";
+        const leverageLabel =
+          leverageMode === "FIXED" ? `Fixed ${sub.realModeLeverage ?? "?"}x` :
+          leverageMode === "MAX" ? "Max (Binance)" : "AI Signal";
+        const hasKeys = !!(await this.userSettingsService.getApiKeys(telegramId, "binance"));
+        const openTrades = realMode ? await this.userRealTradingService.getOpenTrades(telegramId) : [];
 
         await this.telegramService.sendTelegramMessage(
           chatId,
@@ -191,9 +219,23 @@ export class AiCommandService implements OnModuleInit {
           `🚨 Cảnh báo dòng tiền: ${moneyFlow ? "✅ Bật" : "❌ Tắt"}\n` +
           `📡 Auto push signals: ${pushEnabled ? "✅ Bật (10 phút)" : "❌ Tắt"}\n` +
           `📅 Ngày đăng ký: ${subscribedAt}\n\n` +
-          `*Thay đổi cài đặt:*\n` +
+          `*Cai dat vol:*\n` +
+          `💰 Balance mac dinh: *${balance.toLocaleString()} USDT/lenh*\n` +
+          (coinVolLines ? `${coinVolLines}\n` : `  _Chua co override coin nao_\n`) +
+          `📐 TP/SL: ${tpSlLine}\n\n` +
+          `*Real Trading Mode:*\n` +
+          `🔑 Binance API Keys: ${hasKeys ? "✅ Da luu" : "❌ Chua luu"}\n` +
+          `⚡ Real Mode: ${realMode ? "✅ BẬT" : "❌ TẮT"}\n` +
+          (realMode ? `📊 Leverage: *${leverageLabel}*\n` : "") +
+          (realMode && openTrades.length > 0 ? `📈 Lenh mo: *${openTrades.length}*\n` : "") +
+          `\n*Thay đổi cài đặt:*\n` +
           `/ai moneyflow ${moneyFlow ? "off" : "on"} — ${moneyFlow ? "Tắt" : "Bật"} cảnh báo dòng tiền\n` +
           `/ai push ${pushEnabled ? "off" : "on"} — ${pushEnabled ? "Tắt" : "Bật"} auto push signals\n` +
+          `/ai balance <so> — Doi balance mac dinh\n` +
+          `/ai vol BTC 5000 — Set vol BTC rieng\n` +
+          `/ai tpsl 2.5 1.5 — Set TP/SL tuy chinh\n` +
+          `/ai setkeys <key> <secret> — Luu Binance API keys\n` +
+          `/ai realmode on|off — Bat/tat real mode\n` +
           `/ai unsubscribe — Hủy đăng ký tất cả`,
         );
       } catch (err) {
@@ -243,13 +285,220 @@ export class AiCommandService implements OnModuleInit {
       }
     });
 
-    // /ai signals — view all active + queued signals (available to all subscribers)
+    // /ai signals — view all active + queued signals (personalized with user's balance)
     this.telegramService.registerBotCommand(/^\/ai[_ ]signals/, async (msg) => {
       const chatId = msg.chat.id;
+      const telegramId = msg.from?.id;
 
       try {
-        const text = await this.formatSignalsMessage();
+        const sub = telegramId ? await this.subscriptionService.getSubscription(telegramId) : null;
+        const text = await this.formatSignalsMessage({
+          tradingBalance: sub?.tradingBalance,
+          coinVolumes: sub?.coinVolumes,
+          customTpPct: sub?.customTpPct,
+          customSlPct: sub?.customSlPct,
+        });
         await this.telegramService.sendTelegramMessage(chatId, text);
+      } catch (err) {
+        await this.telegramService.sendTelegramMessage(chatId, `❌ Lỗi: ${err?.message}`);
+      }
+    });
+
+    // /ai balance <amount> — set per-user trading balance for USDT PnL display
+    this.telegramService.registerBotCommand(/^\/ai[_ ]balance(?:\s+(\d+(?:\.\d+)?))?$/i, async (msg) => {
+      const chatId = msg.chat.id;
+      const telegramId = msg.from?.id;
+      if (!telegramId) return;
+
+      const match = msg.text?.match(/^\/ai[_ ]balance(?:\s+(\d+(?:\.\d+)?))?$/i);
+      const amountStr = match?.[1];
+
+      try {
+        const sub = await this.subscriptionService.getSubscription(telegramId);
+        if (!sub) {
+          await this.telegramService.sendTelegramMessage(chatId, `❌ Ban chua subscribe. Dung /ai subscribe truoc.`);
+          return;
+        }
+
+        if (!amountStr) {
+          const cur = sub.tradingBalance ?? 1000;
+          await this.telegramService.sendTelegramMessage(chatId,
+            `💰 *Trading Balance cua ban*\n━━━━━━━━━━━━━━━━━━\n\nSo du hien tai: *${cur.toLocaleString()} USDT/lenh*\n\nDung: /ai balance <so tien>\nVi du: /ai balance 500`
+          );
+          return;
+        }
+
+        const amount = parseFloat(amountStr);
+        if (isNaN(amount) || amount < 10 || amount > 1_000_000) {
+          await this.telegramService.sendTelegramMessage(chatId, `❌ So du phai tu 10 den 1,000,000 USDT`);
+          return;
+        }
+
+        await this.subscriptionService.setTradingBalance(telegramId, amount);
+        await this.telegramService.sendTelegramMessage(chatId,
+          `✅ *Da cap nhat balance*\n━━━━━━━━━━━━━━━━━━\n\nTrading balance: *${amount.toLocaleString()} USDT/lenh*\n_PnL tu nay se tinh theo so du nay_`
+        );
+      } catch (err) {
+        await this.telegramService.sendTelegramMessage(chatId, `❌ Lỗi: ${err?.message}`);
+      }
+    });
+
+    // /ai target <amount|off> — set per-user profit target in USDT
+    this.telegramService.registerBotCommand(/^\/ai[_ ]target(?:\s+(\S+))?$/i, async (msg) => {
+      const chatId = msg.chat.id;
+      const telegramId = msg.from?.id;
+      if (!telegramId) return;
+
+      const match = msg.text?.match(/^\/ai[_ ]target(?:\s+(\S+))?$/i);
+      const arg = match?.[1]?.toLowerCase();
+
+      try {
+        const sub = await this.subscriptionService.getSubscription(telegramId);
+        if (!sub) {
+          await this.telegramService.sendTelegramMessage(chatId, `❌ Ban chua subscribe. Dung /ai subscribe truoc.`);
+          return;
+        }
+
+        if (!arg) {
+          const cur = sub.profitTarget;
+          const msg2 = cur
+            ? `🎯 Profit target hien tai: *${cur} USDT*\n\nDung /ai target off de tat, hoac /ai target <so> de doi`
+            : `🎯 Profit target: *chua dat*\n\nDung: /ai target <so USDT>\nVi du: /ai target 50 _(khi tong PnL dat +50 USDT, bot se thong bao)_`;
+          await this.telegramService.sendTelegramMessage(chatId,
+            `💼 *Profit Target*\n━━━━━━━━━━━━━━━━━━\n\n${msg2}`
+          );
+          return;
+        }
+
+        if (arg === "off") {
+          await this.subscriptionService.setProfitTarget(telegramId, null);
+          await this.telegramService.sendTelegramMessage(chatId,
+            `✅ *Profit target da tat*\n_Bot se khong thong bao khi dat muc tieu_`
+          );
+          return;
+        }
+
+        const amount = parseFloat(arg);
+        if (isNaN(amount) || amount <= 0) {
+          await this.telegramService.sendTelegramMessage(chatId, `❌ Nhap so USDT hop le (vi du: /ai target 50)`);
+          return;
+        }
+
+        await this.subscriptionService.setProfitTarget(telegramId, amount);
+        const balance = sub.tradingBalance ?? 1000;
+        await this.telegramService.sendTelegramMessage(chatId,
+          `✅ *Profit Target da dat*\n━━━━━━━━━━━━━━━━━━\n\nMuc tieu: *+${amount} USDT*\nBalance hien tai: ${balance.toLocaleString()} USDT/lenh\n\n_Khi tong PnL mo cua dat +${amount} USDT, bot se thong bao va tu dong dong tat ca lenh_`
+        );
+      } catch (err) {
+        await this.telegramService.sendTelegramMessage(chatId, `❌ Lỗi: ${err?.message}`);
+      }
+    });
+
+    // /ai vol [COIN] [amount|off] — per-coin volume override
+    this.telegramService.registerBotCommand(/^\/ai[_ ]vol(?:\s+(\S+))?(?:\s+(\S+))?$/i, async (msg, match) => {
+      const chatId = msg.chat.id;
+      const telegramId = msg.from?.id;
+      if (!telegramId) return;
+
+      const coin = match?.[1]?.toUpperCase();
+      const amountStr = match?.[2]?.toLowerCase();
+
+      try {
+        const sub = await this.subscriptionService.getSubscription(telegramId);
+        if (!sub) {
+          await this.telegramService.sendTelegramMessage(chatId, `❌ Ban chua subscribe. Dung /ai subscribe truoc.`);
+          return;
+        }
+
+        if (!coin) {
+          // Show current per-coin settings
+          const vols = sub.coinVolumes ?? {};
+          const base = sub.tradingBalance ?? 1000;
+          const lines = Object.entries(vols).map(([c, v]) => `• ${c}: *${v.toLocaleString()} USDT*`);
+          await this.telegramService.sendTelegramMessage(chatId,
+            `💰 *Per-Coin Volume*\n━━━━━━━━━━━━━━━━━━\n` +
+            `Mac dinh: *${base.toLocaleString()} USDT/lenh*\n\n` +
+            (lines.length ? lines.join("\n") : `_Chua co override coin nao_`) +
+            `\n\n*Cach dung:*\n/ai vol BTC 5000 — Set BTC vol 5000 USDT\n/ai vol BTC off — Xoa override BTC`
+          );
+          return;
+        }
+
+        if (amountStr === "off") {
+          const ok = await this.subscriptionService.setCoinVolume(telegramId, coin, null);
+          if (!ok) { await this.telegramService.sendTelegramMessage(chatId, `❌ Loi khi xoa override`); return; }
+          await this.telegramService.sendTelegramMessage(chatId,
+            `✅ Da xoa override *${coin}* — se dung balance mac dinh`
+          );
+          return;
+        }
+
+        const amount = parseFloat(amountStr ?? "");
+        if (isNaN(amount) || amount < 10 || amount > 1_000_000) {
+          await this.telegramService.sendTelegramMessage(chatId, `❌ So tien khong hop le (10 – 1,000,000 USDT)\nVi du: /ai vol BTC 5000`);
+          return;
+        }
+
+        await this.subscriptionService.setCoinVolume(telegramId, coin, amount);
+        await this.telegramService.sendTelegramMessage(chatId,
+          `✅ *${coin}* vol: *${amount.toLocaleString()} USDT/lenh*\n_PnL BTC se tinh theo so du nay_`
+        );
+      } catch (err) {
+        await this.telegramService.sendTelegramMessage(chatId, `❌ Lỗi: ${err?.message}`);
+      }
+    });
+
+    // /ai tpsl [tp% sl% | off] — set custom TP/SL % for signal display
+    this.telegramService.registerBotCommand(/^\/ai[_ ]tpsl(?:\s+(\S+))?(?:\s+(\S+))?$/i, async (msg, match) => {
+      const chatId = msg.chat.id;
+      const telegramId = msg.from?.id;
+      if (!telegramId) return;
+
+      const arg1 = match?.[1]?.toLowerCase();
+      const arg2 = match?.[2];
+
+      try {
+        const sub = await this.subscriptionService.getSubscription(telegramId);
+        if (!sub) {
+          await this.telegramService.sendTelegramMessage(chatId, `❌ Ban chua subscribe. Dung /ai subscribe truoc.`);
+          return;
+        }
+
+        if (!arg1) {
+          const tp = sub.customTpPct;
+          const sl = sub.customSlPct;
+          await this.telegramService.sendTelegramMessage(chatId,
+            `📐 *TP/SL Tuy Chinh*\n━━━━━━━━━━━━━━━━━━\n\n` +
+            (tp && sl
+              ? `TP: *${tp}%* · SL: *${sl}%*\n\nDung /ai tpsl off de dung lai TP/SL tu AI`
+              : `_Dang dung TP/SL tu AI_`) +
+            `\n\n*Cach dung:*\n/ai tpsl 2.5 1.5 — Set TP=2.5%, SL=1.5%\n/ai tpsl off — Dung TP/SL tu AI`
+          );
+          return;
+        }
+
+        if (arg1 === "off") {
+          const ok = await this.subscriptionService.clearCustomTpSl(telegramId);
+          if (!ok) { await this.telegramService.sendTelegramMessage(chatId, `❌ Loi`); return; }
+          await this.telegramService.sendTelegramMessage(chatId,
+            `✅ Da xoa TP/SL tuy chinh — se dung TP/SL tu AI`
+          );
+          return;
+        }
+
+        const tp = parseFloat(arg1);
+        const sl = parseFloat(arg2 ?? "");
+        if (isNaN(tp) || isNaN(sl) || tp <= 0 || sl <= 0 || tp > 50 || sl > 50) {
+          await this.telegramService.sendTelegramMessage(chatId,
+            `❌ Nhap TP% va SL% hop le (0–50)\nVi du: /ai tpsl 2.5 1.5`
+          );
+          return;
+        }
+
+        await this.subscriptionService.setCustomTpSl(telegramId, tp, sl);
+        await this.telegramService.sendTelegramMessage(chatId,
+          `✅ *TP/SL da cap nhat*\n━━━━━━━━━━━━━━━━━━\n\nTP: *+${tp}%* · SL: *-${sl}%*\n_Hien thi trong /ai signals se tinh theo TP/SL nay_`
+        );
       } catch (err) {
         await this.telegramService.sendTelegramMessage(chatId, `❌ Lỗi: ${err?.message}`);
       }
@@ -275,7 +524,7 @@ export class AiCommandService implements OnModuleInit {
         }
 
         if (!toggle) {
-          const enabled = (sub as any).signalsPushEnabled === true;
+          const enabled = sub.signalsPushEnabled === true;
           await this.telegramService.sendTelegramMessage(
             chatId,
             `📡 *Auto Push Signals*\n\n` +
@@ -519,6 +768,281 @@ export class AiCommandService implements OnModuleInit {
       },
     );
 
+    // /ai setkeys <apiKey> <apiSecret> — save Binance API keys for real mode
+    this.telegramService.registerBotCommand(
+      /^\/ai[_ ]setkeys\s+(\S+)\s+(\S+)$/,
+      async (msg, match) => {
+        const chatId = msg.chat.id;
+        const telegramId = msg.from?.id;
+        if (!telegramId) return;
+
+        const apiKey = match?.[1];
+        const apiSecret = match?.[2];
+        if (!apiKey || !apiSecret) {
+          await this.telegramService.sendTelegramMessage(
+            chatId,
+            `❌ Dung: \`/ai setkeys <apiKey> <apiSecret>\``,
+          );
+          return;
+        }
+
+        try {
+          // Must be subscribed first
+          const sub = await this.subscriptionService.getSubscription(telegramId);
+          if (!sub) {
+            await this.telegramService.sendTelegramMessage(
+              chatId,
+              `ℹ️ Ban chua dang ky. Dung /ai subscribe truoc.`,
+            );
+            return;
+          }
+
+          await this.userSettingsService.saveApiKeys(telegramId, chatId, "binance", apiKey, apiSecret);
+          await this.telegramService.sendTelegramMessage(
+            chatId,
+            `✅ *Binance API Keys da duoc luu!*\n\nBat real trading voi /ai realmode on`,
+          );
+        } catch (err) {
+          await this.telegramService.sendTelegramMessage(chatId, `❌ Loi: ${err?.message}`);
+        }
+      },
+    );
+
+    // /ai realmode [on|off|leverage <N|AI|MAX>] — manage real trading mode
+    this.telegramService.registerBotCommand(
+      /^\/ai[_ ]realmode(?:\s+(.+))?$/i,
+      async (msg, match) => {
+        const chatId = msg.chat.id;
+        const telegramId = msg.from?.id;
+        if (!telegramId) return;
+
+        const arg = (match?.[1] ?? "").trim().toLowerCase();
+
+        try {
+          const sub = await this.subscriptionService.getSubscription(telegramId);
+          if (!sub) {
+            await this.telegramService.sendTelegramMessage(
+              chatId,
+              `ℹ️ Ban chua dang ky. Dung /ai subscribe truoc.`,
+            );
+            return;
+          }
+
+          // No arg — show full overview
+          if (!arg) {
+            const realMode = sub.realModeEnabled === true;
+            const leverageMode = sub.realModeLeverageMode ?? "AI";
+            const leverageLabel =
+              leverageMode === "FIXED" ? `Fixed ${sub.realModeLeverage ?? "?"}x` :
+              leverageMode === "MAX" ? "Max (Binance)" : "AI Signal";
+            const hasKeys = !!(await this.userSettingsService.getApiKeys(telegramId, "binance"));
+            const dailyTarget = sub.realModeDailyTargetPct;
+            const dailySl = sub.realModeDailyStopLossPct;
+            const disabledAt = sub.realModeDailyDisabledAt;
+
+            let overviewText =
+              `⚡ *Real Trading Mode*\n━━━━━━━━━━━━━━━━━━\n\n` +
+              `Trang thai: ${realMode ? "✅ BẬT" : "❌ TẮT"}\n` +
+              `Binance API: ${hasKeys ? "✅ Da luu" : "❌ Chua luu"}\n` +
+              `Leverage: *${leverageLabel}*\n`;
+
+            if (disabledAt) {
+              const startOfToday = new Date(); startOfToday.setUTCHours(0, 0, 0, 0);
+              if (disabledAt >= startOfToday) {
+                overviewText += `⚠️ Tu dong tat hom nay (se mo lai ngay mai)\n`;
+              }
+            }
+
+            overviewText += `\n*Gioi han ngay:*\n`;
+            overviewText += `Muc tieu loi nhuan: ${dailyTarget != null ? `*+${dailyTarget}%*` : "_chua dat_"}\n`;
+            overviewText += `Gioi han lo: ${dailySl != null ? `*-${dailySl}%*` : "_chua dat_"}\n`;
+
+            if (realMode) {
+              try {
+                const stats = await this.userRealTradingService.getDailyStats(telegramId);
+                const sign = stats.totalPnlUsdt >= 0 ? "+" : "";
+                const pnlIcon = stats.totalPnlUsdt >= 0 ? "📗" : "📕";
+                overviewText += `\n*Hom nay:*\n`;
+                overviewText += `${pnlIcon} PnL: *${sign}${stats.totalPnlUsdt.toFixed(2)} USDT* (*${sign}${stats.dailyPnlPct.toFixed(2)}%*)\n`;
+                overviewText += `Lenh mo: *${stats.openTrades.length}*, Lenh dong: *${stats.closedToday.length}*\n`;
+                overviewText += `Xem chi tiet: /ai realmode stats\n`;
+              } catch { /* ignore */ }
+            }
+
+            overviewText +=
+              `\n*Lenh:*\n` +
+              `/ai realmode on|off — Bat/tat real mode\n` +
+              `/ai realmode leverage AI|MAX|10 — Dat leverage\n` +
+              `/ai realmode target 5 — Dat muc tieu loi nhuan +5%\n` +
+              `/ai realmode target off — Tat muc tieu\n` +
+              `/ai realmode stoploss 3 — Dat gioi han lo -3%\n` +
+              `/ai realmode stoploss off — Tat gioi han lo\n` +
+              `/ai realmode stats — Chi tiet lenh hom nay`;
+            await this.telegramService.sendTelegramMessage(chatId, overviewText);
+            return;
+          }
+
+          // /ai realmode on
+          if (arg === "on") {
+            const hasKeys = !!(await this.userSettingsService.getApiKeys(telegramId, "binance"));
+            if (!hasKeys) {
+              await this.telegramService.sendTelegramMessage(
+                chatId,
+                `❌ Ban chua luu Binance API keys.\nDung: \`/ai setkeys <apiKey> <apiSecret>\``,
+              );
+              return;
+            }
+            await this.subscriptionService.setRealMode(telegramId, true);
+            // Clear daily-disabled flag so the user gets a fresh daily counter
+            await this.subscriptionService.setRealModeDailyDisabled(telegramId, null).catch(() => {});
+            await this.telegramService.sendTelegramMessage(
+              chatId,
+              `✅ *Real Mode da bat!*\n\nBot se tu dong dat lenh that khi co tin hieu moi.\nDung /ai realmode off de tat.`,
+            );
+            return;
+          }
+
+          // /ai realmode off
+          if (arg === "off") {
+            await this.subscriptionService.setRealMode(telegramId, false);
+            // Close data stream if active
+            await this.userDataStreamService.unregisterUser(telegramId).catch(() => {});
+            await this.telegramService.sendTelegramMessage(
+              chatId,
+              `✅ *Real Mode da tat.*\n\nKhong co them lenh that nao duoc dat.`,
+            );
+            return;
+          }
+
+          // /ai realmode target <N|off>
+          if (arg.startsWith("target")) {
+            const parts = arg.split(/\s+/);
+            const val = parts[1] ?? "";
+            if (val === "off") {
+              await this.subscriptionService.setDailyTargetPct(telegramId, null);
+              await this.telegramService.sendTelegramMessage(chatId, `✅ Muc tieu loi nhuan ngay da tat.`);
+            } else {
+              const n = parseFloat(val);
+              if (isNaN(n) || n <= 0 || n > 100) {
+                await this.telegramService.sendTelegramMessage(chatId,
+                  `❌ Nhap % hop le (1–100).\nVD: /ai realmode target 5 — dat muc tieu +5% moi ngay`);
+                return;
+              }
+              await this.subscriptionService.setDailyTargetPct(telegramId, n);
+              await this.telegramService.sendTelegramMessage(chatId,
+                `✅ *Muc Tieu Loi Nhuan Ngay: +${n}%*\n\nKhi tong PnL hom nay dat +${n}%, bot se tu dong dong tat ca lenh va tat real mode.\nSe mo lai tu dong vao ngay mai.`);
+            }
+            return;
+          }
+
+          // /ai realmode stoploss <N|off>
+          if (arg.startsWith("stoploss")) {
+            const parts = arg.split(/\s+/);
+            const val = parts[1] ?? "";
+            if (val === "off") {
+              await this.subscriptionService.setDailyStopLossPct(telegramId, null);
+              await this.telegramService.sendTelegramMessage(chatId, `✅ Gioi han lo ngay da tat.`);
+            } else {
+              const n = parseFloat(val);
+              if (isNaN(n) || n <= 0 || n > 100) {
+                await this.telegramService.sendTelegramMessage(chatId,
+                  `❌ Nhap % hop le (1–100).\nVD: /ai realmode stoploss 3 — dat gioi han lo -3% moi ngay`);
+                return;
+              }
+              await this.subscriptionService.setDailyStopLossPct(telegramId, n);
+              await this.telegramService.sendTelegramMessage(chatId,
+                `✅ *Gioi Han Lo Ngay: -${n}%*\n\nKhi tong PnL hom nay giam -${n}%, bot se tu dong dong tat ca lenh va tat real mode.\nSe mo lai tu dong vao ngay mai.`);
+            }
+            return;
+          }
+
+          // /ai realmode stats — detailed today's stats
+          if (arg === "stats") {
+            const fmtP = (p: number) =>
+              p >= 1000 ? `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :
+              p >= 1 ? `$${p.toFixed(2)}` : `$${p.toFixed(4)}`;
+            try {
+              const stats = await this.userRealTradingService.getDailyStats(telegramId);
+              const sign = (v: number) => v >= 0 ? "+" : "";
+              const pnlIcon = stats.totalPnlUsdt >= 0 ? "📗" : "📕";
+
+              let text =
+                `📊 *Real Mode: Thong Ke Hom Nay*\n━━━━━━━━━━━━━━━━━━\n\n` +
+                `${pnlIcon} PnL: *${sign(stats.totalPnlUsdt)}${stats.totalPnlUsdt.toFixed(2)} USDT* (*${sign(stats.dailyPnlPct)}${stats.dailyPnlPct.toFixed(2)}%*)\n` +
+                `Lenh mo: *${stats.openTrades.length}* · Dong hom nay: *${stats.closedToday.length}*\n`;
+
+              if (stats.openTrades.length > 0) {
+                text += `\n*Lenh Dang Mo:*\n`;
+                for (const t of stats.openTrades) {
+                  const icon = t.unrealizedPnlUsdt >= 0 ? "📗" : "📕";
+                  const dir = t.direction === "LONG" ? "🟢" : "🔴";
+                  text +=
+                    `${dir} *${t.symbol}* ${t.direction} ${t.leverage}x\n` +
+                    `${icon} ${sign(t.unrealizedPnlPct)}${t.unrealizedPnlPct.toFixed(2)}% (${sign(t.unrealizedPnlUsdt)}${t.unrealizedPnlUsdt.toFixed(2)} USDT)\n` +
+                    `Entry: ${fmtP(t.entryPrice)} · Vol: ${t.notionalUsdt.toFixed(0)} USDT\n`;
+                }
+              }
+
+              if (stats.closedToday.length > 0) {
+                text += `\n*Dong Hom Nay:*\n`;
+                for (const t of stats.closedToday) {
+                  const icon = t.pnlUsdt >= 0 ? "✅" : "❌";
+                  const reasonVi =
+                    t.closeReason === "TAKE_PROFIT" ? "TP" :
+                    t.closeReason === "STOP_LOSS" ? "SL" :
+                    t.closeReason === "DAILY_TARGET" ? "Daily TP" :
+                    t.closeReason === "DAILY_STOP_LOSS" ? "Daily SL" : "Thu cong";
+                  text += `${icon} *${t.symbol}* ${sign(t.pnlUsdt)}${t.pnlUsdt.toFixed(2)} USDT (${reasonVi})\n`;
+                }
+              }
+
+              if (stats.openTrades.length === 0 && stats.closedToday.length === 0) {
+                text += `\n_Chua co lenh nao hom nay._`;
+              }
+
+              text += `\n━━━━━━━━━━━━━━━━━━\n_${new Date().toLocaleTimeString("vi-VN")} UTC_`;
+              await this.telegramService.sendTelegramMessage(chatId, text);
+            } catch (err) {
+              await this.telegramService.sendTelegramMessage(chatId, `❌ Loi lay thong ke: ${err?.message}`);
+            }
+            return;
+          }
+
+          // /ai realmode leverage <AI|MAX|N>
+          if (arg.startsWith("leverage")) {
+            const parts = arg.split(/\s+/);
+            const leverageArg = parts[1] ?? "";
+            if (leverageArg === "ai") {
+              await this.subscriptionService.setRealModeLeverage(telegramId, "AI");
+              await this.telegramService.sendTelegramMessage(chatId, `✅ Leverage: *AI Signal* (dung leverage tu tin hieu AI)`);
+            } else if (leverageArg === "max") {
+              await this.subscriptionService.setRealModeLeverage(telegramId, "MAX");
+              await this.telegramService.sendTelegramMessage(chatId, `✅ Leverage: *MAX* (dung max leverage Binance cho moi cap)`);
+            } else {
+              const n = parseInt(leverageArg);
+              if (isNaN(n) || n < 1 || n > 125) {
+                await this.telegramService.sendTelegramMessage(
+                  chatId,
+                  `❌ Leverage khong hop le. Dung: AI, MAX, hoac so tu 1-125.\nVD: /ai realmode leverage 10`,
+                );
+                return;
+              }
+              await this.subscriptionService.setRealModeLeverage(telegramId, "FIXED", n);
+              await this.telegramService.sendTelegramMessage(chatId, `✅ Leverage: *Fixed ${n}x*`);
+            }
+            return;
+          }
+
+          await this.telegramService.sendTelegramMessage(
+            chatId,
+            `❌ Lenh khong hop le.\nDung: /ai realmode [on|off|target <N|off>|stoploss <N|off>|leverage <AI|MAX|N>|stats]`,
+          );
+        } catch (err) {
+          await this.telegramService.sendTelegramMessage(chatId, `❌ Loi: ${err?.message}`);
+        }
+      },
+    );
+
     this.logger.log("[AiCommand] /ai commands registered");
   }
 
@@ -529,17 +1053,29 @@ export class AiCommandService implements OnModuleInit {
     if (this.pushRunning) return;
     this.pushRunning = true;
     try {
+      // Check profit targets first (may close signals)
+      await this.checkProfitTargets();
+
       const subscribers = await this.subscriptionService.findSignalsPushSubscribers();
       if (subscribers.length === 0) return;
 
-      const text = await this.formatSignalsMessage();
-      // Skip push if no active signals (don't spam empty messages)
-      if (text.includes("Không có tín hiệu")) return;
-
+      // Send personalized message per subscriber (uses their trading balance + per-coin vol + custom TP/SL)
+      let sent = 0;
       for (const sub of subscribers) {
+        const text = await this.formatSignalsMessage({
+          tradingBalance: sub.tradingBalance,
+          coinVolumes: sub.coinVolumes,
+          customTpPct: sub.customTpPct,
+          customSlPct: sub.customSlPct,
+        });
+        // Skip push if no active signals (don't spam empty messages)
+        if (text.includes("Không có tín hiệu")) continue;
         await this.telegramService.sendTelegramMessage(sub.chatId, text).catch(() => {});
+        sent++;
       }
-      this.logger.log(`[AiCommand] Signals push sent to ${subscribers.length} subscribers`);
+      if (sent > 0) {
+        this.logger.log(`[AiCommand] Signals push sent to ${sent} subscribers`);
+      }
     } catch (err) {
       this.logger.warn(`[AiCommand] pushSignalsToSubscribers error: ${err?.message}`);
     } finally {
@@ -548,10 +1084,15 @@ export class AiCommandService implements OnModuleInit {
   }
 
   /**
-   * Format all active + queued signals into a readable message.
-   * Reused by /ai signals command and auto-push cron.
+   * Format active signals display, personalized per-user settings.
+   * @param opts.tradingBalance Default balance for all coins (USDT per trade)
+   * @param opts.coinVolumes Per-coin USDT overrides, e.g. { BTC: 5000 }
+   * @param opts.customTpPct Custom TP% — if set, TP price is computed from entry
+   * @param opts.customSlPct Custom SL% — if set, SL price is computed from entry
    */
-  async formatSignalsMessage(): Promise<string> {
+  async formatSignalsMessage(
+    opts?: Pick<SubscriberInfo, "tradingBalance" | "coinVolumes" | "customTpPct" | "customSlPct">,
+  ): Promise<string> {
     const rawActives = await this.signalQueueService.getAllActiveSignals();
     const queued = await this.signalQueueService.getAllQueuedSignals();
 
@@ -569,13 +1110,41 @@ export class AiCommandService implements OnModuleInit {
       return `📊 *AI Signals*\n━━━━━━━━━━━━━━━━━━\n\n_Không có tín hiệu nào đang chạy._`;
     }
 
+    const getVol = (symbol: string) =>
+      this.getVolForSymbol(symbol, opts?.coinVolumes, opts?.tradingBalance);
+    const customTp = opts?.customTpPct;
+    const customSl = opts?.customSlPct;
+
     const fmtPrice = (p: number) =>
       p >= 1000 ? `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :
       p >= 1 ? `$${p.toFixed(2)}` :
       p >= 0.01 ? `$${p.toFixed(4)}` : `$${p.toFixed(6)}`;
+    const fmtUsd = (pct: number, v: number) => {
+      const usd = (pct / 100) * v;
+      return (usd >= 0 ? "+" : "-") + Math.abs(usd).toFixed(2) + " USDT";
+    };
+
+    // TP/SL helpers: use custom % if set (price computed from entry), else AI prices
+    const getTpPct = (s: typeof actives[0]) =>
+      customTp ?? (s.direction === "LONG"
+        ? ((s.takeProfitPrice - s.entryPrice) / s.entryPrice) * 100
+        : ((s.entryPrice - s.takeProfitPrice) / s.entryPrice) * 100);
+    const getSlPct = (s: typeof actives[0]) =>
+      customSl ?? (s.direction === "LONG"
+        ? ((s.entryPrice - s.stopLossPrice) / s.entryPrice) * 100
+        : ((s.stopLossPrice - s.entryPrice) / s.entryPrice) * 100);
+    const getTpPrice = (s: typeof actives[0]) =>
+      customTp
+        ? (s.direction === "LONG" ? s.entryPrice * (1 + customTp / 100) : s.entryPrice * (1 - customTp / 100))
+        : s.takeProfitPrice;
+    const getSlPrice = (s: typeof actives[0]) =>
+      customSl
+        ? (s.direction === "LONG" ? s.entryPrice * (1 - customSl / 100) : s.entryPrice * (1 + customSl / 100))
+        : s.stopLossPrice;
 
     let text = `📊 *AI Signals* (${actives.length} active`;
     if (queued.length > 0) text += `, ${queued.length} queued`;
+    if (customTp && customSl) text += ` · TP${customTp}%/SL${customSl}%`;
     text += `)\n━━━━━━━━━━━━━━━━━━\n`;
 
     if (actives.length > 0) {
@@ -585,6 +1154,7 @@ export class AiCommandService implements OnModuleInit {
 
       // Compute summary
       let totalPnl = 0;
+      let totalUsdSum = 0;
       let winning = 0;
       let losing = 0;
       let healthCount = 0;
@@ -593,7 +1163,9 @@ export class AiCommandService implements OnModuleInit {
           ? (healthResults[i] as PromiseFulfilledResult<any>).value
           : null;
         if (health) {
+          const v = getVol(actives[i].symbol);
           totalPnl += health.unrealizedPnl;
+          totalUsdSum += (health.unrealizedPnl / 100) * v;
           healthCount++;
           if (health.unrealizedPnl >= 0) winning++;
           else losing++;
@@ -601,44 +1173,40 @@ export class AiCommandService implements OnModuleInit {
       }
 
       if (healthCount > 0) {
-        const avgPnl = totalPnl / healthCount;
         const totalIcon = totalPnl >= 0 ? "📗" : "📕";
         const totalSign = totalPnl >= 0 ? "+" : "";
-        text += `\n${totalIcon} Tong PnL: *${totalSign}${totalPnl.toFixed(2)}%* (avg ${totalSign}${avgPnl.toFixed(2)}%)`;
+        const usdSign = totalUsdSum >= 0 ? "+" : "-";
+        text += `\n${totalIcon} Tong PnL: *${totalSign}${totalPnl.toFixed(2)}%* (*${usdSign}${Math.abs(totalUsdSum).toFixed(2)} USDT*)`;
         text += ` · ✅ ${winning} 🟢  ❌ ${losing} 🔴\n`;
       }
 
       for (let i = 0; i < actives.length; i++) {
         const s = actives[i];
+        const v = getVol(s.symbol);
         const health = healthResults[i].status === "fulfilled"
           ? (healthResults[i] as PromiseFulfilledResult<any>).value
           : null;
         const dirIcon = s.direction === "LONG" ? "🟢" : "🔴";
         const held = s.executedAt ? Math.floor((Date.now() - s.executedAt.getTime()) / 3600000) : 0;
         const heldStr = held >= 24 ? `${Math.floor(held / 24)}d${held % 24}h` : `${held}h`;
+        const tpPct = getTpPct(s);
+        const slPct = getSlPct(s);
+        const tpPrice = getTpPrice(s);
+        const slPrice = getSlPrice(s);
+        const tpUsdt = (tpPct / 100) * v;
+        const slUsdt = (slPct / 100) * v;
 
-        text += `\n┌ ${dirIcon} *${s.symbol}* ${s.direction} · ${heldStr}\n`;
+        text += `\n┌ ${dirIcon} *${s.symbol}* ${s.direction} · ${heldStr} · _Vol ${v.toLocaleString()} USDT_\n`;
 
         if (health) {
           const pnl = health.unrealizedPnl;
           const pnlIcon = pnl >= 0 ? "📗" : "📕";
           const pnlSign = pnl >= 0 ? "+" : "";
-          const distToTp = s.direction === "LONG"
-            ? ((s.takeProfitPrice - health.currentPrice) / health.currentPrice) * 100
-            : ((health.currentPrice - s.takeProfitPrice) / health.currentPrice) * 100;
-          const distToSl = s.direction === "LONG"
-            ? ((health.currentPrice - s.stopLossPrice) / health.currentPrice) * 100
-            : ((s.stopLossPrice - health.currentPrice) / health.currentPrice) * 100;
-
-          text += `│ ${pnlIcon} *${pnlSign}${pnl.toFixed(2)}%* · Now ${fmtPrice(health.currentPrice)}\n`;
-          text += `│ Entry  ${fmtPrice(s.entryPrice)}\n`;
-          text += `│ TP     ${fmtPrice(s.takeProfitPrice)} _(${distToTp.toFixed(1)}% away)_\n`;
-          text += `│ SL     ${fmtPrice(s.stopLossPrice)} _(${distToSl.toFixed(1)}% away)_\n`;
-        } else {
-          text += `│ Entry  ${fmtPrice(s.entryPrice)}\n`;
-          text += `│ TP     ${fmtPrice(s.takeProfitPrice)}\n`;
-          text += `│ SL     ${fmtPrice(s.stopLossPrice)}\n`;
+          text += `│ ${pnlIcon} *${pnlSign}${pnl.toFixed(2)}%* (*${fmtUsd(pnl, v)}*) · Now ${fmtPrice(health.currentPrice)}\n`;
         }
+        text += `│ Entry  ${fmtPrice(s.entryPrice)}\n`;
+        text += `│ TP     ${fmtPrice(tpPrice)} _(+${tpPct.toFixed(1)}% / +${tpUsdt.toFixed(2)} USDT)_\n`;
+        text += `│ SL     ${fmtPrice(slPrice)} _(-${slPct.toFixed(1)}% / -${slUsdt.toFixed(2)} USDT)_\n`;
         text += `└─────────────────\n`;
       }
     }
@@ -656,6 +1224,89 @@ export class AiCommandService implements OnModuleInit {
     text += `_${new Date().toLocaleTimeString("vi-VN")}_`;
 
     return text;
+  }
+
+  /**
+   * Check if any subscriber's profit target has been reached.
+   * If yes, notify them and close all active signals.
+   * Runs in the 10-min auto-push cron.
+   */
+  private async checkProfitTargets(): Promise<void> {
+    try {
+      const targets = await this.subscriptionService.findSubscribersWithProfitTarget();
+      if (targets.length === 0) return;
+
+      const actives = await this.signalQueueService.getAllActiveSignals();
+      if (actives.length === 0) {
+        // No positions open — reset notified flag so next cycle can fire again
+        for (const sub of targets) {
+          if (sub.profitTargetNotified) {
+            await this.subscriptionService.setProfitTargetNotified(sub.telegramId, false);
+          }
+        }
+        return;
+      }
+
+      // Fetch health for all active signals (current prices + unrealised PnL)
+      const healthResults = await Promise.allSettled(
+        actives.map((s) => this.statsService.checkSignalHealth(s.symbol)),
+      );
+
+      for (const sub of targets) {
+        if (sub.profitTargetNotified) continue; // already notified this cycle
+
+        const getSubVol = (symbol: string) =>
+          this.getVolForSymbol(symbol, sub.coinVolumes, sub.tradingBalance);
+        let totalUsd = 0;
+        for (let i = 0; i < actives.length; i++) {
+          const health =
+            healthResults[i].status === "fulfilled"
+              ? (healthResults[i] as PromiseFulfilledResult<any>).value
+              : null;
+          if (!health) continue;
+          const vol = getSubVol(actives[i].symbol);
+          totalUsd += (health.unrealizedPnl / 100) * vol;
+        }
+
+        if (totalUsd >= (sub.profitTarget ?? Infinity)) {
+          const sign = totalUsd >= 0 ? "+" : "";
+          const msg =
+            `🎯 *Muc tieu loi nhuan dat!*\n━━━━━━━━━━━━━━━━━━\n` +
+            `Tong PnL: *${sign}${totalUsd.toFixed(2)} USDT*\n` +
+            `Muc tieu: *+${(sub.profitTarget ?? 0).toFixed(2)} USDT*\n\n` +
+            `_Tat ca tin hieu se duoc dong lai._`;
+          await this.telegramService.sendTelegramMessage(sub.chatId, msg).catch(() => {});
+          await this.subscriptionService.setProfitTargetNotified(sub.telegramId, true);
+
+          // Close all active signals at current market price
+          for (let i = 0; i < actives.length; i++) {
+            const health =
+              healthResults[i].status === "fulfilled"
+                ? (healthResults[i] as PromiseFulfilledResult<any>).value
+                : null;
+            const exitPrice = health?.currentPrice ?? actives[i].entryPrice;
+            await this.signalQueueService
+              .resolveActiveSignal(actives[i].symbol, exitPrice, "AUTO_TAKE_PROFIT")
+              .catch(() => {});
+          }
+          this.logger.log(
+            `[AiCommand] Profit target hit for ${sub.telegramId}: +${totalUsd.toFixed(2)} USDT — closed ${actives.length} signals`,
+          );
+        }
+      }
+    } catch (err) {
+      this.logger.warn(`[AiCommand] checkProfitTargets error: ${err?.message}`);
+    }
+  }
+
+  /** Resolve per-trade volume for a symbol: coin override → base balance → 1000 USDT default. */
+  private getVolForSymbol(
+    symbol: string,
+    coinVolumes?: Record<string, number>,
+    tradingBalance?: number,
+  ): number {
+    const base = symbol.replace(/USDT$/, ""); // "BTCUSDT" → "BTC"
+    return coinVolumes?.[base] ?? coinVolumes?.[symbol] ?? tradingBalance ?? 1000;
   }
 
   private isAdmin(telegramId?: number): boolean {

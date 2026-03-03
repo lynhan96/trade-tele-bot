@@ -6,6 +6,7 @@ import { TelegramModule } from "../telegram/telegram.module";
 import { MarketDataModule } from "../market-data/market-data.module";
 import { CoinFilterModule } from "../coin-filter/coin-filter.module";
 import { StrategyModule } from "../strategy/strategy.module";
+import { UserModule } from "../user/user.module";
 
 import { AiSignalService } from "./ai-signal.service";
 import { SignalQueueService } from "./signal-queue.service";
@@ -13,6 +14,8 @@ import { PositionMonitorService } from "./position-monitor.service";
 import { AiSignalStatsService } from "./ai-signal-stats.service";
 import { AiCommandService } from "./ai-command.service";
 import { UserSignalSubscriptionService } from "./user-signal-subscription.service";
+import { UserRealTradingService } from "./user-real-trading.service";
+import { UserDataStreamService } from "./user-data-stream.service";
 
 import { AiSignal, AiSignalSchema } from "../schemas/ai-signal.schema";
 import {
@@ -31,6 +34,7 @@ import {
   DailyMarketSnapshot,
   DailyMarketSnapshotSchema,
 } from "../schemas/daily-market-snapshot.schema";
+import { UserTrade, UserTradeSchema } from "../schemas/user-trade.schema";
 
 @Module({
   imports: [
@@ -40,6 +44,7 @@ import {
     MarketDataModule,
     CoinFilterModule,
     StrategyModule,
+    UserModule,
     MongooseModule.forFeature([
       { name: AiSignal.name, schema: AiSignalSchema },
       { name: AiCoinProfile.name, schema: AiCoinProfileSchema },
@@ -52,6 +57,7 @@ import {
         name: DailyMarketSnapshot.name,
         schema: DailyMarketSnapshotSchema,
       },
+      { name: UserTrade.name, schema: UserTradeSchema },
     ]),
   ],
   providers: [
@@ -61,6 +67,8 @@ import {
     AiSignalStatsService,
     AiCommandService,
     UserSignalSubscriptionService,
+    UserRealTradingService,
+    UserDataStreamService,
   ],
   exports: [AiSignalService, UserSignalSubscriptionService],
 })

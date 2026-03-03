@@ -5,6 +5,7 @@ import { BinanceService } from "../binance/binance.service";
 import { MarketDataService } from "../market-data/market-data.service";
 import { SignalQueueService } from "./signal-queue.service";
 import { AiSignalDocument } from "../schemas/ai-signal.schema";
+import { UserRealTradingService } from "./user-real-trading.service";
 
 export interface ResolvedSignalInfo {
   symbol: string;
@@ -50,6 +51,9 @@ export class PositionMonitorService implements OnModuleInit {
   /** Callback for SL-moved-to-entry notification. */
   private slMovedCallback?: (symbol: string, entryPrice: number) => Promise<void>;
 
+  /** Callback for SL raised to +2% profit (5% milestone). */
+  private sl5PctCallback?: (symbol: string, newSl: number, direction: string) => Promise<void>;
+
   setResolveCallback(cb: (info: ResolvedSignalInfo) => Promise<void>): void {
     this.resolveCallback = cb;
   }
@@ -58,12 +62,17 @@ export class PositionMonitorService implements OnModuleInit {
     this.slMovedCallback = cb;
   }
 
+  setSl5PctCallback(cb: (symbol: string, newSl: number, direction: string) => Promise<void>): void {
+    this.sl5PctCallback = cb;
+  }
+
   constructor(
     private readonly configService: ConfigService,
     private readonly redisService: RedisService,
     private readonly binanceService: BinanceService,
     private readonly marketDataService: MarketDataService,
     private readonly signalQueueService: SignalQueueService,
+    private readonly userRealTradingService: UserRealTradingService,
   ) {
     this.monitorApiKey = configService.get<string>(
       "AI_MONITOR_BINANCE_API_KEY",
@@ -184,37 +193,22 @@ export class PositionMonitorService implements OnModuleInit {
         ? ((price - entryPrice) / entryPrice) * 100
         : ((entryPrice - price) / entryPrice) * 100;
 
-    // Auto-close at >= 5% profit
-    if (pnlPct >= 5) {
-      if (this.resolvingSymbols.has(sigKey)) return;
-      this.resolvingSymbols.add(sigKey);
-      this.unregisterListener(signal);
-
+    // At >= 5% profit — raise SL to lock in 2% profit (trailing stop milestone, don't auto-close)
+    if (pnlPct >= 5 && !(signal as any).sl5PctRaised) {
+      const newSl = direction === "LONG"
+        ? entryPrice * 1.02
+        : entryPrice * 0.98;
+      (signal as any).stopLossPrice = newSl;
+      (signal as any).sl5PctRaised = true;
+      await this.signalQueueService.raiseStopLoss((signal as any)._id.toString(), newSl);
       this.logger.log(
-        `[PositionMonitor] 💰 ${sigKey} auto-close at ${pnlPct.toFixed(2)}% profit (price=${price})`,
+        `[PositionMonitor] 🚀 ${sigKey} SL raised to +2% (${newSl.toFixed(4)}) at ${pnlPct.toFixed(2)}% profit — still running`,
       );
-
-      try {
-        const resolved = await this.signalQueueService.resolveActiveSignal(
-          sigKey, price, "AUTO_TAKE_PROFIT",
-        );
-        if (resolved) {
-          const promoted = await this.signalQueueService.activateQueuedSignal(sigKey);
-          if (promoted) this.registerListener(promoted);
-
-          if (this.resolveCallback) {
-            await this.resolveCallback({
-              symbol, signalKey: sigKey, direction, entryPrice,
-              exitPrice: price, pnlPercent: pnlPct,
-              closeReason: "AUTO_TAKE_PROFIT",
-              queuedSignalActivated: !!promoted,
-            }).catch((err) => this.logger.warn(`[PositionMonitor] resolveCallback error: ${err?.message}`));
-          }
-        }
-      } finally {
-        this.resolvingSymbols.delete(sigKey);
+      if (this.sl5PctCallback) {
+        await this.sl5PctCallback(symbol, newSl, direction).catch(() => {});
       }
-      return;
+      // Propagate SL move to real Binance orders
+      this.userRealTradingService.moveStopLossForRealUsers(symbol, newSl, direction).catch(() => {});
     }
 
     // Move SL to entry (break-even) at >= 4% profit
@@ -228,6 +222,8 @@ export class PositionMonitorService implements OnModuleInit {
       if (this.slMovedCallback) {
         await this.slMovedCallback(symbol, entryPrice).catch(() => {});
       }
+      // Propagate SL move to real Binance orders
+      this.userRealTradingService.moveStopLossForRealUsers(symbol, entryPrice, direction).catch(() => {});
     }
 
     // ─── Original TP/SL check ─────────────────────────────────────────────

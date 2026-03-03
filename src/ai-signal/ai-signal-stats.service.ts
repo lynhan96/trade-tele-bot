@@ -11,6 +11,7 @@ export interface StrategyStatRow {
   losses: number;
   winRate: number; // %
   avgPnl: number; // %
+  totalPnl: number; // cumulative % across all signals
   avgDurationHours: number;
   testModeCount: number;
   liveCount: number;
@@ -21,6 +22,7 @@ export interface OverallStats {
   wins: number;
   winRate: number;
   avgPnl: number;
+  totalPnlUsd: number; // cumulative realized PnL assuming ASSUMED_BALANCE_USDT per trade
   byStrategy: StrategyStatRow[];
   aiCostUsd: number; // estimated monthly cost
 }
@@ -74,6 +76,7 @@ export class AiSignalStatsService {
             $sum: { $cond: [{ $gt: ["$pnlPercent", 0] }, 1, 0] },
           },
           avgPnl: { $avg: "$pnlPercent" },
+          totalPnl: { $sum: "$pnlPercent" },
           avgDurationMs: {
             $avg: {
               $subtract: ["$positionClosedAt", "$executedAt"],
@@ -99,17 +102,21 @@ export class AiSignalStatsService {
       losses: r.totalSignals - r.wins,
       winRate: r.totalSignals > 0 ? (r.wins / r.totalSignals) * 100 : 0,
       avgPnl: r.avgPnl || 0,
+      totalPnl: r.totalPnl || 0,
       avgDurationHours: r.avgDurationMs ? r.avgDurationMs / 3600000 : 0,
       testModeCount: r.testModeCount,
       liveCount: r.liveCount,
     }));
 
+    const ASSUMED_BALANCE_USDT = 1000;
     const totalSignals = byStrategy.reduce((s, r) => s + r.totalSignals, 0);
     const totalWins = byStrategy.reduce((s, r) => s + r.wins, 0);
     const avgPnl =
       totalSignals > 0
         ? byStrategy.reduce((s, r) => s + r.avgPnl * r.totalSignals, 0) / totalSignals
         : 0;
+    const totalPnlPct = byStrategy.reduce((s, r) => s + r.totalPnl, 0);
+    const totalPnlUsd = (totalPnlPct / 100) * ASSUMED_BALANCE_USDT;
 
     // Estimate AI cost from regime history
     const aiCostUsd = await this.estimateAiCost(since);
@@ -119,6 +126,7 @@ export class AiSignalStatsService {
       wins: totalWins,
       winRate: totalSignals > 0 ? (totalWins / totalSignals) * 100 : 0,
       avgPnl,
+      totalPnlUsd,
       byStrategy,
       aiCostUsd,
     };
@@ -189,39 +197,51 @@ export class AiSignalStatsService {
   // ─── Format messages for Telegram ────────────────────────────────────────
 
   formatStatsMessage(stats: OverallStats, daysBack: number): string {
+    const ASSUMED_BALANCE_USDT = 1000;
+    const fmtUsd = (usd: number) => (usd >= 0 ? "+" : "-") + Math.abs(usd).toFixed(2) + " USDT";
+
+    const pnlIcon = stats.totalPnlUsd >= 0 ? "📗" : "📕";
     const winRateStr = stats.winRate.toFixed(0);
     const avgPnlStr = stats.avgPnl >= 0 ? `+${stats.avgPnl.toFixed(1)}` : stats.avgPnl.toFixed(1);
 
-    let msg = `📊 *AI Signal Stats (${daysBack} ngày)*\n\n`;
-    msg += `Tổng: *${stats.wins}/${stats.totalSignals}* thắng (*${winRateStr}%*) | avg ${avgPnlStr}%\n`;
-    msg += `Chi phí AI ước tính: ~$${stats.aiCostUsd.toFixed(2)}/tháng\n\n`;
+    let msg = `📊 *AI Signal Stats (${daysBack} ngay)*\n`;
+    msg += `━━━━━━━━━━━━━━━━━━\n`;
+    msg += `${pnlIcon} Realized PnL: *${fmtUsd(stats.totalPnlUsd)}* tong | avg *${avgPnlStr}%* _(1000 USDT/lenh)_\n`;
+    msg += `🏆 Win: *${stats.wins}/${stats.totalSignals}* (*${winRateStr}%*)\n`;
+    msg += `🤖 Chi phi AI: ~${stats.aiCostUsd.toFixed(2)} USDT/thang\n`;
 
     if (stats.byStrategy.length === 0) {
-      msg += "_Chưa có tín hiệu hoàn thành nào._";
+      msg += "\n_Chua co tin hieu hoan thanh nao._";
       return msg;
     }
 
+    msg += `━━━━━━━━━━━━━━━━━━\n`;
     for (const row of stats.byStrategy) {
+      const rowUsd = (row.totalPnl / 100) * ASSUMED_BALANCE_USDT;
+      const rowIcon = rowUsd >= 0 ? "📗" : "📕";
       const wr = row.winRate.toFixed(0);
       const pnl = row.avgPnl >= 0 ? `+${row.avgPnl.toFixed(1)}` : row.avgPnl.toFixed(1);
       const dur = row.avgDurationHours.toFixed(1);
-      const testTag = row.testModeCount > 0 ? ` (${row.testModeCount} test)` : "";
-      msg += `*${row.strategy}*: ${row.wins}/${row.totalSignals} (${wr}%) | avg ${pnl}% | ${dur}h${testTag}\n`;
+      const testTag = row.testModeCount > 0 ? ` _(${row.testModeCount} test)_` : "";
+      msg += `${rowIcon} *${row.strategy}*: ${row.wins}/${row.totalSignals} (${wr}%) | avg ${pnl}% | *${fmtUsd(rowUsd)}* | ${dur}h${testTag}\n`;
     }
 
     return msg;
   }
 
   formatHealthMessage(health: SignalHealthCheck): string {
+    const ASSUMED_BALANCE_USDT = 1000;
     const dirEmoji = health.direction === "LONG" ? "📈" : "📉";
     const pnlSign = health.unrealizedPnl >= 0 ? "+" : "";
     const slSign = health.distanceToSl >= 0 ? "+" : "";
     const testTag = health.isTestMode ? " `[TEST]`" : "";
     const statusTag = health.status === "QUEUED" ? " ⏳ QUEUED" : "";
+    const pnlUsd = (health.unrealizedPnl / 100) * ASSUMED_BALANCE_USDT;
+    const pnlUsdStr = (pnlUsd >= 0 ? "+" : "-") + Math.abs(pnlUsd).toFixed(2) + " USDT";
 
     let msg = `🔍 *AI Check: ${health.symbol}*${testTag}${statusTag}\n\n`;
     msg += `${dirEmoji} *${health.direction}* vào $${health.entryPrice.toLocaleString()}\n`;
-    msg += `├ Hiện tại: $${health.currentPrice.toLocaleString()} (${pnlSign}${health.unrealizedPnl.toFixed(2)}%)\n`;
+    msg += `├ Hiện tại: $${health.currentPrice.toLocaleString()} (${pnlSign}${health.unrealizedPnl.toFixed(2)}% / *${pnlUsdStr}*)\n`;
     msg += `├ Stop Loss: $${health.stopLossPrice.toLocaleString()} (${slSign}${health.distanceToSl.toFixed(2)}%)\n`;
     if (health.executedAt) {
       msg += `├ Đã chạy: ${health.hoursActive.toFixed(1)}h\n`;
