@@ -20,6 +20,8 @@ const ENTRY_PRICE_TOLERANCE = 0.005;
 
 /** Redis key for caching symbol quantity precision. */
 const QTY_PRECISION_KEY = (symbol: string) => `cache:binance:qty-precision:${symbol}`;
+/** Redis key for caching symbol price precision (tick size decimals). */
+const PRICE_PRECISION_KEY = (symbol: string) => `cache:binance:price-precision:${symbol}`;
 
 @Injectable()
 export class UserRealTradingService implements OnModuleInit {
@@ -86,11 +88,14 @@ export class UserRealTradingService implements OnModuleInit {
       return;
     }
 
-    const precision = await this.getQuantityPrecision(symbol);
+    const [precision, pricePrecision] = await Promise.all([
+      this.getQuantityPrecision(symbol),
+      this.getPricePrecision(symbol),
+    ]);
 
     await Promise.allSettled(
       subscribers.map((sub) =>
-        this.placeOrderForUser(sub, signal, params, currentPrice, precision),
+        this.placeOrderForUser(sub, signal, params, currentPrice, precision, pricePrecision),
       ),
     );
   }
@@ -101,6 +106,7 @@ export class UserRealTradingService implements OnModuleInit {
     params: AiTunedParams,
     currentPrice: number,
     quantityPrecision: number,
+    pricePrecision: number = 4,
   ): Promise<void> {
     const { telegramId, chatId } = sub;
     const { symbol, direction, entryPrice, stopLossPrice, takeProfitPrice } = signal;
@@ -132,6 +138,11 @@ export class UserRealTradingService implements OnModuleInit {
       const fillPrice = parseFloat(order.avgPrice) || currentPrice;
       const binanceOrderId = order.orderId?.toString() ?? "";
 
+      // Round SL/TP prices to Binance-required precision (avoids "Precision over maximum" error)
+      const roundPrice = (p: number) => parseFloat(p.toFixed(pricePrecision));
+      const roundedSl = roundPrice(stopLossPrice);
+      const roundedTp = takeProfitPrice ? roundPrice(takeProfitPrice) : undefined;
+
       // Place SL algo order
       let binanceSlAlgoId: string | undefined;
       try {
@@ -139,29 +150,35 @@ export class UserRealTradingService implements OnModuleInit {
           keys.apiKey,
           keys.apiSecret,
           symbol,
-          stopLossPrice,
+          roundedSl,
           direction as "LONG" | "SHORT",
           quantity,
         );
         binanceSlAlgoId = slOrder?.algoId?.toString() ?? slOrder?.orderId?.toString();
       } catch (err) {
         this.logger.error(`[RealTrading] ${symbol} SL order failed for user ${telegramId}: ${err?.message}`);
+        await this.telegramService.sendTelegramMessage(chatId,
+          `⚠️ *Real Mode: SL Order That Bai*\n\n${symbol} — SL tai $${roundedSl} khong duoc dat.\nLoi: ${err?.message}\n\n_Hay tu dat SL tren Binance._`
+        ).catch(() => {});
       }
 
       // Place TP algo order (if signal has TP price)
       let binanceTpAlgoId: string | undefined;
-      if (takeProfitPrice) {
+      if (roundedTp) {
         try {
           const tpOrder = await this.binanceService.setTakeProfitAtPrice(
             keys.apiKey,
             keys.apiSecret,
             symbol,
-            takeProfitPrice,
+            roundedTp,
             direction as "LONG" | "SHORT",
           );
           binanceTpAlgoId = tpOrder?.algoId?.toString() ?? tpOrder?.orderId?.toString();
         } catch (err) {
           this.logger.warn(`[RealTrading] ${symbol} TP order failed for user ${telegramId}: ${err?.message}`);
+          await this.telegramService.sendTelegramMessage(chatId,
+            `⚠️ *Real Mode: TP Order That Bai*\n\n${symbol} — TP tai $${roundedTp} khong duoc dat.\nLoi: ${err?.message}\n\n_Lenh van mo, SL van hoat dong._`
+          ).catch(() => {});
         }
       }
 
@@ -200,8 +217,8 @@ export class UserRealTradingService implements OnModuleInit {
         `Symbol: *${symbol}* ${direction}\n` +
         `So luong: *×${quantity}* (${leverage}x)\n` +
         `Gia vao: *${fmtP(fillPrice)}*\n` +
-        `Stop Loss: *${fmtP(stopLossPrice)}*\n` +
-        (takeProfitPrice ? `Take Profit: *${fmtP(takeProfitPrice)}*\n` : "") +
+        `Stop Loss: *${fmtP(roundedSl)}*${binanceSlAlgoId ? "" : " ⚠️"}\n` +
+        (roundedTp ? `Take Profit: *${fmtP(roundedTp)}*${binanceTpAlgoId ? "" : " ⚠️"}\n` : "") +
         `Volume: *${vol.toLocaleString()} USDT*`;
       await this.telegramService.sendTelegramMessage(chatId, msg).catch(() => {});
 
@@ -653,12 +670,25 @@ export class UserRealTradingService implements OnModuleInit {
         timeout: 5_000,
       });
       const info = res.data.symbols?.find((s: any) => s.symbol === symbol);
-      const precision = info?.quantityPrecision ?? 3;
-      await this.redisService.set(QTY_PRECISION_KEY(symbol), precision, 24 * 3600);
-      return precision;
+      const qtyPrecision = info?.quantityPrecision ?? 3;
+      await this.redisService.set(QTY_PRECISION_KEY(symbol), qtyPrecision, 24 * 3600);
+
+      // Also cache price precision from the same response (avoids a second call)
+      const pricePrecision = info?.pricePrecision ?? 4;
+      await this.redisService.set(PRICE_PRECISION_KEY(symbol), pricePrecision, 24 * 3600);
+
+      return qtyPrecision;
     } catch {
       return 3; // safe default
     }
+  }
+
+  private async getPricePrecision(symbol: string): Promise<number> {
+    const cached = await this.redisService.get<number>(PRICE_PRECISION_KEY(symbol));
+    if (cached != null) return cached;
+    // If not cached yet (first run), force a quantity precision fetch which also caches price precision
+    await this.getQuantityPrecision(symbol);
+    return (await this.redisService.get<number>(PRICE_PRECISION_KEY(symbol))) ?? 4;
   }
 
   private async fetchCurrentPrice(symbol: string): Promise<number | null> {

@@ -307,7 +307,7 @@ export class AiSignalService implements OnModuleInit {
 
       const globalRegime = await this.aiOptimizerService.assessGlobalRegime();
 
-      // Build work items: BTC/ETH get TWO entries (INTRADAY + SWING), others get ONE
+      // Build work items: BTC/ETH get TWO entries (INTRADAY + SWING), all others use SWING (4h)
       const workItems: { coin: string; currency: string; forceProfile?: string }[] = [];
       for (const entry of shortlist) {
         const coinUpper = entry.coin.toUpperCase();
@@ -315,7 +315,7 @@ export class AiSignalService implements OnModuleInit {
           workItems.push({ coin: entry.coin, currency: entry.currency, forceProfile: "INTRADAY" });
           workItems.push({ coin: entry.coin, currency: entry.currency, forceProfile: "SWING" });
         } else {
-          workItems.push({ coin: entry.coin, currency: entry.currency });
+          workItems.push({ coin: entry.coin, currency: entry.currency, forceProfile: "SWING" });
         }
       }
 
