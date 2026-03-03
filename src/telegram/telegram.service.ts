@@ -49,7 +49,8 @@ export class TelegramBotService implements OnModuleInit {
           `/ai realmode target 5 — Dat muc tieu loi nhuan +5%/ngay\n` +
           `/ai realmode stoploss 3 — Dat gioi han lo -3%/ngay\n` +
           `/ai realmode stats — Chi tiet lenh va P&L hom nay\n` +
-          `/ai account — Vi the mo & unrealized PnL\n\n` +
+          `/ai account — Vi the mo & unrealized PnL\n` +
+          `/ai rank — Xep hang PnL tat ca nguoi dung\n\n` +
           `⚙️ *Cai dat*\n` +
           `/ai settings — Xem cai dat hien tai\n` +
           `/ai balance <so> — Set balance mac dinh (USDT/lenh)\n` +
@@ -111,6 +112,7 @@ export class TelegramBotService implements OnModuleInit {
         { command: "ai_coins", description: "Xem danh sach coin dang theo doi" },
         { command: "ai_check", description: "Kiem tra tin hieu coin" },
         { command: "ai_account", description: "Vi the mo va PnL real mode" },
+        { command: "ai_rank", description: "Xep hang PnL tat ca nguoi dung" },
         { command: "ai_close", description: "Dong lenh (all hoac SYMBOL)" },
         // Admin
         { command: "ai_status", description: "Trang thai he thong (admin)" },

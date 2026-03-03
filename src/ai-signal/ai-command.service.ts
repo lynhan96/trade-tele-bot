@@ -1022,6 +1022,18 @@ export class AiCommandService implements OnModuleInit {
               const sign = (v: number) => v >= 0 ? "+" : "";
               const pnlIcon = stats.totalPnlUsdt >= 0 ? "📗" : "📕";
 
+              // % based on wallet balance (not notional)
+              const balancePct = balance && balance.walletBalance > 0
+                ? (stats.totalPnlUsdt / balance.walletBalance) * 100
+                : stats.dailyPnlPct;
+
+              // Win rate from closed trades
+              const wins = stats.closedToday.filter(t => t.pnlUsdt >= 0).length;
+              const totalClosed = stats.closedToday.length;
+              const winRateLine = totalClosed > 0
+                ? `🏆 Win: *${wins}/${totalClosed}* (${Math.round(wins / totalClosed * 100)}%)\n`
+                : ``;
+
               let text = `📊 *Real Mode: Thong Ke Hom Nay*\n━━━━━━━━━━━━━━━━━━\n\n`;
 
               if (balance) {
@@ -1033,8 +1045,9 @@ export class AiCommandService implements OnModuleInit {
               }
 
               text +=
-                `${pnlIcon} PnL Hom Nay: *${sign(stats.totalPnlUsdt)}${stats.totalPnlUsdt.toFixed(2)} USDT* (*${sign(stats.dailyPnlPct)}${stats.dailyPnlPct.toFixed(2)}%*)\n` +
-                `Lenh mo: *${stats.openTrades.length}* · Dong hom nay: *${stats.closedToday.length}*\n`;
+                `${pnlIcon} PnL Hom Nay: *${sign(stats.totalPnlUsdt)}${stats.totalPnlUsdt.toFixed(2)} USDT* (*${sign(balancePct)}${balancePct.toFixed(2)}%*)\n` +
+                `Lenh mo: *${stats.openTrades.length}* · Dong hom nay: *${stats.closedToday.length}*\n` +
+                winRateLine;
 
               if (stats.openTrades.length > 0) {
                 text += `\n*Lenh Dang Mo:*\n`;
@@ -1326,6 +1339,58 @@ export class AiCommandService implements OnModuleInit {
         await this.telegramService.sendTelegramMessage(chatId, text);
       } catch (err) {
         await this.telegramService.sendTelegramMessage(chatId, `❌ Loi: ${err?.message}`);
+      }
+    });
+
+    // /ai rank — PnL ranking across all real-mode users (also handles /ai_rank)
+    this.telegramService.registerBotCommand(/^\/ai[_ ]rank/, async (msg) => {
+      const chatId = msg.chat.id;
+      const telegramId = msg.from?.id;
+      if (!telegramId) return;
+
+      try {
+        const sub = await this.subscriptionService.getSubscription(telegramId);
+        if (!sub?.realModeEnabled) {
+          await this.telegramService.sendTelegramMessage(chatId,
+            `⚡ *Real Mode chua bat*\n\nChi nguoi dung Real Mode moi xem duoc xep hang.\nDung /ai realmode on de bat.`);
+          return;
+        }
+
+        const { today, allTime } = await this.userRealTradingService.getAllUsersRanking();
+
+        const medal = (i: number) => i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : `${i + 1}.`;
+        const sign = (v: number) => v >= 0 ? "+" : "";
+        const nameOf = (u: { telegramId: number; username?: string }) =>
+          u.username ? `@${u.username}` : `User #${u.telegramId}`;
+
+        let text = `🏆 *Xep Hang Real Mode*\n━━━━━━━━━━━━━━━━━━\n`;
+
+        text += `\n📅 *Hom Nay:*\n`;
+        if (today.length === 0) {
+          text += `_Chua co giao dich hom nay_\n`;
+        } else {
+          for (let i = 0; i < today.length; i++) {
+            const u = today[i];
+            const winRate = u.total > 0 ? `  Win: ${u.wins}/${u.total} (${Math.round(u.wins / u.total * 100)}%)` : "";
+            text += `${medal(i)} ${nameOf(u)}  *${sign(u.pnlUsdt)}${u.pnlUsdt.toFixed(2)} USDT*${winRate}\n`;
+          }
+        }
+
+        text += `\n📊 *Tong Cong (All-time):*\n`;
+        if (allTime.length === 0) {
+          text += `_Chua co giao dich_\n`;
+        } else {
+          for (let i = 0; i < allTime.length; i++) {
+            const u = allTime[i];
+            const winRate = u.total > 0 ? `  Win: ${u.wins}/${u.total} (${Math.round(u.wins / u.total * 100)}%)` : "";
+            text += `${medal(i)} ${nameOf(u)}  *${sign(u.pnlUsdt)}${u.pnlUsdt.toFixed(2)} USDT*${winRate}\n`;
+          }
+        }
+
+        text += `\n━━━━━━━━━━━━━━━━━━\n_${new Date().toLocaleTimeString("vi-VN")} UTC_`;
+        await this.telegramService.sendTelegramMessage(chatId, text);
+      } catch (err) {
+        await this.telegramService.sendTelegramMessage(chatId, `❌ Loi lay xep hang: ${err?.message}`);
       }
     });
 

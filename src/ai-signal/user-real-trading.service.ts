@@ -478,6 +478,82 @@ export class UserRealTradingService implements OnModuleInit {
   }
 
   /**
+   * Compute PnL ranking across all real-mode users.
+   * Today: closed trades since UTC midnight + unrealized from open positions.
+   * All-time: cumulative closed trades only.
+   */
+  async getAllUsersRanking(): Promise<{
+    today: Array<{ telegramId: number; username?: string; pnlUsdt: number; wins: number; total: number; }>;
+    allTime: Array<{ telegramId: number; username?: string; pnlUsdt: number; wins: number; total: number; }>;
+  }> {
+    const startOfToday = new Date();
+    startOfToday.setUTCHours(0, 0, 0, 0);
+
+    const realModeUsers = await this.subscriptionService.findRealModeSubscribers();
+    const usernameMap = new Map(realModeUsers.map(u => [u.telegramId, u.username]));
+    const realModeIds = new Set(realModeUsers.map(u => u.telegramId));
+
+    const [allTimeAgg, todayAgg, openTrades] = await Promise.all([
+      this.userTradeModel.aggregate([
+        { $match: { status: "CLOSED" } },
+        { $group: {
+          _id: "$telegramId",
+          pnlUsdt: { $sum: "$pnlUsdt" },
+          total: { $sum: 1 },
+          wins: { $sum: { $cond: [{ $gte: ["$pnlUsdt", 0] }, 1, 0] } },
+        }},
+        { $sort: { pnlUsdt: -1 } },
+      ]),
+      this.userTradeModel.aggregate([
+        { $match: { status: "CLOSED", closedAt: { $gte: startOfToday } } },
+        { $group: {
+          _id: "$telegramId",
+          pnlUsdt: { $sum: "$pnlUsdt" },
+          total: { $sum: 1 },
+          wins: { $sum: { $cond: [{ $gte: ["$pnlUsdt", 0] }, 1, 0] } },
+        }},
+      ]),
+      this.userTradeModel.find({ status: "OPEN" }).lean(),
+    ]);
+
+    // Build today map starting from closed trades
+    const todayMap = new Map<number, { pnlUsdt: number; wins: number; total: number }>();
+    for (const row of todayAgg) {
+      todayMap.set(row._id, { pnlUsdt: row.pnlUsdt, wins: row.wins, total: row.total });
+    }
+
+    // Add unrealized PnL from currently open positions
+    for (const trade of openTrades) {
+      const currentPrice = this.marketDataService.getLatestPrice(trade.symbol);
+      if (!currentPrice) continue;
+      const pnlFraction = trade.direction === "LONG"
+        ? (currentPrice - trade.entryPrice) / trade.entryPrice
+        : (trade.entryPrice - currentPrice) / trade.entryPrice;
+      const unrealizedUsdt = pnlFraction * trade.notionalUsdt;
+      const existing = todayMap.get(trade.telegramId) ?? { pnlUsdt: 0, wins: 0, total: 0 };
+      existing.pnlUsdt += unrealizedUsdt;
+      todayMap.set(trade.telegramId, existing);
+    }
+
+    const today = Array.from(todayMap.entries())
+      .filter(([id]) => realModeIds.has(id))
+      .map(([telegramId, data]) => ({ telegramId, username: usernameMap.get(telegramId), ...data }))
+      .sort((a, b) => b.pnlUsdt - a.pnlUsdt);
+
+    const allTime = allTimeAgg
+      .filter(row => realModeIds.has(row._id))
+      .map(row => ({
+        telegramId: row._id,
+        username: usernameMap.get(row._id),
+        pnlUsdt: row.pnlUsdt,
+        wins: row.wins,
+        total: row.total,
+      }));
+
+    return { today, allTime };
+  }
+
+  /**
    * Cancel all SL/TP algo orders and market-close all open positions for a user.
    * Used when daily target or daily stop loss is triggered.
    * Returns the number of positions closed.
