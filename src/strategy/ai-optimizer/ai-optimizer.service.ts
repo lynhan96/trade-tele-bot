@@ -218,7 +218,7 @@ ${historyText}
 Constraints:
 - minVolumeUsd: 3000000 to 100000000
 - minPriceChangePct: 0.1 to 3.0
-- maxShortlistSize: 10 to 50
+- maxShortlistSize: 10 to 100
 
 Guidelines:
 - VOLATILE: more coins moving → widen filter, increase shortlist
@@ -227,7 +227,7 @@ Guidelines:
 - MIXED: balanced defaults
 
 Reply ONLY with valid JSON (no markdown):
-{"minVolumeUsd":10000000,"minPriceChangePct":0.3,"maxShortlistSize":30,"reasoning":"brief reason"}`;
+{"minVolumeUsd":10000000,"minPriceChangePct":0.3,"maxShortlistSize":50,"reasoning":"brief reason"}`;
 
     const resp = await this.anthropic.messages.create({
       model: HAIKU_MODEL,

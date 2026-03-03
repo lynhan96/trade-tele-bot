@@ -53,7 +53,7 @@ export class CoinFilterService {
         this.configService.get("AI_MIN_PRICE_CHANGE_PCT", "0.3"),
       ),
       maxShortlistSize: parseInt(
-        this.configService.get("AI_MAX_SHORTLIST_SIZE", "50"),
+        this.configService.get("AI_MAX_SHORTLIST_SIZE", "100"),
       ),
       source: "env",
     };
