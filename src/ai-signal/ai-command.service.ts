@@ -1014,13 +1014,26 @@ export class AiCommandService implements OnModuleInit {
               p >= 1000 ? `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :
               p >= 1 ? `$${p.toFixed(2)}` : `$${p.toFixed(4)}`;
             try {
-              const stats = await this.userRealTradingService.getDailyStats(telegramId);
+              const keys = await this.userSettingsService.getApiKeys(telegramId, "binance");
+              const [stats, balance] = await Promise.all([
+                this.userRealTradingService.getDailyStats(telegramId),
+                keys ? this.binanceService.getFuturesBalance(keys.apiKey, keys.apiSecret) : Promise.resolve(null),
+              ]);
               const sign = (v: number) => v >= 0 ? "+" : "";
               const pnlIcon = stats.totalPnlUsdt >= 0 ? "📗" : "📕";
 
-              let text =
-                `📊 *Real Mode: Thong Ke Hom Nay*\n━━━━━━━━━━━━━━━━━━\n\n` +
-                `${pnlIcon} PnL: *${sign(stats.totalPnlUsdt)}${stats.totalPnlUsdt.toFixed(2)} USDT* (*${sign(stats.dailyPnlPct)}${stats.dailyPnlPct.toFixed(2)}%*)\n` +
+              let text = `📊 *Real Mode: Thong Ke Hom Nay*\n━━━━━━━━━━━━━━━━━━\n\n`;
+
+              if (balance) {
+                text +=
+                  `💰 *So Du Binance Futures (USDT)*\n` +
+                  `Vi: *${balance.walletBalance.toFixed(2)} USDT*\n` +
+                  `Kha dung: *${balance.availableBalance.toFixed(2)} USDT*\n` +
+                  `Unrealized PnL: *${sign(balance.unrealizedPnl)}${balance.unrealizedPnl.toFixed(2)} USDT*\n\n`;
+              }
+
+              text +=
+                `${pnlIcon} PnL Hom Nay: *${sign(stats.totalPnlUsdt)}${stats.totalPnlUsdt.toFixed(2)} USDT* (*${sign(stats.dailyPnlPct)}${stats.dailyPnlPct.toFixed(2)}%*)\n` +
                 `Lenh mo: *${stats.openTrades.length}* · Dong hom nay: *${stats.closedToday.length}*\n`;
 
               if (stats.openTrades.length > 0) {
