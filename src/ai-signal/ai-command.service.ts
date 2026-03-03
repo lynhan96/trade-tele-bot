@@ -1352,24 +1352,27 @@ export class AiCommandService implements OnModuleInit {
         if (messageId) await this.telegramService.deleteMessage(chatId, messageId);
 
         try {
-          const testSignals = await this.signalQueueService.getAllActiveSignals();
-          let testClosed = 0;
-          for (const s of testSignals) {
-            const price = this.marketDataService.getLatestPrice(s.symbol) ?? s.entryPrice;
-            await this.signalQueueService.resolveActiveSignal(s.symbol, price, "MANUAL").catch(() => {});
-            testClosed++;
-          }
-
           const sub = await this.subscriptionService.getSubscription(telegramId);
-          let realClosed = 0;
+          let resultText: string;
+
           if (sub?.realModeEnabled) {
-            realClosed = await this.userRealTradingService.closeAllRealPositions(telegramId, chatId, "MANUAL");
+            // Real mode: only close personal real positions — do NOT touch global signals
+            const realClosed = await this.userRealTradingService.closeAllRealPositions(telegramId, chatId, "MANUAL");
+            resultText = `✅ *Da dong ${realClosed} lenh that*\n`;
+            if (realClosed > 0) resultText += `⚡ Lenh that: ${realClosed} lenh\n`;
+          } else {
+            // Test mode: close all global signals
+            const testSignals = await this.signalQueueService.getAllActiveSignals();
+            let testClosed = 0;
+            for (const s of testSignals) {
+              const price = this.marketDataService.getLatestPrice(s.symbol) ?? s.entryPrice;
+              await this.signalQueueService.resolveActiveSignal(s.symbol, price, "MANUAL").catch(() => {});
+              testClosed++;
+            }
+            resultText = `✅ *Da dong ${testClosed} tin hieu AI*\n`;
+            if (testClosed > 0) resultText += `📊 Tin hieu AI: ${testClosed} lenh\n`;
           }
 
-          const total = testClosed + realClosed;
-          let resultText = `✅ *Da dong ${total} lenh*\n`;
-          if (testClosed > 0) resultText += `📊 Tin hieu AI: ${testClosed} lenh\n`;
-          if (realClosed > 0) resultText += `⚡ Lenh that: ${realClosed} lenh\n`;
           await this.telegramService.sendTelegramMessage(chatId, resultText);
         } catch (err) {
           await this.telegramService.sendTelegramMessage(chatId, `❌ Loi dong lenh: ${err?.message}`);
@@ -1389,23 +1392,25 @@ export class AiCommandService implements OnModuleInit {
         try {
           let resultText = `✅ *Da dong ${symbol}*\n`;
 
-          const testSignal = (await this.signalQueueService.getAllActiveSignals()).find((s) => s.symbol === symbol);
-          if (testSignal) {
-            const price = this.marketDataService.getLatestPrice(symbol) ?? testSignal.entryPrice;
-            const pnlPct = testSignal.direction === "LONG"
-              ? ((price - testSignal.entryPrice) / testSignal.entryPrice) * 100
-              : ((testSignal.entryPrice - price) / testSignal.entryPrice) * 100;
-            await this.signalQueueService.resolveActiveSignal(symbol, price, "MANUAL").catch(() => {});
-            const sign = pnlPct >= 0 ? "+" : "";
-            resultText += `📊 Tin hieu AI: *${sign}${pnlPct.toFixed(2)}%*\n`;
-          }
-
           const sub = await this.subscriptionService.getSubscription(telegramId);
           if (sub?.realModeEnabled) {
+            // Real mode: only close personal real position — do NOT touch global signal
             const result = await this.userRealTradingService.closeRealPosition(telegramId, chatId, symbol, "MANUAL");
             if (result.success && result.pnlPct !== undefined) {
               const sign = result.pnlPct >= 0 ? "+" : "";
               resultText += `⚡ Lenh that: *${sign}${result.pnlPct.toFixed(2)}%*\n`;
+            }
+          } else {
+            // Test mode: close the global signal
+            const testSignal = (await this.signalQueueService.getAllActiveSignals()).find((s) => s.symbol === symbol);
+            if (testSignal) {
+              const price = this.marketDataService.getLatestPrice(symbol) ?? testSignal.entryPrice;
+              const pnlPct = testSignal.direction === "LONG"
+                ? ((price - testSignal.entryPrice) / testSignal.entryPrice) * 100
+                : ((testSignal.entryPrice - price) / testSignal.entryPrice) * 100;
+              await this.signalQueueService.resolveActiveSignal(symbol, price, "MANUAL").catch(() => {});
+              const sign = pnlPct >= 0 ? "+" : "";
+              resultText += `📊 Tin hieu AI: *${sign}${pnlPct.toFixed(2)}%*\n`;
             }
           }
 
