@@ -752,34 +752,39 @@ export class UserRealTradingService implements OnModuleInit {
     return coinVolumes?.[base] ?? coinVolumes?.[symbol] ?? tradingBalance ?? 1000;
   }
 
-  private async getQuantityPrecision(symbol: string): Promise<number> {
-    const cached = await this.redisService.get<number>(QTY_PRECISION_KEY(symbol));
-    if (cached != null) return cached;
-
+  /** Fetch exchangeInfo once and cache both qty precision and price decimal places (from tickSize). */
+  private async fetchAndCacheSymbolPrecisions(symbol: string): Promise<{ qty: number; price: number }> {
     try {
       const res = await axios.get("https://fapi.binance.com/fapi/v1/exchangeInfo", {
         timeout: 5_000,
       });
       const info = res.data.symbols?.find((s: any) => s.symbol === symbol);
-      const qtyPrecision = info?.quantityPrecision ?? 3;
-      await this.redisService.set(QTY_PRECISION_KEY(symbol), qtyPrecision, 24 * 3600);
+      const qty = info?.quantityPrecision ?? 3;
 
-      // Also cache price precision from the same response (avoids a second call)
-      const pricePrecision = info?.pricePrecision ?? 4;
-      await this.redisService.set(PRICE_PRECISION_KEY(symbol), pricePrecision, 24 * 3600);
+      // Derive price decimal places from PRICE_FILTER tickSize — this is the actual Binance constraint,
+      // not the display-only `pricePrecision` field.
+      const priceFilter = info?.filters?.find((f: any) => f.filterType === 'PRICE_FILTER');
+      const tickSize = priceFilter?.tickSize ? parseFloat(priceFilter.tickSize) : 0.01;
+      const price = tickSize >= 1 ? 0 : Math.min(8, Math.round(-Math.log10(tickSize)));
 
-      return qtyPrecision;
+      await this.redisService.set(QTY_PRECISION_KEY(symbol), qty, 24 * 3600);
+      await this.redisService.set(PRICE_PRECISION_KEY(symbol), price, 24 * 3600);
+      return { qty, price };
     } catch {
-      return 3; // safe default
+      return { qty: 3, price: 2 };
     }
+  }
+
+  private async getQuantityPrecision(symbol: string): Promise<number> {
+    const cached = await this.redisService.get<number>(QTY_PRECISION_KEY(symbol));
+    if (cached != null) return cached;
+    return (await this.fetchAndCacheSymbolPrecisions(symbol)).qty;
   }
 
   private async getPricePrecision(symbol: string): Promise<number> {
     const cached = await this.redisService.get<number>(PRICE_PRECISION_KEY(symbol));
     if (cached != null) return cached;
-    // If not cached yet (first run), force a quantity precision fetch which also caches price precision
-    await this.getQuantityPrecision(symbol);
-    return (await this.redisService.get<number>(PRICE_PRECISION_KEY(symbol))) ?? 4;
+    return (await this.fetchAndCacheSymbolPrecisions(symbol)).price;
   }
 
   private async fetchCurrentPrice(symbol: string): Promise<number | null> {
