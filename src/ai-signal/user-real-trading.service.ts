@@ -850,9 +850,33 @@ export class UserRealTradingService implements OnModuleInit {
                   `🛡️ *Bao Ve Vi The: SL Duoc Dat Lai*\n\n${symbol} ${direction}\nSL: *${fmtP(roundedSl)}*\n_SL bi mat — da tu dong dat lai de bao ve vi the._`
                 ).catch(() => {});
               } catch (err) {
-                this.logger.error(`[RealTrading] ${symbol} user ${telegramId}: SL re-place FAILED: ${err?.message}`);
+                const errMsg = err?.message ?? "";
+                // "GTE can only be used with open positions" means position is already closed
+                if (errMsg.includes("GTE") && errMsg.includes("open positions")) {
+                  this.logger.log(`[RealTrading] ${symbol} user ${telegramId}: SL failed with GTE — position closed on Binance`);
+                  const exitP = this.marketDataService.getLatestPrice(symbol);
+                  let pnlP = 0, pnlU = 0;
+                  if (exitP && trade.entryPrice) {
+                    pnlP = direction === "LONG"
+                      ? ((exitP - trade.entryPrice) / trade.entryPrice) * 100
+                      : ((trade.entryPrice - exitP) / trade.entryPrice) * 100;
+                    pnlU = (pnlP / 100) * (trade.notionalUsdt || 0);
+                  }
+                  await this.userTradeModel.updateOne(
+                    { _id: (trade as any)._id },
+                    { $set: { status: "CLOSED", closeReason: "BINANCE_CLOSED", closedAt: new Date(),
+                      ...(exitP ? { exitPrice: exitP, pnlPercent: pnlP, pnlUsdt: pnlU } : {}) } },
+                  );
+                  const sign = pnlP >= 0 ? "+" : "";
+                  const emoji = pnlP >= 0 ? "✅" : "❌";
+                  await this.telegramService.sendTelegramMessage(chatId,
+                    `${emoji} *Real Mode: Lenh Da Dong*\n━━━━━━━━━━━━━━━━━━\n\n${symbol} ${direction}\nPnL: *${sign}${pnlP.toFixed(2)}% (${sign}${pnlU.toFixed(2)} USDT)*\n_Vi the da dong tren Binance (SL/TP)_`
+                  ).catch(() => {});
+                  continue;
+                }
+                this.logger.error(`[RealTrading] ${symbol} user ${telegramId}: SL re-place FAILED: ${errMsg}`);
                 await this.telegramService.sendTelegramMessage(chatId,
-                  `🚨 *CANH BAO: ${symbol} Khong Co SL!*\n\nKhong the tu dong dat SL tai ${fmtP(slPrice)}.\n*Hay dong lenh hoac dat SL thu cong tren Binance ngay!*\nLoi: ${err?.message}`
+                  `🚨 *CANH BAO: ${symbol} Khong Co SL!*\n\nKhong the tu dong dat SL tai ${fmtP(slPrice)}.\n*Hay dong lenh hoac dat SL thu cong tren Binance ngay!*\nLoi: ${errMsg}`
                 ).catch(() => {});
               }
             }
