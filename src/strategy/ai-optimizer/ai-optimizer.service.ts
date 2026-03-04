@@ -739,6 +739,10 @@ Reply ONLY with JSON:
   }
 
   private mergeWithDefaults(parsed: Partial<AiTunedParams>): AiTunedParams {
+    // GPT sometimes pipes the regime field too — take only the first value
+    if (parsed.regime && String(parsed.regime).includes("|")) {
+      parsed.regime = String(parsed.regime).split("|")[0].trim() as any;
+    }
     const defaults = this.getDefaultParams(parsed.regime || "MIXED");
     const stopLossPercent = parsed.stopLossPercent ?? defaults.stopLossPercent;
     const result = {

@@ -109,12 +109,15 @@ export class RuleEngineService {
 
     const isLong = isCrossAbove;
 
-    // RSI threshold gate — widened in ranging markets where RSI hovers near 50
+    // RSI threshold gate — regime-aware widening
     if (cfg.enableThreshold) {
       const isRanging = params.regime === "RANGE_BOUND" || params.regime === "SIDEWAYS";
+      const isTrendRegime = params.regime === "STRONG_BULL" || params.regime === "STRONG_BEAR";
       const threshold = isRanging
         ? isLong ? 55 : 45   // wider band in ranging: LONG OK up to 55, SHORT OK down to 45
-        : cfg.rsiThreshold;  // default (50) in trending/other regimes
+        : isTrendRegime
+          ? isLong ? 60 : 40  // wider in trends: LONG OK up to 60 (RSI naturally >50 in bull), SHORT OK down to 40
+          : cfg.rsiThreshold;  // default (50) in other regimes
 
       if (isLong && rsi.last >= threshold) {
         this.logger.debug(`[RuleEngine] ${coin} RSI_CROSS LONG blocked: RSI=${rsi.last.toFixed(1)} >= threshold ${threshold}`);
