@@ -557,22 +557,24 @@ Reply ONLY with valid JSON (no markdown):
     const strategies: string[] = [];
 
     // ── Coin is near EMA21 (pullback zone) in trending market ──────────
-    if (isTrend && Math.abs(priceVsEma21_4h) < 3) {
+    // 5% threshold — captures coins still close enough for dip-buying
+    if (isTrend && Math.abs(priceVsEma21_4h) < 5) {
       strategies.push("EMA_PULLBACK");
     }
 
-    // ── RSI extreme (oversold/overbought) → mean reversion ─────────────
-    if (rsi < 35 || rsi > 65) {
+    // ── RSI not neutral → mean reversion candidate ──────────────────
+    // Lowered from 35/65 to match the rule engine's loosened thresholds (35/65)
+    if (rsi < 40 || rsi > 60) {
       strategies.push("MEAN_REVERT_RSI");
     }
 
     // ── Tight Bollinger Bands → scalp range bounces ────────────────────
-    if (bbWidth < 2.5 && (isSideways || isRange)) {
+    if (bbWidth < 3 && (isSideways || isRange)) {
       strategies.push("BB_SCALP");
     }
 
     // ── Trending with clear momentum → trend following ─────────────────
-    if (isTrend && Math.abs(priceVsEma9) < 2) {
+    if (isTrend && Math.abs(priceVsEma9) < 3) {
       strategies.push("TREND_EMA");
     }
 
@@ -724,9 +726,9 @@ Reply ONLY JSON:
         primaryKline: "15m",
         rsiPeriod: 14,
         emaPeriod: 200,
-        priceRange: 0.5,
-        longRsi: 30,
-        shortRsi: 70,
+        priceRange: 3, // was 0.5% — far too tight, almost never triggers
+        longRsi: 35, // was 30 — slightly less extreme for more signals
+        shortRsi: 65, // was 70 — slightly less extreme for more signals
       },
       stochBbPattern: {
         primaryKline: "15m",

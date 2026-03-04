@@ -44,9 +44,16 @@ export class RuleEngineService {
       ? params.strategy.split("|").map((s) => s.trim())
       : [params.strategy];
 
+    if (strategies.length > 1) {
+      this.logger.debug(`[RuleEngine] ${coin} pipe: ${strategies.join(" → ")}`);
+    }
+
     for (const strategy of strategies) {
       const result = await this.evalStrategy(strategy, coin, currency, params);
-      if (result) return result;
+      if (result) {
+        this.logger.debug(`[RuleEngine] ${coin} ✓ ${strategy} fired`);
+        return result;
+      }
     }
     return null;
   }
@@ -262,7 +269,12 @@ export class RuleEngineService {
     const isCrossAbove = this.indicatorService.crossedAbove(fastEma, slowEma);
     const isCrossBelow = this.indicatorService.crossedBelow(fastEma, slowEma);
 
-    if (!isCrossAbove && !isCrossBelow) return null;
+    if (!isCrossAbove && !isCrossBelow) {
+      this.logger.debug(
+        `[RuleEngine] ${coin} TREND_EMA miss: no EMA${cfg.fastPeriod}/${cfg.slowPeriod} cross on ${cfg.primaryKline}`,
+      );
+      return null;
+    }
 
     const isLong = isCrossAbove;
 
@@ -334,12 +346,22 @@ export class RuleEngineService {
 
     // Price must be within priceRange% of the EMA
     const distPct = (Math.abs(currentPrice - ema200.last) / ema200.last) * 100;
-    if (distPct > cfg.priceRange) return null;
+    if (distPct > cfg.priceRange) {
+      this.logger.debug(
+        `[RuleEngine] ${coin} MEAN_REVERT miss: price ${distPct.toFixed(1)}% from EMA200 > ${cfg.priceRange}%`,
+      );
+      return null;
+    }
 
     const isLong = rsi.last < cfg.longRsi && currentPrice > ema200.last;
     const isShort = rsi.last > cfg.shortRsi && currentPrice < ema200.last;
 
-    if (!isLong && !isShort) return null;
+    if (!isLong && !isShort) {
+      this.logger.debug(
+        `[RuleEngine] ${coin} MEAN_REVERT miss: RSI=${rsi.last.toFixed(1)} not extreme (L<${cfg.longRsi} S>${cfg.shortRsi})`,
+      );
+      return null;
+    }
 
     return {
       isLong,
@@ -621,12 +643,20 @@ export class RuleEngineService {
 
     // LONG: price pulled back to EMA21, bouncing, above EMA50
     if (isBull) {
-      const touchedEma = prevPrice <= ema.last * 1.002 || currentPrice <= ema.last * 1.002;
+      // Widen touch tolerance to 1% — price within 1% of EMA21 counts as a pullback
+      const touchedEma = prevPrice <= ema.last * 1.01 || currentPrice <= ema.last * 1.01;
       const isGreen = currentPrice > currentOpen;
       const aboveSupport = currentPrice > emaSupport.last;
-      const rsiInRange = rsi.last >= cfg.rsiMin && rsi.last <= cfg.rsiMax;
+      // Widen RSI range for STRONG_BULL — RSI 35-62 (bull RSI often 50-65)
+      const rsiMax = Math.max(cfg.rsiMax, 62);
+      const rsiInRange = rsi.last >= cfg.rsiMin && rsi.last <= rsiMax;
 
-      if (!touchedEma || !isGreen || !aboveSupport || !rsiInRange) return null;
+      if (!touchedEma || !isGreen || !aboveSupport || !rsiInRange) {
+        this.logger.debug(
+          `[RuleEngine] ${coin} EMA_PULLBACK LONG miss: touch=${touchedEma} green=${isGreen} support=${aboveSupport} rsi=${rsi.last.toFixed(1)}(${cfg.rsiMin}-${rsiMax})`,
+        );
+        return null;
+      }
 
       // HTF RSI confirmation — 4h must still be bullish
       const htfCloses = await this.indicatorService.getCloses(coin, cfg.htfKline);
@@ -645,12 +675,19 @@ export class RuleEngineService {
 
     // SHORT: price rallied to EMA21, rejecting, below EMA50
     if (isBear) {
-      const touchedEma = prevPrice >= ema.last * 0.998 || currentPrice >= ema.last * 0.998;
+      // Widen touch tolerance to 1%
+      const touchedEma = prevPrice >= ema.last * 0.99 || currentPrice >= ema.last * 0.99;
       const isRed = currentPrice < currentOpen;
       const belowSupport = currentPrice < emaSupport.last;
-      const rsiInRange = rsi.last >= (100 - cfg.rsiMax) && rsi.last <= (100 - cfg.rsiMin);
+      const rsiMin = Math.min(100 - Math.max(cfg.rsiMax, 62), 100 - cfg.rsiMin);
+      const rsiInRange = rsi.last >= rsiMin && rsi.last <= (100 - cfg.rsiMin);
 
-      if (!touchedEma || !isRed || !belowSupport || !rsiInRange) return null;
+      if (!touchedEma || !isRed || !belowSupport || !rsiInRange) {
+        this.logger.debug(
+          `[RuleEngine] ${coin} EMA_PULLBACK SHORT miss: touch=${touchedEma} red=${isRed} support=${belowSupport} rsi=${rsi.last.toFixed(1)}`,
+        );
+        return null;
+      }
 
       // HTF RSI confirmation — 4h must still be bearish
       const htfCloses = await this.indicatorService.getCloses(coin, cfg.htfKline);
