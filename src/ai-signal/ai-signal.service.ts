@@ -687,9 +687,8 @@ export class AiSignalService implements OnModuleInit {
 
     // ── Per-coin 4h EMA trend alignment ─────────────────────────────────────
     // Block signals that go against the coin's own 4h trend, regardless of global regime.
-    // Neutral zone (EMA21/EMA50 spread < 1.0%) = no clear trend → both directions allowed.
-    // 1.0% threshold avoids over-filtering in RANGE_BOUND/SIDEWAYS markets where coins
-    // drift slightly without a meaningful trend (was 0.3% — too sensitive, blocked ~50% of valid setups).
+    // Neutral zone (spread below threshold) = no clear trend → both directions allowed.
+    // Regime-aware: ranging markets use 2.0% (small trends are noise), trending uses 1.0%.
     try {
       const htf4hCloses = await this.indicatorService.getCloses(coin, "4h");
       if (htf4hCloses.length >= 55) {
@@ -697,7 +696,10 @@ export class AiSignalService implements OnModuleInit {
         const ema50 = this.indicatorService.getEma(htf4hCloses, 50);
         const spreadPct = (Math.abs(ema21.last - ema50.last) / ema50.last) * 100;
 
-        if (spreadPct > 1.0) {
+        const isRanging = params.regime === "RANGE_BOUND" || params.regime === "SIDEWAYS";
+        const trendSpreadThreshold = isRanging ? 2.0 : 1.0;
+
+        if (spreadPct > trendSpreadThreshold) {
           const coinTrendUp = ema21.last > ema50.last;
           if (signalResult.isLong && !coinTrendUp) {
             this.logger.log(

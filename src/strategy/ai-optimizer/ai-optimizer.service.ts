@@ -702,7 +702,7 @@ Rules: STRONG_BULL→RSI_CROSS/TREND_EMA LONG; STRONG_BEAR→RSI_CROSS/TREND_EMA
   private mergeWithDefaults(parsed: Partial<AiTunedParams>): AiTunedParams {
     const defaults = this.getDefaultParams(parsed.regime || "MIXED");
     const stopLossPercent = parsed.stopLossPercent ?? defaults.stopLossPercent;
-    return {
+    const result = {
       ...defaults,
       ...parsed,
       stopLossPercent,
@@ -721,6 +721,17 @@ Rules: STRONG_BULL→RSI_CROSS/TREND_EMA LONG; STRONG_BEAR→RSI_CROSS/TREND_EMA
       },
       stochEmaKdj: { ...defaults.stochEmaKdj, ...(parsed.stochEmaKdj || {}) },
     };
+
+    // Cap HTF kline to max 4h — GPT sometimes sets "1d" which is too slow for intraday signals
+    const ALLOWED_HTF = ["5m", "15m", "1h", "4h"];
+    if (result.rsiCross?.htfKline && !ALLOWED_HTF.includes(result.rsiCross.htfKline)) {
+      result.rsiCross.htfKline = "4h";
+    }
+    if (result.rsiZone?.htfKline && !ALLOWED_HTF.includes(result.rsiZone.htfKline)) {
+      result.rsiZone.htfKline = "4h";
+    }
+
+    return result;
   }
 
   // ─── Risk advice for signal notifications (algorithmic, no AI call) ─────

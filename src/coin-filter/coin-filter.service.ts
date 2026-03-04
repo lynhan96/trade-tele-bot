@@ -2,6 +2,7 @@ import { Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { RedisService } from "../redis/redis.service";
 import { MarketDataService, Ticker24h } from "../market-data/market-data.service";
+import { FuturesAnalyticsService, CoinAnalytics } from "../market-data/futures-analytics.service";
 
 export interface CoinShortlistEntry {
   symbol: string; // "BTCUSDT"
@@ -10,6 +11,7 @@ export interface CoinShortlistEntry {
   priceChangePercent: number;
   quoteVolume: number; // USD volume
   lastPrice: number;
+  score?: number; // composite quality score
 }
 
 const SHORTLIST_CACHE_KEY = "cache:filter:shortlist";
@@ -26,6 +28,7 @@ export class CoinFilterService {
   constructor(
     private readonly redisService: RedisService,
     private readonly marketDataService: MarketDataService,
+    private readonly futuresAnalyticsService: FuturesAnalyticsService,
     private readonly configService: ConfigService,
   ) {}
 
@@ -67,8 +70,49 @@ export class CoinFilterService {
   }
 
   /**
+   * Compute composite quality score for a coin.
+   * Higher score = better trading candidate.
+   */
+  private computeScore(
+    entry: { quoteVolume: number; priceChangePercent: number },
+    analytics: CoinAnalytics | undefined,
+    volumeMax: number,
+    changeMax: number,
+  ): number {
+    // Volume score (0-1): normalized log scale to avoid mega-cap dominance
+    const volScore = volumeMax > 0
+      ? Math.log10(1 + entry.quoteVolume) / Math.log10(1 + volumeMax)
+      : 0;
+
+    // Volatility score (0-1): higher price change = more tradeable
+    const volatilityScore = changeMax > 0
+      ? entry.priceChangePercent / changeMax
+      : 0;
+
+    // Analytics score (0-1): composite of funding neutrality, L/S balance, taker activity
+    let analyticsScore = 0.5; // default if no analytics
+    if (analytics) {
+      // Neutral funding is best (0.0001 = 0.01%); extreme funding penalized
+      const fundingPenalty = Math.min(1, Math.abs(analytics.fundingRate) / 0.001);
+      const fundingScore = 1 - fundingPenalty;
+
+      // Balanced L/S is best (ratio near 1.0); extremes penalized
+      const lsDeviation = Math.abs(analytics.longShortRatio - 1.0);
+      const lsScore = Math.max(0, 1 - lsDeviation / 2);
+
+      // High taker activity = more aggressive order flow = more signal potential
+      const takerScore = Math.min(1, (analytics.takerBuyRatio || 1) / 2);
+
+      analyticsScore = fundingScore * 0.3 + lsScore * 0.3 + takerScore * 0.4;
+    }
+
+    return volScore * 0.4 + volatilityScore * 0.3 + analyticsScore * 0.3;
+  }
+
+  /**
    * Scan and compute the shortlist of coins to watch.
    * Called every 5 minutes by AiSignalService.
+   * Uses composite scoring: volume (40%) + volatility (30%) + futures analytics (30%).
    */
   async scanAndFilter(): Promise<CoinShortlistEntry[]> {
     const tickers = await this.marketDataService.fetchAndCacheTicker24h();
@@ -88,18 +132,29 @@ export class CoinFilterService {
         parseFloat(t.quoteVolume) >= minVolumeUsd,
     );
 
-    // Score each coin: prioritize volume, then price change
-    const scored = usdtPairs.map((t) => ({
+    // Build base entries
+    const entries = usdtPairs.map((t) => ({
       symbol: t.symbol,
       coin: t.symbol.replace("USDT", ""),
-      currency: "USDT",
+      currency: "USDT" as const,
       priceChangePercent: Math.abs(parseFloat(t.priceChangePercent)),
       quoteVolume: parseFloat(t.quoteVolume),
       lastPrice: parseFloat(t.lastPrice),
     }));
 
-    // Sort by volume descending
-    scored.sort((a, b) => b.quoteVolume - a.quoteVolume);
+    // Get cached futures analytics for scoring
+    const analytics = await this.futuresAnalyticsService.getCachedAnalytics();
+
+    // Compute normalization bounds
+    const volumeMax = Math.max(...entries.map((e) => e.quoteVolume), 1);
+    const changeMax = Math.max(...entries.map((e) => e.priceChangePercent), 0.1);
+
+    // Score and sort by composite quality
+    const scored: (CoinShortlistEntry & { score: number })[] = entries.map((e) => ({
+      ...e,
+      score: this.computeScore(e, analytics.get(e.symbol), volumeMax, changeMax),
+    }));
+    scored.sort((a, b) => b.score - a.score);
 
     // Pick top N, but always include priority coins first
     const shortlist: CoinShortlistEntry[] = [];
@@ -115,7 +170,7 @@ export class CoinFilterService {
       if (shortlist.length >= maxShortlistSize) break;
     }
 
-    // Fill remaining slots with top-volume coins
+    // Fill remaining slots with top-scored coins
     for (const entry of scored) {
       if (shortlist.length >= maxShortlistSize) break;
       if (!addedSymbols.has(entry.symbol)) {

@@ -24,7 +24,8 @@ export class RuleEngineService {
 
   /**
    * Main entry point — evaluates the configured strategy for a coin.
-   * Returns SignalResult if a signal is generated, or null if no signal.
+   * Supports pipe-delimited strategies (e.g. "STOCH_BB_PATTERN|MEAN_REVERT_RSI")
+   * and tries each in order until one produces a signal.
    */
   async evaluate(
     coin: string,
@@ -38,7 +39,25 @@ export class RuleEngineService {
       return null;
     }
 
-    switch (params.strategy) {
+    // Support pipe-delimited strategies from AI optimizer (e.g. "STOCH_BB_PATTERN|MEAN_REVERT_RSI")
+    const strategies = params.strategy.includes("|")
+      ? params.strategy.split("|").map((s) => s.trim())
+      : [params.strategy];
+
+    for (const strategy of strategies) {
+      const result = await this.evalStrategy(strategy, coin, currency, params);
+      if (result) return result;
+    }
+    return null;
+  }
+
+  private async evalStrategy(
+    strategy: string,
+    coin: string,
+    currency: string,
+    params: AiTunedParams,
+  ): Promise<SignalResult | null> {
+    switch (strategy) {
       case "RSI_CROSS":
         return this.evalRsiCross(coin, currency, params);
       case "RSI_ZONE":
@@ -88,15 +107,20 @@ export class RuleEngineService {
 
     const isLong = isCrossAbove;
 
-    // RSI threshold gate
+    // RSI threshold gate — widened in ranging markets where RSI hovers near 50
     if (cfg.enableThreshold) {
-      if (isLong && rsi.last >= cfg.rsiThreshold) {
-        this.logger.debug(`[RuleEngine] ${coin} RSI_CROSS LONG blocked: RSI=${rsi.last.toFixed(1)} >= threshold ${cfg.rsiThreshold}`);
-        return null; // LONG needs RSI below threshold
+      const isRanging = params.regime === "RANGE_BOUND" || params.regime === "SIDEWAYS";
+      const threshold = isRanging
+        ? isLong ? 55 : 45   // wider band in ranging: LONG OK up to 55, SHORT OK down to 45
+        : cfg.rsiThreshold;  // default (50) in trending/other regimes
+
+      if (isLong && rsi.last >= threshold) {
+        this.logger.debug(`[RuleEngine] ${coin} RSI_CROSS LONG blocked: RSI=${rsi.last.toFixed(1)} >= threshold ${threshold}`);
+        return null;
       }
-      if (!isLong && rsi.last <= cfg.rsiThreshold) {
-        this.logger.debug(`[RuleEngine] ${coin} RSI_CROSS SHORT blocked: RSI=${rsi.last.toFixed(1)} <= threshold ${cfg.rsiThreshold}`);
-        return null; // SHORT needs RSI above threshold
+      if (!isLong && rsi.last <= threshold) {
+        this.logger.debug(`[RuleEngine] ${coin} RSI_CROSS SHORT blocked: RSI=${rsi.last.toFixed(1)} <= threshold ${threshold}`);
+        return null;
       }
     }
 
