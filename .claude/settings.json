@@ -22,6 +22,8 @@
       "Bash(grep:*)",
       "Bash(curl:*)",
       "Bash(git:*)",
+      "Bash(ssh:*)",
+      "Bash(make:*)",
       "Bash(docker:*)",
       "Bash(brew:*)",
       "Bash(npx -y redis-cli:*)",

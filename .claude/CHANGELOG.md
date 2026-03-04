@@ -1,5 +1,48 @@
 # Changelog
 
+## 2026-03-04 (3) - Personal Dashboard + GPT-Primary Fix
+
+### Feature: `/ai my` Personal Dashboard
+New command combining `/ai account` + `/ai realmode stats` into one unified view:
+- Futures USDT wallet balance (available + total)
+- Today's PnL summary (closed count, win rate, profit)
+- Open positions with unrealized PnL
+- Closed trades today with individual PnL
+- All-time stats (total trades, win rate, cumulative PnL)
+- Does NOT require admin; requires subscription + real mode enabled
+
+### Feature: `/ai my history` — Recent Trade History
+Shows last 10 closed trades with symbol, PnL, close reason, and date.
+New `getRecentTrades()` method in `UserRealTradingService`.
+
+### Enhancement: All-Time Stats in `/ai realmode stats`
+Added all-time aggregation (total trades, wins, losses, cumulative PnL) to the existing daily stats display. Uses MongoDB aggregation pipeline on UserTrade collection.
+
+### Enhancement: Grouped `/ai` Help Text
+Reorganized `/ai` help into logical groups: Dang ky & Cai dat, Tai khoan cua ban, He thong, Admin.
+
+### Bug Fix: GPT-4o-mini Rate Limit Misconfiguration
+- Root cause: Server `.env` had `AI_MAX_GPT_PER_HOUR=60` overriding code default of `200`
+- GPT silently skipped → all coins fell to Haiku (no credits) → static defaults → no signals
+- Fix: Updated `.env` to `AI_MAX_GPT_PER_HOUR=200`, flushed Redis rate counters
+
+### Files Modified
+- `src/ai-signal/ai-command.service.ts` — `/ai my`, `/ai my history`, grouped help text
+- `src/ai-signal/user-real-trading.service.ts` — `getRecentTrades()`, all-time stats in `getDailyStats()`
+- `src/telegram/telegram.service.ts` — Updated `/start` message + BotFather menu with new commands
+
+---
+
+## 2026-03-04 (2) - Server Debugging Guide + Auto-Allow SSH
+
+### Documentation: Server Debugging Guide
+Created `memory/server-debugging.md` with SSH connection info, Makefile commands, common log patterns, Redis key reference, and common issues & fixes.
+
+### Config: Auto-Allow SSH Commands
+Added SSH, make, git, sleep commands to `~/.claude/settings.json` auto-allow list.
+
+---
+
 ## 2026-03-04 (1) - Signal Generation Optimization (Root Cause Fix)
 
 ### Bug Fix: Multi-Strategy Evaluation (ROOT CAUSE of Zero Signals)
