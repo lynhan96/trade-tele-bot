@@ -316,7 +316,18 @@ Reply ONLY with valid JSON (no markdown):
       return params;
     };
 
-    // ── 1. Haiku (primary — fast, cheap, sufficient for structured JSON param selection) ─────
+    // ── 1. GPT-4o-mini (primary — cheapest, $0.15/MTok input) ──────────────
+    if (this.openai && (await this.checkRateLimit(GPT_RATE_KEY, this.maxGptPerHour))) {
+      try {
+        const params = await this.callGpt(symbol, globalRegime, indicators);
+        await this.incrementRateLimit(GPT_RATE_KEY);
+        return saveAndReturn(params, GPT_MODEL, " (GPT)");
+      } catch (err) {
+        this.logger.warn(`[AiOptimizer] GPT call failed for ${symbol}: ${err?.message}`);
+      }
+    }
+
+    // ── 2. Haiku (backup — better strategy diversity, used when GPT rate-limited) ─
     if (this.enabled) {
       const haikuBurst = (await this.redisService.get<number>(HAIKU_SCAN_BURST_KEY)) || 0;
       if (haikuBurst < MAX_RETUNES_PER_SCAN && (await this.checkRateLimit(HAIKU_RATE_KEY, this.maxHaikuPerHour))) {
@@ -324,22 +335,10 @@ Reply ONLY with valid JSON (no markdown):
           const params = await this.callHaiku(symbol, globalRegime, indicators);
           await this.incrementRateLimit(HAIKU_RATE_KEY);
           await this.redisService.set(HAIKU_SCAN_BURST_KEY, haikuBurst + 1, SCAN_BURST_TTL);
-          return saveAndReturn(params, HAIKU_MODEL);
+          return saveAndReturn(params, HAIKU_MODEL, " (Haiku)");
         } catch (err) {
-          this.logger.warn(`[AiOptimizer] Haiku call failed for ${symbol}: ${err?.message}`);
+          this.logger.warn(`[AiOptimizer] Haiku fallback failed for ${symbol}: ${err?.message}`);
         }
-      }
-    }
-
-    // ── 3. GPT-4o-mini (covers overflow when both Anthropic models limited) ─
-    if (this.openai && (await this.checkRateLimit(GPT_RATE_KEY, this.maxGptPerHour))) {
-      try {
-        const gptIndicators = Object.keys(indicators).length > 0 ? indicators : await this.preComputeIndicators(coin);
-        const params = await this.callGpt(symbol, globalRegime, gptIndicators);
-        await this.incrementRateLimit(GPT_RATE_KEY);
-        return saveAndReturn(params, GPT_MODEL, " (GPT)");
-      } catch (err) {
-        this.logger.warn(`[AiOptimizer] GPT fallback failed for ${symbol}: ${err?.message}`);
       }
     }
 
