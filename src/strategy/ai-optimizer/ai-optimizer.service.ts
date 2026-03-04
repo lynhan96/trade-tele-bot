@@ -532,11 +532,33 @@ Reply ONLY with valid JSON (no markdown):
       .map(([k, v]) => `  ${k}: ${v}`)
       .join("\n");
 
-    return `Crypto param optimizer for ${symbol}. Global regime: ${globalRegime}.
-Indicators: ${indicatorText}
+    return `Crypto trading param optimizer for ${symbol}. Global regime: ${globalRegime}.
+Indicators:
+${indicatorText}
+
+IMPORTANT: Analyze the indicators carefully and pick the BEST strategy for THIS coin's current condition. Do NOT default everything to MIXED/RSI_ZONE.
+
+Strategy selection rules (pick ONE):
+- RSI_CROSS: Best for SIDEWAYS/low-volatility. Triggers when RSI crosses its EMA. High signal frequency.
+- RSI_ZONE: Only for VOLATILE markets. Needs RSI >70 or <30 (rare on 4h). Use sparingly.
+- TREND_EMA: For clear STRONG_BULL or STRONG_BEAR trends. Uses EMA crossovers.
+- MEAN_REVERT_RSI: For RANGE_BOUND markets. Catches oversold/overbought reversals.
+- STOCH_BB_PATTERN: For RANGE_BOUND. Combines Stochastic + Bollinger Bands.
+- BB_SCALP: For tight SIDEWAYS ranges. Scalps Bollinger Band bounces.
+- Use pipe-delimited for multi-strategy: e.g. "RSI_CROSS|MEAN_REVERT_RSI"
+
+Regime guidance:
+- STRONG_BULL: TREND_EMA or RSI_CROSS (LONG bias)
+- STRONG_BEAR: TREND_EMA or RSI_CROSS (SHORT bias)
+- SIDEWAYS: RSI_CROSS or BB_SCALP (most signals in flat markets)
+- RANGE_BOUND: STOCH_BB_PATTERN or MEAN_REVERT_RSI
+- VOLATILE: RSI_ZONE (only when ATR% is high)
+- MIXED: RSI_CROSS|MEAN_REVERT_RSI (multi-strategy for uncertain markets)
+
+Risk rules: SWING→SL 1.5-4%, TP 3-4×SL; higher ATR%→wider SL. INTRADAY→klines 15m/1h; SWING→4h/1d.
+
 Reply ONLY with JSON:
-{"timeframeProfile":"INTRADAY|SWING","regime":"STRONG_BULL|STRONG_BEAR|RANGE_BOUND|SIDEWAYS|VOLATILE|BTC_CORRELATION|MIXED","strategy":"RSI_CROSS|RSI_ZONE|TREND_EMA|MEAN_REVERT_RSI|STOCH_BB_PATTERN|STOCH_EMA_KDJ|BB_SCALP","confidence":0-100,"stopLossPercent":0.5-5.0,"takeProfitPercent":0.5-15.0,"minConfidenceToTrade":38-80,"rsiCross":{"primaryKline":"15m|4h","rsiPeriod":14,"rsiEmaPeriod":9,"enableThreshold":true,"rsiThreshold":50,"enableHtfRsi":true,"htfKline":"1h|1d","enableCandleDir":false,"candleKline":"15m|4h"},"rsiZone":{"primaryKline":"15m|4h","rsiPeriod":14,"rsiEmaPeriod":9,"rsiTop":70,"rsiBottom":30,"enableHtfRsi":true,"htfKline":"1h|1d","enableInitialCandle":true,"excludeLatestCandle":true},"bbScalp":{"primaryKline":"15m","bbPeriod":20,"bbStdDev":2.0,"bbTolerance":0.1,"rsiPeriod":14,"rsiLongMax":45,"rsiShortMin":55}}
-Rules: STRONG_BULL→RSI_CROSS/TREND_EMA LONG; STRONG_BEAR→RSI_CROSS/TREND_EMA SHORT; SIDEWAYS→RSI_CROSS(prefer); RANGE_BOUND→STOCH_BB/MEAN_REVERT; VOLATILE→RSI_ZONE; MIXED→RSI_ZONE. SWING→SL 1.5-4%, TP 3-4×SL; TREND→TP 2-3×SL; higher ATR%→wider SL. INTRADAY→klines 15m/1h; SWING→4h/1d.`;
+{"timeframeProfile":"INTRADAY|SWING","regime":"STRONG_BULL|STRONG_BEAR|RANGE_BOUND|SIDEWAYS|VOLATILE|BTC_CORRELATION|MIXED","strategy":"<pick best>","confidence":0-100,"stopLossPercent":0.5-5.0,"takeProfitPercent":0.5-15.0,"minConfidenceToTrade":38-80,"rsiCross":{"primaryKline":"15m|4h","rsiPeriod":14,"rsiEmaPeriod":9,"enableThreshold":true,"rsiThreshold":50,"enableHtfRsi":true,"htfKline":"1h|4h","enableCandleDir":false,"candleKline":"15m|4h"},"rsiZone":{"primaryKline":"15m|4h","rsiPeriod":14,"rsiEmaPeriod":9,"rsiTop":70,"rsiBottom":30,"enableHtfRsi":true,"htfKline":"1h|4h","enableInitialCandle":true,"excludeLatestCandle":true},"bbScalp":{"primaryKline":"15m","bbPeriod":20,"bbStdDev":2.0,"bbTolerance":0.1,"rsiPeriod":14,"rsiLongMax":45,"rsiShortMin":55}}`;
   }
 
   private async callAnthropic(
