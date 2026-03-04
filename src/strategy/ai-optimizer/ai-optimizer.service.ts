@@ -54,7 +54,7 @@ export class AiOptimizerService {
     this.maxHaikuPerHour = parseInt(
       configService.get("AI_MAX_HAIKU_PER_HOUR", "60"),
     );
-    this.maxGptPerHour = parseInt(configService.get("AI_MAX_GPT_PER_HOUR", "60"));
+    this.maxGptPerHour = parseInt(configService.get("AI_MAX_GPT_PER_HOUR", "200"));
 
     if (this.enabled) {
       const apiKey = configService.get<string>("ANTHROPIC_API_KEY");
