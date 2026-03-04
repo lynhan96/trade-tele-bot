@@ -490,6 +490,22 @@ export class UserRealTradingService implements OnModuleInit {
     return { openTrades, closedToday, totalPnlUsdt, totalNotionalUsdt, dailyPnlPct, allTime };
   }
 
+  /** Recent closed trades for a user (for /ai my history). */
+  async getRecentTrades(telegramId: number, limit = 10): Promise<Array<{
+    symbol: string; direction: string; closeReason?: string;
+    pnlUsdt: number; pnlPercent: number; closedAt?: Date;
+  }>> {
+    const docs = await this.userTradeModel.find({
+      telegramId, status: "CLOSED",
+    }).sort({ closedAt: -1 }).limit(limit).lean();
+    return docs.map((t) => ({
+      symbol: t.symbol, direction: t.direction,
+      closeReason: t.closeReason,
+      pnlUsdt: t.pnlUsdt ?? 0, pnlPercent: t.pnlPercent ?? 0,
+      closedAt: t.closedAt,
+    }));
+  }
+
   /**
    * Compute PnL ranking across all real-mode users.
    * Today: closed trades since UTC midnight + unrealized from open positions.
