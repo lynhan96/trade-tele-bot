@@ -1,5 +1,33 @@
 # Changelog
 
+## 2026-03-04 (1) - Signal Generation Optimization (Root Cause Fix)
+
+### Bug Fix: Multi-Strategy Evaluation (ROOT CAUSE of Zero Signals)
+
+GPT optimizer returns pipe-delimited strategies like `STOCH_BB_PATTERN|MEAN_REVERT_RSI`, but `RuleEngineService.evaluate()` used a simple `switch(params.strategy)` that only matched single strategies. All 98 non-BTC/ETH coins hit `default: return null` and **never generated signals**. Fixed by splitting pipe-delimited strings and trying each strategy in sequence.
+
+### Enhancement: Regime-Aware RSI Threshold Widening
+
+RSI threshold gate in RSI_CROSS widened from strict 50 to 55/45 in RANGE_BOUND/SIDEWAYS regimes. In ranging markets RSI hovers near 50, blocking nearly all signals.
+
+### Bug Fix: HTF Kline Constraint + Degenerate RSI Guard
+
+- GPT sometimes sets `rsiCross.htfKline` to `"1d"` — capped to max `"4h"` in `mergeWithDefaults()`
+- Freshly seeded coins produce RSI=100.0 — added guard in MEAN_REVERT_RSI to reject extreme RSI
+
+### Enhancement: Regime-Aware 4h EMA Trend Spread + Smart Coin Scoring
+
+- 4h EMA trend spread threshold: RANGE_BOUND/SIDEWAYS=2.0%, others=1.0% (was fixed 1.0%)
+- Coin shortlist composite scoring: volume 40% + volatility 30% + futures analytics 30% (replaces pure volume sort)
+
+### Files Modified
+- `src/strategy/rules/rule-engine.service.ts` — multi-strategy eval, RSI threshold, RSI guard
+- `src/strategy/ai-optimizer/ai-optimizer.service.ts` — HTF kline cap
+- `src/ai-signal/ai-signal.service.ts` — regime-aware 4h EMA spread
+- `src/coin-filter/coin-filter.service.ts` — composite scoring with FuturesAnalyticsService
+
+---
+
 ## 2026-03-03 (8) - Reset All Signals + Balance Display + Cost Reduction
 
 ### Feature: `/ai resetall` Admin Command
