@@ -314,6 +314,9 @@ export class RuleEngineService {
     const ema200 = this.indicatorService.getEma(closes, cfg.emaPeriod);
     const currentPrice = closes[closes.length - 1];
 
+    // Skip degenerate RSI (freshly seeded coins with too few candles)
+    if (rsi.last >= 99.9 || rsi.last <= 0.1) return null;
+
     // Price must be within priceRange% of the EMA
     const distPct = (Math.abs(currentPrice - ema200.last) / ema200.last) * 100;
     if (distPct > cfg.priceRange) return null;
