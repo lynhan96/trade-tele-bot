@@ -1043,8 +1043,11 @@ Reply ONLY with JSON:
     key: string,
     maxPerHour: number,
   ): Promise<boolean> {
-    const count = (await this.redisService.get<number>(key)) || 0;
-    return count < maxPerHour;
+    const raw = await this.redisService.get<number>(key);
+    const count = raw || 0;
+    const ok = count < maxPerHour;
+    if (!ok) this.logger.debug(`[AiOptimizer] rate-limit blocked: key=${key} raw=${raw} count=${count} max=${maxPerHour}`);
+    return ok;
   }
 
   private async incrementRateLimit(key: string): Promise<void> {
