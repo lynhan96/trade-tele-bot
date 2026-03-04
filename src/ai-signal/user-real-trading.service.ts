@@ -318,8 +318,15 @@ export class UserRealTradingService implements OnModuleInit {
     exitPrice: number,
     reason: string,
   ): Promise<void> {
-    const trade = await this.userTradeModel.findOne({ telegramId, symbol, status: "OPEN" });
-    if (!trade) return;
+    // Also handle trades that were marked CLOSED by protectOpenTrades but without PnL
+    let trade = await this.userTradeModel.findOne({ telegramId, symbol, status: "OPEN" });
+    if (!trade) {
+      trade = await this.userTradeModel.findOne({
+        telegramId, symbol, status: "CLOSED", pnlUsdt: { $in: [null, undefined, 0] },
+        closedAt: { $gte: new Date(Date.now() - 5 * 60 * 1000) }, // within last 5 min
+      });
+      if (!trade) return;
+    }
 
     const pnlPct =
       trade.direction === "LONG"
@@ -780,13 +787,44 @@ export class UserRealTradingService implements OnModuleInit {
           for (const trade of trades) {
             const { symbol, direction, slPrice, tpPrice, chatId } = trade;
 
-            // Position already closed on Binance — mark trade as closed
+            // Position already closed on Binance — mark trade as closed with PnL
             if (!openSymbols.has(symbol)) {
-              this.logger.log(`[RealTrading] ${symbol} user ${telegramId}: position gone on Binance — marking CLOSED`);
+              // Skip if already closed by another handler (race condition)
+              const freshTrade = await this.userTradeModel.findById((trade as any)._id);
+              if (!freshTrade || freshTrade.status === "CLOSED") continue;
+
+              // Calculate PnL using latest price (best approximation of exit price)
+              let exitPrice = this.marketDataService.getLatestPrice(symbol);
+              let pnlPct = 0;
+              let pnlUsdt = 0;
+              if (exitPrice && trade.entryPrice) {
+                pnlPct = direction === "LONG"
+                  ? ((exitPrice - trade.entryPrice) / trade.entryPrice) * 100
+                  : ((trade.entryPrice - exitPrice) / trade.entryPrice) * 100;
+                pnlUsdt = (pnlPct / 100) * (trade.notionalUsdt || 0);
+              }
+
+              this.logger.log(`[RealTrading] ${symbol} user ${telegramId}: position gone on Binance — marking CLOSED (PnL: ${pnlPct.toFixed(2)}%)`);
               await this.userTradeModel.updateOne(
                 { _id: (trade as any)._id },
-                { $set: { status: "CLOSED", closeReason: "BINANCE_CLOSED", closedAt: new Date() } },
+                { $set: {
+                  status: "CLOSED",
+                  closeReason: "BINANCE_CLOSED",
+                  closedAt: new Date(),
+                  ...(exitPrice ? { exitPrice, pnlPercent: pnlPct, pnlUsdt } : {}),
+                } },
               );
+
+              // Notify user
+              if (exitPrice) {
+                const sign = pnlPct >= 0 ? "+" : "";
+                const emoji = pnlPct >= 0 ? "✅" : "❌";
+                const fmtExit = exitPrice >= 1000 ? `$${exitPrice.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :
+                  exitPrice >= 1 ? `$${exitPrice.toFixed(2)}` : `$${exitPrice.toFixed(4)}`;
+                await this.telegramService.sendTelegramMessage(chatId,
+                  `${emoji} *Real Mode: Lenh Da Dong*\n━━━━━━━━━━━━━━━━━━\n\n${symbol} ${direction}\nPnL: *${sign}${pnlPct.toFixed(2)}% (${sign}${pnlUsdt.toFixed(2)} USDT)*\n_Vi the da dong tren Binance_`
+                ).catch(() => {});
+              }
               continue;
             }
 
