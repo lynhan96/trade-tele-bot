@@ -146,10 +146,22 @@ export class UserRealTradingService implements OnModuleInit {
       // GTE_GTC algo orders require an open position to exist
       await new Promise((r) => setTimeout(r, 1500));
 
-      // Round SL/TP prices to Binance-required precision (avoids "Precision over maximum" error)
+      // Use user's custom TP/SL% if set, otherwise use AI signal prices
       const roundPrice = (p: number) => parseFloat(p.toFixed(pricePrecision));
-      const roundedSl = roundPrice(stopLossPrice);
-      const roundedTp = takeProfitPrice ? roundPrice(takeProfitPrice) : undefined;
+      let effectiveSl = stopLossPrice;
+      let effectiveTp = takeProfitPrice;
+      if (sub.customSlPct) {
+        effectiveSl = direction === "LONG"
+          ? fillPrice * (1 - sub.customSlPct / 100)
+          : fillPrice * (1 + sub.customSlPct / 100);
+      }
+      if (sub.customTpPct) {
+        effectiveTp = direction === "LONG"
+          ? fillPrice * (1 + sub.customTpPct / 100)
+          : fillPrice * (1 - sub.customTpPct / 100);
+      }
+      const roundedSl = roundPrice(effectiveSl);
+      const roundedTp = effectiveTp ? roundPrice(effectiveTp) : undefined;
 
       // Place SL algo order
       let binanceSlAlgoId: string | undefined;
@@ -200,8 +212,8 @@ export class UserRealTradingService implements OnModuleInit {
         quantity,
         leverage,
         notionalUsdt: quantity * fillPrice,
-        slPrice: stopLossPrice,
-        tpPrice: takeProfitPrice ?? undefined,
+        slPrice: effectiveSl,
+        tpPrice: effectiveTp ?? undefined,
         binanceOrderId,
         binanceSlAlgoId,
         binanceTpAlgoId,
