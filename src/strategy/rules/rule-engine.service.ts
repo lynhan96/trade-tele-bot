@@ -189,6 +189,9 @@ export class RuleEngineService {
     const closesToUse = cfg.excludeLatestCandle ? closes.slice(0, -1) : closes;
     const rsi = this.indicatorService.getRsi(closesToUse, cfg.rsiPeriod);
 
+    // Skip degenerate RSI (freshly seeded coins with too few real candles)
+    if (rsi.last >= 99.9 || rsi.last <= 0.1) return null;
+
     const isLongZone = rsi.last < cfg.rsiBottom;
     const isShortZone = rsi.last > cfg.rsiTop;
 

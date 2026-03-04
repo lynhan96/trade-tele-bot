@@ -56,8 +56,9 @@ export class SignalQueueService {
     forceProfile?: string,
   ): Promise<SignalHandleResult> {
     const symbol = `${coin.toUpperCase()}${currency.toUpperCase()}`;
-    // For dual-timeframe coins, use profile-aware Redis key
-    const signalKey = forceProfile ? `${symbol}:${forceProfile}` : symbol;
+    // Only dual-timeframe coins use profile-aware Redis key (must match processCoin + docSignalKey)
+    const isDual = DUAL_TIMEFRAME_COINS.includes(coin.toUpperCase());
+    const signalKey = isDual && forceProfile ? `${symbol}:${forceProfile}` : symbol;
 
     const active = await this.getActiveSignal(signalKey);
 
