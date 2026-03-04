@@ -1078,6 +1078,18 @@ export class AiCommandService implements OnModuleInit {
                 text += `\n_Chua co lenh nao hom nay._`;
               }
 
+              // All-time stats
+              const at = stats.allTime;
+              if (at.total > 0) {
+                const atIcon = at.pnlUsdt >= 0 ? "📈" : "📉";
+                const atWinRate = Math.round((at.wins / at.total) * 100);
+                text += `\n━━━━━━━━━━━━━━━━━━\n`;
+                text += `${atIcon} *Tong Ket (All-time)*\n`;
+                text += `Tong lenh: *${at.total}* · Win: *${at.wins}* · Loss: *${at.losses}*\n`;
+                text += `🏆 Win rate: *${atWinRate}%*\n`;
+                text += `💰 Tong PnL: *${sign(at.pnlUsdt)}${at.pnlUsdt.toFixed(2)} USDT*\n`;
+              }
+
               text += `\n━━━━━━━━━━━━━━━━━━\n_${new Date().toLocaleTimeString("vi-VN")} UTC_`;
               await this.telegramService.sendTelegramMessage(chatId, text);
             } catch (err) {

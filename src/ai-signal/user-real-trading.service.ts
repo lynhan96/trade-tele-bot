@@ -430,16 +430,26 @@ export class UserRealTradingService implements OnModuleInit {
     totalPnlUsdt: number;
     totalNotionalUsdt: number;
     dailyPnlPct: number;
+    allTime: { wins: number; losses: number; total: number; pnlUsdt: number };
   }> {
     const startOfToday = new Date();
     startOfToday.setUTCHours(0, 0, 0, 0);
 
-    const [openDocs, closedDocs] = await Promise.all([
+    const [openDocs, closedDocs, allTimeAgg] = await Promise.all([
       this.userTradeModel.find({ telegramId, status: "OPEN" }).lean(),
       this.userTradeModel.find({
         telegramId, status: "CLOSED",
         closedAt: { $gte: startOfToday },
       }).lean(),
+      this.userTradeModel.aggregate([
+        { $match: { telegramId, status: "CLOSED" } },
+        { $group: {
+          _id: null,
+          pnlUsdt: { $sum: "$pnlUsdt" },
+          total: { $sum: 1 },
+          wins: { $sum: { $cond: [{ $gte: ["$pnlUsdt", 0] }, 1, 0] } },
+        }},
+      ]),
     ]);
 
     // Fetch current prices for open trades
@@ -474,7 +484,10 @@ export class UserRealTradingService implements OnModuleInit {
 
     const dailyPnlPct = totalNotionalUsdt > 0 ? (totalPnlUsdt / totalNotionalUsdt) * 100 : 0;
 
-    return { openTrades, closedToday, totalPnlUsdt, totalNotionalUsdt, dailyPnlPct };
+    const agg = allTimeAgg[0] || { wins: 0, total: 0, pnlUsdt: 0 };
+    const allTime = { wins: agg.wins, losses: agg.total - agg.wins, total: agg.total, pnlUsdt: agg.pnlUsdt ?? 0 };
+
+    return { openTrades, closedToday, totalPnlUsdt, totalNotionalUsdt, dailyPnlPct, allTime };
   }
 
   /**
