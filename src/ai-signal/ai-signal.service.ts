@@ -796,6 +796,8 @@ export class AiSignalService implements OnModuleInit {
     const subscribers = await this.subscriptionService.findAllActive();
     let notified = 0;
     for (const sub of subscribers) {
+      // Real-mode users get their own notifications from UserRealTradingService
+      if (sub.realModeEnabled) continue;
       await this.telegramService
         .sendTelegramMessage(sub.chatId, text)
         .catch(() => {});
@@ -917,6 +919,7 @@ export class AiSignalService implements OnModuleInit {
 
     const subscribers = await this.subscriptionService.findAllActive();
     for (const sub of subscribers) {
+      if (sub.realModeEnabled) continue;
       await this.telegramService.sendTelegramMessage(sub.chatId, text).catch(() => {});
     }
 
@@ -1011,6 +1014,7 @@ export class AiSignalService implements OnModuleInit {
 
     const subscribers = await this.subscriptionService.findAllActive();
     for (const sub of subscribers) {
+      if (sub.realModeEnabled) continue;
       await this.telegramService
         .sendTelegramMessage(sub.chatId, text)
         .catch(() => {});
@@ -1042,6 +1046,7 @@ export class AiSignalService implements OnModuleInit {
 
     const subscribers = await this.subscriptionService.findAllActive();
     for (const sub of subscribers) {
+      if (sub.realModeEnabled) continue;
       await this.telegramService
         .sendTelegramMessage(sub.chatId, text)
         .catch(() => {});
@@ -1059,6 +1064,7 @@ export class AiSignalService implements OnModuleInit {
 
     const subscribers = await this.subscriptionService.findAllActive();
     for (const sub of subscribers) {
+      if (sub.realModeEnabled) continue;
       await this.telegramService.sendTelegramMessage(sub.chatId, text).catch(() => {});
     }
   }
@@ -1097,6 +1103,7 @@ export class AiSignalService implements OnModuleInit {
 
     const subscribers = await this.subscriptionService.findAllActive();
     for (const sub of subscribers) {
+      if (sub.realModeEnabled) continue;
       await this.telegramService.sendTelegramMessage(sub.chatId, text).catch(() => {});
     }
   }
@@ -1114,6 +1121,7 @@ export class AiSignalService implements OnModuleInit {
 
     const subscribers = await this.subscriptionService.findAllActive();
     for (const sub of subscribers) {
+      if (sub.realModeEnabled) continue;
       await this.telegramService.sendTelegramMessage(sub.chatId, text).catch(() => {});
     }
   }
@@ -1150,6 +1158,7 @@ export class AiSignalService implements OnModuleInit {
 
     const subscribers = await this.subscriptionService.findAllActive();
     for (const sub of subscribers) {
+      if (sub.realModeEnabled) continue;
       await this.telegramService
         .sendTelegramMessage(sub.chatId, text)
         .catch(() => {});
