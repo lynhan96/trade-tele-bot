@@ -306,8 +306,15 @@ Reply ONLY with valid JSON (no markdown):
     // Pre-compute indicators once — shared across all AI models in the waterfall
     const indicators = this.enabled ? await this.preComputeIndicators(coin) : {};
 
+    // Algorithmic strategy selection — gives per-coin diversity based on indicators
+    const algoStrategy = Object.keys(indicators).length > 0
+      ? this.selectStrategiesForCoin(globalRegime, indicators)
+      : null;
+
     // Helper: apply profile override, cache result, save history, log
     const saveAndReturn = async (params: AiTunedParams, model: string, tag = ""): Promise<AiTunedParams> => {
+      // Override GPT's strategy with algorithmic selection (GPT only tunes SL/TP/confidence)
+      if (algoStrategy) params.strategy = algoStrategy;
       if (forceProfile) params = this.applyForcedProfile(params, forceProfile);
       const jitter = Math.floor(Math.random() * AI_PARAMS_JITTER);
       await this.redisService.set(cacheKey, params, AI_PARAMS_TTL + jitter);
@@ -523,50 +530,105 @@ Reply ONLY with valid JSON (no markdown):
     }
   }
 
+  /**
+   * Algorithmic strategy selection based on per-coin indicators.
+   * Returns pipe-delimited strategies tailored to this coin's condition.
+   * Deterministic, free, and gives actual per-coin diversity.
+   */
+  private selectStrategiesForCoin(
+    globalRegime: string,
+    indicators: Record<string, any>,
+  ): string {
+    const rsi = parseFloat(indicators.rsi14_15m) || 50;
+    const rsi4h = indicators.rsi14_4h !== "N/A" ? parseFloat(indicators.rsi14_4h) : 50;
+    const bbWidth = parseFloat(indicators.bbWidthPct) || 3;
+    const atr = parseFloat(indicators.atrPct_15m) || 1;
+    const priceVsEma9 = parseFloat(indicators.priceVsEma9_pct) || 0;
+    const priceVsEma21_4h = indicators.priceVsEma21_4h_pct !== "N/A"
+      ? parseFloat(indicators.priceVsEma21_4h_pct) : 0;
+
+    const isBull = globalRegime === "STRONG_BULL";
+    const isBear = globalRegime === "STRONG_BEAR";
+    const isTrend = isBull || isBear;
+    const isSideways = globalRegime === "SIDEWAYS";
+    const isRange = globalRegime === "RANGE_BOUND";
+    const isVolatile = globalRegime === "VOLATILE";
+
+    const strategies: string[] = [];
+
+    // ── Coin is near EMA21 (pullback zone) in trending market ──────────
+    if (isTrend && Math.abs(priceVsEma21_4h) < 3) {
+      strategies.push("EMA_PULLBACK");
+    }
+
+    // ── RSI extreme (oversold/overbought) → mean reversion ─────────────
+    if (rsi < 35 || rsi > 65) {
+      strategies.push("MEAN_REVERT_RSI");
+    }
+
+    // ── Tight Bollinger Bands → scalp range bounces ────────────────────
+    if (bbWidth < 2.5 && (isSideways || isRange)) {
+      strategies.push("BB_SCALP");
+    }
+
+    // ── Trending with clear momentum → trend following ─────────────────
+    if (isTrend && Math.abs(priceVsEma9) < 2) {
+      strategies.push("TREND_EMA");
+    }
+
+    // ── Volatile with RSI at extremes → zone trading ───────────────────
+    if (isVolatile && (rsi < 30 || rsi > 70)) {
+      strategies.push("RSI_ZONE");
+    }
+
+    // ── Stoch + BB pattern for range-bound ─────────────────────────────
+    if (isRange && bbWidth < 4) {
+      strategies.push("STOCH_BB_PATTERN");
+    }
+
+    // ── RSI_CROSS as universal fallback (high frequency) ───────────────
+    if (!strategies.includes("RSI_CROSS")) {
+      strategies.push("RSI_CROSS");
+    }
+
+    // Ensure at least 2 strategies, cap at 3
+    if (strategies.length < 2) {
+      if (isTrend && !strategies.includes("EMA_PULLBACK")) strategies.unshift("EMA_PULLBACK");
+      else if (!strategies.includes("MEAN_REVERT_RSI")) strategies.push("MEAN_REVERT_RSI");
+    }
+
+    return strategies.slice(0, 3).join("|");
+  }
+
   private buildTuningPrompt(
     symbol: string,
     globalRegime: string,
     indicators: Record<string, any>,
   ): string {
-    const indicatorText = Object.entries(indicators)
-      .map(([k, v]) => `  ${k}: ${v}`)
-      .join("\n");
+    // Strategy is now selected algorithmically — GPT only tunes risk params
+    const strategy = this.selectStrategiesForCoin(globalRegime, indicators);
+    const atr = parseFloat(indicators.atrPct_15m) || 1;
+    const rsi = parseFloat(indicators.rsi14_15m) || 50;
+    const rsi4h = indicators.rsi14_4h !== "N/A" ? parseFloat(indicators.rsi14_4h) : 50;
+    const bbWidth = parseFloat(indicators.bbWidthPct) || 3;
+    const priceVsEma200 = indicators.priceVsEma200_pct !== "N/A" ? indicators.priceVsEma200_pct : "N/A";
 
-    return `Crypto trading param optimizer for ${symbol}. Global regime: ${globalRegime}.
-Indicators:
-${indicatorText}
+    return `Risk param optimizer for ${symbol}. Regime: ${globalRegime}. Strategy: ${strategy}.
+Key data: RSI(15m)=${rsi.toFixed(1)}, RSI(4h)=${rsi4h.toFixed(1)}, ATR(15m)=${atr.toFixed(2)}%, BBWidth=${bbWidth.toFixed(2)}%, priceVsEMA200=${priceVsEma200}%.
 
-IMPORTANT: Analyze THIS coin's indicators carefully. Each coin needs its OWN strategy based on its condition, not just the global regime.
+Set SL/TP based on this coin's volatility (ATR):
+- Low ATR (<1%): tight SL 1.0-1.5%, TP 2-3x SL
+- Medium ATR (1-2%): SL 1.5-2.5%, TP 2-3x SL
+- High ATR (>2%): wide SL 2.5-4.0%, TP 2-4x SL
+- The strategy "${strategy}" is pre-selected. Return it as-is.
 
-CRITICAL: ALWAYS use pipe-delimited multi-strategy (2-3 strategies). This ensures if the primary strategy doesn't find an entry, fallbacks still catch opportunities. Single strategies miss too many trades.
+Set confidence based on alignment:
+- RSI + regime aligned (e.g. RSI>50 in STRONG_BULL): higher confidence 70-85
+- RSI neutral (40-60): moderate 55-70
+- RSI against regime (e.g. RSI<40 in STRONG_BULL): lower 40-55
 
-Available strategies:
-- TREND_EMA: EMA crossovers. Best when ADX>20 and clear trend.
-- EMA_PULLBACK: Buy dips to EMA21 in uptrends, sell rallies in downtrends. Best for STRONG_BULL/BEAR. High win rate.
-- RSI_CROSS: RSI crosses its EMA. High frequency, works in most conditions.
-- MEAN_REVERT_RSI: Catches oversold/overbought reversals near EMA200.
-- STOCH_BB_PATTERN: Stochastic + Bollinger Band reversal pattern.
-- BB_SCALP: Bollinger Band bounces. Best for tight SIDEWAYS ranges.
-- RSI_ZONE: RSI extremes (>70/<30). Only for VOLATILE markets, rare signals.
-
-Regime → strategy pipes (MUST use pipes):
-- STRONG_BULL: "TREND_EMA|EMA_PULLBACK|RSI_CROSS" (trend entries + dip buys + RSI momentum)
-- STRONG_BEAR: "TREND_EMA|EMA_PULLBACK|RSI_CROSS" (trend entries + rally sells + RSI momentum)
-- SIDEWAYS: "RSI_CROSS|BB_SCALP" (momentum + band bounces)
-- RANGE_BOUND: "MEAN_REVERT_RSI|STOCH_BB_PATTERN|RSI_CROSS"
-- VOLATILE: "RSI_ZONE|MEAN_REVERT_RSI"
-- MIXED: "RSI_CROSS|MEAN_REVERT_RSI|BB_SCALP"
-
-Coin-specific adjustments:
-- If RSI is 40-60 (consolidating): prefer RSI_CROSS as primary
-- If RSI < 35 or > 65 (extended): prefer MEAN_REVERT_RSI as primary
-- If BBWidth < 2% (tight range): include BB_SCALP
-- If ADX > 25 (strong trend): include TREND_EMA as primary
-
-Risk rules: SWING→SL 1.5-4%, TP 2-4×SL; higher ATR%→wider SL. INTRADAY→klines 15m/1h; SWING→4h/1d.
-
-Reply ONLY with JSON:
-{"timeframeProfile":"INTRADAY|SWING","regime":"STRONG_BULL|STRONG_BEAR|RANGE_BOUND|SIDEWAYS|VOLATILE|BTC_CORRELATION|MIXED","strategy":"PIPE|DELIMITED|STRATEGIES","confidence":0-100,"stopLossPercent":0.5-5.0,"takeProfitPercent":0.5-15.0,"minConfidenceToTrade":38-80,"rsiCross":{"primaryKline":"15m|4h","rsiPeriod":14,"rsiEmaPeriod":9,"enableThreshold":true,"rsiThreshold":50,"enableHtfRsi":true,"htfKline":"1h|4h","enableCandleDir":false,"candleKline":"15m|4h"},"rsiZone":{"primaryKline":"15m|4h","rsiPeriod":14,"rsiEmaPeriod":9,"rsiTop":70,"rsiBottom":30,"enableHtfRsi":true,"htfKline":"1h|4h","enableInitialCandle":true,"excludeLatestCandle":true},"bbScalp":{"primaryKline":"15m","bbPeriod":20,"bbStdDev":2.0,"bbTolerance":0.1,"rsiPeriod":14,"rsiLongMax":45,"rsiShortMin":55}}`;
+Reply ONLY JSON:
+{"regime":"${globalRegime}","strategy":"${strategy}","confidence":40-85,"stopLossPercent":1.0-4.0,"takeProfitPercent":2.0-12.0,"minConfidenceToTrade":40}`;
   }
 
   private async callAnthropic(
@@ -723,6 +785,12 @@ Reply ONLY with JSON:
   ): Promise<AiTunedParams> {
     const defaults = this.getDefaultParams(regime);
     try {
+      // Use per-coin indicators for strategy selection + ATR-adjusted SL
+      const indicators = await this.preComputeIndicators(coin);
+      if (Object.keys(indicators).length > 0) {
+        defaults.strategy = this.selectStrategiesForCoin(regime, indicators);
+      }
+
       const ohlc = await this.indicatorService.getOhlc(coin, "15m");
       if (ohlc.closes.length < 20) return defaults;
 
