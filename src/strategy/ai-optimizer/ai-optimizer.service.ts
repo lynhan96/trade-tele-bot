@@ -536,29 +536,37 @@ Reply ONLY with valid JSON (no markdown):
 Indicators:
 ${indicatorText}
 
-IMPORTANT: Analyze the indicators carefully and pick the BEST strategy for THIS coin's current condition. Do NOT default everything to MIXED/RSI_ZONE.
+IMPORTANT: Analyze THIS coin's indicators carefully. Each coin needs its OWN strategy based on its condition, not just the global regime.
 
-Strategy selection rules (pick ONE):
-- RSI_CROSS: Best for SIDEWAYS/low-volatility. Triggers when RSI crosses its EMA. High signal frequency.
-- RSI_ZONE: Only for VOLATILE markets. Needs RSI >70 or <30 (rare on 4h). Use sparingly.
-- TREND_EMA: For clear STRONG_BULL or STRONG_BEAR trends. Uses EMA crossovers.
-- MEAN_REVERT_RSI: For RANGE_BOUND markets. Catches oversold/overbought reversals.
-- STOCH_BB_PATTERN: For RANGE_BOUND. Combines Stochastic + Bollinger Bands.
-- BB_SCALP: For tight SIDEWAYS ranges. Scalps Bollinger Band bounces.
-- Use pipe-delimited for multi-strategy: e.g. "RSI_CROSS|MEAN_REVERT_RSI"
+CRITICAL: ALWAYS use pipe-delimited multi-strategy (2-3 strategies). This ensures if the primary strategy doesn't find an entry, fallbacks still catch opportunities. Single strategies miss too many trades.
 
-Regime guidance:
-- STRONG_BULL: TREND_EMA or RSI_CROSS (LONG bias)
-- STRONG_BEAR: TREND_EMA or RSI_CROSS (SHORT bias)
-- SIDEWAYS: RSI_CROSS or BB_SCALP (most signals in flat markets)
-- RANGE_BOUND: STOCH_BB_PATTERN or MEAN_REVERT_RSI
-- VOLATILE: RSI_ZONE (only when ATR% is high)
-- MIXED: RSI_CROSS|MEAN_REVERT_RSI (multi-strategy for uncertain markets)
+Available strategies:
+- TREND_EMA: EMA crossovers. Best when ADX>20 and clear trend.
+- EMA_PULLBACK: Buy dips to EMA21 in uptrends, sell rallies in downtrends. Best for STRONG_BULL/BEAR. High win rate.
+- RSI_CROSS: RSI crosses its EMA. High frequency, works in most conditions.
+- MEAN_REVERT_RSI: Catches oversold/overbought reversals near EMA200.
+- STOCH_BB_PATTERN: Stochastic + Bollinger Band reversal pattern.
+- BB_SCALP: Bollinger Band bounces. Best for tight SIDEWAYS ranges.
+- RSI_ZONE: RSI extremes (>70/<30). Only for VOLATILE markets, rare signals.
 
-Risk rules: SWING→SL 1.5-4%, TP 3-4×SL; higher ATR%→wider SL. INTRADAY→klines 15m/1h; SWING→4h/1d.
+Regime → strategy pipes (MUST use pipes):
+- STRONG_BULL: "TREND_EMA|EMA_PULLBACK|RSI_CROSS" (trend entries + dip buys + RSI momentum)
+- STRONG_BEAR: "TREND_EMA|EMA_PULLBACK|RSI_CROSS" (trend entries + rally sells + RSI momentum)
+- SIDEWAYS: "RSI_CROSS|BB_SCALP" (momentum + band bounces)
+- RANGE_BOUND: "MEAN_REVERT_RSI|STOCH_BB_PATTERN|RSI_CROSS"
+- VOLATILE: "RSI_ZONE|MEAN_REVERT_RSI"
+- MIXED: "RSI_CROSS|MEAN_REVERT_RSI|BB_SCALP"
+
+Coin-specific adjustments:
+- If RSI is 40-60 (consolidating): prefer RSI_CROSS as primary
+- If RSI < 35 or > 65 (extended): prefer MEAN_REVERT_RSI as primary
+- If BBWidth < 2% (tight range): include BB_SCALP
+- If ADX > 25 (strong trend): include TREND_EMA as primary
+
+Risk rules: SWING→SL 1.5-4%, TP 2-4×SL; higher ATR%→wider SL. INTRADAY→klines 15m/1h; SWING→4h/1d.
 
 Reply ONLY with JSON:
-{"timeframeProfile":"INTRADAY|SWING","regime":"STRONG_BULL|STRONG_BEAR|RANGE_BOUND|SIDEWAYS|VOLATILE|BTC_CORRELATION|MIXED","strategy":"<pick best>","confidence":0-100,"stopLossPercent":0.5-5.0,"takeProfitPercent":0.5-15.0,"minConfidenceToTrade":38-80,"rsiCross":{"primaryKline":"15m|4h","rsiPeriod":14,"rsiEmaPeriod":9,"enableThreshold":true,"rsiThreshold":50,"enableHtfRsi":true,"htfKline":"1h|4h","enableCandleDir":false,"candleKline":"15m|4h"},"rsiZone":{"primaryKline":"15m|4h","rsiPeriod":14,"rsiEmaPeriod":9,"rsiTop":70,"rsiBottom":30,"enableHtfRsi":true,"htfKline":"1h|4h","enableInitialCandle":true,"excludeLatestCandle":true},"bbScalp":{"primaryKline":"15m","bbPeriod":20,"bbStdDev":2.0,"bbTolerance":0.1,"rsiPeriod":14,"rsiLongMax":45,"rsiShortMin":55}}`;
+{"timeframeProfile":"INTRADAY|SWING","regime":"STRONG_BULL|STRONG_BEAR|RANGE_BOUND|SIDEWAYS|VOLATILE|BTC_CORRELATION|MIXED","strategy":"PIPE|DELIMITED|STRATEGIES","confidence":0-100,"stopLossPercent":0.5-5.0,"takeProfitPercent":0.5-15.0,"minConfidenceToTrade":38-80,"rsiCross":{"primaryKline":"15m|4h","rsiPeriod":14,"rsiEmaPeriod":9,"enableThreshold":true,"rsiThreshold":50,"enableHtfRsi":true,"htfKline":"1h|4h","enableCandleDir":false,"candleKline":"15m|4h"},"rsiZone":{"primaryKline":"15m|4h","rsiPeriod":14,"rsiEmaPeriod":9,"rsiTop":70,"rsiBottom":30,"enableHtfRsi":true,"htfKline":"1h|4h","enableInitialCandle":true,"excludeLatestCandle":true},"bbScalp":{"primaryKline":"15m","bbPeriod":20,"bbStdDev":2.0,"bbTolerance":0.1,"rsiPeriod":14,"rsiLongMax":45,"rsiShortMin":55}}`;
   }
 
   private async callAnthropic(
@@ -612,8 +620,8 @@ Reply ONLY with JSON:
     return {
       timeframeProfile: "INTRADAY",
       regime: regime as any,
-      // SIDEWAYS uses RSI_CROSS — better performance than BB_SCALP (63% vs 37% win rate in testing)
-      strategy: isTrend ? "TREND_EMA" : "RSI_CROSS",
+      // Multi-strategy pipes: primary|fallback1|fallback2 — ensures signals when primary misses
+      strategy: isTrend ? "TREND_EMA|EMA_PULLBACK|RSI_CROSS" : isSideways ? "RSI_CROSS|BB_SCALP" : "RSI_CROSS|MEAN_REVERT_RSI",
       confidence: isSideways ? 45 : isTrend ? 60 : 55,
       stopLossPercent: isSideways ? 1.5 : isTrend ? 2.5 : 2.0,
       takeProfitPercent: isSideways ? 3.0 : isTrend ? 5.0 : 4.0,
@@ -683,6 +691,16 @@ Reply ONLY with JSON:
         enableKdj: false,
         kdjRangeLength: 9,
       },
+      emaPullback: {
+        primaryKline: "15m",
+        emaPeriod: 21,
+        emaSupportPeriod: 50,
+        rsiPeriod: 14,
+        rsiMin: 35,
+        rsiMax: 55,
+        htfKline: "4h",
+        htfRsiMin: 45,
+      },
       bbScalp: {
         primaryKline: "15m",
         bbPeriod: 20,
@@ -741,6 +759,7 @@ Reply ONLY with JSON:
         ...(parsed.stochBbPattern || {}),
       },
       stochEmaKdj: { ...defaults.stochEmaKdj, ...(parsed.stochEmaKdj || {}) },
+      emaPullback: { ...defaults.emaPullback, ...(parsed.emaPullback || {}) },
     };
 
     // Cap HTF kline to max 4h — GPT sometimes sets "1d" which is too slow for intraday signals

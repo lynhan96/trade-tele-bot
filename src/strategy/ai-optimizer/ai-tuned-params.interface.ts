@@ -16,15 +16,8 @@ export interface AiTunedParams {
   /** Timeframe profile: INTRADAY = 15m primary / 1h HTF; SWING = 4h primary / 1d HTF */
   timeframeProfile: "INTRADAY" | "SWING";
 
-  /** Selected strategy */
-  strategy:
-    | "RSI_CROSS"
-    | "RSI_ZONE"
-    | "TREND_EMA"
-    | "MEAN_REVERT_RSI"
-    | "STOCH_BB_PATTERN"
-    | "STOCH_EMA_KDJ"
-    | "BB_SCALP";
+  /** Selected strategy — pipe-delimited for multi-strategy: "TREND_EMA|RSI_CROSS|EMA_PULLBACK" */
+  strategy: string;
 
   /** AI confidence in this regime assessment (0-100) */
   confidence: number;
@@ -117,6 +110,18 @@ export interface AiTunedParams {
     emaRange: number; // Candle body must straddle EMA within X%
     enableKdj: boolean;
     kdjRangeLength: number;
+  };
+
+  /** EMA_PULLBACK specific params — buy dips to EMA in trending markets */
+  emaPullback?: {
+    primaryKline: string;     // "15m" or "4h"
+    emaPeriod: number;        // EMA to pull back to (default 21)
+    emaSupportPeriod: number; // larger EMA for trend confirmation (default 50)
+    rsiPeriod: number;        // default 14
+    rsiMin: number;           // min RSI — below this is a crash, not a dip (default 35)
+    rsiMax: number;           // max RSI — must have pulled back from high (default 55)
+    htfKline: string;         // "4h" — higher timeframe confirmation
+    htfRsiMin: number;        // HTF RSI must be above this for LONG (default 45)
   };
 
   /** BB_SCALP specific params — mean reversion at Bollinger Band extremes (SIDEWAYS regime) */

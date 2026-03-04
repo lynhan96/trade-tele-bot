@@ -22,7 +22,7 @@ const MONITOR_POSITIONS_KEY = "cache:ai:monitor:positions";
 const MONITOR_POSITIONS_TTL = 60; // 60s
 
 /** Coins that run BOTH INTRADAY and SWING strategies simultaneously. */
-const DUAL_TIMEFRAME_COINS = ["BTC", "ETH"];
+const DUAL_TIMEFRAME_COINS = ["BTC", "ETH", "SOL", "BNB", "XRP"];
 
 @Injectable()
 export class PositionMonitorService implements OnModuleInit {

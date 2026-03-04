@@ -70,6 +70,8 @@ export class RuleEngineService {
         return this.evalStochBbPattern(coin, currency, params);
       case "STOCH_EMA_KDJ":
         return this.evalStochEmaKdj(coin, currency, params);
+      case "EMA_PULLBACK":
+        return this.evalEmaPullback(coin, currency, params);
       case "BB_SCALP":
         return this.evalBbScalp(coin, currency, params);
       default:
@@ -262,6 +264,7 @@ export class RuleEngineService {
     const isLong = isCrossAbove;
 
     // Trend gate: price must be near the trend EMA (EMA200 on higher TF)
+    // Regime-aware: widen trendRange in strong trends (coins can be further from EMA200)
     if (cfg.enableTrendGate) {
       const trendCloses = await this.indicatorService.getCloses(coin, cfg.trendKline);
       if (trendCloses.length >= cfg.trendEmaPeriod) {
@@ -270,14 +273,20 @@ export class RuleEngineService {
         const distPct =
           (Math.abs(currentPrice - trendEma.last) / trendEma.last) * 100;
 
-        if (distPct > cfg.trendRange) return null; // price too far from trend EMA
+        const isTrendRegime = params.regime === "STRONG_BULL" || params.regime === "STRONG_BEAR";
+        const effectiveTrendRange = isTrendRegime ? Math.max(cfg.trendRange, 8) : cfg.trendRange;
+
+        if (distPct > effectiveTrendRange) return null; // price too far from trend EMA
         if (isLong && currentPrice < trendEma.last) return null; // price below trend = no LONG
         if (!isLong && currentPrice > trendEma.last) return null; // price above trend = no SHORT
       }
     }
 
     // ADX trend strength gate — skip EMA crossovers in choppy/weak trend conditions
-    const adxMin = cfg.adxMin ?? 20;
+    // Regime-aware: lower threshold in strong trends (macro trend already confirmed)
+    const baseAdxMin = cfg.adxMin ?? 20;
+    const isTrendRegime = params.regime === "STRONG_BULL" || params.regime === "STRONG_BEAR";
+    const adxMin = isTrendRegime ? Math.max(baseAdxMin - 5, 12) : baseAdxMin;
     if (adxMin > 0) {
       const adxOhlc = await this.indicatorService.getOhlc(coin, cfg.primaryKline);
       const { adx } = this.indicatorService.getAdx(adxOhlc.highs, adxOhlc.lows, adxOhlc.closes, 14);
@@ -579,6 +588,83 @@ export class RuleEngineService {
       strategy: "STOCH_EMA_KDJ",
       reason: `Stoch cross in ${patternState.isLong ? "oversold" : "overbought"} zone + EMA(${cfg.emaPeriod}) body pierce on ${cfg.primaryKline}`,
     };
+  }
+
+  // ─── EMA_PULLBACK (buy dips to EMA in trending markets) ─────────────────
+
+  async evalEmaPullback(
+    coin: string,
+    currency: string,
+    params: AiTunedParams,
+  ): Promise<SignalResult | null> {
+    const cfg = params.emaPullback;
+    if (!cfg) return null;
+
+    // Only works in trending regimes — buying dips in uptrend, selling rallies in downtrend
+    const isBull = params.regime === "STRONG_BULL";
+    const isBear = params.regime === "STRONG_BEAR";
+    if (!isBull && !isBear) return null;
+
+    const ohlc = await this.indicatorService.getOhlc(coin, cfg.primaryKline);
+    const { opens, closes } = ohlc;
+    if (closes.length < cfg.emaSupportPeriod + 10) return null;
+
+    const ema = this.indicatorService.getEma(closes, cfg.emaPeriod);
+    const emaSupport = this.indicatorService.getEma(closes, cfg.emaSupportPeriod);
+    const rsi = this.indicatorService.getRsi(closes, cfg.rsiPeriod);
+    const currentPrice = closes[closes.length - 1];
+    const prevPrice = closes[closes.length - 2];
+    const currentOpen = opens[opens.length - 1];
+
+    // LONG: price pulled back to EMA21, bouncing, above EMA50
+    if (isBull) {
+      const touchedEma = prevPrice <= ema.last * 1.002 || currentPrice <= ema.last * 1.002;
+      const isGreen = currentPrice > currentOpen;
+      const aboveSupport = currentPrice > emaSupport.last;
+      const rsiInRange = rsi.last >= cfg.rsiMin && rsi.last <= cfg.rsiMax;
+
+      if (!touchedEma || !isGreen || !aboveSupport || !rsiInRange) return null;
+
+      // HTF RSI confirmation — 4h must still be bullish
+      const htfCloses = await this.indicatorService.getCloses(coin, cfg.htfKline);
+      if (htfCloses.length >= 50) {
+        const htfRsi = this.indicatorService.getRsi(htfCloses, cfg.rsiPeriod);
+        if (htfRsi.last < cfg.htfRsiMin) return null;
+      }
+
+      return {
+        isLong: true,
+        entryPrice: currentPrice,
+        strategy: "EMA_PULLBACK",
+        reason: `Pullback to EMA(${cfg.emaPeriod})=${ema.last.toFixed(2)}, bounce (green), RSI=${rsi.last.toFixed(1)} on ${cfg.primaryKline}`,
+      };
+    }
+
+    // SHORT: price rallied to EMA21, rejecting, below EMA50
+    if (isBear) {
+      const touchedEma = prevPrice >= ema.last * 0.998 || currentPrice >= ema.last * 0.998;
+      const isRed = currentPrice < currentOpen;
+      const belowSupport = currentPrice < emaSupport.last;
+      const rsiInRange = rsi.last >= (100 - cfg.rsiMax) && rsi.last <= (100 - cfg.rsiMin);
+
+      if (!touchedEma || !isRed || !belowSupport || !rsiInRange) return null;
+
+      // HTF RSI confirmation — 4h must still be bearish
+      const htfCloses = await this.indicatorService.getCloses(coin, cfg.htfKline);
+      if (htfCloses.length >= 50) {
+        const htfRsi = this.indicatorService.getRsi(htfCloses, cfg.rsiPeriod);
+        if (htfRsi.last > (100 - cfg.htfRsiMin)) return null;
+      }
+
+      return {
+        isLong: false,
+        entryPrice: currentPrice,
+        strategy: "EMA_PULLBACK",
+        reason: `Rally to EMA(${cfg.emaPeriod})=${ema.last.toFixed(2)}, rejection (red), RSI=${rsi.last.toFixed(1)} on ${cfg.primaryKline}`,
+      };
+    }
+
+    return null;
   }
 
   // ─── BB_SCALP (mean reversion at Bollinger Band extremes, SIDEWAYS regime) ─

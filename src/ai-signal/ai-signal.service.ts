@@ -32,8 +32,9 @@ const AI_PAUSED_KEY = "cache:ai:paused";
 const AI_TEST_MODE_KEY = "cache:ai:test-mode";
 const AI_SCANNING_KEY = "cache:ai:scanning";
 
-/** Coins that run BOTH INTRADAY (15m) and SWING (4h) strategies simultaneously. */
-const DUAL_TIMEFRAME_COINS = ["BTC", "ETH"];
+/** Coins that run BOTH INTRADAY (15m) and SWING (4h) strategies simultaneously.
+ * Top 5 by market cap — 15m catches more frequent signals than 4h alone. */
+const DUAL_TIMEFRAME_COINS = ["BTC", "ETH", "SOL", "BNB", "XRP"];
 
 @Injectable()
 export class AiSignalService implements OnModuleInit {
