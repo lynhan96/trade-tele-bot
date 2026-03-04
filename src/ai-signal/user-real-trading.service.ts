@@ -773,8 +773,23 @@ export class UserRealTradingService implements OnModuleInit {
             return ppCache.get(sym)!;
           };
 
+          // Fetch actual open positions on Binance to verify trades are still open
+          const binancePositions = await this.binanceService.getOpenPositions(keys.apiKey, keys.apiSecret).catch(() => []);
+          const openSymbols = new Set(binancePositions.map((p) => p.symbol));
+
           for (const trade of trades) {
             const { symbol, direction, slPrice, tpPrice, chatId } = trade;
+
+            // Position already closed on Binance — mark trade as closed
+            if (!openSymbols.has(symbol)) {
+              this.logger.log(`[RealTrading] ${symbol} user ${telegramId}: position gone on Binance — marking CLOSED`);
+              await this.userTradeModel.updateOne(
+                { _id: (trade as any)._id },
+                { $set: { status: "CLOSED", closeReason: "BINANCE_CLOSED", closedAt: new Date() } },
+              );
+              continue;
+            }
+
             const algo = algoMap.get(symbol);
             const fmtP = (p: number) =>
               p >= 1000 ? `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :
