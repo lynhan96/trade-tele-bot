@@ -317,11 +317,7 @@ Reply ONLY with valid JSON (no markdown):
     };
 
     // ── 1. GPT-4o-mini (primary — cheapest, $0.15/MTok input) ──────────────
-    const gptRateOk = this.openai ? await this.checkRateLimit(GPT_RATE_KEY, this.maxGptPerHour) : false;
-    if (!this.openai || !gptRateOk) {
-      this.logger.debug(`[AiOptimizer] GPT skip ${symbol}: openai=${!!this.openai} rateOk=${gptRateOk}`);
-    }
-    if (this.openai && gptRateOk) {
+    if (this.openai && (await this.checkRateLimit(GPT_RATE_KEY, this.maxGptPerHour))) {
       try {
         const params = await this.callGpt(symbol, globalRegime, indicators);
         await this.incrementRateLimit(GPT_RATE_KEY);
@@ -1043,11 +1039,8 @@ Reply ONLY with JSON:
     key: string,
     maxPerHour: number,
   ): Promise<boolean> {
-    const raw = await this.redisService.get<number>(key);
-    const count = raw || 0;
-    const ok = count < maxPerHour;
-    if (!ok) this.logger.debug(`[AiOptimizer] rate-limit blocked: key=${key} raw=${raw} count=${count} max=${maxPerHour}`);
-    return ok;
+    const count = (await this.redisService.get<number>(key)) || 0;
+    return count < maxPerHour;
   }
 
   private async incrementRateLimit(key: string): Promise<void> {
