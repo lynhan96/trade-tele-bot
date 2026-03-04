@@ -317,7 +317,11 @@ Reply ONLY with valid JSON (no markdown):
     };
 
     // ── 1. GPT-4o-mini (primary — cheapest, $0.15/MTok input) ──────────────
-    if (this.openai && (await this.checkRateLimit(GPT_RATE_KEY, this.maxGptPerHour))) {
+    const gptRateOk = this.openai ? await this.checkRateLimit(GPT_RATE_KEY, this.maxGptPerHour) : false;
+    if (!this.openai || !gptRateOk) {
+      this.logger.debug(`[AiOptimizer] GPT skip ${symbol}: openai=${!!this.openai} rateOk=${gptRateOk}`);
+    }
+    if (this.openai && gptRateOk) {
       try {
         const params = await this.callGpt(symbol, globalRegime, indicators);
         await this.incrementRateLimit(GPT_RATE_KEY);
