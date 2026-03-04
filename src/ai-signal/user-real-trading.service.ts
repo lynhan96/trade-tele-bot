@@ -15,8 +15,9 @@ import { AiTunedParams } from "../strategy/ai-optimizer/ai-tuned-params.interfac
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const axios = require("axios");
 
-/** Tolerance for signal entry price vs current market price (0.5%). */
-const ENTRY_PRICE_TOLERANCE = 0.005;
+/** Tolerance for signal entry price vs current market price — profile-aware. */
+const ENTRY_PRICE_TOLERANCE_INTRADAY = 0.015; // 1.5% for 15m signals (candle close is recent)
+const ENTRY_PRICE_TOLERANCE_SWING = 0.05;     // 5% for 4h signals (candle close can be hours old)
 
 /** Redis key for caching symbol quantity precision. */
 const QTY_PRECISION_KEY = (symbol: string) => `cache:binance:qty-precision:${symbol}`;
@@ -70,9 +71,12 @@ export class UserRealTradingService implements OnModuleInit {
     }
 
     const priceDeviation = Math.abs(currentPrice - entryPrice) / entryPrice;
-    if (priceDeviation > ENTRY_PRICE_TOLERANCE) {
+    const tolerance = params.timeframeProfile === "SWING"
+      ? ENTRY_PRICE_TOLERANCE_SWING
+      : ENTRY_PRICE_TOLERANCE_INTRADAY;
+    if (priceDeviation > tolerance) {
       this.logger.log(
-        `[RealTrading] ${symbol} price deviation ${(priceDeviation * 100).toFixed(2)}% > 0.5% — skipping real orders`,
+        `[RealTrading] ${symbol} price deviation ${(priceDeviation * 100).toFixed(2)}% > ${(tolerance * 100).toFixed(1)}% (${params.timeframeProfile}) — skipping real orders`,
       );
       // Notify all real-mode subscribers about the skip
       for (const sub of subscribers) {
@@ -81,7 +85,7 @@ export class UserRealTradingService implements OnModuleInit {
           `${symbol} ${direction}\n` +
           `Gia tin hieu: $${entryPrice.toFixed(4)}\n` +
           `Gia hien tai: $${currentPrice.toFixed(4)}\n` +
-          `Lech: ${(priceDeviation * 100).toFixed(2)}% > 0.5%\n\n` +
+          `Lech: ${(priceDeviation * 100).toFixed(2)}% > ${(tolerance * 100).toFixed(1)}%\n\n` +
           `_Lenh khong duoc dat do gia di qua xa diem vao._`;
         await this.telegramService.sendTelegramMessage(sub.chatId, msg).catch(() => {});
       }
