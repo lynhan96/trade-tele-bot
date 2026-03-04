@@ -142,6 +142,10 @@ export class UserRealTradingService implements OnModuleInit {
       const fillPrice = parseFloat(order.avgPrice) || currentPrice;
       const binanceOrderId = order.orderId?.toString() ?? "";
 
+      // Wait for Binance to register the position before placing conditional orders
+      // GTE_GTC algo orders require an open position to exist
+      await new Promise((r) => setTimeout(r, 1500));
+
       // Round SL/TP prices to Binance-required precision (avoids "Precision over maximum" error)
       const roundPrice = (p: number) => parseFloat(p.toFixed(pricePrecision));
       const roundedSl = roundPrice(stopLossPrice);
