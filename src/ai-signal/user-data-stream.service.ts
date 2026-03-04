@@ -162,9 +162,19 @@ export class UserDataStreamService implements OnModuleInit, OnModuleDestroy {
     if (!order) return;
 
     const orderStatus: string = order.X;
+
+    // Log all FILLED events for debugging
+    if (orderStatus === "FILLED") {
+      this.logger.log(
+        `[UserDataStream] User ${telegramId} FILLED: ${order.s} ${order.S} type=${order.o} ot=${order.ot} R=${order.R} cp=${order.cp} qty=${order.q} price=${order.ap || order.L}`,
+      );
+    }
+
     if (orderStatus !== "FILLED") return;
 
-    const isClose: boolean = order.R === true || order.cp === true;
+    // Lenient boolean check — Binance may send true, "true", or "TRUE"
+    const toBool = (v: any) => v === true || v === "true" || v === "TRUE";
+    const isClose: boolean = toBool(order.R) || toBool(order.cp);
     if (!isClose) return;
 
     const symbol: string = order.s;

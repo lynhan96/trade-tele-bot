@@ -934,7 +934,10 @@ export class UserRealTradingService implements OnModuleInit {
 
   /** Re-register data streams for users with OPEN trades (called on module init). */
   private async reRegisterOpenTradeStreams(): Promise<void> {
-    if (!this.userDataStreamService) return;
+    if (!this.userDataStreamService) {
+      this.logger.warn(`[RealTrading] reRegisterOpenTradeStreams: userDataStreamService not set yet`);
+      return;
+    }
     try {
       const telegramIds = await this.userTradeModel
         .distinct("telegramId", { status: "OPEN" })
