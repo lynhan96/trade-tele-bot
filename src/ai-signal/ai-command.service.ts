@@ -12,6 +12,8 @@ import { UserDataStreamService } from "./user-data-stream.service";
 import { MarketDataService } from "../market-data/market-data.service";
 import { BinanceService } from "../binance/binance.service";
 
+const DUAL_TIMEFRAME_COINS = ["BTC", "ETH", "SOL", "BNB", "XRP"];
+
 @Injectable()
 export class AiCommandService implements OnModuleInit {
   private readonly logger = new Logger(AiCommandService.name);
@@ -1247,11 +1249,12 @@ export class AiCommandService implements OnModuleInit {
               return;
             }
 
-            // Close all AI signals
+            // Close all AI signals (use signal key with profile for dual-timeframe coins)
             let signalsClosed = 0;
             for (const s of testSignals) {
               const price = this.marketDataService.getLatestPrice(s.symbol) ?? s.entryPrice;
-              await this.signalQueueService.resolveActiveSignal(s.symbol, price, "MANUAL").catch(() => {});
+              const sigKey = this.getSignalKey(s);
+              await this.signalQueueService.resolveActiveSignal(sigKey, price, "MANUAL").catch(() => {});
               signalsClosed++;
             }
 
@@ -1277,12 +1280,13 @@ export class AiCommandService implements OnModuleInit {
               return;
             }
 
-            // Close the AI signal
+            // Close the AI signal (use signal key with profile for dual-timeframe coins)
             const price = this.marketDataService.getLatestPrice(symbol) ?? signal.entryPrice;
             const pnlPct = signal.direction === "LONG"
               ? ((price - signal.entryPrice) / signal.entryPrice) * 100
               : ((signal.entryPrice - price) / signal.entryPrice) * 100;
-            await this.signalQueueService.resolveActiveSignal(symbol, price, "MANUAL").catch(() => {});
+            const sigKey = this.getSignalKey(signal);
+            await this.signalQueueService.resolveActiveSignal(sigKey, price, "MANUAL").catch(() => {});
 
             // Close real positions for this symbol for all real-mode users
             let realClosed = 0;
@@ -1912,8 +1916,9 @@ export class AiCommandService implements OnModuleInit {
                 ? (healthResults[i] as PromiseFulfilledResult<any>).value
                 : null;
             const exitPrice = health?.currentPrice ?? actives[i].entryPrice;
+            const sigKey = this.getSignalKey(actives[i]);
             await this.signalQueueService
-              .resolveActiveSignal(actives[i].symbol, exitPrice, "AUTO_TAKE_PROFIT")
+              .resolveActiveSignal(sigKey, exitPrice, "AUTO_TAKE_PROFIT")
               .catch(() => {});
           }
           this.logger.log(
@@ -1934,6 +1939,15 @@ export class AiCommandService implements OnModuleInit {
   ): number {
     const base = symbol.replace(/USDT$/, ""); // "BTCUSDT" → "BTC"
     return coinVolumes?.[base] ?? coinVolumes?.[symbol] ?? tradingBalance ?? 1000;
+  }
+
+  private getSignalKey(signal: { symbol: string; timeframeProfile?: string; coin?: string }): string {
+    const coin = (signal.coin || signal.symbol.replace("USDT", "")).toUpperCase();
+    const profile = signal.timeframeProfile;
+    if (DUAL_TIMEFRAME_COINS.includes(coin) && profile) {
+      return `${signal.symbol}:${profile}`;
+    }
+    return signal.symbol;
   }
 
   private isAdmin(telegramId?: number): boolean {
