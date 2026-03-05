@@ -240,6 +240,15 @@ export class UserRealTradingService implements OnModuleInit {
         }
       }
 
+      // Final DB-level dedup: ensure no existing OPEN trade for this symbol
+      const existingTrade = await this.userTradeModel.findOne({
+        telegramId, symbol, status: "OPEN",
+      });
+      if (existingTrade) {
+        this.logger.warn(`[RealTrading] ${symbol}: user ${telegramId} already has OPEN trade in DB, skipping duplicate`);
+        return;
+      }
+
       // Save UserTrade to MongoDB
       const trade = await this.userTradeModel.create({
         telegramId,
@@ -844,10 +853,33 @@ export class UserRealTradingService implements OnModuleInit {
           };
 
           // Fetch actual open positions on Binance to verify trades are still open
-          const binancePositions = await this.binanceService.getOpenPositions(keys.apiKey, keys.apiSecret).catch(() => []);
+          // IMPORTANT: if API call fails, skip position check entirely (don't assume all closed)
+          let binancePositions;
+          try {
+            binancePositions = await this.binanceService.getOpenPositions(keys.apiKey, keys.apiSecret);
+          } catch (err) {
+            this.logger.warn(`[RealTrading] protectOpenTrades: getOpenPositions failed for user ${telegramId}, skipping position check: ${err?.message}`);
+            continue; // Skip this user entirely — don't falsely close trades
+          }
           const openSymbols = new Set(binancePositions.map((p) => p.symbol));
 
+          // Dedup: only process one OPEN trade per symbol (close duplicates silently)
+          const seenSymbols = new Set<string>();
+          const dedupedTrades: typeof trades = [];
           for (const trade of trades) {
+            if (seenSymbols.has(trade.symbol)) {
+              this.logger.warn(`[RealTrading] ${trade.symbol} user ${telegramId}: closing duplicate OPEN trade record`);
+              await this.userTradeModel.updateOne(
+                { _id: (trade as any)._id },
+                { $set: { status: "CLOSED", closeReason: "DUPLICATE", closedAt: new Date() } },
+              );
+              continue;
+            }
+            seenSymbols.add(trade.symbol);
+            dedupedTrades.push(trade);
+          }
+
+          for (const trade of dedupedTrades) {
             const { symbol, direction, slPrice, tpPrice, chatId } = trade;
 
             // Position already closed on Binance — mark trade as closed with PnL
