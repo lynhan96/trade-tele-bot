@@ -92,13 +92,26 @@ export class UserRealTradingService implements OnModuleInit {
       return;
     }
 
+    // Filter out subscribers who already have an open trade on this symbol
+    // (prevents duplicate positions when INTRADAY + SWING both trigger for dual-timeframe coins)
+    const eligibleSubs: typeof subscribers = [];
+    for (const sub of subscribers) {
+      const existing = await this.userTradeModel.findOne({ telegramId: sub.telegramId, symbol, status: "OPEN" }).lean();
+      if (existing) {
+        this.logger.debug(`[RealTrading] ${symbol}: user ${sub.telegramId} already has open position, skipping`);
+        continue;
+      }
+      eligibleSubs.push(sub);
+    }
+    if (eligibleSubs.length === 0) return;
+
     const [precision, pricePrecision] = await Promise.all([
       this.getQuantityPrecision(symbol),
       this.getPricePrecision(symbol),
     ]);
 
     await Promise.allSettled(
-      subscribers.map((sub) =>
+      eligibleSubs.map((sub) =>
         this.placeOrderForUser(sub, signal, params, currentPrice, precision, pricePrecision),
       ),
     );
