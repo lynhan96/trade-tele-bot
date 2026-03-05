@@ -246,27 +246,39 @@ export class BinanceService {
     side: "LONG" | "SHORT",
     quantity: number,
   ): Promise<any> {
-    try {
-      const client = this.createClient(apiKey, apiSecret);
+    const client = this.createClient(apiKey, apiSecret);
+    const orderSide = side === "LONG" ? "SELL" : "BUY";
 
-      // Place stop loss via Algo Order API (required since Binance migration 2025-12-09)
-      // Both SL and TP use closePosition:true — shows in Binance app position TP/SL row
+    // Try closePosition first (shows in Binance app position row)
+    try {
       const order = await (client as any).privateRequest('POST', '/fapi/v1/algoOrder', {
         algoType: 'CONDITIONAL',
         symbol,
-        side: side === "LONG" ? "SELL" : "BUY",
+        side: orderSide,
         type: "STOP_MARKET",
         triggerPrice: stopPrice.toString(),
         closePosition: "true",
       });
-
-      this.logger.log(`Set stop loss for ${symbol} at $${stopPrice} (${side})`);
+      this.logger.log(`Set stop loss for ${symbol} at $${stopPrice} (${side}) [closePosition]`);
       return order;
     } catch (error) {
-      this.logger.error(
-        `Error setting stop loss for ${symbol}:`,
-        error.message,
-      );
+      this.logger.warn(`SL closePosition failed for ${symbol}: ${error.message} — retrying with quantity`);
+    }
+
+    // Fallback: use quantity if closePosition fails (GTE conflict)
+    try {
+      const order = await (client as any).privateRequest('POST', '/fapi/v1/algoOrder', {
+        algoType: 'CONDITIONAL',
+        symbol,
+        side: orderSide,
+        type: "STOP_MARKET",
+        triggerPrice: stopPrice.toString(),
+        quantity: quantity.toString(),
+      });
+      this.logger.log(`Set stop loss for ${symbol} at $${stopPrice} (${side}) [quantity fallback]`);
+      return order;
+    } catch (error) {
+      this.logger.error(`Error setting stop loss for ${symbol}:`, error.message);
       throw error;
     }
   }
@@ -282,25 +294,44 @@ export class BinanceService {
     side: "LONG" | "SHORT",
     quantity?: number,
   ): Promise<any> {
+    const client = this.createClient(apiKey, apiSecret);
+    const orderSide = side === "LONG" ? "SELL" : "BUY";
+
+    // Try closePosition first (shows in Binance app position row)
     try {
-      const client = this.createClient(apiKey, apiSecret);
-      // Use closePosition so TP shows in Binance app position row
-      // (SL uses quantity instead to avoid GTE conflict — only one closePosition per direction)
-      const params: any = {
+      const order = await (client as any).privateRequest('POST', '/fapi/v1/algoOrder', {
         algoType: 'CONDITIONAL',
         symbol,
-        side: side === "LONG" ? "SELL" : "BUY",
+        side: orderSide,
         type: "TAKE_PROFIT_MARKET",
         triggerPrice: tpPrice.toString(),
         closePosition: "true",
-      };
-      const order = await (client as any).privateRequest('POST', '/fapi/v1/algoOrder', params);
-      this.logger.log(`Set take profit for ${symbol} at $${tpPrice} (${side})`);
+      });
+      this.logger.log(`Set take profit for ${symbol} at $${tpPrice} (${side}) [closePosition]`);
       return order;
     } catch (error) {
-      this.logger.error(`Error setting take profit for ${symbol}:`, error.message);
-      throw error;
+      this.logger.warn(`TP closePosition failed for ${symbol}: ${error.message} — retrying with quantity`);
     }
+
+    // Fallback: use quantity if closePosition fails (GTE conflict)
+    if (quantity) {
+      try {
+        const order = await (client as any).privateRequest('POST', '/fapi/v1/algoOrder', {
+          algoType: 'CONDITIONAL',
+          symbol,
+          side: orderSide,
+          type: "TAKE_PROFIT_MARKET",
+          triggerPrice: tpPrice.toString(),
+          quantity: quantity.toString(),
+        });
+        this.logger.log(`Set take profit for ${symbol} at $${tpPrice} (${side}) [quantity fallback]`);
+        return order;
+      } catch (error2) {
+        this.logger.error(`Error setting take profit for ${symbol}:`, error2.message);
+        throw error2;
+      }
+    }
+    throw new Error(`TP closePosition failed for ${symbol} and no quantity available for fallback`);
   }
 
   /**
