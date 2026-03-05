@@ -250,14 +250,14 @@ export class BinanceService {
       const client = this.createClient(apiKey, apiSecret);
 
       // Place stop loss via Algo Order API (required since Binance migration 2025-12-09)
-      // Uses quantity (not closePosition) so TP can use closePosition for display in Binance app
+      // Both SL and TP use closePosition:true — shows in Binance app position TP/SL row
       const order = await (client as any).privateRequest('POST', '/fapi/v1/algoOrder', {
         algoType: 'CONDITIONAL',
         symbol,
         side: side === "LONG" ? "SELL" : "BUY",
         type: "STOP_MARKET",
         triggerPrice: stopPrice.toString(),
-        quantity: quantity.toString(),
+        closePosition: "true",
       });
 
       this.logger.log(`Set stop loss for ${symbol} at $${stopPrice} (${side})`);
