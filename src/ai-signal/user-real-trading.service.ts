@@ -844,6 +844,9 @@ export class UserRealTradingService implements OnModuleInit {
           const keys = await this.userSettingsService.getApiKeys(telegramId, "binance");
           if (!keys?.apiKey) continue;
 
+          // Fetch user subscription for custom TP/SL settings
+          const sub = await this.subscriptionService.getSubscription(telegramId);
+
           // One call to get all open algo orders for this user
           const algoMap = await this.binanceService.getOpenAlgoOrders(keys.apiKey, keys.apiSecret);
 
@@ -930,10 +933,18 @@ export class UserRealTradingService implements OnModuleInit {
             const round = (p: number) => parseFloat(p.toFixed(pp));
 
             // ── SL missing ──────────────────────────────────────────────────
-            if (!algo?.hasSl) {
-              this.logger.warn(`[RealTrading] ${symbol} user ${telegramId}: SL missing — placing at $${slPrice}`);
+            // If slPrice not in trade record, compute from user's customSlPct
+            let effectiveSlPrice = slPrice;
+            if (!effectiveSlPrice && sub?.customSlPct && trade.entryPrice) {
+              effectiveSlPrice = direction === "LONG"
+                ? trade.entryPrice * (1 - sub.customSlPct / 100)
+                : trade.entryPrice * (1 + sub.customSlPct / 100);
+              await this.userTradeModel.updateOne({ _id: trade._id }, { $set: { slPrice: effectiveSlPrice } });
+            }
+            if (!algo?.hasSl && effectiveSlPrice) {
+              this.logger.warn(`[RealTrading] ${symbol} user ${telegramId}: SL missing — placing at $${effectiveSlPrice}`);
               try {
-                const roundedSl = round(slPrice);
+                const roundedSl = round(effectiveSlPrice);
                 const slOrder = await this.binanceService.setStopLoss(
                   keys.apiKey, keys.apiSecret, symbol, roundedSl,
                   direction as "LONG" | "SHORT", trade.quantity,
@@ -976,10 +987,19 @@ export class UserRealTradingService implements OnModuleInit {
             }
 
             // ── TP missing ──────────────────────────────────────────────────
-            if (tpPrice && !algo?.hasTp) {
-              this.logger.warn(`[RealTrading] ${symbol} user ${telegramId}: TP missing — placing at $${tpPrice}`);
+            // If tpPrice not in trade record, compute from user's customTpPct
+            let effectiveTpPrice = tpPrice;
+            if (!effectiveTpPrice && sub?.customTpPct && trade.entryPrice) {
+              effectiveTpPrice = direction === "LONG"
+                ? trade.entryPrice * (1 + sub.customTpPct / 100)
+                : trade.entryPrice * (1 - sub.customTpPct / 100);
+              // Save computed TP back to trade record
+              await this.userTradeModel.updateOne({ _id: trade._id }, { $set: { tpPrice: effectiveTpPrice } });
+            }
+            if (effectiveTpPrice && !algo?.hasTp) {
+              this.logger.warn(`[RealTrading] ${symbol} user ${telegramId}: TP missing — placing at $${effectiveTpPrice}`);
               try {
-                const roundedTp = round(tpPrice);
+                const roundedTp = round(effectiveTpPrice);
                 const tpOrder = await this.binanceService.setTakeProfitAtPrice(
                   keys.apiKey, keys.apiSecret, symbol, roundedTp,
                   direction as "LONG" | "SHORT",
