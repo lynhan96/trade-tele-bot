@@ -682,35 +682,57 @@ export class AiSignalService implements OnModuleInit {
       }
     }
 
-    // ── Global regime trend filter (with futures sentiment override) ──────
+    // ── Global regime trend filter (uses indicator-based globalRegime, not AI params.regime) ──
     // STRONG_BEAR: only SHORT signals (unless futures sentiment is strongly bullish).
     // STRONG_BULL: only LONG signals (unless futures sentiment is strongly bearish).
     // Futures sentiment override threshold: |score| >= 30 = allow counter-regime signals.
     const SENTIMENT_OVERRIDE_THRESHOLD = 30;
     const sentiment = await this.futuresAnalyticsService.calculateSentiment(symbol);
 
-    if (params.regime === "STRONG_BEAR" && signalResult.isLong) {
+    if (globalRegime === "STRONG_BEAR" && signalResult.isLong) {
       if (sentiment && sentiment.score >= SENTIMENT_OVERRIDE_THRESHOLD) {
         this.logger.log(
           `[AiSignal] ${coin.toUpperCase()} LONG allowed in STRONG_BEAR — futures sentiment bullish (${sentiment.score}): ${sentiment.signals.join("; ")}`,
         );
       } else {
-        this.logger.debug(
+        this.logger.log(
           `[AiSignal] ${coin.toUpperCase()} LONG skipped — regime STRONG_BEAR (shorts only)${sentiment ? ` [sentiment=${sentiment.score}]` : ""}`,
         );
         return;
       }
     }
-    if (params.regime === "STRONG_BULL" && !signalResult.isLong) {
+    if (globalRegime === "STRONG_BULL" && !signalResult.isLong) {
       if (sentiment && sentiment.score <= -SENTIMENT_OVERRIDE_THRESHOLD) {
         this.logger.log(
           `[AiSignal] ${coin.toUpperCase()} SHORT allowed in STRONG_BULL — futures sentiment bearish (${sentiment.score}): ${sentiment.signals.join("; ")}`,
         );
       } else {
-        this.logger.debug(
+        this.logger.log(
           `[AiSignal] ${coin.toUpperCase()} SHORT skipped — regime STRONG_BULL (longs only)${sentiment ? ` [sentiment=${sentiment.score}]` : ""}`,
         );
         return;
+      }
+    }
+
+    // ── VOLATILE regime: block signals against BTC direction ──────────────
+    // In volatile markets, only trade in BTC's direction (crash = SHORT only, pump = LONG only)
+    if (globalRegime === "VOLATILE") {
+      const btcCtx = await this.redisService.get<{ rsi: number; priceVsEma9: number }>("cache:ai:regime:btc-context");
+      if (btcCtx) {
+        // BTC below EMA9 + low RSI = bearish volatile → block LONGs
+        if (btcCtx.priceVsEma9 < -0.5 && btcCtx.rsi < 45 && signalResult.isLong) {
+          this.logger.log(
+            `[AiSignal] ${coin.toUpperCase()} LONG skipped — VOLATILE + BTC bearish (RSI=${btcCtx.rsi.toFixed(0)}, vs EMA9=${btcCtx.priceVsEma9.toFixed(1)}%)`,
+          );
+          return;
+        }
+        // BTC above EMA9 + high RSI = bullish volatile → block SHORTs
+        if (btcCtx.priceVsEma9 > 0.5 && btcCtx.rsi > 55 && !signalResult.isLong) {
+          this.logger.log(
+            `[AiSignal] ${coin.toUpperCase()} SHORT skipped — VOLATILE + BTC bullish (RSI=${btcCtx.rsi.toFixed(0)}, vs EMA9=${btcCtx.priceVsEma9.toFixed(1)}%)`,
+          );
+          return;
+        }
       }
     }
 

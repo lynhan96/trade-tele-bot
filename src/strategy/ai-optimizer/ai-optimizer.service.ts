@@ -20,7 +20,7 @@ const HAIKU_MODEL = "claude-haiku-4-5-20251001";
 
 const AI_PARAMS_TTL = 4 * 60 * 60; // 4h cache for tuned params (saves ~50% API calls)
 const AI_PARAMS_JITTER = 45 * 60; // ±22.5 min random offset to stagger expiry
-const AI_REGIME_TTL = 4 * 60 * 60; // 4h cache for global regime
+const AI_REGIME_TTL = 30 * 60; // 30min cache — react faster to market changes
 const HAIKU_RATE_KEY = "cache:ai:rate:haiku"; // single rate limiter (only tuning uses AI now)
 const AI_MARKET_FILTERS_KEY = "cache:ai:market-filters"; // AI-decided coin filter settings
 const AI_MARKET_FILTERS_TTL = 8 * 60 * 60; // 8h — re-evaluated on regime change
@@ -117,8 +117,14 @@ export class AiOptimizerService {
       let regime = "MIXED";
       let confidence = 50;
 
+      // CRASH DETECTION: RSI extremely low + price well below EMA9 → immediate STRONG_BEAR
+      // Catches sudden dumps even if price hasn't crossed EMA200 yet
+      if (rsi < 30 && priceVsEma9 < -1.0) {
+        regime = "STRONG_BEAR";
+        confidence = Math.min(90, 50 + (50 - rsi));
+      }
       // VOLATILE: high ATR + wide BB — market is whipping around
-      if (atr15m > 1.5 && bbWidth > 5) {
+      else if (atr15m > 1.5 && bbWidth > 5) {
         regime = "VOLATILE";
         confidence = Math.min(85, 50 + atr15m * 10);
       }
@@ -150,6 +156,10 @@ export class AiOptimizerService {
       }
 
       await this.redisService.set(cacheKey, regime, AI_REGIME_TTL);
+      // Store BTC context for VOLATILE direction filter in processCoin
+      await this.redisService.set("cache:ai:regime:btc-context", {
+        rsi, rsi4h, priceVsEma9, priceVsEma200, atr15m, bbWidth,
+      }, AI_REGIME_TTL);
 
       // If regime changed → flush all coin param caches so Haiku re-evaluates with new strategy
       const prevRegime = await this.redisService.get<string>(prevRegimeKey);
