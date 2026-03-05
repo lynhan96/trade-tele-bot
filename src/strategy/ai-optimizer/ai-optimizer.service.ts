@@ -349,9 +349,12 @@ Reply ONLY with valid JSON (no markdown):
       }
     }
 
-    // ── 4. Static ATR-adjusted defaults ──────────────────────────────────
+    // ── 4. Static ATR-adjusted defaults (still cache so /ai market works) ──
     let defaults = await this.getAtrAdjustedDefaults(coin, globalRegime);
+    if (algoStrategy) defaults.strategy = algoStrategy;
     if (forceProfile) defaults = this.applyForcedProfile(defaults, forceProfile);
+    const jitter = Math.floor(Math.random() * AI_PARAMS_JITTER);
+    await this.redisService.set(cacheKey, defaults, AI_PARAMS_TTL + jitter);
     this.logger.debug(`[AiOptimizer] ${symbol}${forceProfile ? `:${forceProfile}` : ""} using static defaults SL=${defaults.stopLossPercent}%`);
     return defaults;
   }

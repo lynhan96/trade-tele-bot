@@ -1342,21 +1342,20 @@ export class AiSignalService implements OnModuleInit {
       priceChangePercent: number;
     }[] = [];
 
+    const globalRegime = await this.redisService.get<string>("cache:ai:regime") || "MIXED";
     for (const entry of shortlist) {
       const params = await this.redisService.get<any>(
         `cache:ai:params:${entry.symbol}`,
       );
-      if (params) {
-        results.push({
-          symbol: entry.symbol,
-          confidence: params.confidence || 0,
-          regime: params.regime || "UNKNOWN",
-          strategy: params.strategy || "N/A",
-          lastPrice: entry.lastPrice || 0,
-          quoteVolume: entry.quoteVolume || 0,
-          priceChangePercent: entry.priceChangePercent || 0,
-        });
-      }
+      results.push({
+        symbol: entry.symbol,
+        confidence: params?.confidence || 0,
+        regime: params?.regime || globalRegime,
+        strategy: params?.strategy || "N/A",
+        lastPrice: entry.lastPrice || 0,
+        quoteVolume: entry.quoteVolume || 0,
+        priceChangePercent: entry.priceChangePercent || 0,
+      });
     }
     return results;
   }
