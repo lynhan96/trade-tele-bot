@@ -168,7 +168,7 @@ export class UserRealTradingService implements OnModuleInit {
       await new Promise((r) => setTimeout(r, 1500));
 
       // Merge user's custom TP/SL% with AI defaults:
-      // SL = tighter (smaller %) of user vs AI → min(userSL%, defaultSL%)
+      // SL = wider (larger %) of user vs AI → max(userSL%, defaultSL%)
       // TP = bigger (larger %) of user vs AI → max(userTP%, defaultTP%)
       const roundPrice = (p: number) => parseFloat(p.toFixed(pricePrecision));
       const defaultSlPct = Math.abs(fillPrice - stopLossPrice) / fillPrice * 100;
@@ -177,7 +177,7 @@ export class UserRealTradingService implements OnModuleInit {
       let effectiveSl = stopLossPrice;
       let effectiveTp = takeProfitPrice;
       if (sub.customSlPct) {
-        const slPct = Math.min(sub.customSlPct, defaultSlPct);
+        const slPct = Math.max(sub.customSlPct, defaultSlPct);
         effectiveSl = direction === "LONG"
           ? fillPrice * (1 - slPct / 100)
           : fillPrice * (1 + slPct / 100);
