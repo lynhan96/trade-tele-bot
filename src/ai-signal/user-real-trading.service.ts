@@ -385,6 +385,12 @@ export class UserRealTradingService implements OnModuleInit {
     return this.userTradeModel.find({ telegramId, status: "OPEN" }).lean() as any;
   }
 
+  /** Delete all user trade records (admin full reset). */
+  async deleteAllTrades(): Promise<number> {
+    const result = await this.userTradeModel.deleteMany({});
+    return result.deletedCount;
+  }
+
   /**
    * Close a single real trade by symbol for a user.
    * Cancels existing SL/TP algo orders and places a market-close order on Binance.

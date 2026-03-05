@@ -787,7 +787,7 @@ export class AiCommandService implements OnModuleInit {
     });
 
     // /ai resetall — cancel all signals + clear Redis state (admin only)
-    this.telegramService.registerBotCommand(/^\/ai[_ ]resetall/, async (msg) => {
+    this.telegramService.registerBotCommand(/^\/ai[_ ]resetall$/, async (msg) => {
       const chatId = msg.chat.id;
       if (!this.isAdmin(msg.from?.id)) return;
 
@@ -799,6 +799,45 @@ export class AiCommandService implements OnModuleInit {
         `• Redis signal keys da xoa\n\n` +
         `_He thong san sang cho tin hieu moi._`,
       );
+    });
+
+    // /ai admin reset — full database clean: delete all signals + trades + reset stats (admin only)
+    this.telegramService.registerBotCommand(/^\/ai[_ ]admin[_ ]reset$/i, async (msg) => {
+      const chatId = msg.chat.id;
+      if (!this.isAdmin(msg.from?.id)) return;
+
+      try {
+        // Close any real positions first
+        const realModeUsers = await this.subscriptionService.findRealModeSubscribers();
+        let realClosed = 0;
+        for (const user of realModeUsers) {
+          const count = await this.userRealTradingService
+            .closeAllRealPositions(user.telegramId, user.chatId, "ADMIN_RESET")
+            .catch(() => 0);
+          realClosed += count;
+        }
+
+        // Full reset: delete all signal docs + clear all Redis keys
+        const signalsDeleted = await this.signalQueueService.fullReset();
+
+        // Delete all user trades
+        const tradesDeleted = await this.userRealTradingService.deleteAllTrades();
+
+        // Reset coin profile stats
+        const profilesReset = await this.aiSignalService.resetCoinProfileStats();
+
+        let text = `🔄 *Full Reset hoan tat*\n\n`;
+        text += `• ${signalsDeleted} tin hieu da xoa\n`;
+        text += `• ${tradesDeleted} giao dich da xoa\n`;
+        text += `• ${profilesReset} coin profile da reset stats\n`;
+        text += `• Redis signal/params/cooldown keys da xoa\n`;
+        if (realClosed > 0) text += `• ${realClosed} lenh that da dong\n`;
+        text += `\n_He thong clean, san sang test moi._`;
+
+        await this.telegramService.sendTelegramMessage(chatId, text);
+      } catch (err) {
+        await this.telegramService.sendTelegramMessage(chatId, `❌ Loi: ${err?.message}`);
+      }
     });
 
     // /ai override <SYMBOL> <STRATEGY> (also handles /ai_override)

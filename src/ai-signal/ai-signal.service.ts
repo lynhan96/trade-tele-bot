@@ -979,6 +979,12 @@ export class AiSignalService implements OnModuleInit {
     return signal.symbol;
   }
 
+  /** Reset all coin profile stats (admin full reset). */
+  async resetCoinProfileStats(): Promise<number> {
+    const result = await this.aiCoinProfileModel.updateMany({}, { $set: { wins: 0, losses: 0, totalTrades: 0 } });
+    return result.modifiedCount;
+  }
+
   /** Format price for Telegram display */
   private fmtPrice = (p: number): string =>
     p >= 1000 ? `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :

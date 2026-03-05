@@ -448,6 +448,29 @@ export class SignalQueueService {
     return result.modifiedCount;
   }
 
+  /**
+   * Full reset: delete ALL signal documents + clear all Redis signal/params/cooldown keys.
+   * Returns count of deleted signal documents.
+   */
+  async fullReset(): Promise<number> {
+    const result = await this.aiSignalModel.deleteMany({});
+    const patterns = ["cache:ai-signal:*", "cache:ai:params:*", "cache:ai:cooldown:*"];
+    const prefix = "binance-bot:";
+    let keysCleared = 0;
+    for (const pattern of patterns) {
+      const keys = await this.redisService.keys(pattern);
+      await Promise.all(
+        keys.map((k) => {
+          const unprefixed = k.startsWith(prefix) ? k.slice(prefix.length) : k;
+          return this.redisService.delete(unprefixed);
+        }),
+      );
+      keysCleared += keys.length;
+    }
+    this.logger.log(`[SignalQueue] Full reset: deleted ${result.deletedCount} signals, cleared ${keysCleared} Redis keys`);
+    return result.deletedCount;
+  }
+
   // ─── Duplicate cleanup (for accurate stats) ─────────────────────────────
 
   /**
