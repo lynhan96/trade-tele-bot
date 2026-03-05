@@ -279,17 +279,25 @@ export class BinanceService {
     symbol: string,
     tpPrice: number,
     side: "LONG" | "SHORT",
+    quantity?: number,
   ): Promise<any> {
     try {
       const client = this.createClient(apiKey, apiSecret);
-      const order = await (client as any).privateRequest('POST', '/fapi/v1/algoOrder', {
+      // Use quantity instead of closePosition to avoid GTE conflict with SL order
+      // (Binance only allows one closePosition GTE order per direction)
+      const params: any = {
         algoType: 'CONDITIONAL',
         symbol,
         side: side === "LONG" ? "SELL" : "BUY",
         type: "TAKE_PROFIT_MARKET",
         triggerPrice: tpPrice.toString(),
-        closePosition: "true",
-      });
+      };
+      if (quantity) {
+        params.quantity = quantity.toString();
+      } else {
+        params.closePosition = "true";
+      }
+      const order = await (client as any).privateRequest('POST', '/fapi/v1/algoOrder', params);
       this.logger.log(`Set take profit for ${symbol} at $${tpPrice} (${side})`);
       return order;
     } catch (error) {

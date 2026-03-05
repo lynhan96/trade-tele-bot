@@ -23,6 +23,8 @@ const ENTRY_PRICE_TOLERANCE_SWING = 0.01;    // 1% — same for swing signals
 const QTY_PRECISION_KEY = (symbol: string) => `cache:binance:qty-precision:${symbol}`;
 /** Redis key for caching symbol price precision (tick size decimals). */
 const PRICE_PRECISION_KEY = (symbol: string) => `cache:binance:price-precision:${symbol}`;
+/** Redis lock to prevent duplicate order placement (30s TTL). */
+const ORDER_LOCK_KEY = (telegramId: number, symbol: string) => `cache:order-lock:${telegramId}:${symbol}`;
 
 @Injectable()
 export class UserRealTradingService implements OnModuleInit {
@@ -129,6 +131,14 @@ export class UserRealTradingService implements OnModuleInit {
     const { symbol, direction, entryPrice, stopLossPrice, takeProfitPrice } = signal;
 
     try {
+      // Redis lock to prevent duplicate orders when INTRADAY + SWING fire simultaneously
+      const lockKey = ORDER_LOCK_KEY(telegramId, symbol);
+      const acquired = await this.redisService.setNX(lockKey, "1", 30);
+      if (!acquired) {
+        this.logger.debug(`[RealTrading] ${symbol}: user ${telegramId} order lock active, skipping duplicate`);
+        return;
+      }
+
       const keys = await this.userSettingsService.getApiKeys(telegramId, "binance");
       if (!keys?.apiKey) {
         this.logger.debug(`[RealTrading] ${symbol}: user ${telegramId} has no Binance API keys`);
@@ -226,6 +236,7 @@ export class UserRealTradingService implements OnModuleInit {
             symbol,
             roundedTp,
             direction as "LONG" | "SHORT",
+            quantity,
           );
           binanceTpAlgoId = tpOrder?.algoId?.toString() ?? tpOrder?.orderId?.toString();
         } catch (err) {
@@ -735,12 +746,17 @@ export class UserRealTradingService implements OnModuleInit {
           // Close all open positions
           const closedCount = await this.closeAllRealPositions(user.telegramId, user.chatId, reason);
 
-          // Disable real mode
-          await this.subscriptionService.setRealMode(user.telegramId, false);
-          await this.subscriptionService.setRealModeDailyDisabled(user.telegramId, new Date());
+          // Only disable real mode for stop loss — target hit just closes positions
+          if (slHit) {
+            await this.subscriptionService.setRealMode(user.telegramId, false);
+            await this.subscriptionService.setRealModeDailyDisabled(user.telegramId, new Date());
+          }
 
           const emoji = targetHit ? "🎯" : "🛑";
           const titleVi = targetHit ? "Dat Muc Tieu Ngay" : "Dung Lo Ngay";
+          const statusMsg = slHit
+            ? `\nReal mode da *TAT*. Se tu dong BAT lai vao ngay mai 00:01 UTC.`
+            : `\nReal mode van *BAT* — chi dong lenh, khong tat.`;
           const msg =
             `${emoji} *Real Mode: ${titleVi}*\n` +
             `━━━━━━━━━━━━━━━━━━\n\n` +
@@ -748,7 +764,7 @@ export class UserRealTradingService implements OnModuleInit {
             (targetHit ? `Muc tieu: *+${user.realModeDailyTargetPct}%*\n` : ``) +
             (slHit ? `Gioi han lo: *-${user.realModeDailyStopLossPct}%*\n` : ``) +
             (closedCount > 0 ? `Da dong: *${closedCount} lenh*\n` : ``) +
-            `\nReal mode da *TAT*. Se tu dong BAT lai vao ngay mai 00:01 UTC.`;
+            statusMsg;
           await this.telegramService.sendTelegramMessage(user.chatId, msg).catch(() => {});
 
           this.logger.log(
@@ -941,6 +957,7 @@ export class UserRealTradingService implements OnModuleInit {
                 const tpOrder = await this.binanceService.setTakeProfitAtPrice(
                   keys.apiKey, keys.apiSecret, symbol, roundedTp,
                   direction as "LONG" | "SHORT",
+                  trade.quantity,
                 );
                 const newId = tpOrder?.algoId?.toString() ?? tpOrder?.orderId?.toString();
                 await this.userTradeModel.updateOne({ _id: trade._id }, { $set: { binanceTpAlgoId: newId } });
