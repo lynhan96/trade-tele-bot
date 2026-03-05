@@ -1524,13 +1524,11 @@ export class AiCommandService implements OnModuleInit {
           text += `📊 *Lenh Dang Mo* (${stats.openTrades.length})\n\n`;
           for (const t of stats.openTrades) {
             const dirIcon = t.direction === "LONG" ? "🟢" : "🔴";
-            const pnlEmoji = t.unrealizedPnlUsdt >= 0 ? "▲" : "▼";
-            const nowPrice = this.marketDataService.getLatestPrice(t.symbol);
+            const pnlIcon = t.unrealizedPnlUsdt >= 0 ? "📈" : "📉";
             const held = t.openedAt ? Math.floor((Date.now() - new Date(t.openedAt).getTime()) / 3600000) : 0;
             const heldStr = held >= 24 ? `${Math.floor(held / 24)}d${held % 24}h` : `${held}h`;
             text += `${dirIcon} *${t.symbol}* · ${t.leverage}x · ${heldStr}\n`;
-            text += `    ${pnlEmoji} *${sign(t.unrealizedPnlPct)}${t.unrealizedPnlPct.toFixed(2)}%* (*${sign(t.unrealizedPnlUsdt)}${t.unrealizedPnlUsdt.toFixed(2)} USDT*)\n`;
-            text += `    ${fmtP(t.entryPrice)} → ${nowPrice ? fmtP(nowPrice) : "..."}\n\n`;
+            text += `    ${pnlIcon} PnL: *${sign(t.unrealizedPnlPct)}${t.unrealizedPnlPct.toFixed(2)}%* (*${sign(t.unrealizedPnlUsdt)}${t.unrealizedPnlUsdt.toFixed(2)} USDT*)\n\n`;
           }
         }
 
