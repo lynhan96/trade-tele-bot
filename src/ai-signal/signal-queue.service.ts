@@ -416,6 +416,40 @@ export class SignalQueueService {
     return this.aiSignalModel.findById(id);
   }
 
+  /**
+   * Update signal entry price to current market price and recalculate SL/TP proportionally.
+   * Called at activation to ensure prices match reality (candle close can be stale).
+   */
+  async refreshEntryPrice(signal: AiSignalDocument, currentPrice: number): Promise<AiSignalDocument> {
+    const oldEntry = signal.entryPrice;
+    if (!currentPrice || currentPrice <= 0 || Math.abs(currentPrice - oldEntry) / oldEntry < 0.001) {
+      return signal; // no meaningful change
+    }
+
+    const isLong = signal.direction === "LONG";
+    const slPct = signal.stopLossPercent;
+    const tpPct = signal.takeProfitPercent;
+
+    const newSl = isLong
+      ? currentPrice * (1 - slPct / 100)
+      : currentPrice * (1 + slPct / 100);
+    const newTp = isLong
+      ? currentPrice * (1 + tpPct / 100)
+      : currentPrice * (1 - tpPct / 100);
+
+    await this.aiSignalModel.findByIdAndUpdate((signal as any)._id, {
+      entryPrice: currentPrice,
+      stopLossPrice: parseFloat(newSl.toFixed(8)),
+      takeProfitPrice: parseFloat(newTp.toFixed(8)),
+    });
+
+    this.logger.log(
+      `[SignalQueue] ${signal.symbol} entry refreshed: $${oldEntry.toFixed(4)} → $${currentPrice.toFixed(4)} (SL/TP recalculated)`,
+    );
+
+    return this.aiSignalModel.findById((signal as any)._id);
+  }
+
   async getAllActiveSignals(): Promise<AiSignalDocument[]> {
     return this.aiSignalModel.find({ status: "ACTIVE" });
   }

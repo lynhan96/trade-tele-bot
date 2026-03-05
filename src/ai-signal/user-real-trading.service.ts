@@ -15,9 +15,8 @@ import { AiTunedParams } from "../strategy/ai-optimizer/ai-tuned-params.interfac
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const axios = require("axios");
 
-/** Tolerance for signal entry price vs current market price — profile-aware. */
-const ENTRY_PRICE_TOLERANCE_INTRADAY = 0.03; // 3% — skip real order if price moved too far from signal entry
-const ENTRY_PRICE_TOLERANCE_SWING = 0.05;    // 5% — wider for swing signals
+/** Max tolerance — skip order if price moved beyond this from signal entry. */
+const ENTRY_PRICE_TOLERANCE = 0.01; // 1%
 
 /** Redis key for caching symbol quantity precision. */
 const QTY_PRECISION_KEY = (symbol: string) => `cache:binance:qty-precision:${symbol}`;
@@ -73,12 +72,9 @@ export class UserRealTradingService implements OnModuleInit {
     }
 
     const priceDeviation = Math.abs(currentPrice - entryPrice) / entryPrice;
-    const tolerance = params.timeframeProfile === "SWING"
-      ? ENTRY_PRICE_TOLERANCE_SWING
-      : ENTRY_PRICE_TOLERANCE_INTRADAY;
-    if (priceDeviation > tolerance) {
+    if (priceDeviation > ENTRY_PRICE_TOLERANCE) {
       this.logger.log(
-        `[RealTrading] ${symbol} price deviation ${(priceDeviation * 100).toFixed(2)}% > ${(tolerance * 100).toFixed(1)}% (${params.timeframeProfile}) — skipping real orders`,
+        `[RealTrading] ${symbol} price deviation ${(priceDeviation * 100).toFixed(2)}% > ${(ENTRY_PRICE_TOLERANCE * 100).toFixed(1)}% — skipping real orders`,
       );
       // Notify all real-mode subscribers about the skip
       for (const sub of subscribers) {
@@ -87,7 +83,7 @@ export class UserRealTradingService implements OnModuleInit {
           `${symbol} ${direction}\n` +
           `Gia tin hieu: $${entryPrice.toFixed(4)}\n` +
           `Gia hien tai: $${currentPrice.toFixed(4)}\n` +
-          `Lech: ${(priceDeviation * 100).toFixed(2)}% > ${(tolerance * 100).toFixed(1)}%\n\n` +
+          `Lech: ${(priceDeviation * 100).toFixed(2)}% > ${(ENTRY_PRICE_TOLERANCE * 100).toFixed(1)}%\n\n` +
           `_Lenh khong duoc dat do gia di qua xa diem vao._`;
         await this.telegramService.sendTelegramMessage(sub.chatId, msg).catch(() => {});
       }

@@ -770,9 +770,24 @@ export class AiSignalService implements OnModuleInit {
     );
 
     if (queueResult.action === "EXECUTED") {
-      const activeSignal =
+      let activeSignal =
         await this.signalQueueService.getActiveSignal(signalKey);
       if (activeSignal) {
+        // Refresh entry price to current market price (candle close can be stale)
+        try {
+          const axios = require("axios");
+          const res = await axios.get(
+            `https://fapi.binance.com/fapi/v1/ticker/price?symbol=${activeSignal.symbol}`,
+            { timeout: 5000 },
+          );
+          const livePrice = parseFloat(res.data?.price);
+          if (livePrice > 0) {
+            activeSignal = await this.signalQueueService.refreshEntryPrice(activeSignal, livePrice);
+          }
+        } catch (err) {
+          this.logger.warn(`[AiSignal] Failed to refresh entry price for ${activeSignal.symbol}: ${err?.message}`);
+        }
+
         if (isTestMode) {
           // Test mode: send "[TEST]" notification instead of placing real trades
           await this.notifySignalTestMode(activeSignal);
