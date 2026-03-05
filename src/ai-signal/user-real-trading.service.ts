@@ -167,19 +167,28 @@ export class UserRealTradingService implements OnModuleInit {
       // GTE_GTC algo orders require an open position to exist
       await new Promise((r) => setTimeout(r, 1500));
 
-      // Use user's custom TP/SL% if set, otherwise use AI signal prices
+      // Merge user's custom TP/SL% with AI defaults:
+      // SL = tighter (smaller %) of user vs AI → min(userSL%, defaultSL%)
+      // TP = bigger (larger %) of user vs AI → max(userTP%, defaultTP%)
       const roundPrice = (p: number) => parseFloat(p.toFixed(pricePrecision));
+      const defaultSlPct = Math.abs(fillPrice - stopLossPrice) / fillPrice * 100;
+      const defaultTpPct = takeProfitPrice ? Math.abs(takeProfitPrice - fillPrice) / fillPrice * 100 : 0;
+
       let effectiveSl = stopLossPrice;
       let effectiveTp = takeProfitPrice;
       if (sub.customSlPct) {
+        const slPct = Math.min(sub.customSlPct, defaultSlPct);
         effectiveSl = direction === "LONG"
-          ? fillPrice * (1 - sub.customSlPct / 100)
-          : fillPrice * (1 + sub.customSlPct / 100);
+          ? fillPrice * (1 - slPct / 100)
+          : fillPrice * (1 + slPct / 100);
+        this.logger.debug(`[RealTrading] ${symbol} SL: user=${sub.customSlPct}%, AI=${defaultSlPct.toFixed(2)}% → using ${slPct.toFixed(2)}%`);
       }
       if (sub.customTpPct) {
+        const tpPct = Math.max(sub.customTpPct, defaultTpPct);
         effectiveTp = direction === "LONG"
-          ? fillPrice * (1 + sub.customTpPct / 100)
-          : fillPrice * (1 - sub.customTpPct / 100);
+          ? fillPrice * (1 + tpPct / 100)
+          : fillPrice * (1 - tpPct / 100);
+        this.logger.debug(`[RealTrading] ${symbol} TP: user=${sub.customTpPct}%, AI=${defaultTpPct.toFixed(2)}% → using ${tpPct.toFixed(2)}%`);
       }
       const roundedSl = roundPrice(effectiveSl);
       const roundedTp = effectiveTp ? roundPrice(effectiveTp) : undefined;
