@@ -1532,15 +1532,43 @@ export class AiCommandService implements OnModuleInit {
           }
         }
 
-        // ── Closed today ──
+        // ── Closed today (grouped: wins then losses) ──
         if (stats.closedToday.length > 0) {
           text += `━━━━━━━━━━━━━━━━━━\n`;
           const closedPnl = stats.closedToday.reduce((s, t) => s + (t.pnlUsdt || 0), 0);
           text += `📋 *Da Dong* (${totalClosed}) · *${sign(closedPnl)}${closedPnl.toFixed(2)} USDT*\n\n`;
-          for (const t of stats.closedToday) {
-            const ico = t.pnlUsdt >= 0 ? "✅" : "❌";
-            const sym = t.symbol.replace("USDT", "");
-            text += `${ico} ${sym} *${sign(t.pnlUsdt)}${t.pnlUsdt.toFixed(2)}*\n`;
+
+          const winTrades = stats.closedToday.filter(t => t.pnlUsdt > 0);
+          const lossTrades = stats.closedToday.filter(t => t.pnlUsdt < 0);
+          const breakEvenTrades = stats.closedToday.filter(t => t.pnlUsdt === 0);
+
+          if (winTrades.length > 0) {
+            const winTotal = winTrades.reduce((s, t) => s + t.pnlUsdt, 0);
+            text += `✅ *Win (${winTrades.length})* · +${winTotal.toFixed(2)} USDT\n`;
+            for (const t of winTrades) {
+              const sym = t.symbol.replace("USDT", "");
+              text += `    ${sym} +${t.pnlUsdt.toFixed(2)}\n`;
+            }
+            text += `\n`;
+          }
+
+          if (lossTrades.length > 0) {
+            const lossTotal = lossTrades.reduce((s, t) => s + t.pnlUsdt, 0);
+            text += `❌ *Loss (${lossTrades.length})* · ${lossTotal.toFixed(2)} USDT\n`;
+            for (const t of lossTrades) {
+              const sym = t.symbol.replace("USDT", "");
+              text += `    ${sym} ${t.pnlUsdt.toFixed(2)}\n`;
+            }
+            text += `\n`;
+          }
+
+          if (breakEvenTrades.length > 0) {
+            text += `➖ *Break-even (${breakEvenTrades.length})*\n`;
+            for (const t of breakEvenTrades) {
+              const sym = t.symbol.replace("USDT", "");
+              text += `    ${sym} 0.00\n`;
+            }
+            text += `\n`;
           }
         }
 
