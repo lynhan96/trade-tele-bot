@@ -135,6 +135,18 @@ export class UserRealTradingService implements OnModuleInit {
         return;
       }
 
+      // Double-check: no existing Binance position on this symbol (race condition guard)
+      try {
+        const positions = await this.binanceService.getOpenPositions(keys.apiKey, keys.apiSecret);
+        const existing = positions.find(p => p.symbol === symbol && parseFloat(String(p.positionAmt)) !== 0);
+        if (existing) {
+          this.logger.debug(`[RealTrading] ${symbol}: user ${telegramId} already has Binance position (${existing.positionAmt}), skipping`);
+          return;
+        }
+      } catch (err) {
+        this.logger.warn(`[RealTrading] ${symbol}: failed to check positions for user ${telegramId}: ${err?.message}`);
+      }
+
       const leverage = await this.resolveLeverage(sub, params, keys.apiKey, keys.apiSecret, symbol);
       const vol = this.getVolForSymbol(symbol, sub.coinVolumes, sub.tradingBalance);
       const rawQty = vol / currentPrice;
