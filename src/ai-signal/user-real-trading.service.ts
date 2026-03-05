@@ -59,11 +59,19 @@ export class UserRealTradingService implements OnModuleInit {
    * Called when a new signal becomes ACTIVE.
    * Places MARKET orders on Binance for all users with realModeEnabled = true.
    */
+  // Symbols that require special Binance agreements (TradFi pairs)
+  private static readonly EXCLUDED_SYMBOLS = ["XAUUSDT", "XAGUSDT"];
+
   async onSignalActivated(signal: AiSignalDocument, params: AiTunedParams): Promise<void> {
     const subscribers = await this.subscriptionService.findRealModeSubscribers();
     if (subscribers.length === 0) return;
 
     const { symbol, direction, entryPrice, stopLossPrice, takeProfitPrice } = signal;
+
+    if (UserRealTradingService.EXCLUDED_SYMBOLS.includes(symbol)) {
+      this.logger.debug(`[RealTrading] ${symbol}: excluded (TradFi pair), skipping real orders`);
+      return;
+    }
     const currentPrice = await this.fetchCurrentPrice(symbol);
     if (!currentPrice) {
       this.logger.warn(`[RealTrading] ${symbol}: cannot fetch current price, skipping real orders`);
