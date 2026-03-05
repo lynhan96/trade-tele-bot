@@ -48,8 +48,6 @@ export class UserRealTradingService implements OnModuleInit {
     // Delayed to allow UserDataStreamService to initialize first
     setTimeout(() => this.reRegisterOpenTradeStreams().catch(() => {}), 5_000);
 
-    // One-time migration: re-place SL/TP with closePosition:true for existing open trades
-    setTimeout(() => this.migrateSlTpToClosePosition().catch(() => {}), 10_000);
   }
 
   /** Set the UserDataStreamService (called by UserDataStreamService.onModuleInit to avoid circular dep). */
@@ -888,51 +886,6 @@ export class UserRealTradingService implements OnModuleInit {
           }
           const openSymbols = new Set(binancePositions.map((p) => p.symbol));
 
-          // ── Orphan detection: Binance positions not tracked in DB ──────
-          // Create trade records so they get TP/SL protection
-          const trackedSymbols = new Set(trades.map((t) => t.symbol));
-          for (const pos of binancePositions) {
-            if (trackedSymbols.has(pos.symbol)) continue; // Already tracked
-            const direction = pos.side as "LONG" | "SHORT";
-            const entryPrice = pos.entryPrice;
-            const quantity = pos.quantity;
-            const leverage = pos.leverage;
-            const notional = quantity * entryPrice;
-
-            // Compute TP/SL from user's custom settings
-            let tpPrice: number | undefined;
-            let slPrice: number | undefined;
-            if (sub?.customTpPct && entryPrice) {
-              tpPrice = direction === "LONG"
-                ? entryPrice * (1 + sub.customTpPct / 100)
-                : entryPrice * (1 - sub.customTpPct / 100);
-            }
-            if (sub?.customSlPct && entryPrice) {
-              slPrice = direction === "LONG"
-                ? entryPrice * (1 - sub.customSlPct / 100)
-                : entryPrice * (1 + sub.customSlPct / 100);
-            }
-
-            this.logger.log(`[RealTrading] ${pos.symbol} user ${telegramId}: orphan position found — creating trade record (${direction}, entry=${entryPrice})`);
-            const newTrade = await this.userTradeModel.create({
-              telegramId,
-              chatId: sub?.chatId || telegramId,
-              symbol: pos.symbol,
-              direction,
-              entryPrice,
-              quantity,
-              leverage,
-              notionalUsdt: notional,
-              slPrice,
-              tpPrice,
-              status: "OPEN",
-              openedAt: new Date(),
-              closeReason: undefined,
-            });
-            trades.push(newTrade);
-            trackedSymbols.add(pos.symbol);
-          }
-
           // Dedup: only process one OPEN trade per symbol (close duplicates silently)
           const seenSymbols = new Set<string>();
           const dedupedTrades: typeof trades = [];
@@ -1088,73 +1041,6 @@ export class UserRealTradingService implements OnModuleInit {
     } catch (err) {
       this.logger.error(`[RealTrading] protectOpenTrades outer error: ${err?.message}`);
     }
-  }
-
-  // ─── One-time migration: re-place SL/TP with closePosition:true ──────────
-
-  /**
-   * Runs once on startup. For every OPEN trade, cancels the old SL/TP algo orders
-   * and re-places them using closePosition:true so they show in the Binance app.
-   * Does NOT open new positions — only updates the protective orders.
-   */
-  private async migrateSlTpToClosePosition(): Promise<void> {
-    const openTrades = await this.userTradeModel.find({ status: "OPEN" }).lean();
-    if (openTrades.length === 0) return;
-
-    this.logger.log(`[Migration] Re-placing SL/TP for ${openTrades.length} open trade(s) with closePosition:true`);
-
-    for (const trade of openTrades) {
-      try {
-        const keys = await this.userSettingsService.getApiKeys(trade.telegramId, "binance");
-        if (!keys?.apiKey) continue;
-
-        const { symbol, direction, slPrice, tpPrice, quantity } = trade;
-        const updates: Record<string, any> = {};
-
-        // ── Cancel & re-place SL ──
-        if (trade.binanceSlAlgoId) {
-          await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, trade.binanceSlAlgoId).catch(() => {});
-        }
-        if (slPrice) {
-          try {
-            const slOrder = await this.binanceService.setStopLoss(
-              keys.apiKey, keys.apiSecret, symbol, slPrice,
-              direction as "LONG" | "SHORT", quantity,
-            );
-            updates.binanceSlAlgoId = slOrder?.algoId?.toString() ?? slOrder?.orderId?.toString();
-            this.logger.log(`[Migration] ${symbol} user ${trade.telegramId}: SL re-placed at $${slPrice}`);
-          } catch (err) {
-            this.logger.warn(`[Migration] ${symbol} user ${trade.telegramId}: SL re-place failed: ${err?.message}`);
-          }
-        }
-
-        // ── Cancel & re-place TP ──
-        if (trade.binanceTpAlgoId) {
-          await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, trade.binanceTpAlgoId).catch(() => {});
-        }
-        if (tpPrice) {
-          try {
-            const tpOrder = await this.binanceService.setTakeProfitAtPrice(
-              keys.apiKey, keys.apiSecret, symbol, tpPrice,
-              direction as "LONG" | "SHORT", quantity,
-            );
-            updates.binanceTpAlgoId = tpOrder?.algoId?.toString() ?? tpOrder?.orderId?.toString();
-            this.logger.log(`[Migration] ${symbol} user ${trade.telegramId}: TP re-placed at $${tpPrice}`);
-          } catch (err) {
-            this.logger.warn(`[Migration] ${symbol} user ${trade.telegramId}: TP re-place failed: ${err?.message}`);
-          }
-        }
-
-        // Update DB with new algo IDs
-        if (Object.keys(updates).length > 0) {
-          await this.userTradeModel.updateOne({ _id: (trade as any)._id }, { $set: updates });
-        }
-      } catch (err) {
-        this.logger.error(`[Migration] Failed for trade ${(trade as any)._id}: ${err?.message}`);
-      }
-    }
-
-    this.logger.log(`[Migration] SL/TP closePosition migration complete`);
   }
 
   // ─── Private helpers ──────────────────────────────────────────────────────
