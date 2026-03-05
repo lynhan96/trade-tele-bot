@@ -101,6 +101,7 @@ export class AiOptimizerService {
     try {
       const indicators = await this.preComputeIndicators("btc");
       if (!indicators.price) {
+        this.logger.warn(`[AiOptimizer] assessGlobalRegime: no BTC price data — returning MIXED`);
         return "MIXED";
       }
 
