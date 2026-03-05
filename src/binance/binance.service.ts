@@ -250,13 +250,14 @@ export class BinanceService {
       const client = this.createClient(apiKey, apiSecret);
 
       // Place stop loss via Algo Order API (required since Binance migration 2025-12-09)
+      // Uses quantity (not closePosition) so TP can use closePosition for display in Binance app
       const order = await (client as any).privateRequest('POST', '/fapi/v1/algoOrder', {
         algoType: 'CONDITIONAL',
         symbol,
         side: side === "LONG" ? "SELL" : "BUY",
         type: "STOP_MARKET",
         triggerPrice: stopPrice.toString(),
-        closePosition: "true",
+        quantity: quantity.toString(),
       });
 
       this.logger.log(`Set stop loss for ${symbol} at $${stopPrice} (${side})`);
@@ -283,20 +284,16 @@ export class BinanceService {
   ): Promise<any> {
     try {
       const client = this.createClient(apiKey, apiSecret);
-      // Use quantity instead of closePosition to avoid GTE conflict with SL order
-      // (Binance only allows one closePosition GTE order per direction)
+      // Use closePosition so TP shows in Binance app position row
+      // (SL uses quantity instead to avoid GTE conflict — only one closePosition per direction)
       const params: any = {
         algoType: 'CONDITIONAL',
         symbol,
         side: side === "LONG" ? "SELL" : "BUY",
         type: "TAKE_PROFIT_MARKET",
         triggerPrice: tpPrice.toString(),
+        closePosition: "true",
       };
-      if (quantity) {
-        params.quantity = quantity.toString();
-      } else {
-        params.closePosition = "true";
-      }
       const order = await (client as any).privateRequest('POST', '/fapi/v1/algoOrder', params);
       this.logger.log(`Set take profit for ${symbol} at $${tpPrice} (${side})`);
       return order;
