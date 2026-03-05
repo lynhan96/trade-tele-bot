@@ -310,9 +310,22 @@ export class AiSignalService implements OnModuleInit {
 
       const globalRegime = await this.aiOptimizerService.assessGlobalRegime();
 
+      // ── Extreme move filter: skip coins with >30% 24h price change ──────
+      // After a 30%+ dump/pump the move is done, high risk of reversal/dead cat bounce.
+      const EXTREME_MOVE_PCT = 30;
+      const filtered = shortlist.filter((entry) => {
+        if (Math.abs(entry.priceChangePercent) > EXTREME_MOVE_PCT) {
+          this.logger.log(
+            `[AiSignal] ${entry.coin.toUpperCase()} skipped — extreme 24h move (${entry.priceChangePercent > 0 ? "+" : ""}${entry.priceChangePercent.toFixed(1)}%)`,
+          );
+          return false;
+        }
+        return true;
+      });
+
       // Build work items: BTC/ETH get TWO entries (INTRADAY + SWING), all others use SWING (4h)
       const workItems: { coin: string; currency: string; forceProfile?: string }[] = [];
-      for (const entry of shortlist) {
+      for (const entry of filtered) {
         const coinUpper = entry.coin.toUpperCase();
         if (DUAL_TIMEFRAME_COINS.includes(coinUpper)) {
           workItems.push({ coin: entry.coin, currency: entry.currency, forceProfile: "INTRADAY" });
