@@ -47,7 +47,8 @@ export class TelegramBotService implements OnModuleInit {
           `/ai realmode — Xem/bat/tat dat lenh that\n` +
           `/ai realmode leverage AI|MAX|10 — Chon he so don bay\n` +
           `/ai realmode target 5 — Dat muc tieu loi nhuan +5%/ngay\n` +
-          `/ai realmode stoploss 3 — Dat gioi han lo -3%/ngay\n\n` +
+          `/ai realmode stoploss 3 — Dat gioi han lo -3%/ngay\n` +
+          `/ai realmode maxpos 3 — Toi da 3 lenh cung luc\n\n` +
           `👤 *Tai khoan cua ban*\n` +
           `/ai my — Dashboard ca nhan (so du, PnL, all-time)\n` +
           `/ai my history — Lich su 10 lenh gan nhat\n` +

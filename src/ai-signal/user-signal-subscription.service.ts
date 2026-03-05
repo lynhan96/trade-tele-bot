@@ -17,6 +17,7 @@ export interface SubscriberInfo {
   profitTarget?: number;                // USDT profit target (null = disabled)
   profitTargetNotified?: boolean;       // already notified for this cycle
   realModeEnabled?: boolean;            // true = place real Binance orders
+  maxOpenPositions?: number;            // max concurrent positions (default: 3)
   realModeLeverage?: number;            // fixed leverage value (only used when mode = FIXED)
   realModeLeverageMode?: string;        // "AI" | "FIXED" | "MAX"
   realModeDailyTargetPct?: number;      // close all + disable when daily PnL reaches this % (e.g. 5 = +5%)
@@ -119,6 +120,7 @@ export class UserSignalSubscriptionService {
       realModeDailyTargetPct: d.realModeDailyTargetPct,
       realModeDailyStopLossPct: d.realModeDailyStopLossPct,
       realModeDailyDisabledAt: d.realModeDailyDisabledAt,
+      maxOpenPositions: d.maxOpenPositions,
     }));
   }
 
@@ -393,6 +395,15 @@ export class UserSignalSubscriptionService {
       ? { $unset: { realModeDailyStopLossPct: 1 } }
       : { $set: { realModeDailyStopLossPct: pct } };
     const result = await this.subscriptionModel.findOneAndUpdate({ telegramId, isActive: true }, update);
+    return !!result;
+  }
+
+  /** Set max concurrent open positions for a user. */
+  async setMaxOpenPositions(telegramId: number, max: number): Promise<boolean> {
+    const result = await this.subscriptionModel.findOneAndUpdate(
+      { telegramId, isActive: true },
+      { $set: { maxOpenPositions: max } },
+    );
     return !!result;
   }
 

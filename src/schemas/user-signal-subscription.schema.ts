@@ -64,6 +64,9 @@ export class UserSignalSubscription {
   @Prop()
   realModeDailyDisabledAt?: Date; // set when auto-disabled by daily limit; cleared on next-day reset
 
+  @Prop({ default: 3 })
+  maxOpenPositions?: number; // max concurrent real positions per user (default: 3)
+
   @Prop({ required: true, default: new Date() })
   subscribedAt: Date;
 

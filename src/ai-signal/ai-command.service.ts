@@ -953,6 +953,9 @@ export class AiCommandService implements OnModuleInit {
               }
             }
 
+            const maxPos = sub.maxOpenPositions ?? 3;
+            overviewText += `Toi da vi the: *${maxPos} lenh*\n`;
+
             overviewText += `\n*Gioi han ngay:*\n`;
             overviewText += `Muc tieu loi nhuan: ${dailyTarget != null ? `*+${dailyTarget}%*` : "_chua dat_"}\n`;
             overviewText += `Gioi han lo: ${dailySl != null ? `*-${dailySl}%*` : "_chua dat_"}\n`;
@@ -977,6 +980,7 @@ export class AiCommandService implements OnModuleInit {
               `/ai realmode target off — Tat muc tieu\n` +
               `/ai realmode stoploss 3 — Dat gioi han lo -3%\n` +
               `/ai realmode stoploss off — Tat gioi han lo\n` +
+              `/ai realmode maxpos 3 — Toi da 3 lenh cung luc\n` +
               `/ai realmode stats — Chi tiet lenh hom nay`;
             await this.telegramService.sendTelegramMessage(chatId, overviewText);
             return;
@@ -1053,6 +1057,22 @@ export class AiCommandService implements OnModuleInit {
               await this.telegramService.sendTelegramMessage(chatId,
                 `✅ *Gioi Han Lo Ngay: -${n}%*\n\nKhi tong PnL hom nay giam -${n}%, bot se tu dong dong tat ca lenh va tat real mode.\nSe mo lai tu dong vao ngay mai.`);
             }
+            return;
+          }
+
+          // /ai realmode maxpos <N>
+          if (arg.startsWith("maxpos")) {
+            const parts = arg.split(/\s+/);
+            const val = parts[1] ?? "";
+            const n = parseInt(val, 10);
+            if (isNaN(n) || n < 1 || n > 20) {
+              await this.telegramService.sendTelegramMessage(chatId,
+                `❌ Nhap so hop le (1–20).\nVD: /ai realmode maxpos 3 — toi da 3 lenh cung luc`);
+              return;
+            }
+            await this.subscriptionService.setMaxOpenPositions(telegramId, n);
+            await this.telegramService.sendTelegramMessage(chatId,
+              `✅ *Gioi Han Vi The: ${n} lenh*\n\nBot se chi mo toi da ${n} vi the cung luc.\nLenh moi se bi bo qua khi dat gioi han.`);
             return;
           }
 

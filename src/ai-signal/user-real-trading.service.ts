@@ -91,7 +91,7 @@ export class UserRealTradingService implements OnModuleInit {
     }
 
     // Filter out subscribers who already have an open trade on this symbol
-    // (prevents duplicate positions when INTRADAY + SWING both trigger for dual-timeframe coins)
+    // or who have reached their max open positions limit
     const eligibleSubs: typeof subscribers = [];
     for (const sub of subscribers) {
       const existing = await this.userTradeModel.findOne({ telegramId: sub.telegramId, symbol, status: "OPEN" }).lean();
@@ -99,6 +99,17 @@ export class UserRealTradingService implements OnModuleInit {
         this.logger.debug(`[RealTrading] ${symbol}: user ${sub.telegramId} already has open position, skipping`);
         continue;
       }
+
+      // Max concurrent positions check
+      const maxPos = sub.maxOpenPositions ?? 3;
+      const openCount = await this.userTradeModel.countDocuments({ telegramId: sub.telegramId, status: "OPEN" });
+      if (openCount >= maxPos) {
+        this.logger.log(
+          `[RealTrading] ${symbol}: user ${sub.telegramId} at max positions (${openCount}/${maxPos}), skipping`,
+        );
+        continue;
+      }
+
       eligibleSubs.push(sub);
     }
     if (eligibleSubs.length === 0) return;
