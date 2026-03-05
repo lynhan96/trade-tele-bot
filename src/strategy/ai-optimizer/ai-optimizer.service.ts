@@ -117,9 +117,9 @@ export class AiOptimizerService {
       let regime = "MIXED";
       let confidence = 50;
 
-      // CRASH DETECTION: RSI extremely low + price well below EMA9 → immediate STRONG_BEAR
-      // Catches sudden dumps even if price hasn't crossed EMA200 yet
-      if (rsi < 30 && priceVsEma9 < -1.0) {
+      // CRASH DETECTION: RSI low + price below EMA9 → immediate STRONG_BEAR
+      // Catches dumps even if price hasn't crossed EMA200 yet (e.g. BTC RSI=31, down from EMA9)
+      if (rsi < 35 && priceVsEma9 < -0.5) {
         regime = "STRONG_BEAR";
         confidence = Math.min(90, 50 + (50 - rsi));
       }
