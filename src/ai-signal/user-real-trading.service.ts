@@ -841,13 +841,20 @@ export class UserRealTradingService implements OnModuleInit {
   async protectOpenTrades(): Promise<void> {
     try {
       const openTrades = await this.userTradeModel.find({ status: "OPEN" }).exec();
-      if (openTrades.length === 0) return;
 
-      // Group by user to do one algo-order API call per user
+      // Always check real mode users — even if DB has no OPEN trades,
+      // Binance may have orphan positions (e.g., after DB clean) that need TP/SL protection.
+      const realModeSubs = await this.subscriptionService.findRealModeSubscribers();
+
+      // Group DB trades by user
       const byUser = new Map<number, typeof openTrades>();
       for (const trade of openTrades) {
         if (!byUser.has(trade.telegramId)) byUser.set(trade.telegramId, []);
         byUser.get(trade.telegramId)!.push(trade);
+      }
+      // Ensure all real mode users are in the map (even if they have no DB trades)
+      for (const sub of realModeSubs) {
+        if (!byUser.has(sub.telegramId)) byUser.set(sub.telegramId, []);
       }
 
       for (const [telegramId, trades] of byUser) {
@@ -877,6 +884,51 @@ export class UserRealTradingService implements OnModuleInit {
             continue; // Skip this user entirely — don't falsely close trades
           }
           const openSymbols = new Set(binancePositions.map((p) => p.symbol));
+
+          // ── Orphan detection: Binance positions not tracked in DB ──────
+          // Create trade records so they get TP/SL protection
+          const trackedSymbols = new Set(trades.map((t) => t.symbol));
+          for (const pos of binancePositions) {
+            if (trackedSymbols.has(pos.symbol)) continue; // Already tracked
+            const direction = pos.side as "LONG" | "SHORT";
+            const entryPrice = pos.entryPrice;
+            const quantity = pos.quantity;
+            const leverage = pos.leverage;
+            const notional = quantity * entryPrice;
+
+            // Compute TP/SL from user's custom settings
+            let tpPrice: number | undefined;
+            let slPrice: number | undefined;
+            if (sub?.customTpPct && entryPrice) {
+              tpPrice = direction === "LONG"
+                ? entryPrice * (1 + sub.customTpPct / 100)
+                : entryPrice * (1 - sub.customTpPct / 100);
+            }
+            if (sub?.customSlPct && entryPrice) {
+              slPrice = direction === "LONG"
+                ? entryPrice * (1 - sub.customSlPct / 100)
+                : entryPrice * (1 + sub.customSlPct / 100);
+            }
+
+            this.logger.log(`[RealTrading] ${pos.symbol} user ${telegramId}: orphan position found — creating trade record (${direction}, entry=${entryPrice})`);
+            const newTrade = await this.userTradeModel.create({
+              telegramId,
+              chatId: sub?.chatId || telegramId,
+              symbol: pos.symbol,
+              direction,
+              entryPrice,
+              quantity,
+              leverage,
+              notionalUsdt: notional,
+              slPrice,
+              tpPrice,
+              status: "OPEN",
+              openedAt: new Date(),
+              closeReason: undefined,
+            });
+            trades.push(newTrade);
+            trackedSymbols.add(pos.symbol);
+          }
 
           // Dedup: only process one OPEN trade per symbol (close duplicates silently)
           const seenSymbols = new Set<string>();
