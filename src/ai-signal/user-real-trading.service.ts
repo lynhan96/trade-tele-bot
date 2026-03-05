@@ -983,9 +983,11 @@ export class UserRealTradingService implements OnModuleInit {
                 ).catch(() => {});
               } catch (err) {
                 const errMsg = err?.message ?? "";
-                // "GTE can only be used with open positions" means position is already closed
-                if (errMsg.includes("GTE") && errMsg.includes("open positions")) {
-                  this.logger.log(`[RealTrading] ${symbol} user ${telegramId}: SL failed with GTE — position closed on Binance`);
+                // Position is gone or SL already triggered — mark trade as closed
+                const isPositionGone = (errMsg.includes("GTE") && errMsg.includes("open positions"))
+                  || errMsg.includes("immediately trigger");
+                if (isPositionGone) {
+                  this.logger.log(`[RealTrading] ${symbol} user ${telegramId}: SL failed (${errMsg}) — position likely closed on Binance`);
                   const exitP = this.marketDataService.getLatestPrice(symbol);
                   let pnlP = 0, pnlU = 0;
                   if (exitP && trade.entryPrice) {
@@ -994,22 +996,31 @@ export class UserRealTradingService implements OnModuleInit {
                       : ((trade.entryPrice - exitP) / trade.entryPrice) * 100;
                     pnlU = (pnlP / 100) * (trade.notionalUsdt || 0);
                   }
-                  await this.userTradeModel.updateOne(
-                    { _id: (trade as any)._id },
+                  const updated = await this.userTradeModel.findOneAndUpdate(
+                    { _id: (trade as any)._id, status: "OPEN" },
                     { $set: { status: "CLOSED", closeReason: "BINANCE_CLOSED", closedAt: new Date(),
                       ...(exitP ? { exitPrice: exitP, pnlPercent: pnlP, pnlUsdt: pnlU } : {}) } },
+                    { new: true },
                   );
-                  const sign = pnlP >= 0 ? "+" : "";
-                  const emoji = pnlP >= 0 ? "✅" : "❌";
-                  await this.telegramService.sendTelegramMessage(chatId,
-                    `${emoji} *Real Mode: Lenh Da Dong*\n━━━━━━━━━━━━━━━━━━\n\n${symbol} ${direction}\nPnL: *${sign}${pnlP.toFixed(2)}% (${sign}${pnlU.toFixed(2)} USDT)*\n_Vi the da dong tren Binance (SL/TP)_`
-                  ).catch(() => {});
+                  if (updated) {
+                    const s = pnlP >= 0 ? "+" : "";
+                    const emoji = pnlP >= 0 ? "✅" : "❌";
+                    await this.telegramService.sendTelegramMessage(chatId,
+                      `${emoji} *Real Mode: Lenh Da Dong*\n━━━━━━━━━━━━━━━━━━\n\n${symbol} ${direction}\nPnL: *${s}${pnlP.toFixed(2)}% (${s}${pnlU.toFixed(2)} USDT)*\n_Vi the da dong tren Binance_`
+                    ).catch(() => {});
+                  }
                   continue;
                 }
                 this.logger.error(`[RealTrading] ${symbol} user ${telegramId}: SL re-place FAILED: ${errMsg}`);
-                await this.telegramService.sendTelegramMessage(chatId,
-                  `🚨 *CANH BAO: ${symbol} Khong Co SL!*\n\nKhong the tu dong dat SL tai ${fmtP(slPrice)}.\n*Hay dong lenh hoac dat SL thu cong tren Binance ngay!*\nLoi: ${errMsg}`
-                ).catch(() => {});
+                // Only warn once — set a Redis key to prevent spamming every 5 min
+                const warnKey = `cache:sl-warn:${telegramId}:${symbol}`;
+                const alreadyWarned = await this.redisService.get(warnKey);
+                if (!alreadyWarned) {
+                  await this.redisService.set(warnKey, "1", 3600); // 1h cooldown
+                  await this.telegramService.sendTelegramMessage(chatId,
+                    `🚨 *CANH BAO: ${symbol} Khong Co SL!*\n\nKhong the tu dong dat SL tai ${fmtP(slPrice)}.\n*Hay dong lenh hoac dat SL thu cong tren Binance ngay!*\nLoi: ${errMsg}`
+                  ).catch(() => {});
+                }
               }
             }
 
@@ -1038,7 +1049,14 @@ export class UserRealTradingService implements OnModuleInit {
                   `🛡️ *Bao Ve Vi The: TP Duoc Dat Lai*\n\n${symbol} ${direction}\nTP: *${fmtP(roundedTp)}*\n_TP bi mat — da tu dong dat lai._`
                 ).catch(() => {});
               } catch (err) {
-                this.logger.warn(`[RealTrading] ${symbol} user ${telegramId}: TP re-place failed: ${err?.message}`);
+                const tpErr = err?.message ?? "";
+                // Position gone — don't keep retrying
+                if ((tpErr.includes("GTE") && tpErr.includes("open positions")) || tpErr.includes("immediately trigger")) {
+                  this.logger.log(`[RealTrading] ${symbol} user ${telegramId}: TP failed (${tpErr}) — position likely closed`);
+                  // SL handler above will close the trade on next cycle if not already
+                } else {
+                  this.logger.warn(`[RealTrading] ${symbol} user ${telegramId}: TP re-place failed: ${tpErr}`);
+                }
               }
             }
           }
