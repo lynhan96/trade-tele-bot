@@ -690,7 +690,7 @@ Reply ONLY JSON:
         rsiThreshold: 50,
         enableHtfRsi: true,
         htfKline: "1h",
-        enableCandleDir: false,
+        enableCandleDir: true,
         candleKline: "15m",
       },
       rsiZone: {

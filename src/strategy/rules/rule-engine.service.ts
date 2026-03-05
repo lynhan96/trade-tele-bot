@@ -116,15 +116,15 @@ export class RuleEngineService {
 
     const isLong = isCrossAbove;
 
-    // RSI threshold gate — regime-aware widening
+    // RSI threshold gate — tighter thresholds to avoid peak entries
     if (cfg.enableThreshold) {
       const isRanging = params.regime === "RANGE_BOUND" || params.regime === "SIDEWAYS";
       const isTrendRegime = params.regime === "STRONG_BULL" || params.regime === "STRONG_BEAR";
       const threshold = isRanging
-        ? isLong ? 55 : 45   // wider band in ranging: LONG OK up to 55, SHORT OK down to 45
+        ? isLong ? 50 : 50   // neutral zone only in ranging
         : isTrendRegime
-          ? isLong ? 60 : 40  // wider in trends: LONG OK up to 60 (RSI naturally >50 in bull), SHORT OK down to 40
-          : cfg.rsiThreshold;  // default (50) in other regimes
+          ? isLong ? 50 : 50  // allow LONG only when RSI < 50 (not extended) even in bull
+          : cfg.rsiThreshold;  // default (50)
 
       if (isLong && rsi.last >= threshold) {
         this.logger.debug(`[RuleEngine] ${coin} RSI_CROSS LONG blocked: RSI=${rsi.last.toFixed(1)} >= threshold ${threshold}`);
@@ -136,7 +136,17 @@ export class RuleEngineService {
       }
     }
 
-    // HTF RSI confirmation
+    // Overbought/oversold absolute protection — never enter at extremes
+    if (isLong && rsi.last > 65) {
+      this.logger.debug(`[RuleEngine] ${coin} RSI_CROSS LONG blocked: RSI=${rsi.last.toFixed(1)} overbought (>65)`);
+      return null;
+    }
+    if (!isLong && rsi.last < 35) {
+      this.logger.debug(`[RuleEngine] ${coin} RSI_CROSS SHORT blocked: RSI=${rsi.last.toFixed(1)} oversold (<35)`);
+      return null;
+    }
+
+    // HTF RSI confirmation + overbought/oversold check
     if (cfg.enableHtfRsi) {
       const htfCloses = await this.indicatorService.getCloses(coin, cfg.htfKline);
       if (htfCloses.length >= 50) {
@@ -149,6 +159,15 @@ export class RuleEngineService {
         }
         if (!isLong && htfIsBullish) {
           this.logger.debug(`[RuleEngine] ${coin} RSI_CROSS SHORT blocked: HTF(${cfg.htfKline}) RSI=${htfRsi.last.toFixed(1)} bullish (> EMA ${htfRsiEma.last.toFixed(1)})`);
+          return null;
+        }
+        // Block LONG if HTF RSI overbought, SHORT if oversold
+        if (isLong && htfRsi.last > 70) {
+          this.logger.debug(`[RuleEngine] ${coin} RSI_CROSS LONG blocked: HTF RSI=${htfRsi.last.toFixed(1)} overbought (>70)`);
+          return null;
+        }
+        if (!isLong && htfRsi.last < 30) {
+          this.logger.debug(`[RuleEngine] ${coin} RSI_CROSS SHORT blocked: HTF RSI=${htfRsi.last.toFixed(1)} oversold (<30)`);
           return null;
         }
       }
