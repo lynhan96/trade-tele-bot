@@ -366,7 +366,7 @@ Reply ONLY with valid JSON (no markdown):
 
     if (profile === "SWING") {
       // SWING: 4h primary, 1d HTF, wider SL
-      result.stopLossPercent = Math.max(1.5, result.stopLossPercent);
+      result.stopLossPercent = Math.max(3, result.stopLossPercent);
       result.takeProfitPercent = Math.max(result.stopLossPercent * 2, result.takeProfitPercent);
       if (result.rsiCross) {
         result.rsiCross = { ...result.rsiCross, primaryKline: "4h", htfKline: "1d", candleKline: "4h" };
@@ -556,14 +556,16 @@ Reply ONLY with valid JSON (no markdown):
 
     const strategies: string[] = [];
 
-    // ── Coin is near EMA21 (pullback zone) in trending market ──────────
-    // 5% threshold — captures coins still close enough for dip-buying
-    if (isTrend && Math.abs(priceVsEma21_4h) < 5) {
+    // ── RSI_CROSS is the best performer (80% win, +2.2% avg) — prioritize it ──
+    strategies.push("RSI_CROSS");
+
+    // ── EMA_PULLBACK only for trending + very close to EMA21 (tighter filter) ──
+    // Tightened from 5% to 2% — reduces false pullback signals on volatile small-caps
+    if (isTrend && Math.abs(priceVsEma21_4h) < 2) {
       strategies.push("EMA_PULLBACK");
     }
 
     // ── RSI not neutral → mean reversion candidate ──────────────────
-    // Lowered from 35/65 to match the rule engine's loosened thresholds (35/65)
     if (rsi < 40 || rsi > 60) {
       strategies.push("MEAN_REVERT_RSI");
     }
@@ -588,17 +590,7 @@ Reply ONLY with valid JSON (no markdown):
       strategies.push("STOCH_BB_PATTERN");
     }
 
-    // ── RSI_CROSS as universal fallback (high frequency) ───────────────
-    if (!strategies.includes("RSI_CROSS")) {
-      strategies.push("RSI_CROSS");
-    }
-
-    // Ensure at least 2 strategies, cap at 3
-    if (strategies.length < 2) {
-      if (isTrend && !strategies.includes("EMA_PULLBACK")) strategies.unshift("EMA_PULLBACK");
-      else if (!strategies.includes("MEAN_REVERT_RSI")) strategies.push("MEAN_REVERT_RSI");
-    }
-
+    // Cap at 3 strategies
     return strategies.slice(0, 3).join("|");
   }
 
@@ -618,10 +610,10 @@ Reply ONLY with valid JSON (no markdown):
     return `Risk param optimizer for ${symbol}. Regime: ${globalRegime}. Strategy: ${strategy}.
 Key data: RSI(15m)=${rsi.toFixed(1)}, RSI(4h)=${rsi4h.toFixed(1)}, ATR(15m)=${atr.toFixed(2)}%, BBWidth=${bbWidth.toFixed(2)}%, priceVsEMA200=${priceVsEma200}%.
 
-Set SL/TP based on this coin's volatility (ATR):
-- Low ATR (<1%): tight SL 1.0-1.5%, TP 2-3x SL
-- Medium ATR (1-2%): SL 1.5-2.5%, TP 2-3x SL
-- High ATR (>2%): wide SL 2.5-4.0%, TP 2-4x SL
+Set SL/TP based on this coin's volatility (ATR). MINIMUM SL is 3%:
+- Low ATR (<1%): SL 3.0%, TP 2-3x SL
+- Medium ATR (1-2%): SL 3.0-4.0%, TP 2-3x SL
+- High ATR (>2%): SL 4.0-6.0%, TP 2-4x SL
 - The strategy "${strategy}" is pre-selected. Return it as-is.
 
 Set confidence based on alignment:
@@ -630,7 +622,7 @@ Set confidence based on alignment:
 - RSI against regime (e.g. RSI<40 in STRONG_BULL): lower 40-55
 
 Reply ONLY JSON:
-{"regime":"${globalRegime}","strategy":"${strategy}","confidence":40-85,"stopLossPercent":1.0-4.0,"takeProfitPercent":2.0-12.0,"minConfidenceToTrade":40}`;
+{"regime":"${globalRegime}","strategy":"${strategy}","confidence":40-85,"stopLossPercent":3.0-6.0,"takeProfitPercent":6.0-18.0,"minConfidenceToTrade":40}`;
   }
 
   private async callAnthropic(
@@ -687,7 +679,7 @@ Reply ONLY JSON:
       // Multi-strategy pipes: primary|fallback1|fallback2 — ensures signals when primary misses
       strategy: isTrend ? "TREND_EMA|EMA_PULLBACK|RSI_CROSS" : isSideways ? "RSI_CROSS|BB_SCALP" : "RSI_CROSS|MEAN_REVERT_RSI",
       confidence: isSideways ? 45 : isTrend ? 60 : 55,
-      stopLossPercent: isSideways ? 1.5 : isTrend ? 2.5 : 2.0,
+      stopLossPercent: isSideways ? 3.0 : isTrend ? 3.5 : 3.0,
       takeProfitPercent: isSideways ? 3.0 : isTrend ? 5.0 : 4.0,
       minConfidenceToTrade: isSideways ? 42 : isTrend ? 50 : 45,
       rsiCross: {
@@ -798,8 +790,8 @@ Reply ONLY JSON:
 
       const atrPct = this.indicatorService.getAtrPercent(ohlc.highs, ohlc.lows, ohlc.closes, 14);
 
-      // SL = 1.5× ATR, clamped to [1.5%, 6%]
-      const slPct = Math.max(1.5, Math.min(6, atrPct * 1.5));
+      // SL = 1.5× ATR, clamped to [3%, 6%]
+      const slPct = Math.max(3, Math.min(6, atrPct * 1.5));
       defaults.stopLossPercent = parseFloat(slPct.toFixed(1));
       defaults.takeProfitPercent = parseFloat((slPct * 2).toFixed(1));
     } catch {
@@ -814,7 +806,8 @@ Reply ONLY JSON:
       parsed.regime = String(parsed.regime).split("|")[0].trim() as any;
     }
     const defaults = this.getDefaultParams(parsed.regime || "MIXED");
-    const stopLossPercent = parsed.stopLossPercent ?? defaults.stopLossPercent;
+    const MIN_SL = 3.0;
+    const stopLossPercent = Math.max(parsed.stopLossPercent ?? defaults.stopLossPercent, MIN_SL);
     const result = {
       ...defaults,
       ...parsed,
