@@ -260,7 +260,7 @@ export class AiSignalService implements OnModuleInit {
       }
 
       text += `━━━━━━━━━━━━━━━━━━\n`;
-      text += `_${new Date().toLocaleTimeString("vi-VN")} • Binance Futures_`;
+      text += `_${new Date().toLocaleTimeString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" })} • Binance Futures_`;
 
       // Broadcast to subscribers who have money flow enabled
       const subscribers = await this.subscriptionService.findMoneyFlowSubscribers();
@@ -814,7 +814,7 @@ export class AiSignalService implements OnModuleInit {
     const dirEmoji = signal.direction === "LONG" ? "📈" : "📉";
     const dirColor = signal.direction === "LONG" ? "🟢" : "🔴";
     const fmtP = this.fmtPrice;
-    const time = new Date().toLocaleString("vi-VN", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "2-digit" });
+    const time = new Date().toLocaleString("vi-VN", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "2-digit", timeZone: "Asia/Ho_Chi_Minh" });
 
     const text =
       `${dirEmoji} *AI Signal — ${signal.symbol}* 🧪\n` +
@@ -938,7 +938,7 @@ export class AiSignalService implements OnModuleInit {
 
     // Notify subscribers (only once — not every 30s)
     const fmtP = this.fmtPrice;
-    const time = new Date().toLocaleString("vi-VN", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "2-digit" });
+    const time = new Date().toLocaleString("vi-VN", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "2-digit", timeZone: "Asia/Ho_Chi_Minh" });
 
     const icon = tpHit ? "🎯" : (pnl > 0 ? "🔒" : "🛑");
     const label = tpHit ? "Take Profit!" : (pnl > 0 ? "Trailing Stop - Co loi!" : "Stop Loss");
@@ -1004,7 +1004,7 @@ export class AiSignalService implements OnModuleInit {
     const dirEmoji = signal.direction === "LONG" ? "📈" : "📉";
     const dirColor = signal.direction === "LONG" ? "🟢" : "🔴";
     const fmtP = this.fmtPrice;
-    const time = new Date().toLocaleString("vi-VN", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "2-digit" });
+    const time = new Date().toLocaleString("vi-VN", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "2-digit", timeZone: "Asia/Ho_Chi_Minh" });
 
     const text =
       `${dirEmoji} *AI Signal — ${signal.symbol}*\n` +
@@ -1033,7 +1033,7 @@ export class AiSignalService implements OnModuleInit {
     const testLabel = isTestMode ? " 🧪" : "";
     const fmtP = this.fmtPrice;
     const hoursLeft = Math.max(0, (signal.expiresAt.getTime() - Date.now()) / 3600000);
-    const time = new Date().toLocaleString("vi-VN", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "2-digit" });
+    const time = new Date().toLocaleString("vi-VN", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "2-digit", timeZone: "Asia/Ho_Chi_Minh" });
 
     const text =
       `${dirEmoji} *AI Signal — ${signal.symbol}* 📋${testLabel}\n` +
@@ -1064,7 +1064,7 @@ export class AiSignalService implements OnModuleInit {
     const pnlEmoji = closedInfo.pnlPercent >= 0 ? "🟢" : "🔴";
     const testLabel = signal.isTestMode ? " 🧪" : "";
     const fmtP = this.fmtPrice;
-    const time = new Date().toLocaleString("vi-VN", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "2-digit" });
+    const time = new Date().toLocaleString("vi-VN", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "2-digit", timeZone: "Asia/Ho_Chi_Minh" });
 
     const text =
       `${pnlEmoji} *${closedInfo.symbol} ${closedInfo.direction} đã đóng*\n` +
@@ -1093,7 +1093,7 @@ export class AiSignalService implements OnModuleInit {
       `━━━━━━━━━━━━━━━━━━\n\n` +
       `Profit dat 4%, SL da chuyen ve gia entry ${fmtP(entryPrice)}\n` +
       `Bao ve loi nhuan, khong con rui ro!\n\n` +
-      `_${new Date().toLocaleTimeString("vi-VN")}_`;
+      `_${new Date().toLocaleTimeString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" })}_`;
 
     const subscribers = await this.subscriptionService.findAllActive();
     for (const sub of subscribers) {
@@ -1132,7 +1132,7 @@ export class AiSignalService implements OnModuleInit {
       `Entry: ${fmtP(signal.entryPrice)}\n` +
       `TP: ${fmtP(signal.takeProfitPrice)} | SL: ${fmtP(signal.stopLossPrice)}\n` +
       pnlLine + `\n` +
-      `_${new Date().toLocaleTimeString("vi-VN")}_`;
+      `_${new Date().toLocaleTimeString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" })}_`;
 
     const subscribers = await this.subscriptionService.findAllActive();
     for (const sub of subscribers) {
@@ -1150,7 +1150,7 @@ export class AiSignalService implements OnModuleInit {
       `Profit dat 5%! SL da nang len +2% loi nhuan\n` +
       `SL moi: *${fmtP(newSl)}*\n` +
       `Lenh tiep tuc chay, dam bao loi toi thieu +2%\n\n` +
-      `_${new Date().toLocaleTimeString("vi-VN")}_`;
+      `_${new Date().toLocaleTimeString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" })}_`;
 
     const subscribers = await this.subscriptionService.findAllActive();
     for (const sub of subscribers) {
@@ -1162,7 +1162,7 @@ export class AiSignalService implements OnModuleInit {
   private async notifyPositionClosed(info: ResolvedSignalInfo): Promise<void> {
     const pnlSign = info.pnlPercent >= 0 ? "+" : "";
     const fmtP = this.fmtPrice;
-    const time = new Date().toLocaleString("vi-VN", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "2-digit" });
+    const time = new Date().toLocaleString("vi-VN", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "2-digit", timeZone: "Asia/Ho_Chi_Minh" });
 
     let headerIcon: string;
     let headerLabel: string;

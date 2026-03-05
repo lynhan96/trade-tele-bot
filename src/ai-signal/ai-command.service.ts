@@ -205,7 +205,7 @@ export class AiCommandService implements OnModuleInit {
         const moneyFlow = sub.moneyFlowEnabled !== false;
         const pushEnabled = sub.signalsPushEnabled === true;
         const subscribedAt = sub.subscribedAt
-          ? new Date(sub.subscribedAt).toLocaleDateString("vi-VN")
+          ? new Date(sub.subscribedAt).toLocaleDateString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" })
           : "N/A";
         const balance = sub.tradingBalance ?? 1000;
         const coinVols = sub.coinVolumes ?? {};
@@ -1097,7 +1097,7 @@ export class AiCommandService implements OnModuleInit {
                 text += `💰 Tong PnL: *${sign(at.pnlUsdt)}${at.pnlUsdt.toFixed(2)} USDT*\n`;
               }
 
-              text += `\n━━━━━━━━━━━━━━━━━━\n_${new Date().toLocaleTimeString("vi-VN")} UTC_`;
+              text += `\n━━━━━━━━━━━━━━━━━━\n_${new Date().toLocaleTimeString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" })}_`;
               await this.telegramService.sendTelegramMessage(chatId, text);
             } catch (err) {
               await this.telegramService.sendTelegramMessage(chatId, `❌ Loi lay thong ke: ${err?.message}`);
@@ -1358,7 +1358,7 @@ export class AiCommandService implements OnModuleInit {
           const closedSign = closedPnl >= 0 ? "+" : "";
           text += `📋 Da dong hom nay: *${stats.closedToday.length} lenh* (${closedSign}${closedPnl.toFixed(2)} USDT)\n`;
         }
-        text += `_${new Date().toLocaleTimeString("vi-VN")}_`;
+        text += `_${new Date().toLocaleTimeString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" })}_`;
 
         await this.telegramService.sendTelegramMessage(chatId, text);
       } catch (err) {
@@ -1471,7 +1471,7 @@ export class AiCommandService implements OnModuleInit {
           text += `💰 Tong PnL: *${sign(at.pnlUsdt)}${at.pnlUsdt.toFixed(2)} USDT*\n`;
         }
 
-        text += `\n━━━━━━━━━━━━━━━━━━\n_${new Date().toLocaleTimeString("vi-VN")} UTC_`;
+        text += `\n━━━━━━━━━━━━━━━━━━\n_${new Date().toLocaleTimeString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" })}_`;
         await this.telegramService.sendTelegramMessage(chatId, text);
       } catch (err) {
         await this.telegramService.sendTelegramMessage(chatId, `❌ Loi: ${err?.message}`);
@@ -1516,12 +1516,12 @@ export class AiCommandService implements OnModuleInit {
             t.closeReason === "DAILY_TARGET" ? "Daily TP" :
             t.closeReason === "DAILY_STOP_LOSS" ? "Daily SL" : "Thu cong";
           const dateStr = t.closedAt
-            ? new Date(t.closedAt).toLocaleDateString("vi-VN", { day: "2-digit", month: "2-digit" })
+            ? new Date(t.closedAt).toLocaleDateString("vi-VN", { day: "2-digit", month: "2-digit", timeZone: "Asia/Ho_Chi_Minh" })
             : "";
           text += `${icon} *${t.symbol}* ${sign(t.pnlUsdt)}${t.pnlUsdt.toFixed(2)} USDT (${reasonVi})${dateStr ? ` · ${dateStr}` : ""}\n`;
         }
 
-        text += `\n━━━━━━━━━━━━━━━━━━\n_${new Date().toLocaleTimeString("vi-VN")} UTC_`;
+        text += `\n━━━━━━━━━━━━━━━━━━\n_${new Date().toLocaleTimeString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" })}_`;
         await this.telegramService.sendTelegramMessage(chatId, text);
       } catch (err) {
         await this.telegramService.sendTelegramMessage(chatId, `❌ Loi: ${err?.message}`);
@@ -1573,7 +1573,7 @@ export class AiCommandService implements OnModuleInit {
           }
         }
 
-        text += `\n━━━━━━━━━━━━━━━━━━\n_${new Date().toLocaleTimeString("vi-VN")} UTC_`;
+        text += `\n━━━━━━━━━━━━━━━━━━\n_${new Date().toLocaleTimeString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" })}_`;
         await this.telegramService.sendTelegramMessage(chatId, text);
       } catch (err) {
         await this.telegramService.sendTelegramMessage(chatId, `❌ Loi lay xep hang: ${err?.message}`);
@@ -1786,7 +1786,7 @@ export class AiCommandService implements OnModuleInit {
           ? `${Math.floor(heldH / 24)}d${heldH % 24}h`
           : heldH > 0 ? `${heldH}h${heldM}m` : `${heldM}m`;
         const createdStr = s.executedAt
-          ? s.executedAt.toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" })
+          ? s.executedAt.toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Ho_Chi_Minh" })
           : "";
         const tpPct = getTpPct(s);
         const slPct = getSlPct(s);
@@ -1820,7 +1820,7 @@ export class AiCommandService implements OnModuleInit {
     }
 
     text += `━━━━━━━━━━━━━━━━━━\n`;
-    text += `_${new Date().toLocaleTimeString("vi-VN")}_`;
+    text += `_${new Date().toLocaleTimeString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" })}_`;
 
     return text;
   }

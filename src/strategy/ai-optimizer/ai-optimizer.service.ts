@@ -1110,7 +1110,7 @@ Reply ONLY JSON:
 
       msg +=
         `\n━━━━━━━━━━━━━━━━━━━━\n` +
-        `_${new Date().toLocaleTimeString("vi-VN")} · Binance Futures_`;
+        `_${new Date().toLocaleTimeString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" })} · Binance Futures_`;
 
       return msg;
     } catch (err) {
