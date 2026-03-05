@@ -1495,54 +1495,54 @@ export class AiCommandService implements OnModuleInit {
         const wins = stats.closedToday.filter(t => t.pnlUsdt >= 0).length;
         const totalClosed = stats.closedToday.length;
 
-        let text = `⚡ *My Signals*\n━━━━━━━━━━━━━━━━━━\n\n`;
+        let text = `⚡ *My Dashboard*\n━━━━━━━━━━━━━━━━━━\n\n`;
 
-        // Wallet balance
+        // ── Wallet overview ──
         if (balance) {
-          text +=
-            `💰 So Du: *${balance.walletBalance.toFixed(2)} USDT* (Kha dung: ${balance.availableBalance.toFixed(2)})\n`;
+          text += `💰 So Du: *${balance.walletBalance.toFixed(2)} USDT*\n`;
+          text += `    Kha dung: ${balance.availableBalance.toFixed(2)}`;
           if (Math.abs(balance.unrealizedPnl) > 0.01) {
-            text += `Unrealized PnL: *${sign(balance.unrealizedPnl)}${balance.unrealizedPnl.toFixed(2)} USDT*\n`;
+            const urIcon = balance.unrealizedPnl >= 0 ? "📈" : "📉";
+            text += ` · ${urIcon} *${sign(balance.unrealizedPnl)}${balance.unrealizedPnl.toFixed(2)}*`;
           }
           text += `\n`;
         }
 
-        // Today PnL summary
-        text +=
-          `${pnlIcon} PnL Hom Nay: *${sign(stats.totalPnlUsdt)}${stats.totalPnlUsdt.toFixed(2)} USDT* (*${sign(balancePct)}${balancePct.toFixed(2)}%*)\n` +
-          `Lenh mo: *${stats.openTrades.length}* · Dong: *${totalClosed}*`;
+        // ── Today PnL card ──
+        const todayPnlEmoji = stats.totalPnlUsdt >= 0 ? "🟩" : "🟥";
+        text += `\n${todayPnlEmoji} *PnL Hom Nay*\n`;
+        text += `    *${sign(stats.totalPnlUsdt)}${stats.totalPnlUsdt.toFixed(2)} USDT* (${sign(balancePct)}${balancePct.toFixed(2)}%)\n`;
+        text += `    Mo: ${stats.openTrades.length} · Dong: ${totalClosed}`;
         if (totalClosed > 0) {
-          text += ` · 🏆 Win: *${wins}/${totalClosed}* (${Math.round(wins / totalClosed * 100)}%)`;
+          text += ` · 🏆 ${wins}W/${totalClosed - wins}L (${Math.round(wins / totalClosed * 100)}%)`;
         }
         text += `\n`;
 
-        // Open positions
+        // ── Open positions ──
         if (stats.openTrades.length > 0) {
-          text += `\n*Lenh Dang Mo:*\n`;
+          text += `\n━━━━━━━━━━━━━━━━━━\n`;
+          text += `📊 *Lenh Dang Mo* (${stats.openTrades.length})\n\n`;
           for (const t of stats.openTrades) {
             const dirIcon = t.direction === "LONG" ? "🟢" : "🔴";
-            const tPnlIcon = t.unrealizedPnlUsdt >= 0 ? "📗" : "📕";
+            const pnlEmoji = t.unrealizedPnlUsdt >= 0 ? "▲" : "▼";
             const nowPrice = this.marketDataService.getLatestPrice(t.symbol);
             const held = t.openedAt ? Math.floor((Date.now() - new Date(t.openedAt).getTime()) / 3600000) : 0;
             const heldStr = held >= 24 ? `${Math.floor(held / 24)}d${held % 24}h` : `${held}h`;
-            text +=
-              `${dirIcon} *${t.symbol}* ${t.direction} ${t.leverage}x · ${heldStr}\n` +
-              `${tPnlIcon} *${sign(t.unrealizedPnlPct)}${t.unrealizedPnlPct.toFixed(2)}% (${sign(t.unrealizedPnlUsdt)}${t.unrealizedPnlUsdt.toFixed(2)} USDT)*\n` +
-              `Entry: ${fmtP(t.entryPrice)}${nowPrice ? ` · Now: ${fmtP(nowPrice)}` : ""} · Vol: ${t.notionalUsdt.toFixed(0)} USDT\n`;
+            text += `${dirIcon} *${t.symbol}* · ${t.leverage}x · ${heldStr}\n`;
+            text += `    ${pnlEmoji} *${sign(t.unrealizedPnlPct)}${t.unrealizedPnlPct.toFixed(2)}%* (*${sign(t.unrealizedPnlUsdt)}${t.unrealizedPnlUsdt.toFixed(2)} USDT*)\n`;
+            text += `    ${fmtP(t.entryPrice)} → ${nowPrice ? fmtP(nowPrice) : "..."}\n\n`;
           }
         }
 
-        // Closed today
+        // ── Closed today ──
         if (stats.closedToday.length > 0) {
-          text += `\n*Dong Hom Nay:*\n`;
+          text += `━━━━━━━━━━━━━━━━━━\n`;
+          const closedPnl = stats.closedToday.reduce((s, t) => s + (t.pnlUsdt || 0), 0);
+          text += `📋 *Da Dong* (${totalClosed}) · *${sign(closedPnl)}${closedPnl.toFixed(2)} USDT*\n\n`;
           for (const t of stats.closedToday) {
-            const icon = t.pnlUsdt >= 0 ? "✅" : "❌";
-            const reasonVi =
-              t.closeReason === "TAKE_PROFIT" ? "TP" :
-              t.closeReason === "STOP_LOSS" ? "SL" :
-              t.closeReason === "DAILY_TARGET" ? "Daily TP" :
-              t.closeReason === "DAILY_STOP_LOSS" ? "Daily SL" : "Thu cong";
-            text += `${icon} *${t.symbol}* ${sign(t.pnlUsdt)}${t.pnlUsdt.toFixed(2)} USDT (${reasonVi})\n`;
+            const ico = t.pnlUsdt >= 0 ? "✅" : "❌";
+            const sym = t.symbol.replace("USDT", "");
+            text += `${ico} ${sym} *${sign(t.pnlUsdt)}${t.pnlUsdt.toFixed(2)}*\n`;
           }
         }
 
@@ -1550,19 +1550,18 @@ export class AiCommandService implements OnModuleInit {
           text += `\n_Chua co lenh nao hom nay._\n`;
         }
 
-        // All-time stats
+        // ── All-time stats ──
         const at = stats.allTime;
         if (at.total > 0) {
-          const atIcon = at.pnlUsdt >= 0 ? "📈" : "📉";
           const atWinRate = Math.round((at.wins / at.total) * 100);
+          const atIcon = at.pnlUsdt >= 0 ? "📈" : "📉";
           text += `\n━━━━━━━━━━━━━━━━━━\n`;
-          text += `${atIcon} *Tong Ket (All-time)*\n`;
-          text += `Tong lenh: *${at.total}* · Win: *${at.wins}* · Loss: *${at.losses}*\n`;
-          text += `🏆 Win rate: *${atWinRate}%*\n`;
-          text += `💰 Tong PnL: *${sign(at.pnlUsdt)}${at.pnlUsdt.toFixed(2)} USDT*\n`;
+          text += `${atIcon} *All-time*\n`;
+          text += `    ${at.total} lenh · ${atWinRate}% WR\n`;
+          text += `    *${sign(at.pnlUsdt)}${at.pnlUsdt.toFixed(2)} USDT*\n`;
         }
 
-        text += `\n━━━━━━━━━━━━━━━━━━\n_${new Date().toLocaleTimeString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" })}_`;
+        text += `\n_${new Date().toLocaleTimeString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" })}_`;
         await this.telegramService.sendTelegramMessage(chatId, text);
       } catch (err) {
         await this.telegramService.sendTelegramMessage(chatId, `❌ Loi: ${err?.message}`);

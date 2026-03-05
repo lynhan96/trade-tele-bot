@@ -1,5 +1,91 @@
 # Changelog
 
+## 2026-03-06 (1) - Migrate Existing SL/TP to closePosition:true
+
+### Enhancement: One-Time SL/TP Migration for Open Trades
+
+Added `migrateSlTpToClosePosition()` startup migration that runs 10s after boot. For all OPEN trades in the DB, cancels old SL/TP algo orders (placed with `quantity`) and re-places them using `closePosition:true` so they display in the Binance app's position TP/SL row. Does NOT open new positions — only updates protective orders. Updates DB with new algo IDs.
+
+### Files Modified
+- `src/ai-signal/user-real-trading.service.ts` — Added `migrateSlTpToClosePosition()` method + call in `onModuleInit()`
+
+---
+
+## 2026-03-05 (7) - Bear Market Signal Filtering & Anti-FOMO
+
+### Enhancement: Use globalRegime Instead of params.regime for Direction Filter
+
+Changed direction filter in `processCoin()` from `params.regime` (AI-dependent, defaults to MIXED when API fails) to `globalRegime` (indicator-based, always works). Ensures LONGs are blocked in STRONG_BEAR even when AI API is down.
+
+### Feature: Crash Detection for STRONG_BEAR
+
+Added fast-path STRONG_BEAR detection: RSI<35 + price below EMA9 by >0.5% triggers STRONG_BEAR immediately, without requiring EMA200 crossover. Catches sudden market dumps.
+
+### Feature: VOLATILE Regime Filter
+
+When `globalRegime === "VOLATILE"`, checks BTC context from Redis. BTC bearish (below EMA9 + RSI<45) → blocks LONGs. BTC bullish (above EMA9 + RSI>55) → blocks SHORTs. BTC context stored in Redis alongside regime.
+
+### Feature: Extreme Move Filter (Anti-FOMO)
+
+Coins with >30% 24h price change are filtered out before signal generation. Prevents chasing crashed coins (e.g., MANTRA after 99% dump) or pumped coins (e.g., ALPACA +391%). Currently blocking ~21 extreme movers per scan cycle.
+
+### Enhancement: Reduced Regime Cache TTL
+
+Changed `AI_REGIME_TTL` from 4 hours to 30 minutes for faster reaction to market condition changes during crashes.
+
+### Bug Fix: TP/SL Uses User's Exact Custom Values
+
+Removed `Math.max(customTpPct, aiTpPct)` — now uses user's exact custom TP value when set. Enhanced `protectOpenTrades` to compute TP/SL from user's `customTpPct`/`customSlPct` when trade record has no prices.
+
+### Files Modified
+- `src/ai-signal/ai-signal.service.ts` — globalRegime filter, VOLATILE filter, extreme move filter
+- `src/strategy/ai-optimizer/ai-optimizer.service.ts` — crash detection, TTL reduction, BTC context Redis storage, debug logging
+- `src/ai-signal/user-real-trading.service.ts` — TP/SL custom values fix, protectOpenTrades enhancement
+- `src/ai-signal/signal-queue.service.ts` — MIN_PERCENT reverted to 3%
+
+---
+
+## 2026-03-05 (6) - Real Trading Hardening: Duplicate Guards, Entry Refresh, TP/SL Merge
+
+### Bug Fix: TP GTE closePosition Conflict
+
+Binance only allows one `closePosition` GTE algo order per symbol per direction. Both SL and TP used `closePosition: "true"`, causing TP placement to fail. Fixed: SL keeps `closePosition`, TP now uses `quantity` parameter instead.
+
+### Enhancement: Triple Duplicate Order Guard
+
+INTRADAY + SWING signals fire `onSignalActivated()` nearly simultaneously, bypassing single DB check. Added 3-layer protection:
+1. DB `findOne({symbol, status:"OPEN"})` — existing check
+2. Redis NX lock (30s TTL) `cache:order-lock:{telegramId}:{symbol}` — atomic race condition guard
+3. Binance `getOpenPositions()` — final exchange-level verification
+
+### Enhancement: Entry Price Refresh at Activation
+
+Signal entry price was set at candle close time (can be 15min–4h stale). Added `refreshEntryPrice()` that updates signal entry to live WS price via `MarketDataService.getLatestPrice()` and recalculates SL/TP proportionally. Price tolerance kept at 1%.
+
+### Enhancement: Smart TP/SL Merge with User Config
+
+Custom SL always uses user's exact value (no comparison with AI default). Custom TP uses `max(userTP%, aiTP%)` for bigger target. Notification messages now show SL/TP percentages.
+
+### Enhancement: Daily Target Keeps Realmode ON
+
+Changed daily profit target logic: hitting target closes positions but keeps realmode enabled. Only stop loss hit disables realmode (closes + sets `dailyDisabledAt`).
+
+### Enhancement: TradFi Exclusion Removed
+
+After user verified account can trade XAU/XAG, removed `EXCLUDED_SYMBOLS` filter.
+
+### Enhancement: Expanded Coin Scanning
+
+Server .env updated: `AI_MAX_SHORTLIST_SIZE` 50→80, `AI_MIN_COIN_VOLUME_USD` $10M→$3M. Now scans more coins including newer/lower-cap ones.
+
+### Files Modified
+- `src/ai-signal/user-real-trading.service.ts` — Triple duplicate guard, TP/SL merge logic, price tolerance, daily target logic, TradFi removal
+- `src/binance/binance.service.ts` — `setTakeProfitAtPrice()` accepts optional `quantity` param
+- `src/ai-signal/signal-queue.service.ts` — `refreshEntryPrice()` method
+- `src/ai-signal/ai-signal.service.ts` — MarketDataService injection, calls refreshEntryPrice at activation
+
+---
+
 ## 2026-03-05 (5) - Database Reset, Signal Key Fix, Market Fix, TradFi Exclusion
 
 ### Feature: `/ai admin reset` Command

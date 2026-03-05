@@ -47,6 +47,9 @@ export class UserRealTradingService implements OnModuleInit {
     // Re-open data streams for any users with OPEN trades (bot restart recovery)
     // Delayed to allow UserDataStreamService to initialize first
     setTimeout(() => this.reRegisterOpenTradeStreams().catch(() => {}), 5_000);
+
+    // One-time migration: re-place SL/TP with closePosition:true for existing open trades
+    setTimeout(() => this.migrateSlTpToClosePosition().catch(() => {}), 10_000);
   }
 
   /** Set the UserDataStreamService (called by UserDataStreamService.onModuleInit to avoid circular dep). */
@@ -1085,6 +1088,73 @@ export class UserRealTradingService implements OnModuleInit {
     } catch (err) {
       this.logger.error(`[RealTrading] protectOpenTrades outer error: ${err?.message}`);
     }
+  }
+
+  // ─── One-time migration: re-place SL/TP with closePosition:true ──────────
+
+  /**
+   * Runs once on startup. For every OPEN trade, cancels the old SL/TP algo orders
+   * and re-places them using closePosition:true so they show in the Binance app.
+   * Does NOT open new positions — only updates the protective orders.
+   */
+  private async migrateSlTpToClosePosition(): Promise<void> {
+    const openTrades = await this.userTradeModel.find({ status: "OPEN" }).lean();
+    if (openTrades.length === 0) return;
+
+    this.logger.log(`[Migration] Re-placing SL/TP for ${openTrades.length} open trade(s) with closePosition:true`);
+
+    for (const trade of openTrades) {
+      try {
+        const keys = await this.userSettingsService.getApiKeys(trade.telegramId, "binance");
+        if (!keys?.apiKey) continue;
+
+        const { symbol, direction, slPrice, tpPrice, quantity } = trade;
+        const updates: Record<string, any> = {};
+
+        // ── Cancel & re-place SL ──
+        if (trade.binanceSlAlgoId) {
+          await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, trade.binanceSlAlgoId).catch(() => {});
+        }
+        if (slPrice) {
+          try {
+            const slOrder = await this.binanceService.setStopLoss(
+              keys.apiKey, keys.apiSecret, symbol, slPrice,
+              direction as "LONG" | "SHORT", quantity,
+            );
+            updates.binanceSlAlgoId = slOrder?.algoId?.toString() ?? slOrder?.orderId?.toString();
+            this.logger.log(`[Migration] ${symbol} user ${trade.telegramId}: SL re-placed at $${slPrice}`);
+          } catch (err) {
+            this.logger.warn(`[Migration] ${symbol} user ${trade.telegramId}: SL re-place failed: ${err?.message}`);
+          }
+        }
+
+        // ── Cancel & re-place TP ──
+        if (trade.binanceTpAlgoId) {
+          await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, trade.binanceTpAlgoId).catch(() => {});
+        }
+        if (tpPrice) {
+          try {
+            const tpOrder = await this.binanceService.setTakeProfitAtPrice(
+              keys.apiKey, keys.apiSecret, symbol, tpPrice,
+              direction as "LONG" | "SHORT", quantity,
+            );
+            updates.binanceTpAlgoId = tpOrder?.algoId?.toString() ?? tpOrder?.orderId?.toString();
+            this.logger.log(`[Migration] ${symbol} user ${trade.telegramId}: TP re-placed at $${tpPrice}`);
+          } catch (err) {
+            this.logger.warn(`[Migration] ${symbol} user ${trade.telegramId}: TP re-place failed: ${err?.message}`);
+          }
+        }
+
+        // Update DB with new algo IDs
+        if (Object.keys(updates).length > 0) {
+          await this.userTradeModel.updateOne({ _id: (trade as any)._id }, { $set: updates });
+        }
+      } catch (err) {
+        this.logger.error(`[Migration] Failed for trade ${(trade as any)._id}: ${err?.message}`);
+      }
+    }
+
+    this.logger.log(`[Migration] SL/TP closePosition migration complete`);
   }
 
   // ─── Private helpers ──────────────────────────────────────────────────────
