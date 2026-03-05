@@ -44,10 +44,18 @@ export class UserRealTradingService implements OnModuleInit {
   ) {}
 
   async onModuleInit(): Promise<void> {
+    // Close orphan trade records (positions not opened by our bot — no aiSignalId)
+    const orphanResult = await this.userTradeModel.updateMany(
+      { status: "OPEN", $or: [{ aiSignalId: { $exists: false } }, { aiSignalId: null }] },
+      { $set: { status: "CLOSED", closeReason: "ORPHAN_CLEANUP", closedAt: new Date() } },
+    );
+    if (orphanResult.modifiedCount > 0) {
+      this.logger.log(`[Startup] Closed ${orphanResult.modifiedCount} orphan trade record(s) without aiSignalId`);
+    }
+
     // Re-open data streams for any users with OPEN trades (bot restart recovery)
     // Delayed to allow UserDataStreamService to initialize first
     setTimeout(() => this.reRegisterOpenTradeStreams().catch(() => {}), 5_000);
-
   }
 
   /** Set the UserDataStreamService (called by UserDataStreamService.onModuleInit to avoid circular dep). */
