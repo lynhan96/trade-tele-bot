@@ -39,8 +39,8 @@ export class UserTrade {
   @Prop()
   tpPrice?: number;
 
-  @Prop({ required: true })
-  binanceOrderId: string; // market order ID
+  @Prop()
+  binanceOrderId?: string; // market order ID (missing for orphan positions)
 
   @Prop()
   binanceSlAlgoId?: string; // algo SL order algoId (for cancellation when moving SL)
