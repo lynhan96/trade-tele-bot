@@ -40,6 +40,7 @@ export class BinanceService {
     return Binance({
       apiKey,
       apiSecret,
+      recvWindow: 10000,
     });
   }
 

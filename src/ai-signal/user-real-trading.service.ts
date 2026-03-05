@@ -153,6 +153,13 @@ export class UserRealTradingService implements OnModuleInit {
         this.logger.warn(`[RealTrading] ${symbol}: failed to check positions for user ${telegramId}: ${err?.message}`);
       }
 
+      // Final DB-level dedup: ensure no existing OPEN trade for this symbol BEFORE placing any order
+      const existingTrade = await this.userTradeModel.findOne({ telegramId, symbol, status: "OPEN" });
+      if (existingTrade) {
+        this.logger.warn(`[RealTrading] ${symbol}: user ${telegramId} already has OPEN trade in DB, skipping`);
+        return;
+      }
+
       const leverage = await this.resolveLeverage(sub, params, keys.apiKey, keys.apiSecret, symbol);
       const vol = this.getVolForSymbol(symbol, sub.coinVolumes, sub.tradingBalance);
       const rawQty = vol / currentPrice;
@@ -238,15 +245,6 @@ export class UserRealTradingService implements OnModuleInit {
             `⚠️ *Real Mode: TP Order That Bai*\n\n${symbol} — TP tai $${roundedTp} khong duoc dat.\nLoi: ${err?.message}\n\n_Lenh van mo, SL van hoat dong._`
           ).catch(() => {});
         }
-      }
-
-      // Final DB-level dedup: ensure no existing OPEN trade for this symbol
-      const existingTrade = await this.userTradeModel.findOne({
-        telegramId, symbol, status: "OPEN",
-      });
-      if (existingTrade) {
-        this.logger.warn(`[RealTrading] ${symbol}: user ${telegramId} already has OPEN trade in DB, skipping duplicate`);
-        return;
       }
 
       // Save UserTrade to MongoDB
@@ -395,14 +393,20 @@ export class UserRealTradingService implements OnModuleInit {
         : ((trade.entryPrice - exitPrice) / trade.entryPrice) * 100;
     const pnlUsdt = (pnlPct / 100) * trade.notionalUsdt;
 
-    await this.userTradeModel.findByIdAndUpdate((trade as any)._id, {
-      status: "CLOSED",
-      closeReason: reason,
-      exitPrice,
-      pnlPercent: pnlPct,
-      pnlUsdt,
-      closedAt: new Date(),
-    });
+    // Atomic: only update if still OPEN (prevents duplicate notification if protectOpenTrades already closed it)
+    const updated = await this.userTradeModel.findOneAndUpdate(
+      { _id: (trade as any)._id, status: "OPEN" },
+      { $set: { status: "CLOSED", closeReason: reason, exitPrice, pnlPercent: pnlPct, pnlUsdt, closedAt: new Date() } },
+      { new: true },
+    );
+    if (!updated) {
+      // Already closed by another handler — just update PnL if missing
+      await this.userTradeModel.updateOne(
+        { _id: (trade as any)._id, pnlUsdt: { $in: [null, 0] } },
+        { $set: { exitPrice, pnlPercent: pnlPct, pnlUsdt, closeReason: reason } },
+      );
+      return; // Don't send duplicate notification
+    }
 
     const sign = pnlPct >= 0 ? "+" : "";
     const emoji = pnlPct >= 0 ? "✅" : "❌";
@@ -884,10 +888,6 @@ export class UserRealTradingService implements OnModuleInit {
 
             // Position already closed on Binance — mark trade as closed with PnL
             if (!openSymbols.has(symbol)) {
-              // Skip if already closed by another handler (race condition)
-              const freshTrade = await this.userTradeModel.findById((trade as any)._id);
-              if (!freshTrade || freshTrade.status === "CLOSED") continue;
-
               // Calculate PnL using latest price (best approximation of exit price)
               let exitPrice = this.marketDataService.getLatestPrice(symbol);
               let pnlPct = 0;
@@ -899,23 +899,25 @@ export class UserRealTradingService implements OnModuleInit {
                 pnlUsdt = (pnlPct / 100) * (trade.notionalUsdt || 0);
               }
 
-              this.logger.log(`[RealTrading] ${symbol} user ${telegramId}: position gone on Binance — marking CLOSED (PnL: ${pnlPct.toFixed(2)}%)`);
-              await this.userTradeModel.updateOne(
-                { _id: (trade as any)._id },
+              // Atomic: only close if still OPEN (prevents duplicate notification with onTradeClose)
+              const updated = await this.userTradeModel.findOneAndUpdate(
+                { _id: (trade as any)._id, status: "OPEN" },
                 { $set: {
                   status: "CLOSED",
                   closeReason: "BINANCE_CLOSED",
                   closedAt: new Date(),
                   ...(exitPrice ? { exitPrice, pnlPercent: pnlPct, pnlUsdt } : {}),
                 } },
+                { new: true },
               );
+              if (!updated) continue; // Already closed by onTradeClose — skip notification
+
+              this.logger.log(`[RealTrading] ${symbol} user ${telegramId}: position gone on Binance — marking CLOSED (PnL: ${pnlPct.toFixed(2)}%)`);
 
               // Notify user
               if (exitPrice) {
                 const sign = pnlPct >= 0 ? "+" : "";
                 const emoji = pnlPct >= 0 ? "✅" : "❌";
-                const fmtExit = exitPrice >= 1000 ? `$${exitPrice.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :
-                  exitPrice >= 1 ? `$${exitPrice.toFixed(2)}` : `$${exitPrice.toFixed(4)}`;
                 await this.telegramService.sendTelegramMessage(chatId,
                   `${emoji} *Real Mode: Lenh Da Dong*\n━━━━━━━━━━━━━━━━━━\n\n${symbol} ${direction}\nPnL: *${sign}${pnlPct.toFixed(2)}% (${sign}${pnlUsdt.toFixed(2)} USDT)*\n_Vi the da dong tren Binance_`
                 ).catch(() => {});
