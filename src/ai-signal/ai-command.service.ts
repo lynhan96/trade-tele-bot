@@ -1227,19 +1227,19 @@ export class AiCommandService implements OnModuleInit {
       },
     );
 
-    // /ai admin close [all|SYMBOL] — close AI test signals only (admin, to reset and get new signals)
+    // /ai admin close [all|SYMBOL] — close AI signals AND all users' real positions for those signals
     this.telegramService.registerBotCommand(
       /^\/ai[_ ]admin[_ ]close(?:\s+(\S+))?$/i,
       async (msg, match) => {
         if (!this.isAdmin(msg.from?.id)) return;
         const chatId = msg.chat.id;
-        const telegramId = msg.from?.id;
 
         const arg = match?.[1]?.toUpperCase() ?? "";
         const isCloseAll = !arg || arg === "ALL";
 
         try {
           const testSignals = await this.signalQueueService.getAllActiveSignals();
+          const realModeUsers = await this.subscriptionService.findRealModeSubscribers();
 
           if (isCloseAll) {
             if (testSignals.length === 0) {
@@ -1247,13 +1247,27 @@ export class AiCommandService implements OnModuleInit {
               return;
             }
 
-            let closed = 0;
+            // Close all AI signals
+            let signalsClosed = 0;
             for (const s of testSignals) {
               const price = this.marketDataService.getLatestPrice(s.symbol) ?? s.entryPrice;
               await this.signalQueueService.resolveActiveSignal(s.symbol, price, "MANUAL").catch(() => {});
-              closed++;
+              signalsClosed++;
             }
-            await this.telegramService.sendTelegramMessage(chatId, `✅ *Da dong ${closed} tin hieu AI*\n📊 He thong se tao tin hieu moi trong lan scan tiep theo.`);
+
+            // Close all real positions for all real-mode users
+            let realClosed = 0;
+            for (const user of realModeUsers) {
+              const count = await this.userRealTradingService
+                .closeAllRealPositions(user.telegramId, user.chatId, "ADMIN_CLOSE")
+                .catch(() => 0);
+              realClosed += count;
+            }
+
+            let resultText = `✅ *Da dong ${signalsClosed} tin hieu AI*\n`;
+            if (realClosed > 0) resultText += `⚡ Da dong ${realClosed} lenh that cho ${realModeUsers.length} user\n`;
+            resultText += `📊 He thong se tao tin hieu moi trong lan scan tiep theo.`;
+            await this.telegramService.sendTelegramMessage(chatId, resultText);
           } else {
             const symbol = arg.endsWith("USDT") ? arg : `${arg}USDT`;
             const signal = testSignals.find((s) => s.symbol === symbol);
@@ -1263,13 +1277,27 @@ export class AiCommandService implements OnModuleInit {
               return;
             }
 
+            // Close the AI signal
             const price = this.marketDataService.getLatestPrice(symbol) ?? signal.entryPrice;
             const pnlPct = signal.direction === "LONG"
               ? ((price - signal.entryPrice) / signal.entryPrice) * 100
               : ((signal.entryPrice - price) / signal.entryPrice) * 100;
             await this.signalQueueService.resolveActiveSignal(symbol, price, "MANUAL").catch(() => {});
+
+            // Close real positions for this symbol for all real-mode users
+            let realClosed = 0;
+            for (const user of realModeUsers) {
+              const result = await this.userRealTradingService
+                .closeRealPosition(user.telegramId, user.chatId, symbol, "ADMIN_CLOSE")
+                .catch(() => ({ success: false }));
+              if (result.success) realClosed++;
+            }
+
             const sign = pnlPct >= 0 ? "+" : "";
-            await this.telegramService.sendTelegramMessage(chatId, `✅ *Da dong tin hieu ${symbol}* (${sign}${pnlPct.toFixed(2)}%)\n📊 Se tao tin hieu moi khi co co hoi.`);
+            let resultText = `✅ *Da dong tin hieu ${symbol}* (${sign}${pnlPct.toFixed(2)}%)\n`;
+            if (realClosed > 0) resultText += `⚡ Da dong ${realClosed} lenh that\n`;
+            resultText += `📊 Se tao tin hieu moi khi co co hoi.`;
+            await this.telegramService.sendTelegramMessage(chatId, resultText);
           }
         } catch (err) {
           await this.telegramService.sendTelegramMessage(chatId, `❌ Loi: ${err?.message}`);
