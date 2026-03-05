@@ -805,6 +805,11 @@ Reply ONLY JSON:
     if (parsed.regime && String(parsed.regime).includes("|")) {
       parsed.regime = String(parsed.regime).split("|")[0].trim() as any;
     }
+    // GPT sometimes returns confidence as range string "55-70" — take the first number
+    if (parsed.confidence != null && typeof parsed.confidence !== "number") {
+      const num = parseInt(String(parsed.confidence), 10);
+      parsed.confidence = isNaN(num) ? 50 : num;
+    }
     const defaults = this.getDefaultParams(parsed.regime || "MIXED");
     const MIN_SL = 3.0;
     const stopLossPercent = Math.max(parsed.stopLossPercent ?? defaults.stopLossPercent, MIN_SL);
