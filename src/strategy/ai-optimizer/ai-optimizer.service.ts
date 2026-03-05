@@ -96,8 +96,12 @@ export class AiOptimizerService {
     const cacheKey = "cache:ai:regime";
     const prevRegimeKey = "cache:ai:regime:prev";
     const cached = await this.redisService.get<string>(cacheKey);
-    if (cached) return cached;
+    if (cached) {
+      this.logger.debug(`[AiOptimizer] assessGlobalRegime: cached=${cached}`);
+      return cached;
+    }
 
+    this.logger.log(`[AiOptimizer] assessGlobalRegime: no cache, computing...`);
     try {
       const indicators = await this.preComputeIndicators("btc");
       if (!indicators.price) {
