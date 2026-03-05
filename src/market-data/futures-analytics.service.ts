@@ -12,6 +12,15 @@ export interface CoinAnalytics {
   takerBuyRatio: number; // >1 = more taker buys (aggressive buying)
 }
 
+/**
+ * Futures sentiment score: negative = bearish pressure, positive = bullish pressure.
+ * Range roughly -100 to +100. Used to override regime blocking for SHORTs/LONGs.
+ */
+export interface FuturesSentiment {
+  score: number; // -100 (very bearish) to +100 (very bullish)
+  signals: string[]; // human-readable reasons
+}
+
 export interface MoneyFlowAlert {
   symbol: string;
   alertType: "OI_SURGE" | "OI_DROP" | "VOLUME_SPIKE" | "FUNDING_EXTREME" | "LONG_SHORT_EXTREME";
@@ -225,6 +234,92 @@ export class FuturesAnalyticsService {
   /**
    * Format analytics data for a single coin (used in /ai check).
    */
+  /**
+   * Calculate bearish/bullish sentiment from futures data for a specific coin.
+   * Negative score = bearish pressure (favours SHORT), positive = bullish (favours LONG).
+   *
+   * Scoring weights:
+   *  - Funding rate:    ±30  (negative funding = shorts paying = bearish pressure building)
+   *  - L/S ratio:       ±30  (too many longs = squeeze risk = bearish)
+   *  - Taker buy/sell:  ±25  (taker sell dominance = aggressive selling = bearish)
+   *  - OI change:       ±15  (OI drop = deleveraging, OI surge context-dependent)
+   */
+  async calculateSentiment(symbol: string): Promise<FuturesSentiment | null> {
+    const analytics = await this.getCachedAnalytics();
+    const fa = analytics.get(symbol);
+    if (!fa) return null;
+
+    let score = 0;
+    const signals: string[] = [];
+
+    // ── Funding rate (max ±30) ──
+    // Negative funding → shorts paying longs → crowded short = potential squeeze UP (bullish)
+    // Positive funding → longs paying shorts → crowded long = potential squeeze DOWN (bearish)
+    const fundingPct = fa.fundingRate * 100; // e.g. 0.01% = 0.0001 raw
+    if (fundingPct > 0.05) {
+      const pts = Math.min(30, Math.round(fundingPct * 300)); // 0.1% → 30 pts
+      score -= pts;
+      signals.push(`Funding +${fundingPct.toFixed(3)}% (longs paying → bearish, -${pts})`);
+    } else if (fundingPct < -0.05) {
+      const pts = Math.min(30, Math.round(Math.abs(fundingPct) * 300));
+      score += pts;
+      signals.push(`Funding ${fundingPct.toFixed(3)}% (shorts paying → bullish, +${pts})`);
+    }
+
+    // ── L/S ratio (max ±30) ──
+    // L/S > 1.5 = too many longs = long squeeze risk (bearish)
+    // L/S < 0.67 = too many shorts = short squeeze risk (bullish)
+    if (fa.longShortRatio > 1.5) {
+      const pts = Math.min(30, Math.round((fa.longShortRatio - 1) * 20));
+      score -= pts;
+      signals.push(`L/S ${fa.longShortRatio.toFixed(2)} (crowded long → bearish, -${pts})`);
+    } else if (fa.longShortRatio < 0.67) {
+      const pts = Math.min(30, Math.round((1 - fa.longShortRatio) * 30));
+      score += pts;
+      signals.push(`L/S ${fa.longShortRatio.toFixed(2)} (crowded short → bullish, +${pts})`);
+    }
+
+    // ── Taker buy/sell ratio (max ±25) ──
+    // < 0.8 = aggressive selling dominance (bearish)
+    // > 1.2 = aggressive buying dominance (bullish)
+    if (fa.takerBuyRatio < 0.8) {
+      const pts = Math.min(25, Math.round((1 - fa.takerBuyRatio) * 50));
+      score -= pts;
+      signals.push(`Taker ${fa.takerBuyRatio.toFixed(2)} (sell pressure → bearish, -${pts})`);
+    } else if (fa.takerBuyRatio > 1.2) {
+      const pts = Math.min(25, Math.round((fa.takerBuyRatio - 1) * 50));
+      score += pts;
+      signals.push(`Taker ${fa.takerBuyRatio.toFixed(2)} (buy pressure → bullish, +${pts})`);
+    }
+
+    // ── OI change (max ±15) ──
+    const prevOi = await this.redisService.get<Record<string, number>>(PREV_OI_KEY);
+    if (prevOi && prevOi[symbol] && prevOi[symbol] > 0) {
+      const oiChangePct = ((fa.openInterest - prevOi[symbol]) / prevOi[symbol]) * 100;
+      if (oiChangePct < -10) {
+        // OI dropping = deleveraging, trend weakening
+        const pts = Math.min(15, Math.round(Math.abs(oiChangePct)));
+        score -= pts; // bearish: positions closing, momentum dying
+        signals.push(`OI ${oiChangePct.toFixed(1)}% (deleveraging → bearish, -${pts})`);
+      } else if (oiChangePct > 10) {
+        // OI surging = new positions opening — direction depends on funding
+        const pts = Math.min(15, Math.round(oiChangePct));
+        if (fundingPct > 0.02) {
+          score -= pts; // OI up + positive funding = new longs being added → squeeze risk
+          signals.push(`OI +${oiChangePct.toFixed(1)}% + funding+ (new longs → bearish, -${pts})`);
+        } else if (fundingPct < -0.02) {
+          score += pts; // OI up + negative funding = new shorts being added → squeeze risk
+          signals.push(`OI +${oiChangePct.toFixed(1)}% + funding- (new shorts → bullish, +${pts})`);
+        }
+      }
+    }
+
+    // Clamp to -100..+100
+    score = Math.max(-100, Math.min(100, score));
+
+    return { score, signals };
+  }
+
   formatCoinAnalytics(data: CoinAnalytics, price: number): string {
     const fundingPct = (data.fundingRate * 100).toFixed(4);
     const fundingIcon = data.fundingRate > 0 ? "🔴" : data.fundingRate < 0 ? "🟢" : "⚪";

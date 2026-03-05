@@ -623,28 +623,11 @@ export class AiSignalService implements OnModuleInit {
     );
 
     // Adjust confidence using cached futures analytics (no extra API calls)
+    // Now DIRECTIONAL: funding/L-S/taker data boosts confidence when aligned with signal direction
     const cachedAnalytics = await this.futuresAnalyticsService.getCachedAnalytics();
     const fa = cachedAnalytics.get(symbol);
     if (fa) {
-      let adj = 0;
-      // Extreme funding: longs paying high fee → penalize LONG, boost SHORT
-      const isTrend = params.regime === "STRONG_BULL" || params.regime === "STRONG_BEAR";
-      if (fa.fundingRate > 0.001) adj += isTrend ? -5 : -10;
-      else if (fa.fundingRate < -0.001) adj += isTrend ? -5 : -10;
-      // Moderate funding confirmation
-      else if (Math.abs(fa.fundingRate) < 0.0003) adj += 3;
-
-      // L/S ratio: too many longs = squeeze risk for longs
-      if (fa.longShortRatio > 2.5) adj -= 10;
-      else if (fa.longShortRatio < 0.4) adj -= 10;
-
-      // Taker buy/sell momentum — only boost confidence when momentum aligns with regime
-      if (fa.takerBuyRatio > 1.3 && params.regime !== "STRONG_BEAR") adj += 5; // buy pressure, skip in bear regime
-      else if (fa.takerBuyRatio < 0.7 && params.regime !== "STRONG_BULL") adj += 5; // sell pressure, skip in bull regime
-
-      if (adj !== 0) {
-        params.confidence = Math.max(10, Math.min(95, params.confidence + adj));
-      }
+      // We'll apply confidence adjustments after signal direction is known (below)
     }
 
     // Cap minConfidenceToTrade per regime — in ranging/sideways markets Haiku sets thresholds
@@ -670,20 +653,63 @@ export class AiSignalService implements OnModuleInit {
     );
     if (!signalResult) return;
 
-    // ── Global regime trend filter ──────────────────────────────────────────
-    // STRONG_BEAR: only SHORT signals. STRONG_BULL: only LONG signals.
-    // All other regimes (MIXED, SIDEWAYS, RANGE_BOUND, VOLATILE, BTC_CORRELATION) allow both.
+    // ── Directional confidence adjustment using futures data ──────────────
+    // Boost confidence when futures data aligns with signal direction, penalize when against.
+    if (fa) {
+      let adj = 0;
+      const isLong = signalResult.isLong;
+
+      // Funding: positive funding = longs paying → bearish for longs, bullish for shorts
+      if (fa.fundingRate > 0.001) adj += isLong ? -8 : 8;
+      else if (fa.fundingRate < -0.001) adj += isLong ? 8 : -8;
+      else if (Math.abs(fa.fundingRate) < 0.0003) adj += 3; // neutral funding = stable
+
+      // L/S ratio: crowded longs → bearish for longs
+      if (fa.longShortRatio > 2.0) adj += isLong ? -10 : 10;
+      else if (fa.longShortRatio < 0.5) adj += isLong ? 10 : -10;
+
+      // Taker momentum: sell pressure → bearish for longs
+      if (fa.takerBuyRatio < 0.7) adj += isLong ? -5 : 5;
+      else if (fa.takerBuyRatio > 1.3) adj += isLong ? 5 : -5;
+
+      if (adj !== 0) {
+        params.confidence = Math.max(10, Math.min(95, params.confidence + adj));
+        this.logger.debug(
+          `[AiSignal] ${coin.toUpperCase()} confidence ${adj > 0 ? "+" : ""}${adj} from futures data (now ${params.confidence})`,
+        );
+      }
+    }
+
+    // ── Global regime trend filter (with futures sentiment override) ──────
+    // STRONG_BEAR: only SHORT signals (unless futures sentiment is strongly bullish).
+    // STRONG_BULL: only LONG signals (unless futures sentiment is strongly bearish).
+    // Futures sentiment override threshold: |score| >= 30 = allow counter-regime signals.
+    const SENTIMENT_OVERRIDE_THRESHOLD = 30;
+    const sentiment = await this.futuresAnalyticsService.calculateSentiment(symbol);
+
     if (params.regime === "STRONG_BEAR" && signalResult.isLong) {
-      this.logger.debug(
-        `[AiSignal] ${coin.toUpperCase()} LONG skipped — regime STRONG_BEAR (shorts only)`,
-      );
-      return;
+      if (sentiment && sentiment.score >= SENTIMENT_OVERRIDE_THRESHOLD) {
+        this.logger.log(
+          `[AiSignal] ${coin.toUpperCase()} LONG allowed in STRONG_BEAR — futures sentiment bullish (${sentiment.score}): ${sentiment.signals.join("; ")}`,
+        );
+      } else {
+        this.logger.debug(
+          `[AiSignal] ${coin.toUpperCase()} LONG skipped — regime STRONG_BEAR (shorts only)${sentiment ? ` [sentiment=${sentiment.score}]` : ""}`,
+        );
+        return;
+      }
     }
     if (params.regime === "STRONG_BULL" && !signalResult.isLong) {
-      this.logger.debug(
-        `[AiSignal] ${coin.toUpperCase()} SHORT skipped — regime STRONG_BULL (longs only)`,
-      );
-      return;
+      if (sentiment && sentiment.score <= -SENTIMENT_OVERRIDE_THRESHOLD) {
+        this.logger.log(
+          `[AiSignal] ${coin.toUpperCase()} SHORT allowed in STRONG_BULL — futures sentiment bearish (${sentiment.score}): ${sentiment.signals.join("; ")}`,
+        );
+      } else {
+        this.logger.debug(
+          `[AiSignal] ${coin.toUpperCase()} SHORT skipped — regime STRONG_BULL (longs only)${sentiment ? ` [sentiment=${sentiment.score}]` : ""}`,
+        );
+        return;
+      }
     }
 
     // ── Per-coin 4h EMA trend alignment ─────────────────────────────────────
@@ -709,10 +735,17 @@ export class AiSignalService implements OnModuleInit {
             return;
           }
           if (!signalResult.isLong && coinTrendUp) {
-            this.logger.log(
-              `[AiSignal] ${signalKey} SHORT blocked — 4h uptrend (EMA21 > EMA50, spread=${spreadPct.toFixed(2)}%)`,
-            );
-            return;
+            // Allow SHORT against 4h uptrend if futures sentiment is strongly bearish
+            if (sentiment && sentiment.score <= -SENTIMENT_OVERRIDE_THRESHOLD) {
+              this.logger.log(
+                `[AiSignal] ${signalKey} SHORT allowed against 4h uptrend — futures sentiment bearish (${sentiment.score})`,
+              );
+            } else {
+              this.logger.log(
+                `[AiSignal] ${signalKey} SHORT blocked — 4h uptrend (EMA21 > EMA50, spread=${spreadPct.toFixed(2)}%)${sentiment ? ` [sentiment=${sentiment.score}]` : ""}`,
+              );
+              return;
+            }
           }
         }
       }
