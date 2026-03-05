@@ -1,5 +1,150 @@
 # Changelog
 
+## 2026-03-05 (5) - Database Reset, Signal Key Fix, Market Fix, TradFi Exclusion
+
+### Feature: `/ai admin reset` Command
+
+Full database clean command for admin: deletes all ai_signals, user_trades, resets coin profile stats, clears all Redis signal/params/cooldown keys, restarts cleanly.
+
+### Bug Fix: Signal Key for Dual-Timeframe Close
+
+`resolveActiveSignal()` was called with plain symbol (e.g. "BTCUSDT") but Redis key includes profile suffix (e.g. "BTCUSDT:INTRADAY"). Added `getSignalKey()` helper to `ai-command.service.ts` that checks `DUAL_TIMEFRAME_COINS` and appends profile. Fixed in both admin close and `checkProfitTargets()`.
+
+### Bug Fix: `/ai market` Showing 0 Coins After Reset
+
+`getAllCoinParams()` only returned coins with cached AI params in Redis. After reset, params were empty. Fixed to return all shortlist coins with defaults. Also fixed static ATR defaults not being cached in Redis.
+
+### Bug Fix: GPT Confidence Range String
+
+GPT sometimes returns confidence as `"55-70"` string instead of number. Added parsing in `mergeWithDefaults()` to extract first number.
+
+### Bug Fix: Duplicate Real Positions for Dual-Timeframe Coins
+
+Both INTRADAY and SWING signals triggered `onSignalActivated()`, placing 2 identical positions per user. Added check for existing OPEN trade on symbol before placing.
+
+### Enhancement: TradFi Pair Exclusion
+
+XAU/XAG require special Binance TradFi-Perps agreement. Added `EXCLUDED_SYMBOLS` list to skip these in `onSignalActivated()`.
+
+### Enhancement: Test Volume for Signal Display
+
+`/ai signals` now uses fixed 1000 USDT volume for test-mode signals instead of user's personal balance.
+
+### Files Modified
+- `src/ai-signal/ai-command.service.ts` — `getSignalKey()` helper, `/ai admin reset`, test vol fix, signal key in close/profit-target
+- `src/ai-signal/signal-queue.service.ts` — `fullReset()` method
+- `src/ai-signal/user-real-trading.service.ts` — `deleteAllTrades()`, duplicate position guard, TradFi exclusion
+- `src/ai-signal/ai-signal.service.ts` — `resetCoinProfileStats()`, `getAllCoinParams()` fix
+- `src/strategy/ai-optimizer/ai-optimizer.service.ts` — Confidence range parsing, static defaults caching
+- `src/telegram/telegram.service.ts` — Added `/ai admin reset` + `/ai admin close` to /start and BotFather menu
+
+---
+
+## 2026-03-05 (4) - Close Command Separation + Timezone Fix + Admin Close Real Positions
+
+### Enhancement: Separate Close Commands for Real vs Admin
+
+Problem: `/ai close all` had either/or logic — real mode users only closed Binance positions, test mode only closed signals. Signals stayed open after closing.
+
+Solution: Split into two distinct commands:
+- `/ai close [all|SYMBOL]` — User-facing; closes real Binance positions only (requires `realModeEnabled`)
+- `/ai admin close [all|SYMBOL]` — Admin; closes AI signals AND real positions for ALL real-mode users
+
+### Bug Fix: Admin Close Not Closing Real Binance Positions
+
+Problem: `/ai admin close all` called `resolveActiveSignal()` which only updates MongoDB/Redis but does NOT close real Binance positions. This left orphaned positions open, and new scan cycles immediately created new positions on those symbols (e.g. DOGE auto-opened after close).
+
+Fix: Admin close now also calls `findRealModeSubscribers()` and `closeAllRealPositions()` / `closeRealPosition()` for every real-mode user. Uses `"ADMIN_CLOSE"` as close reason.
+
+### Enhancement: UTC+7 Timezone for All Timestamps
+
+All `toLocaleString`, `toLocaleTimeString`, `toLocaleDateString` calls now include `timeZone: "Asia/Ho_Chi_Minh"` for Vietnam time display. Applied across 3 files.
+
+### Files Modified
+- `src/ai-signal/ai-command.service.ts` — Close command separation, admin close with real position closure, timezone fixes
+- `src/ai-signal/ai-signal.service.ts` — Timezone fixes
+- `src/strategy/ai-optimizer/ai-optimizer.service.ts` — Timezone fix
+
+---
+
+## 2026-03-05 (3) - Futures Sentiment Override for SHORT Signals
+
+### Feature: Allow SHORTs in STRONG_BULL When Futures Data is Bearish
+
+Problem: Only 4 out of 31 completed signals were SHORTs because STRONG_BULL regime completely blocked all SHORT signals. The bot had rich futures data (funding rate, L/S ratio, taker buy/sell, OI) but only used it for minor confidence adjustments (±5-10 points).
+
+Solution: New `calculateSentiment()` function scores futures data from -100 (very bearish) to +100 (very bullish):
+- Funding rate: ±30 pts (positive funding = longs paying = bearish for longs)
+- L/S ratio: ±30 pts (crowded longs >1.5 = squeeze risk = bearish)
+- Taker buy/sell: ±25 pts (sell dominance <0.8 = bearish)
+- OI change: ±15 pts (deleveraging or new position context)
+
+Override rules:
+- Sentiment <= -30: SHORTs allowed in STRONG_BULL + against coin 4h uptrend
+- Sentiment >= +30: LONGs allowed in STRONG_BEAR
+- Confidence adjustment now directional (boosts when futures align with signal direction)
+
+### Files Modified
+- `src/market-data/futures-analytics.service.ts` — NEW `FuturesSentiment` interface + `calculateSentiment()` method
+- `src/ai-signal/ai-signal.service.ts` — Regime filter with sentiment override, directional confidence, per-coin EMA override
+
+---
+
+## 2026-03-05 (2) - RSI_CROSS Entry Quality Improvements
+
+### Enhancement: Prevent Peak Entries
+RSI_CROSS was entering LONGs at local peaks because thresholds were too permissive (RSI < 60 in bull markets = already extended). Also no overbought protection.
+
+Changes:
+- RSI threshold tightened to 50 for ALL regimes (was 55-60). LONG only when RSI < 50
+- Overbought absolute block: LONG skipped if RSI > 65, SHORT skipped if RSI < 35
+- HTF RSI overbought: LONG blocked if 1h RSI > 70 (higher timeframe already extended)
+- Candle direction enabled by default: LONG only on green candles, SHORT only on red
+- Entry tolerance for real orders: tightened to 1% (was 1.5% intraday, 5% swing)
+
+### Files Modified
+- `src/strategy/rules/rule-engine.service.ts` — RSI_CROSS threshold, overbought checks, HTF check
+- `src/strategy/ai-optimizer/ai-optimizer.service.ts` — enableCandleDir: true
+- `src/ai-signal/user-real-trading.service.ts` — entry tolerance 1%
+
+---
+
+## 2026-03-05 (1) - PnL Sync Fix + Custom TP/SL for Real Orders + Strategy Optimization
+
+### Bug Fix: Trade PnL Not Recorded (Shows +0.00 USDT)
+Root cause: `protectOpenTrades()` cron marked trades as CLOSED without calculating PnL (exitPrice, pnlPercent, pnlUsdt all undefined → displayed as 0.00). Also, when SL re-place failed with "GTE can only be used with open positions" error, it looped every 3 min instead of recognizing the position was already closed.
+
+Fixes:
+- `protectOpenTrades()` now calculates PnL using latest WS price before marking CLOSED
+- GTE error detection: marks trade CLOSED with PnL and sends Telegram notification
+- `onTradeClose()` can now update trades that were marked CLOSED without PnL (within 5 min window)
+- Fixed 2 historical trades (CRVUSDT, NEARUSDT) in MongoDB with correct SL-based PnL
+
+### Bug Fix: `/ai tpsl` Not Applied to Real Binance Orders
+`/ai tpsl 2.5 1.5` only affected display in `/ai signals` — real orders used AI signal SL% (as low as 1.5%). Now `placeOrderForUser()` checks `sub.customSlPct` and `sub.customTpPct` and calculates SL/TP from actual fill price.
+
+### Enhancement: Strategy Priority Optimization (Based on 30-Day Data)
+Performance review: RSI_CROSS (80% win, +2.2% avg) >> EMA_PULLBACK (50%, +1.5%) >> MEAN_REVERT_RSI (33%, +1.2%).
+
+Changes:
+- RSI_CROSS now evaluated first in strategy pipe (was last as "fallback")
+- EMA_PULLBACK tightened: only triggers within 2% of 4h EMA21 (was 5%)
+- Minimum SL raised from 2% to 3% across ALL code paths:
+  - `signal-queue.service.ts` MIN_PERCENT
+  - `mergeWithDefaults()` MIN_SL enforcement
+  - `getDefaultParams()` defaults (1.5-2.5% → 3.0-3.5%)
+  - `applyForcedProfile()` SWING minimum (1.5% → 3%)
+  - ATR defaults clamp (1.5% → 3%)
+  - GPT prompt SL ranges updated to 3.0-6.0%
+- Flushed Redis param caches to apply immediately
+
+### Files Modified
+- `src/ai-signal/user-real-trading.service.ts` — PnL calculation in protectOpenTrades, GTE error detection, custom TP/SL in placeOrderForUser, onTradeClose race condition fix
+- `src/ai-signal/signal-queue.service.ts` — MIN_PERCENT 2→3
+- `src/strategy/ai-optimizer/ai-optimizer.service.ts` — RSI_CROSS priority, EMA_PULLBACK tightened, 3% min SL everywhere, GPT prompt updated
+
+---
+
 ## 2026-03-04 (3) - Personal Dashboard + GPT-Primary Fix
 
 ### Feature: `/ai my` Personal Dashboard

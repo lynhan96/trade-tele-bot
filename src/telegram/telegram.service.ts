@@ -73,7 +73,9 @@ export class TelegramBotService implements OnModuleInit {
           `/ai test on|off — Bat/tat che do test\n` +
           `/ai pause / /ai resume — Tam dung/tiep tuc\n` +
           `/ai override — Override chien luoc\n` +
-          `/ai resetall — Reset tat ca tin hieu\n\n` +
+          `/ai resetall — Reset tat ca tin hieu\n` +
+          `/ai admin close all — Dong tat ca tin hieu + lenh that\n` +
+          `/ai admin reset — Xoa toan bo du lieu (clean DB)\n\n` +
           `─────────────────────\n` +
           `💡 *Huong dan nhanh:*\n` +
           `1. /ai subscribe — bat dau nhan tin hieu\n` +
@@ -130,6 +132,8 @@ export class TelegramBotService implements OnModuleInit {
         { command: "ai_pause", description: "Tam dung tin hieu (admin)" },
         { command: "ai_resume", description: "Tiep tuc tin hieu (admin)" },
         { command: "ai_resetall", description: "Reset tat ca tin hieu (admin)" },
+        { command: "ai_admin_close", description: "Dong tin hieu + lenh that (admin)" },
+        { command: "ai_admin_reset", description: "Xoa toan bo du lieu (admin)" },
       ]);
       this.logger.log("[Telegram] Bot command menu updated successfully (old commands cleared)");
     } catch (err) {
