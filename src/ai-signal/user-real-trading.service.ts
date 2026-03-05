@@ -16,8 +16,8 @@ import { AiTunedParams } from "../strategy/ai-optimizer/ai-tuned-params.interfac
 const axios = require("axios");
 
 /** Tolerance for signal entry price vs current market price — profile-aware. */
-const ENTRY_PRICE_TOLERANCE_INTRADAY = 0.01; // 1% — skip real order if price moved too far from signal entry
-const ENTRY_PRICE_TOLERANCE_SWING = 0.01;    // 1% — same for swing signals
+const ENTRY_PRICE_TOLERANCE_INTRADAY = 0.03; // 3% — skip real order if price moved too far from signal entry
+const ENTRY_PRICE_TOLERANCE_SWING = 0.05;    // 5% — wider for swing signals
 
 /** Redis key for caching symbol quantity precision. */
 const QTY_PRECISION_KEY = (symbol: string) => `cache:binance:qty-precision:${symbol}`;
@@ -276,14 +276,16 @@ export class UserRealTradingService implements OnModuleInit {
         p >= 1000 ? `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :
         p >= 1 ? `$${p.toFixed(2)}` : `$${p.toFixed(4)}`;
       const dirEmoji = direction === "LONG" ? "📈" : "📉";
+      const actualSlPct = Math.abs(fillPrice - roundedSl) / fillPrice * 100;
+      const actualTpPct = roundedTp ? Math.abs(roundedTp - fillPrice) / fillPrice * 100 : 0;
       const msg =
         `${dirEmoji} *Real Mode: Dat Lenh Thanh Cong*\n` +
         `━━━━━━━━━━━━━━━━━━\n\n` +
         `Symbol: *${symbol}* ${direction}\n` +
         `So luong: *×${quantity}* (${leverage}x)\n` +
         `Gia vao: *${fmtP(fillPrice)}*\n` +
-        `Stop Loss: *${fmtP(roundedSl)}*${binanceSlAlgoId ? "" : " ⚠️"}\n` +
-        (roundedTp ? `Take Profit: *${fmtP(roundedTp)}*${binanceTpAlgoId ? "" : " ⚠️"}\n` : "") +
+        `Stop Loss: *${fmtP(roundedSl)}* (${actualSlPct.toFixed(1)}%)${binanceSlAlgoId ? "" : " ⚠️"}\n` +
+        (roundedTp ? `Take Profit: *${fmtP(roundedTp)}* (${actualTpPct.toFixed(1)}%)${binanceTpAlgoId ? "" : " ⚠️"}\n` : "") +
         `Volume: *${vol.toLocaleString()} USDT*`;
       await this.telegramService.sendTelegramMessage(chatId, msg).catch(() => {});
 
