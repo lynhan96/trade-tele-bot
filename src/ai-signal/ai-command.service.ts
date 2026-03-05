@@ -1773,8 +1773,9 @@ export class AiCommandService implements OnModuleInit {
       return `📊 *AI Signals*\n━━━━━━━━━━━━━━━━━━\n\n_Không có tín hiệu nào đang chạy._`;
     }
 
-    const getVol = (symbol: string) =>
-      this.getVolForSymbol(symbol, opts?.coinVolumes, opts?.tradingBalance);
+    const TEST_VOL = 1000; // Fixed test volume for PnL display
+    const getVol = (symbol: string, isTest?: boolean) =>
+      isTest ? TEST_VOL : this.getVolForSymbol(symbol, opts?.coinVolumes, opts?.tradingBalance);
     const customTp = opts?.customTpPct;
     const customSl = opts?.customSlPct;
 
@@ -1826,7 +1827,7 @@ export class AiCommandService implements OnModuleInit {
           ? (healthResults[i] as PromiseFulfilledResult<any>).value
           : null;
         if (health) {
-          const v = getVol(actives[i].symbol);
+          const v = getVol(actives[i].symbol, actives[i].isTestMode);
           totalPnl += health.unrealizedPnl;
           totalUsdSum += (health.unrealizedPnl / 100) * v;
           healthCount++;
@@ -1845,7 +1846,7 @@ export class AiCommandService implements OnModuleInit {
 
       for (let i = 0; i < actives.length; i++) {
         const s = actives[i];
-        const v = getVol(s.symbol);
+        const v = getVol(s.symbol, s.isTestMode);
         const health = healthResults[i].status === "fulfilled"
           ? (healthResults[i] as PromiseFulfilledResult<any>).value
           : null;
