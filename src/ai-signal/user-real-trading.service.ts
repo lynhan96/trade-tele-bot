@@ -16,8 +16,8 @@ import { AiTunedParams } from "../strategy/ai-optimizer/ai-tuned-params.interfac
 const axios = require("axios");
 
 /** Tolerance for signal entry price vs current market price — profile-aware. */
-const ENTRY_PRICE_TOLERANCE_INTRADAY = 0.015; // 1.5% for 15m signals (candle close is recent)
-const ENTRY_PRICE_TOLERANCE_SWING = 0.05;     // 5% for 4h signals (candle close can be hours old)
+const ENTRY_PRICE_TOLERANCE_INTRADAY = 0.01; // 1% — skip real order if price moved too far from signal entry
+const ENTRY_PRICE_TOLERANCE_SWING = 0.01;    // 1% — same for swing signals
 
 /** Redis key for caching symbol quantity precision. */
 const QTY_PRECISION_KEY = (symbol: string) => `cache:binance:qty-precision:${symbol}`;
