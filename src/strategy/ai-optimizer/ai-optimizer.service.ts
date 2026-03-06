@@ -257,15 +257,49 @@ Guidelines:
 Reply ONLY with valid JSON (no markdown):
 {"minVolumeUsd":10000000,"minPriceChangePct":0.3,"maxShortlistSize":50,"reasoning":"brief reason"}`;
 
-    const resp = await this.anthropic.messages.create({
-      model: HAIKU_MODEL,
-      max_tokens: 200,
-      messages: [{ role: "user", content: prompt }],
-    });
+    let text: string;
+    let model: string;
+    let tokensIn = 0;
+    let tokensOut = 0;
 
-    const text = ((resp.content[0] as any).text || "").trim();
+    // Try GPT first, fall back to Haiku
+    if (this.openai) {
+      try {
+        const resp = await this.openai.chat.completions.create({
+          model: GPT_MODEL,
+          max_tokens: 200,
+          messages: [{ role: "user", content: prompt }],
+        });
+        text = resp.choices[0]?.message?.content?.trim() || "";
+        model = GPT_MODEL;
+        tokensIn = resp.usage?.prompt_tokens || 0;
+        tokensOut = resp.usage?.completion_tokens || 0;
+      } catch (gptErr) {
+        this.logger.warn(`[AiOptimizer] GPT filter tuning failed: ${gptErr?.message}, trying Haiku`);
+        const resp = await this.anthropic.messages.create({
+          model: HAIKU_MODEL,
+          max_tokens: 200,
+          messages: [{ role: "user", content: prompt }],
+        });
+        text = ((resp.content[0] as any).text || "").trim();
+        model = HAIKU_MODEL;
+        tokensIn = resp.usage.input_tokens;
+        tokensOut = resp.usage.output_tokens;
+      }
+    } else {
+      const resp = await this.anthropic.messages.create({
+        model: HAIKU_MODEL,
+        max_tokens: 200,
+        messages: [{ role: "user", content: prompt }],
+      });
+      text = ((resp.content[0] as any).text || "").trim();
+      model = HAIKU_MODEL;
+      tokensIn = resp.usage.input_tokens;
+      tokensOut = resp.usage.output_tokens;
+    }
+
     const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error("No JSON in Haiku filter response");
+    if (!jsonMatch) throw new Error("No JSON in filter response");
 
     const parsed = JSON.parse(jsonMatch[0]);
 
@@ -283,9 +317,9 @@ Reply ONLY with valid JSON (no markdown):
       minPriceChangePct,
       maxShortlistSize,
       reasoning: parsed.reasoning,
-      model: HAIKU_MODEL,
-      tokensIn: resp.usage.input_tokens,
-      tokensOut: resp.usage.output_tokens,
+      model,
+      tokensIn,
+      tokensOut,
     });
 
     // 5. Cache in Redis (8h)
