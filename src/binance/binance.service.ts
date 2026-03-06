@@ -1,21 +1,6 @@
 import { Injectable, Logger } from "@nestjs/common";
 import Binance, { CandleChartInterval_LT } from "binance-api-node";
 
-export interface Position {
-  symbol: string;
-  positionAmt: string;
-  entryPrice: string;
-  markPrice: string;
-  unRealizedProfit: string;
-  leverage: string;
-  isolated: boolean;
-  positionSide: string;
-  liquidationPrice: string;
-  margin: string;
-  takeProfit?: string;
-  stopLoss?: string;
-}
-
 export interface PositionInfo {
   symbol: string;
   side: string;

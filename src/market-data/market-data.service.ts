@@ -16,18 +16,6 @@ import {
   CandleHistoryDocument,
 } from "./schemas/candle-history.schema";
 
-export interface KlineCloseEvent {
-  symbol: string;
-  interval: string;
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-  volume: number;
-  isFinal: boolean;
-  closeTime: number;
-}
-
 export interface Ticker24h {
   symbol: string;
   priceChangePercent: string; // e.g. "3.45"

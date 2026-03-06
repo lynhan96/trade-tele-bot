@@ -344,6 +344,7 @@ export class RuleEngineService {
   }
 
   // ─── MEAN_REVERT_RSI (ported from F2) ────────────────────────────────────
+  // DATA: 22 trades, 1 win, 12 SL = -21.54% PnL. MIXED: 0/7 wins. Catches falling knives.
 
   async evalMeanRevertRsi(
     coin: string,
@@ -353,7 +354,19 @@ export class RuleEngineService {
     const cfg = params.meanRevertRsi;
     if (!cfg) return null;
 
-    const closes = await this.indicatorService.getCloses(coin, cfg.primaryKline);
+    // Block in MIXED regime — 100% loss rate (7/7 SL) from database
+    if (params.regime === "MIXED") {
+      this.logger.debug(`[RuleEngine] ${coin} MEAN_REVERT blocked: MIXED regime (100% loss rate)`);
+      return null;
+    }
+    // Block in STRONG_BEAR/VOLATILE — catches falling knives
+    if (params.regime === "STRONG_BEAR" || params.regime === "VOLATILE") {
+      this.logger.debug(`[RuleEngine] ${coin} MEAN_REVERT blocked: ${params.regime} regime`);
+      return null;
+    }
+
+    const ohlc = await this.indicatorService.getOhlc(coin, cfg.primaryKline);
+    const closes = ohlc.closes;
     if (closes.length < cfg.emaPeriod + 20) return null;
 
     const rsi = this.indicatorService.getRsi(closes, cfg.rsiPeriod);
@@ -382,11 +395,39 @@ export class RuleEngineService {
       return null;
     }
 
+    // RSI recovery confirmation: RSI must be turning (not still dropping/rising)
+    if (isLong && rsi.last < rsi.secondLast) {
+      this.logger.debug(`[RuleEngine] ${coin} MEAN_REVERT LONG blocked: RSI still dropping ${rsi.secondLast.toFixed(1)}→${rsi.last.toFixed(1)}`);
+      return null;
+    }
+    if (isShort && rsi.last > rsi.secondLast) {
+      this.logger.debug(`[RuleEngine] ${coin} MEAN_REVERT SHORT blocked: RSI still rising ${rsi.secondLast.toFixed(1)}→${rsi.last.toFixed(1)}`);
+      return null;
+    }
+
+    // ADX filter: block in trending markets (ADX > 30 = strong trend, mean reversion fails)
+    const { adx } = this.indicatorService.getAdx(ohlc.highs, ohlc.lows, closes, 14);
+    if (adx > 30) {
+      this.logger.debug(`[RuleEngine] ${coin} MEAN_REVERT blocked: ADX=${adx.toFixed(1)} > 30 (trending)`);
+      return null;
+    }
+
+    // Candle confirmation: require bounce candle (green for LONG, red for SHORT)
+    const lastOpen = ohlc.opens[ohlc.opens.length - 1];
+    if (isLong && currentPrice < lastOpen) {
+      this.logger.debug(`[RuleEngine] ${coin} MEAN_REVERT LONG blocked: red candle (no bounce)`);
+      return null;
+    }
+    if (isShort && currentPrice > lastOpen) {
+      this.logger.debug(`[RuleEngine] ${coin} MEAN_REVERT SHORT blocked: green candle (no rejection)`);
+      return null;
+    }
+
     return {
       isLong,
       entryPrice: currentPrice,
       strategy: "MEAN_REVERT_RSI",
-      reason: `Price within ${cfg.priceRange}% of EMA(${cfg.emaPeriod}), RSI=${rsi.last.toFixed(1)} (${isLong ? "oversold" : "overbought"})`,
+      reason: `Price within ${cfg.priceRange}% of EMA(${cfg.emaPeriod}), RSI=${rsi.last.toFixed(1)} turning (ADX=${adx.toFixed(0)}) (${isLong ? "oversold" : "overbought"})`,
     };
   }
 
@@ -727,6 +768,8 @@ export class RuleEngineService {
   }
 
   // ─── BB_SCALP (mean reversion at Bollinger Band extremes, SIDEWAYS regime) ─
+  // DATA: SHORT 16 trades, 0 SL = +30.87%. LONG 22 trades, 0 wins, 9 SL = -13.32%.
+  // LONGs bounce off lower band in downtrends → false bounces. Needs HTF confirmation.
 
   private async evalBbScalp(
     coin: string,
@@ -737,17 +780,16 @@ export class RuleEngineService {
       primaryKline: "15m",
       bbPeriod: 20,
       bbStdDev: 2.0,
-      bbTolerance: 0.1, // tight: price must be within 0.1% of band
+      bbTolerance: 0.1,
       rsiPeriod: 14,
-      rsiLongMax: 45, // must be somewhat oversold (not just mid-range RSI)
-      rsiShortMin: 55, // must be somewhat overbought
+      rsiLongMax: 45,
+      rsiShortMin: 55,
     };
 
     const ohlc = await this.indicatorService.getOhlc(coin, cfg.primaryKline);
     if (ohlc.closes.length < cfg.bbPeriod + cfg.rsiPeriod + 5) return null;
 
     const closes = ohlc.closes;
-    const opens = ohlc.opens;
     const lastClose = closes[closes.length - 1];
     const prevClose = closes[closes.length - 2];
     const prev2Close = closes[closes.length - 3];
@@ -767,13 +809,37 @@ export class RuleEngineService {
     const toleranceFactor = cfg.bbTolerance / 100;
 
     // ── LONG: confirmed bounce off lower band ──────────────────────────────
-    // 1. Previous candle was at/below lower band (band was actually touched)
-    // 2. Current candle is closing ABOVE previous close (bounce has started)
-    // 3. RSI is in oversold territory and turning up
     const prevAtLowerBand = prevClose <= lower * (1 + toleranceFactor);
     const bouncingUp = lastClose > prevClose && lastClose > prev2Close;
-    const rsiTurningUp = rsi > rsiPrev; // RSI starting to recover
+    const rsiTurningUp = rsi > rsiPrev;
     if (prevAtLowerBand && bouncingUp && rsi < cfg.rsiLongMax && rsiTurningUp) {
+      // Extra LONG filter: require RSI to be deeply oversold (< 35 instead of < 45)
+      // DATA: BB_SCALP LONGs at RSI 40-45 mostly fail, only deep oversold has chance
+      if (rsi >= 35) {
+        this.logger.debug(`[RuleEngine] ${coin} BB_SCALP LONG blocked: RSI=${rsi.toFixed(1)} not deeply oversold (<35)`);
+        return null;
+      }
+
+      // HTF confirmation: 1h RSI must not be in downtrend (> 40)
+      const htfCloses = await this.indicatorService.getCloses(coin, "1h");
+      if (htfCloses.length >= 20) {
+        const htfRsi = this.indicatorService.getRsi(htfCloses, 14);
+        if (htfRsi.last < 40) {
+          this.logger.debug(`[RuleEngine] ${coin} BB_SCALP LONG blocked: 1h RSI=${htfRsi.last.toFixed(1)} bearish (<40)`);
+          return null;
+        }
+      }
+
+      // Volume confirmation: current candle must show buying pressure
+      const lastOpen = ohlc.opens[ohlc.opens.length - 1];
+      const bodySize = Math.abs(lastClose - lastOpen);
+      const candleRange = ohlc.highs[ohlc.highs.length - 1] - ohlc.lows[ohlc.lows.length - 1];
+      // Body must be > 50% of candle range (strong green, not doji)
+      if (candleRange > 0 && bodySize / candleRange < 0.5) {
+        this.logger.debug(`[RuleEngine] ${coin} BB_SCALP LONG blocked: weak bounce candle (body=${(bodySize/candleRange*100).toFixed(0)}%)`);
+        return null;
+      }
+
       return {
         isLong: true,
         entryPrice: lastClose,
@@ -783,12 +849,9 @@ export class RuleEngineService {
     }
 
     // ── SHORT: confirmed rejection at upper band ───────────────────────────
-    // 1. Previous candle was at/above upper band (band was actually touched)
-    // 2. Current candle is closing BELOW previous close (rejection has started)
-    // 3. RSI is in overbought territory and turning down
     const prevAtUpperBand = prevClose >= upper * (1 - toleranceFactor);
     const rejectingDown = lastClose < prevClose && lastClose < prev2Close;
-    const rsiTurningDown = rsi < rsiPrev; // RSI starting to drop
+    const rsiTurningDown = rsi < rsiPrev;
     if (prevAtUpperBand && rejectingDown && rsi > cfg.rsiShortMin && rsiTurningDown) {
       return {
         isLong: false,

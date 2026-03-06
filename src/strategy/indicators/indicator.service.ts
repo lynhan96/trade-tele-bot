@@ -1,7 +1,7 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { MarketDataService } from "../../market-data/market-data.service";
 
-const { RSI, EMA, SMA, BollingerBands } = require("technicalindicators");
+const { RSI, EMA, BollingerBands } = require("technicalindicators");
 
 // ─── Helper types ────────────────────────────────────────────────────────────
 
@@ -65,14 +65,6 @@ export class IndicatorService {
 
   getEma(closes: number[], period: number): CrossValue {
     const values = EMA.calculate({ period, values: closes });
-    return {
-      last: values[values.length - 1],
-      secondLast: values[values.length - 2],
-    };
-  }
-
-  getSma(closes: number[], period: number): CrossValue {
-    const values = SMA.calculate({ period, values: closes });
     return {
       last: values[values.length - 1],
       secondLast: values[values.length - 2],

@@ -32,6 +32,10 @@ import { MarketDataService } from "../market-data/market-data.service";
 const AI_PAUSED_KEY = "cache:ai:paused";
 const AI_TEST_MODE_KEY = "cache:ai:test-mode";
 const AI_SCANNING_KEY = "cache:ai:scanning";
+const AI_MARKET_COOLDOWN_KEY = "cache:ai:market-cooldown"; // market-wide pause after consecutive SLs
+const AI_SL_COUNTER_KEY = "cache:ai:sl-hits"; // rolling SL hit counter (1h window)
+const MARKET_COOLDOWN_DURATION = 30 * 60; // 30 min cooldown after too many SLs
+const MAX_SL_BEFORE_COOLDOWN = 3; // trigger cooldown after 3 SL hits in 1 hour
 
 /** Coins that run BOTH INTRADAY (15m) and SWING (4h) strategies simultaneously.
  * Top 5 by market cap — 15m catches more frequent signals than 4h alone. */
@@ -91,6 +95,21 @@ export class AiSignalService implements OnModuleInit {
       // Use profile-aware key for cooldown on dual-timeframe coins
       const signalKey = info.signalKey || info.symbol;
       await this.redisService.set(`cache:ai:cooldown:${signalKey}`, true, 30 * 60);
+
+      // Track SL hits for market-wide cooldown
+      if (info.closeReason === "STOP_LOSS") {
+        await this.trackSlHitAndMaybeCooldown();
+      }
+
+      // Record result for GPT context (recent performance awareness)
+      await this.aiOptimizerService.recordTradeResult({
+        symbol: info.symbol,
+        direction: info.direction,
+        strategy: "", // not available in ResolvedSignalInfo
+        pnlPercent: info.pnlPercent,
+        closeReason: info.closeReason,
+      }).catch(() => {});
+
       await this.notifyPositionClosed(info).catch(() => {});
 
       if (info.queuedSignalActivated) {
@@ -299,6 +318,10 @@ export class AiSignalService implements OnModuleInit {
     const paused = await this.redisService.get<boolean>(AI_PAUSED_KEY);
     if (paused) return;
 
+    // Market-wide cooldown: skip new signals when too many SLs hit recently
+    const marketCooldown = await this.redisService.get<boolean>(AI_MARKET_COOLDOWN_KEY);
+    if (marketCooldown) return;
+
     // Prevent overlapping scans (100 coins in batches of 5 can take >30s)
     const scanning = await this.redisService.get<boolean>(AI_SCANNING_KEY);
     if (scanning) return;
@@ -375,6 +398,21 @@ export class AiSignalService implements OnModuleInit {
         const signalKey = info.signalKey || info.symbol;
         // Cooldown to prevent ping-pong recreation (30 min)
         await this.redisService.set(`cache:ai:cooldown:${signalKey}`, true, 30 * 60);
+
+        // Track SL hits for market-wide cooldown
+        if (info.closeReason === "STOP_LOSS") {
+          await this.trackSlHitAndMaybeCooldown();
+        }
+
+        // Record result for GPT context
+        await this.aiOptimizerService.recordTradeResult({
+          symbol: info.symbol,
+          direction: info.direction,
+          strategy: "",
+          pnlPercent: info.pnlPercent,
+          closeReason: info.closeReason,
+        }).catch(() => {});
+
         await this.notifyPositionClosed(info).catch(() => {});
 
         if (info.queuedSignalActivated) {
@@ -751,6 +789,41 @@ export class AiSignalService implements OnModuleInit {
       }
     }
 
+    // ── LONG confidence penalty: LONGs have 2.5% win rate vs SHORTs 86% ─────
+    // In non-STRONG_BULL regimes, apply -15 confidence penalty to LONGs
+    // This makes LONGs harder to pass the minConfidenceToTrade threshold
+    if (signalResult.isLong && globalRegime !== "STRONG_BULL") {
+      const penalty = globalRegime === "STRONG_BEAR" ? 25 : 15;
+      params.confidence = Math.max(10, params.confidence - penalty);
+      this.logger.debug(
+        `[AiSignal] ${coin.toUpperCase()} LONG confidence penalty -${penalty} in ${globalRegime} (now ${params.confidence})`,
+      );
+      // Re-check confidence threshold after penalty
+      if (params.confidence < (params.minConfidenceToTrade || 40)) {
+        this.logger.log(
+          `[AiSignal] ${coin.toUpperCase()} LONG blocked — confidence ${params.confidence} < threshold ${params.minConfidenceToTrade} after penalty`,
+        );
+        return;
+      }
+    }
+
+    // ── Recent SL direction bias: block direction that keeps losing ─────────
+    // If 3+ of last 5 SLs are in one direction, block that direction temporarily
+    const recentPerf = await this.redisService.get<any[]>("cache:ai:recent-perf") || [];
+    const recentSLs = recentPerf.filter((p) => p.closeReason === "STOP_LOSS").slice(-5);
+    if (recentSLs.length >= 3) {
+      const longSLs = recentSLs.filter((p) => p.direction === "LONG").length;
+      const shortSLs = recentSLs.filter((p) => p.direction === "SHORT").length;
+      if (longSLs >= 3 && signalResult.isLong) {
+        this.logger.log(`[AiSignal] ${coin.toUpperCase()} LONG blocked — ${longSLs}/${recentSLs.length} recent SLs are LONGs`);
+        return;
+      }
+      if (shortSLs >= 3 && !signalResult.isLong) {
+        this.logger.log(`[AiSignal] ${coin.toUpperCase()} SHORT blocked — ${shortSLs}/${recentSLs.length} recent SLs are SHORTs`);
+        return;
+      }
+    }
+
     // ── Per-coin 4h EMA trend alignment ─────────────────────────────────────
     // Block signals that go against the coin's own 4h trend, regardless of global regime.
     // Neutral zone (spread below threshold) = no clear trend → both directions allowed.
@@ -842,6 +915,49 @@ export class AiSignalService implements OnModuleInit {
     // SKIPPED — silent
     } finally {
       this.processingCoins.delete(lockKey);
+    }
+  }
+
+  // ─── Market-wide SL cooldown ─────────────────────────────────────────────
+
+  /**
+   * Track a stop loss hit. If too many SLs fire within 1 hour,
+   * activate a market-wide cooldown to let the market stabilize.
+   * Prevents the bot from opening new positions into a crash.
+   */
+  private async trackSlHitAndMaybeCooldown(): Promise<void> {
+    // Increment rolling SL counter (1h window)
+    const current = ((await this.redisService.get<number>(AI_SL_COUNTER_KEY)) || 0) + 1;
+    await this.redisService.set(AI_SL_COUNTER_KEY, current, 60 * 60); // 1h TTL
+
+    this.logger.log(`[AiSignal] SL hit #${current}/${MAX_SL_BEFORE_COOLDOWN} in rolling 1h window`);
+
+    if (current >= MAX_SL_BEFORE_COOLDOWN) {
+      await this.redisService.set(AI_MARKET_COOLDOWN_KEY, true, MARKET_COOLDOWN_DURATION);
+      // Reset counter so cooldown doesn't re-trigger immediately after expiry
+      await this.redisService.delete(AI_SL_COUNTER_KEY);
+
+      // Force regime reassessment — market conditions have changed
+      await this.redisService.delete("cache:ai:regime");
+
+      this.logger.warn(
+        `[AiSignal] ⚠️ Market cooldown activated — ${current} SL hits in 1h. Pausing new signals for ${MARKET_COOLDOWN_DURATION / 60} min.`,
+      );
+
+      // Notify subscribers about cooldown
+      const subscribers = await this.subscriptionService.findRealModeSubscribers();
+      const cooldownMin = MARKET_COOLDOWN_DURATION / 60;
+      const text =
+        `⏸️ *Tạm Dừng Tín Hiệu*\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `${current} lệnh SL liên tiếp trong 1h.\n` +
+        `Thị trường bất ổn — tạm dừng tín hiệu mới *${cooldownMin} phút* để thị trường ổn định.\n\n` +
+        `Các lệnh đang mở vẫn được giám sát bình thường.\n\n` +
+        `_Tự động mở lại sau ${cooldownMin} phút._`;
+
+      for (const sub of subscribers) {
+        await this.telegramService.sendTelegramMessage(sub.chatId, text).catch(() => {});
+      }
     }
   }
 
@@ -963,6 +1079,20 @@ export class AiSignalService implements OnModuleInit {
       currentPrice,
       reason as any,
     ).catch(() => {});
+
+    // Track SL hits for market-wide cooldown
+    if (reason === "STOP_LOSS") {
+      await this.trackSlHitAndMaybeCooldown();
+    }
+
+    // Record result for GPT context
+    await this.aiOptimizerService.recordTradeResult({
+      symbol: signal.symbol,
+      direction: signal.direction,
+      strategy: signal.strategy || "",
+      pnlPercent: pnl,
+      closeReason: reason,
+    }).catch(() => {});
 
     // Set cooldown to prevent ping-pong recreation (30 min)
     await this.redisService.set(

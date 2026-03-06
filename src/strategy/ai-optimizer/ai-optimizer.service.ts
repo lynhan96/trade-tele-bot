@@ -2,7 +2,6 @@ import { Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { InjectModel } from "@nestjs/mongoose";
 import { Model } from "mongoose";
-import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
 import { RedisService } from "../../redis/redis.service";
 import { IndicatorService } from "../indicators/indicator.service";
@@ -16,29 +15,21 @@ import {
 } from "../../schemas/ai-market-config.schema";
 import { AiTunedParams } from "./ai-tuned-params.interface";
 
-const HAIKU_MODEL = "claude-haiku-4-5-20251001";
-
-const AI_PARAMS_TTL = 4 * 60 * 60; // 4h cache for tuned params (saves ~50% API calls)
-const AI_PARAMS_JITTER = 45 * 60; // ±22.5 min random offset to stagger expiry
-const AI_REGIME_TTL = 30 * 60; // 30min cache — react faster to market changes
-const HAIKU_RATE_KEY = "cache:ai:rate:haiku"; // single rate limiter (only tuning uses AI now)
+const AI_PARAMS_TTL = 2 * 60 * 60; // 2h cache — re-tune more often for better accuracy
+const AI_PARAMS_JITTER = 30 * 60; // ±15 min random offset to stagger expiry
+const AI_REGIME_TTL = 10 * 60; // 10min cache — react fast to market crashes
 const AI_MARKET_FILTERS_KEY = "cache:ai:market-filters"; // AI-decided coin filter settings
 const AI_MARKET_FILTERS_TTL = 8 * 60 * 60; // 8h — re-evaluated on regime change
-const HAIKU_SCAN_BURST_KEY = "cache:ai:rate:haiku:burst"; // per-scan burst limiter
-const MAX_RETUNES_PER_SCAN = 10; // up to 10 Haiku calls per 30s scan (covers 100-coin shortlist faster)
-const SCAN_BURST_TTL = 35; // slightly longer than 30s scan interval
 const RATE_WINDOW = 60 * 60; // 1h window
 
 const GPT_MODEL = "gpt-4o-mini";
-const GPT_RATE_KEY = "cache:ai:rate:gpt"; // hourly budget for GPT fallback
+const GPT_RATE_KEY = "cache:ai:rate:gpt"; // hourly budget for GPT
+const RECENT_PERF_KEY = "cache:ai:recent-perf"; // recent SL/TP stats for GPT context
 
 @Injectable()
 export class AiOptimizerService {
   private readonly logger = new Logger(AiOptimizerService.name);
-  private anthropic: Anthropic;
   private openai: OpenAI | null = null;
-  private readonly enabled: boolean;
-  private readonly maxHaikuPerHour: number;
   private readonly maxGptPerHour: number;
 
   constructor(
@@ -50,28 +41,14 @@ export class AiOptimizerService {
     @InjectModel(AiMarketConfig.name)
     private readonly marketConfigModel: Model<AiMarketConfigDocument>,
   ) {
-    this.enabled = configService.get("AI_ENABLED", "true") === "true";
-    this.maxHaikuPerHour = parseInt(
-      configService.get("AI_MAX_HAIKU_PER_HOUR", "60"),
-    );
     this.maxGptPerHour = parseInt(configService.get("AI_MAX_GPT_PER_HOUR", "200"));
-
-    if (this.enabled) {
-      const apiKey = configService.get<string>("ANTHROPIC_API_KEY");
-      if (apiKey) {
-        this.anthropic = new Anthropic({ apiKey });
-      } else {
-        this.logger.warn(
-          "[AiOptimizer] ANTHROPIC_API_KEY not set, using fallback params",
-        );
-        this.enabled = false;
-      }
-    }
 
     const openaiKey = configService.get<string>("OPENAI_API_KEY");
     if (openaiKey) {
       this.openai = new OpenAI({ apiKey: openaiKey });
-      this.logger.log("[AiOptimizer] GPT-4o-mini fallback enabled");
+      this.logger.log("[AiOptimizer] GPT-4o-mini AI tuning enabled");
+    } else {
+      this.logger.warn("[AiOptimizer] OPENAI_API_KEY not set, using static defaults");
     }
   }
 
@@ -122,11 +99,23 @@ export class AiOptimizerService {
       let regime = "MIXED";
       let confidence = 50;
 
-      // CRASH DETECTION: RSI low + price below EMA9 → immediate STRONG_BEAR
-      // Catches dumps even if price hasn't crossed EMA200 yet (e.g. BTC RSI=31, down from EMA9)
+      // CRASH DETECTION (multi-level):
+      // Level 1: RSI < 35 on 15m + below EMA9 → strong dump signal
+      // Level 2: RSI < 45 on 15m + RSI < 45 on 4h + below EMA9 → both timeframes bearish
+      // Level 3: RSI < 40 on 15m + price dropping away from EMA9 → moderate dump
       if (rsi < 35 && priceVsEma9 < -0.5) {
         regime = "STRONG_BEAR";
         confidence = Math.min(90, 50 + (50 - rsi));
+      }
+      else if (rsi < 45 && rsi4h < 45 && priceVsEma9 < -0.3) {
+        // Both 15m AND 4h RSI bearish = confirmed downtrend, not just noise
+        regime = "STRONG_BEAR";
+        confidence = Math.min(85, 40 + (50 - rsi) + (50 - rsi4h) / 2);
+      }
+      else if (rsi < 40 && priceVsEma9 < -1.0) {
+        // Price significantly below EMA9 — dump in progress
+        regime = "STRONG_BEAR";
+        confidence = Math.min(80, 45 + (50 - rsi));
       }
       // VOLATILE: high ATR + wide BB — market is whipping around
       else if (atr15m > 1.5 && bbWidth > 5) {
@@ -166,7 +155,7 @@ export class AiOptimizerService {
         rsi, rsi4h, priceVsEma9, priceVsEma200, atr15m, bbWidth,
       }, AI_REGIME_TTL);
 
-      // If regime changed → flush all coin param caches so Haiku re-evaluates with new strategy
+      // If regime changed → flush all coin param caches so GPT re-evaluates with new strategy
       const prevRegime = await this.redisService.get<string>(prevRegimeKey);
       if (prevRegime && prevRegime !== regime) {
         this.logger.log(
@@ -211,7 +200,7 @@ export class AiOptimizerService {
     regime: string,
     indicators: { rsi15m: number; atr15m: number; bbWidth: number },
   ): Promise<void> {
-    if (!this.enabled) return;
+    if (!this.openai) return;
 
     // 1. Fetch last 5 decisions as conversation history
     const history = await this.marketConfigModel
@@ -235,7 +224,7 @@ export class AiOptimizerService {
             .join("\n")
         : "No previous decisions.";
 
-    // 3. Call Haiku
+    // 3. Call GPT
     const prompt = `You decide optimal crypto coin filter settings for trading signals.
 
 Current market: regime=${regime}, BTC RSI(15m)=${indicators.rsi15m.toFixed(1)}, ATR(15m)=${indicators.atr15m.toFixed(2)}%, BB Width=${indicators.bbWidth.toFixed(2)}%
@@ -257,46 +246,16 @@ Guidelines:
 Reply ONLY with valid JSON (no markdown):
 {"minVolumeUsd":10000000,"minPriceChangePct":0.3,"maxShortlistSize":50,"reasoning":"brief reason"}`;
 
-    let text: string;
-    let model: string;
-    let tokensIn = 0;
-    let tokensOut = 0;
-
-    // Try GPT first, fall back to Haiku
-    if (this.openai) {
-      try {
-        const resp = await this.openai.chat.completions.create({
-          model: GPT_MODEL,
-          max_tokens: 200,
-          messages: [{ role: "user", content: prompt }],
-        });
-        text = resp.choices[0]?.message?.content?.trim() || "";
-        model = GPT_MODEL;
-        tokensIn = resp.usage?.prompt_tokens || 0;
-        tokensOut = resp.usage?.completion_tokens || 0;
-      } catch (gptErr) {
-        this.logger.warn(`[AiOptimizer] GPT filter tuning failed: ${gptErr?.message}, trying Haiku`);
-        const resp = await this.anthropic.messages.create({
-          model: HAIKU_MODEL,
-          max_tokens: 200,
-          messages: [{ role: "user", content: prompt }],
-        });
-        text = ((resp.content[0] as any).text || "").trim();
-        model = HAIKU_MODEL;
-        tokensIn = resp.usage.input_tokens;
-        tokensOut = resp.usage.output_tokens;
-      }
-    } else {
-      const resp = await this.anthropic.messages.create({
-        model: HAIKU_MODEL,
-        max_tokens: 200,
-        messages: [{ role: "user", content: prompt }],
-      });
-      text = ((resp.content[0] as any).text || "").trim();
-      model = HAIKU_MODEL;
-      tokensIn = resp.usage.input_tokens;
-      tokensOut = resp.usage.output_tokens;
-    }
+    const resp = await this.openai.chat.completions.create({
+      model: GPT_MODEL,
+      max_tokens: 200,
+      messages: [{ role: "user", content: prompt }],
+      response_format: { type: "json_object" },
+    });
+    const text = resp.choices[0]?.message?.content?.trim() || "";
+    const model = GPT_MODEL;
+    const tokensIn = resp.usage?.prompt_tokens || 0;
+    const tokensOut = resp.usage?.completion_tokens || 0;
 
     const jsonMatch = text.match(/\{[\s\S]*\}/);
     if (!jsonMatch) throw new Error("No JSON in filter response");
@@ -352,18 +311,31 @@ Reply ONLY with valid JSON (no markdown):
     const cached = await this.redisService.get<AiTunedParams>(cacheKey);
     if (cached) return cached;
 
-    // Pre-compute indicators once — shared across all AI models in the waterfall
-    const indicators = this.enabled ? await this.preComputeIndicators(coin) : {};
+    // Pre-compute indicators once
+    const indicators = this.openai ? await this.preComputeIndicators(coin) : {};
 
-    // Algorithmic strategy selection — gives per-coin diversity based on indicators
+    // Compute ATR-adjusted SL floor — AI SL must not be lower than this
+    const atrDefaults = await this.getAtrAdjustedDefaults(coin, globalRegime);
+    const slFloor = atrDefaults.stopLossPercent;
+
+    // Algorithmic strategy as fallback (only used when AI doesn't return strategy)
     const algoStrategy = Object.keys(indicators).length > 0
       ? this.selectStrategiesForCoin(globalRegime, indicators)
       : null;
 
-    // Helper: apply profile override, cache result, save history, log
+    // Helper: enforce SL floor, apply profile override, cache result, save history, log
     const saveAndReturn = async (params: AiTunedParams, model: string, tag = ""): Promise<AiTunedParams> => {
-      // Override GPT's strategy with algorithmic selection (GPT only tunes SL/TP/confidence)
-      if (algoStrategy) params.strategy = algoStrategy;
+      // Only use algorithmic strategy as fallback if AI didn't provide one
+      if (!params.strategy && algoStrategy) params.strategy = algoStrategy;
+      // Enforce SL floor: AI SL must not be lower than ATR-adjusted default
+      if (params.stopLossPercent < slFloor) {
+        this.logger.log(`[AiOptimizer] ${symbol}: AI SL ${params.stopLossPercent}% < floor ${slFloor}%, using floor`);
+        params.stopLossPercent = slFloor;
+        // Adjust TP proportionally if it's now below 2x SL
+        if (params.takeProfitPercent < slFloor * 2) {
+          params.takeProfitPercent = parseFloat((slFloor * 2).toFixed(1));
+        }
+      }
       if (forceProfile) params = this.applyForcedProfile(params, forceProfile);
       const jitter = Math.floor(Math.random() * AI_PARAMS_JITTER);
       await this.redisService.set(cacheKey, params, AI_PARAMS_TTL + jitter);
@@ -372,34 +344,20 @@ Reply ONLY with valid JSON (no markdown):
       return params;
     };
 
-    // ── 1. GPT-4o-mini (primary — cheapest, $0.15/MTok input) ──────────────
+    // ── 1. GPT-4o-mini (primary AI tuner) ──────────────────────────────────
     if (this.openai && (await this.checkRateLimit(GPT_RATE_KEY, this.maxGptPerHour))) {
       try {
         const params = await this.callGpt(symbol, globalRegime, indicators);
         await this.incrementRateLimit(GPT_RATE_KEY);
-        return saveAndReturn(params, GPT_MODEL, " (GPT)");
+        return saveAndReturn(params, GPT_MODEL);
       } catch (err) {
         this.logger.warn(`[AiOptimizer] GPT call failed for ${symbol}: ${err?.message}`);
       }
     }
 
-    // ── 2. Haiku (backup — better strategy diversity, used when GPT rate-limited) ─
-    if (this.enabled) {
-      const haikuBurst = (await this.redisService.get<number>(HAIKU_SCAN_BURST_KEY)) || 0;
-      if (haikuBurst < MAX_RETUNES_PER_SCAN && (await this.checkRateLimit(HAIKU_RATE_KEY, this.maxHaikuPerHour))) {
-        try {
-          const params = await this.callHaiku(symbol, globalRegime, indicators);
-          await this.incrementRateLimit(HAIKU_RATE_KEY);
-          await this.redisService.set(HAIKU_SCAN_BURST_KEY, haikuBurst + 1, SCAN_BURST_TTL);
-          return saveAndReturn(params, HAIKU_MODEL, " (Haiku)");
-        } catch (err) {
-          this.logger.warn(`[AiOptimizer] Haiku fallback failed for ${symbol}: ${err?.message}`);
-        }
-      }
-    }
-
-    // ── 4. Static ATR-adjusted defaults (still cache so /ai market works) ──
-    let defaults = await this.getAtrAdjustedDefaults(coin, globalRegime);
+    // ── 2. Static ATR-adjusted defaults (when GPT unavailable/rate-limited) ──
+    // When no AI available, fall back to algorithmic strategy selection
+    let defaults = atrDefaults;
     if (algoStrategy) defaults.strategy = algoStrategy;
     if (forceProfile) defaults = this.applyForcedProfile(defaults, forceProfile);
     const jitter = Math.floor(Math.random() * AI_PARAMS_JITTER);
@@ -410,7 +368,7 @@ Reply ONLY with valid JSON (no markdown):
 
   /**
    * Override timeframe settings for a forced profile (INTRADAY or SWING).
-   * No extra Haiku call — reuses base params and only adjusts kline settings.
+   * Reuses base params and only adjusts kline settings.
    */
   private applyForcedProfile(params: AiTunedParams, profile: string): AiTunedParams {
     const result = { ...params };
@@ -608,28 +566,28 @@ Reply ONLY with valid JSON (no markdown):
 
     const strategies: string[] = [];
 
-    // ── RSI_CROSS is the best performer (80% win, +2.2% avg) — prioritize it ──
-    strategies.push("RSI_CROSS");
-
-    // ── EMA_PULLBACK only for trending + very close to EMA21 (tighter filter) ──
-    // Tightened from 5% to 2% — reduces false pullback signals on volatile small-caps
-    if (isTrend && Math.abs(priceVsEma21_4h) < 2) {
-      strategies.push("EMA_PULLBACK");
-    }
-
-    // ── RSI not neutral → mean reversion candidate ──────────────────
-    if (rsi < 40 || rsi > 60) {
-      strategies.push("MEAN_REVERT_RSI");
-    }
-
-    // ── Tight Bollinger Bands → scalp range bounces ────────────────────
+    // ── BB_SCALP is the best performer (SHORT: +30.87%, 0 SL) — prioritize in range ──
     if (bbWidth < 3 && (isSideways || isRange)) {
       strategies.push("BB_SCALP");
+    }
+
+    // ── RSI_CROSS is a solid all-rounder — always include ──
+    strategies.push("RSI_CROSS");
+
+    // ── EMA_PULLBACK for trending + close to EMA21 ──
+    if (isTrend && Math.abs(priceVsEma21_4h) < 2) {
+      strategies.push("EMA_PULLBACK");
     }
 
     // ── Trending with clear momentum → trend following ─────────────────
     if (isTrend && Math.abs(priceVsEma9) < 3) {
       strategies.push("TREND_EMA");
+    }
+
+    // ── MEAN_REVERT_RSI only in RANGE_BOUND/SIDEWAYS (blocked in MIXED/BEAR/VOLATILE by rule engine)
+    // Deprioritized: 22 trades, 1 win, -21.54% PnL
+    if ((isRange || isSideways) && (rsi < 35 || rsi > 65)) {
+      strategies.push("MEAN_REVERT_RSI");
     }
 
     // ── Volatile with RSI at extremes → zone trading ───────────────────
@@ -646,57 +604,51 @@ Reply ONLY with valid JSON (no markdown):
     return strategies.slice(0, 3).join("|");
   }
 
-  private buildTuningPrompt(
+  private async buildTuningPrompt(
     symbol: string,
     globalRegime: string,
     indicators: Record<string, any>,
-  ): string {
-    // Strategy is now selected algorithmically — GPT only tunes risk params
-    const strategy = this.selectStrategiesForCoin(globalRegime, indicators);
+  ): Promise<string> {
     const atr = parseFloat(indicators.atrPct_15m) || 1;
     const rsi = parseFloat(indicators.rsi14_15m) || 50;
     const rsi4h = indicators.rsi14_4h !== "N/A" ? parseFloat(indicators.rsi14_4h) : 50;
     const bbWidth = parseFloat(indicators.bbWidthPct) || 3;
     const priceVsEma200 = indicators.priceVsEma200_pct !== "N/A" ? indicators.priceVsEma200_pct : "N/A";
+    const priceVsEma9 = indicators.priceVsEma9_pct || "0";
+    const priceVsEma21_4h = indicators.priceVsEma21_4h_pct !== "N/A" ? indicators.priceVsEma21_4h_pct : "N/A";
+    const perfContext = await this.getRecentPerfContext();
 
-    return `Risk param optimizer for ${symbol}. Regime: ${globalRegime}. Strategy: ${strategy}.
-Key data: RSI(15m)=${rsi.toFixed(1)}, RSI(4h)=${rsi4h.toFixed(1)}, ATR(15m)=${atr.toFixed(2)}%, BBWidth=${bbWidth.toFixed(2)}%, priceVsEMA200=${priceVsEma200}%.
+    return `Trading signal optimizer for ${symbol}. Regime: ${globalRegime}.
+Key data: RSI(15m)=${rsi.toFixed(1)}, RSI(4h)=${rsi4h.toFixed(1)}, ATR(15m)=${atr.toFixed(2)}%, BBWidth=${bbWidth.toFixed(2)}%, priceVsEMA9=${priceVsEma9}%, priceVsEMA200=${priceVsEma200}%, priceVsEMA21_4h=${priceVsEma21_4h}%.${perfContext}
 
-Set SL/TP based on this coin's volatility (ATR). MINIMUM SL is 3%:
+CRITICAL PERFORMANCE DATA (last 14 days):
+- SHORT signals: +31.42% PnL, 86% admin-closed in profit, only 5 SL
+- LONG signals: -35.69% PnL, 1 TP out of 40 trades, 22 SL hits
+- STRONG BIAS: prefer SHORT signals unless regime is STRONG_BULL
+
+STEP 1 — Choose 1-3 strategies (pipe-delimited). Ranked by real performance:
+- BB_SCALP: BEST performer. SHORT: +30.87%, 0 SL. Use in SIDEWAYS/RANGE_BOUND (BBWidth<3%).
+- EMA_PULLBACK: SHORT in STRONG_BEAR: +2.44%. Only when trending AND price near EMA21 (within 2%).
+- RSI_CROSS: Solid all-rounder. Always include as fallback.
+- TREND_EMA: Trending regime with price near EMA9 (within 3%).
+- RSI_ZONE: Volatile regime with RSI at extremes (<30 or >70).
+- MEAN_REVERT_RSI: WORST performer (-21.54% PnL, 1 win / 22 trades). ONLY use in RANGE_BOUND/SIDEWAYS with RSI <35 or >65. NEVER in MIXED/BEAR/VOLATILE.
+- STOCH_BB_PATTERN: Range-bound regime with BBWidth <4%.
+
+STEP 2 — Set SL/TP based on volatility (ATR). MINIMUM SL is 3%:
 - Low ATR (<1%): SL 3.0%, TP 2-3x SL
 - Medium ATR (1-2%): SL 3.0-4.0%, TP 2-3x SL
 - High ATR (>2%): SL 4.0-6.0%, TP 2-4x SL
-- The strategy "${strategy}" is pre-selected. Return it as-is.
 
-Set confidence based on alignment:
-- RSI + regime aligned (e.g. RSI>50 in STRONG_BULL): higher confidence 70-85
-- RSI neutral (40-60): moderate 55-70
-- RSI against regime (e.g. RSI<40 in STRONG_BULL): lower 40-55
+STEP 3 — Set confidence. LONGs need higher confidence than SHORTs:
+- SHORT + regime aligned: confidence 65-85
+- SHORT + neutral: confidence 55-70
+- LONG + STRONG_BULL: confidence 60-80
+- LONG + other regime: confidence 40-55 (will likely get blocked by LONG penalty)
+- If recent trades show many SL hits: raise minConfidenceToTrade to 55-65
 
 Reply ONLY JSON:
-{"regime":"${globalRegime}","strategy":"${strategy}","confidence":40-85,"stopLossPercent":3.0-8.0,"takeProfitPercent":6.0-18.0,"minConfidenceToTrade":40}`;
-  }
-
-  private async callAnthropic(
-    model: string,
-    symbol: string,
-    globalRegime: string,
-    indicators: Record<string, any>,
-  ): Promise<AiTunedParams> {
-    const prompt = this.buildTuningPrompt(symbol, globalRegime, indicators);
-    const response = await this.anthropic.messages.create({
-      model,
-      max_tokens: 400,
-      messages: [{ role: "user", content: prompt }],
-    });
-    const text = (response.content[0] as any).text;
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error(`No JSON in ${model} response`);
-    return this.mergeWithDefaults(JSON.parse(jsonMatch[0]));
-  }
-
-  private callHaiku(symbol: string, globalRegime: string, indicators: Record<string, any>) {
-    return this.callAnthropic(HAIKU_MODEL, symbol, globalRegime, indicators);
+{"regime":"${globalRegime}","strategy":"RSI_CROSS|...","confidence":40-85,"stopLossPercent":3.0-8.0,"takeProfitPercent":6.0-18.0,"minConfidenceToTrade":40}`;
   }
 
   private async callGpt(
@@ -704,7 +656,7 @@ Reply ONLY JSON:
     globalRegime: string,
     indicators: Record<string, any>,
   ): Promise<AiTunedParams> {
-    const prompt = this.buildTuningPrompt(symbol, globalRegime, indicators);
+    const prompt = await this.buildTuningPrompt(symbol, globalRegime, indicators);
 
     const response = await this.openai!.chat.completions.create({
       model: GPT_MODEL,
@@ -728,8 +680,9 @@ Reply ONLY JSON:
     return {
       timeframeProfile: "INTRADAY",
       regime: regime as any,
-      // Multi-strategy pipes: primary|fallback1|fallback2 — ensures signals when primary misses
-      strategy: isTrend ? "TREND_EMA|EMA_PULLBACK|RSI_CROSS" : isSideways ? "RSI_CROSS|BB_SCALP" : "RSI_CROSS|MEAN_REVERT_RSI",
+      // Multi-strategy pipes: primary|fallback1|fallback2
+      // MEAN_REVERT_RSI removed from defaults (1 win / 22 trades = -21.54% PnL)
+      strategy: isTrend ? "EMA_PULLBACK|TREND_EMA|RSI_CROSS" : isSideways ? "BB_SCALP|RSI_CROSS" : "RSI_CROSS|BB_SCALP",
       confidence: isSideways ? 45 : isTrend ? 60 : 55,
       stopLossPercent: isSideways ? 3.0 : isTrend ? 3.5 : 3.0,
       takeProfitPercent: isSideways ? 3.0 : isTrend ? 5.0 : 4.0,
@@ -898,6 +851,46 @@ Reply ONLY JSON:
     }
 
     return result;
+  }
+
+  // ─── Recent performance tracking (for GPT context) ─────────────────────
+
+  /**
+   * Called by AiSignalService when a trade closes.
+   * Stores recent results in Redis so GPT can factor in recent performance.
+   */
+  async recordTradeResult(result: {
+    symbol: string;
+    direction: string;
+    strategy: string;
+    pnlPercent: number;
+    closeReason: string;
+  }): Promise<void> {
+    const perf = (await this.redisService.get<any[]>(RECENT_PERF_KEY)) || [];
+    perf.push({
+      ...result,
+      time: new Date().toISOString().slice(11, 16),
+    });
+    // Keep last 20 results, 4h TTL
+    const trimmed = perf.slice(-20);
+    await this.redisService.set(RECENT_PERF_KEY, trimmed, 4 * 60 * 60);
+  }
+
+  private async getRecentPerfContext(): Promise<string> {
+    const perf = (await this.redisService.get<any[]>(RECENT_PERF_KEY)) || [];
+    if (perf.length === 0) return "";
+
+    const wins = perf.filter((p) => p.pnlPercent > 0).length;
+    const losses = perf.length - wins;
+    const longLosses = perf.filter((p) => p.direction === "LONG" && p.pnlPercent <= 0).length;
+    const shortLosses = perf.filter((p) => p.direction === "SHORT" && p.pnlPercent <= 0).length;
+    const recentSLs = perf.slice(-5).filter((p) => p.closeReason === "STOP_LOSS").length;
+
+    let context = `\nRecent performance (last ${perf.length} trades): ${wins}W/${losses}L.`;
+    if (longLosses > losses / 2) context += ` LONGs losing heavily (${longLosses} losses).`;
+    if (shortLosses > losses / 2) context += ` SHORTs losing heavily (${shortLosses} losses).`;
+    if (recentSLs >= 3) context += ` WARNING: ${recentSLs}/5 recent trades hit SL — market unstable, use higher confidence threshold and wider SL.`;
+    return context;
   }
 
   // ─── Risk advice for signal notifications (algorithmic, no AI call) ─────
