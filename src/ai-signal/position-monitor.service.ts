@@ -220,8 +220,8 @@ export class PositionMonitorService implements OnModuleInit {
       this.userRealTradingService.moveStopLossForRealUsers(symbol, newSl, direction).catch(() => {});
     }
 
-    // Move SL to entry (break-even) at >= 4% profit (skipped if 5% milestone already triggered)
-    if (pnlPct >= 4 && !(signal as any).slMovedToEntry) {
+    // Move SL to entry (break-even) at >= 3% profit (skipped if 5% milestone already triggered)
+    if (pnlPct >= 3 && !(signal as any).slMovedToEntry) {
       (signal as any).stopLossPrice = entryPrice;
       (signal as any).slMovedToEntry = true;
       await this.signalQueueService.moveStopLossToEntry((signal as any)._id.toString());
