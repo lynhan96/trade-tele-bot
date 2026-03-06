@@ -71,7 +71,8 @@ export class AiCommandService implements OnModuleInit {
         `/ai close — Dong lenh\n\n` +
         `*He thong:*\n` +
         `/ai signals — Tin hieu AI dang chay\n` +
-        `/ai rank — Xep hang PnL\n`;
+        `/ai rank — Xep hang PnL\n` +
+        `/ai daily history — Lich su TP/SL hang ngay\n`;
       await this.telegramService.sendTelegramMessage(chatId, text);
     });
 
@@ -1423,6 +1424,46 @@ export class AiCommandService implements OnModuleInit {
             ? new Date(t.closedAt).toLocaleDateString("vi-VN", { day: "2-digit", month: "2-digit", timeZone: "Asia/Ho_Chi_Minh" })
             : "";
           text += `${icon} *${t.symbol}* ${sign(t.pnlUsdt)}${t.pnlUsdt.toFixed(2)} USDT (${reasonVi})${dateStr ? ` · ${dateStr}` : ""}\n`;
+        }
+
+        text += `\n━━━━━━━━━━━━━━━━━━\n_${new Date().toLocaleTimeString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" })}_`;
+        await this.telegramService.sendTelegramMessage(chatId, text);
+      } catch (err) {
+        await this.telegramService.sendTelegramMessage(chatId, `❌ Loi: ${err?.message}`);
+      }
+    });
+
+    // /ai daily_history — view daily TP/SL limit hit history
+    this.telegramService.registerBotCommand(/^\/ai[_ ]daily[_ ]history$/i, async (msg) => {
+      const chatId = msg.chat.id;
+      const telegramId = msg.from?.id;
+      if (!telegramId) return;
+
+      try {
+        const isAdmin = this.adminIds.includes(telegramId);
+        const records = isAdmin
+          ? await this.userRealTradingService.getAllDailyLimitHistory(30)
+          : await this.userRealTradingService.getDailyLimitHistory(telegramId, 20);
+
+        if (records.length === 0) {
+          await this.telegramService.sendTelegramMessage(chatId,
+            `📊 *Daily Limit History*\n━━━━━━━━━━━━━━━━━━\n\n_Chua co su kien nao._`);
+          return;
+        }
+
+        const sign = (v: number) => v >= 0 ? "+" : "";
+        const title = isAdmin ? "Daily Limit History (All Users)" : "Daily Limit History";
+        let text = `📊 *${title}*\n━━━━━━━━━━━━━━━━━━\n\n`;
+
+        for (const r of records) {
+          const icon = r.type === "DAILY_TARGET" ? "🎯" : "🛑";
+          const typeVi = r.type === "DAILY_TARGET" ? "TP" : "SL";
+          const dateStr = new Date(r.triggeredAt).toLocaleString("vi-VN", {
+            day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit",
+            timeZone: "Asia/Ho_Chi_Minh",
+          });
+          const userTag = isAdmin ? ` · @${r.username ?? r.telegramId}` : "";
+          text += `${icon} *${typeVi}* ${sign(r.pnlUsdt)}${r.pnlUsdt.toFixed(2)} USDT (${sign(r.pnlPct)}${r.pnlPct.toFixed(2)}%) · Limit: ${r.type === "DAILY_TARGET" ? "+" : "-"}${r.limitPct}% · Dong: ${r.positionsClosed} lenh · ${dateStr}${userTag}\n`;
         }
 
         text += `\n━━━━━━━━━━━━━━━━━━\n_${new Date().toLocaleTimeString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" })}_`;

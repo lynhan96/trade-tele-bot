@@ -9,6 +9,7 @@ import { UserSettingsService } from "../user/user-settings.service";
 import { MarketDataService } from "../market-data/market-data.service";
 import { SubscriberInfo, UserSignalSubscriptionService } from "./user-signal-subscription.service";
 import { UserTrade, UserTradeDocument } from "../schemas/user-trade.schema";
+import { DailyLimitHistory, DailyLimitHistoryDocument } from "../schemas/daily-limit-history.schema";
 import { AiSignalDocument } from "../schemas/ai-signal.schema";
 import { AiTunedParams } from "../strategy/ai-optimizer/ai-tuned-params.interface";
 import { getProxyAgent } from "../utils/proxy";
@@ -45,6 +46,8 @@ export class UserRealTradingService implements OnModuleInit {
     private readonly marketDataService: MarketDataService,
     @InjectModel(UserTrade.name)
     private readonly userTradeModel: Model<UserTradeDocument>,
+    @InjectModel(DailyLimitHistory.name)
+    private readonly dailyLimitHistoryModel: Model<DailyLimitHistoryDocument>,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -538,9 +541,11 @@ export class UserRealTradingService implements OnModuleInit {
 
   /**
    * Compute today's trading stats for a user.
-   * Returns open trades with unrealized PnL and closed trades since start of UTC day.
+   * @param sinceDate — if provided, only count closed trades after this date (for TP cycle reset).
+   *                     If null, counts all closed trades since start of UTC day.
+   * Returns open trades with unrealized PnL and closed trades since start of day (or sinceDate).
    */
-  async getDailyStats(telegramId: number): Promise<{
+  async getDailyStats(telegramId: number, sinceDate?: Date): Promise<{
     openTrades: Array<{
       symbol: string; direction: string; entryPrice: number;
       quantity: number; leverage: number; notionalUsdt: number;
@@ -558,11 +563,14 @@ export class UserRealTradingService implements OnModuleInit {
     const startOfToday = new Date();
     startOfToday.setUTCHours(0, 0, 0, 0);
 
+    // For PnL limit checks: use sinceDate (last TP hit) if it's today, otherwise start of day
+    const pnlSince = sinceDate && sinceDate > startOfToday ? sinceDate : startOfToday;
+
     const [openDocs, closedDocs, allTimeAgg] = await Promise.all([
       this.userTradeModel.find({ telegramId, status: "OPEN" }).lean(),
       this.userTradeModel.find({
         telegramId, status: "CLOSED",
-        closedAt: { $gte: startOfToday },
+        closedAt: { $gte: pnlSince },
       }).lean(),
       this.userTradeModel.aggregate([
         { $match: { telegramId, status: "CLOSED" } },
@@ -767,10 +775,10 @@ export class UserRealTradingService implements OnModuleInit {
   // ─── Daily P&L limit crons ────────────────────────────────────────────────
 
   /**
-   * Every 5 minutes: check daily P&L limits for real-mode users.
+   * Every 1 minute: check daily P&L limits for real-mode users.
    * If a user's daily profit target or stop loss is hit → close all + disable real mode.
    */
-  @Cron("0 */5 * * * *")
+  @Cron("0 */1 * * * *")
   async checkDailyLimits(): Promise<void> {
     try {
       const users = await this.subscriptionService.findRealModeSubscribersWithDailyLimits();
@@ -778,7 +786,7 @@ export class UserRealTradingService implements OnModuleInit {
 
       for (const user of users) {
         try {
-          const stats = await this.getDailyStats(user.telegramId);
+          const stats = await this.getDailyStats(user.telegramId, user.realModeDailyTpHitAt);
           if (stats.totalNotionalUsdt === 0) continue; // no trades today
 
           const pnlPct = stats.dailyPnlPct;
@@ -793,10 +801,27 @@ export class UserRealTradingService implements OnModuleInit {
           // Close all open positions
           const closedCount = await this.closeAllRealPositions(user.telegramId, user.chatId, reason);
 
+          // Save history record
+          await this.dailyLimitHistoryModel.create({
+            telegramId: user.telegramId,
+            username: user.username,
+            type: reason,
+            pnlUsdt: stats.totalPnlUsdt,
+            pnlPct,
+            limitPct: targetHit ? user.realModeDailyTargetPct : user.realModeDailyStopLossPct,
+            positionsClosed: closedCount,
+            triggeredAt: new Date(),
+          });
+
           // Only disable real mode for stop loss — target hit just closes positions
           if (slHit) {
             await this.subscriptionService.setRealMode(user.telegramId, false);
             await this.subscriptionService.setRealModeDailyDisabled(user.telegramId, new Date());
+          } else if (targetHit) {
+            // Mark TP hit time — next PnL cycle starts from this point (loop forever)
+            // Add 1s buffer so trades closed at this moment are excluded from next cycle
+            const tpHitAt = new Date(Date.now() + 1000);
+            await this.subscriptionService.setRealModeDailyTpHitAt(user.telegramId, tpHitAt);
           }
 
           const emoji = targetHit ? "🎯" : "🛑";
@@ -839,6 +864,7 @@ export class UserRealTradingService implements OnModuleInit {
         try {
           await this.subscriptionService.setRealMode(user.telegramId, true);
           await this.subscriptionService.setRealModeDailyDisabled(user.telegramId, null);
+          await this.subscriptionService.setRealModeDailyTpHitAt(user.telegramId, null);
 
           const targetLine = user.realModeDailyTargetPct != null
             ? `Muc tieu: *+${user.realModeDailyTargetPct}%*\n` : ``;
@@ -861,6 +887,28 @@ export class UserRealTradingService implements OnModuleInit {
     } catch (err) {
       this.logger.error(`[RealTrading] resetDailyLimits outer error: ${err?.message}`);
     }
+  }
+
+  /**
+   * Get daily limit history for a user (last N events).
+   */
+  async getDailyLimitHistory(telegramId: number, limit = 20): Promise<any[]> {
+    return this.dailyLimitHistoryModel
+      .find({ telegramId })
+      .sort({ triggeredAt: -1 })
+      .limit(limit)
+      .lean();
+  }
+
+  /**
+   * Get daily limit history for all users (admin view, last N events).
+   */
+  async getAllDailyLimitHistory(limit = 50): Promise<any[]> {
+    return this.dailyLimitHistoryModel
+      .find()
+      .sort({ triggeredAt: -1 })
+      .limit(limit)
+      .lean();
   }
 
   /**

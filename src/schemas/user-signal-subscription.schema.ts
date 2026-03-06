@@ -64,6 +64,9 @@ export class UserSignalSubscription {
   @Prop()
   realModeDailyDisabledAt?: Date; // set when auto-disabled by daily limit; cleared on next-day reset
 
+  @Prop()
+  realModeDailyTpHitAt?: Date; // set when daily TP target hit; trades after this start a new PnL cycle
+
   @Prop({ default: 3 })
   maxOpenPositions?: number; // max concurrent real positions per user (default: 3)
 

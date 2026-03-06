@@ -23,6 +23,7 @@ export interface SubscriberInfo {
   realModeDailyTargetPct?: number;      // close all + disable when daily PnL reaches this % (e.g. 5 = +5%)
   realModeDailyStopLossPct?: number;    // close all + disable when daily PnL drops to this % (e.g. 3 = -3%)
   realModeDailyDisabledAt?: Date;       // set when auto-disabled by daily limit
+  realModeDailyTpHitAt?: Date;          // set when daily TP hit; PnL resets from this point
 }
 
 @Injectable()
@@ -130,6 +131,7 @@ export class UserSignalSubscriptionService {
       realModeDailyTargetPct: d.realModeDailyTargetPct,
       realModeDailyStopLossPct: d.realModeDailyStopLossPct,
       realModeDailyDisabledAt: d.realModeDailyDisabledAt,
+      realModeDailyTpHitAt: d.realModeDailyTpHitAt,
     }));
   }
 
@@ -380,6 +382,25 @@ export class UserSignalSubscriptionService {
       await this.subscriptionModel.findOneAndUpdate(
         { telegramId },
         { $set: { realModeDailyDisabledAt: date } },
+      );
+    }
+  }
+
+  /**
+   * Set or clear the daily TP hit timestamp.
+   * When set, getDailyStats only counts trades AFTER this time for PnL calculation.
+   * This allows the "loop forever" behavior — after hitting TP, PnL resets for next cycle.
+   */
+  async setRealModeDailyTpHitAt(telegramId: number, date: Date | null): Promise<void> {
+    if (date == null) {
+      await this.subscriptionModel.findOneAndUpdate(
+        { telegramId },
+        { $unset: { realModeDailyTpHitAt: 1 } },
+      );
+    } else {
+      await this.subscriptionModel.findOneAndUpdate(
+        { telegramId },
+        { $set: { realModeDailyTpHitAt: date } },
       );
     }
   }

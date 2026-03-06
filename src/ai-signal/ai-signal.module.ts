@@ -35,6 +35,10 @@ import {
   DailyMarketSnapshotSchema,
 } from "../schemas/daily-market-snapshot.schema";
 import { UserTrade, UserTradeSchema } from "../schemas/user-trade.schema";
+import {
+  DailyLimitHistory,
+  DailyLimitHistorySchema,
+} from "../schemas/daily-limit-history.schema";
 
 @Module({
   imports: [
@@ -58,6 +62,7 @@ import { UserTrade, UserTradeSchema } from "../schemas/user-trade.schema";
         schema: DailyMarketSnapshotSchema,
       },
       { name: UserTrade.name, schema: UserTradeSchema },
+      { name: DailyLimitHistory.name, schema: DailyLimitHistorySchema },
     ]),
   ],
   providers: [
