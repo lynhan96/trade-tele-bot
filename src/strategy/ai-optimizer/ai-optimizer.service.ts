@@ -385,7 +385,8 @@ Reply ONLY with valid JSON (no markdown):
         result.rsiZone = { ...result.rsiZone, primaryKline: "4h", htfKline: "1d" };
       }
     } else {
-      // INTRADAY: 15m primary, 1h HTF
+      // INTRADAY: 15m primary, 1h HTF, cap TP for scalping
+      result.takeProfitPercent = Math.min(4, result.takeProfitPercent);
       if (result.rsiCross) {
         result.rsiCross = { ...result.rsiCross, primaryKline: "15m", htfKline: "1h", candleKline: "15m" };
       }
@@ -636,9 +637,10 @@ STEP 1 — Choose 1-3 strategies (pipe-delimited). Ranked by real performance:
 - STOCH_BB_PATTERN: Range-bound regime with BBWidth <4%.
 
 STEP 2 — Set SL/TP based on volatility (ATR). MINIMUM SL is 3%:
-- Low ATR (<1%): SL 3.0%, TP 2-3x SL
-- Medium ATR (1-2%): SL 3.0-4.0%, TP 2-3x SL
-- High ATR (>2%): SL 4.0-6.0%, TP 2-4x SL
+- Low ATR (<1%): SL 3.0%, TP 3.0-4.0%
+- Medium ATR (1-2%): SL 3.0-4.0%, TP 3.0-4.0%
+- High ATR (>2%): SL 4.0-6.0%, TP 4.0-8.0%
+- For INTRADAY/scalping: keep TP tight (3-4%), quick profits are better than waiting
 
 STEP 3 — Set confidence. LONGs need higher confidence than SHORTs:
 - SHORT + regime aligned: confidence 65-85
@@ -648,7 +650,7 @@ STEP 3 — Set confidence. LONGs need higher confidence than SHORTs:
 - If recent trades show many SL hits: raise minConfidenceToTrade to 55-65
 
 Reply ONLY JSON:
-{"regime":"${globalRegime}","strategy":"RSI_CROSS|...","confidence":40-85,"stopLossPercent":3.0-8.0,"takeProfitPercent":6.0-18.0,"minConfidenceToTrade":40}`;
+{"regime":"${globalRegime}","strategy":"RSI_CROSS|...","confidence":40-85,"stopLossPercent":3.0-8.0,"takeProfitPercent":3.0-8.0,"minConfidenceToTrade":40}`;
   }
 
   private async callGpt(
