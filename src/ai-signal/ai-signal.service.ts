@@ -335,8 +335,8 @@ export class AiSignalService implements OnModuleInit {
         }
       }
 
-      // Process in batches of 5 to avoid Anthropic concurrent connection limits
-      const BATCH_SIZE = 5;
+      // Process in batches of 10 to reduce total blocking time
+      const BATCH_SIZE = 10;
       for (let i = 0; i < workItems.length; i += BATCH_SIZE) {
         const batch = workItems.slice(i, i + BATCH_SIZE);
         await Promise.allSettled(
@@ -349,6 +349,8 @@ export class AiSignalService implements OnModuleInit {
             ),
           ),
         );
+        // Yield to event loop so Telegram commands don't hang during long scans
+        await new Promise((r) => setImmediate(r));
       }
     } catch (err) {
       this.logger.error(`[AiSignal] runSignalScan error: ${err?.message}`);

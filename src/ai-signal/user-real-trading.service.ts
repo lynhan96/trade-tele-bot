@@ -1152,20 +1152,9 @@ export class UserRealTradingService implements OnModuleInit {
   }
 
   private async fetchCurrentPrice(symbol: string): Promise<number | null> {
-    // Prefer the live WebSocket price (already subscribed for signal monitoring)
+    // Use in-memory WebSocket price only — no HTTP calls to Binance
     const wsPrice = this.marketDataService.getLatestPrice(symbol);
-    if (wsPrice && wsPrice > 0) return wsPrice;
-
-    // Fallback: HTTP fetch if symbol not in current shortlist/WS feed
-    try {
-      const res = await axios.get(
-        `https://fapi.binance.com/fapi/v1/ticker/price?symbol=${symbol}`,
-        { timeout: 5_000 },
-      );
-      return parseFloat(res.data.price);
-    } catch {
-      return null;
-    }
+    return wsPrice && wsPrice > 0 ? wsPrice : null;
   }
 
   /** Re-register data streams for users with OPEN trades (called on module init). */
