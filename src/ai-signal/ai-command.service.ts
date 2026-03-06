@@ -55,9 +55,6 @@ export class AiCommandService implements OnModuleInit {
         `/ai subscribe — Dang ky nhan tin hieu AI\n` +
         `/ai unsubscribe — Huy dang ky\n` +
         `/ai settings — Xem cai dat cua ban\n` +
-        `/ai moneyflow on|off — Bat/tat canh bao dong tien\n` +
-        `/ai push on|off — Auto push signals moi 10 phut\n` +
-        `/ai balance <so> — Set balance (USDT/lenh)\n` +
         `/ai vol <COIN> <so> — Set vol rieng cho tung coin\n` +
         `/ai tpsl <tp%> <sl%> — Set TP/SL tuy chinh\n` +
         `/ai tpsl off — Dung TP/SL tu AI\n` +
@@ -69,22 +66,7 @@ export class AiCommandService implements OnModuleInit {
         `/ai account — Vi the mo va PnL real mode\n` +
         `/ai close — Dong lenh that (Binance)\n\n` +
         `*He thong:*\n` +
-        `/ai signals — Xem tat ca tin hieu AI dang chay\n` +
-        `/ai market — Phan tich thi truong AI\n` +
-        `/ai coins — Xem danh sach coin dang theo doi\n` +
-        `/ai check \\<SYMBOL\\> — Kiem tra tin hieu coin\n` +
-        `/ai status — Trang thai he thong\n`;
-      if (isAdmin) {
-        text +=
-          `\n*Admin:*\n` +
-          `/ai stats — Thống kê hiệu suất theo chiến lược\n` +
-          `/ai params \\<SYMBOL\\> — Xem tham số AI của coin\n` +
-          `/ai snapshot — Tạo/cập nhật daily snapshot\n` +
-          `/ai test on|off — Bật/tắt chế độ test\n` +
-          `/ai pause — Tạm dừng sinh tín hiệu\n` +
-          `/ai resume — Tiếp tục sinh tín hiệu\n` +
-          `/ai admin close — Dong tin hieu AI (reset de scan moi)`;
-      }
+        `/ai signals — Xem tat ca tin hieu AI dang chay\n`;
       await this.telegramService.sendTelegramMessage(chatId, text);
     });
 
@@ -255,25 +237,6 @@ export class AiCommandService implements OnModuleInit {
         );
       } catch (err) {
         await this.telegramService.sendTelegramMessage(chatId, `❌ Lỗi: ${err?.message}`);
-      }
-    });
-
-    // /ai market — AI market overview (available to all users, also handles /ai_market)
-    this.telegramService.registerBotCommand(/^\/ai[_ ]market/, async (msg) => {
-      const chatId = msg.chat.id;
-
-      try {
-        await this.telegramService.sendTelegramMessage(
-          chatId,
-          "🔄 _Đang phân tích thị trường..._",
-        );
-        const overview = await this.aiSignalService.generateMarketOverview();
-        await this.telegramService.sendTelegramMessage(chatId, overview);
-      } catch (err) {
-        await this.telegramService.sendTelegramMessage(
-          chatId,
-          `❌ Lỗi phân tích thị trường: ${err?.message}`,
-        );
       }
     });
 
@@ -614,8 +577,10 @@ export class AiCommandService implements OnModuleInit {
         text += `Coins theo dõi: ${status.shortlist.join(", ") || "_(trống)_"}\n\n`;
 
         if (actives.length > 0) {
+          const _to = (p: Promise<any>, ms: number) =>
+            Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), ms))]);
           const healthResults = await Promise.allSettled(
-            actives.map((s) => this.statsService.checkSignalHealth(s.symbol)),
+            actives.map((s) => _to(this.statsService.buildHealthCheck(s as any), 3000)),
           );
           text += `📈 *Active (${actives.length}):*\n`;
           for (let i = 0; i < actives.length; i++) {
@@ -1864,8 +1829,11 @@ export class AiCommandService implements OnModuleInit {
     text += `)\n━━━━━━━━━━━━━━━━━━\n`;
 
     if (actives.length > 0) {
+      // Use buildHealthCheck (skips redundant DB query) with 3s timeout per signal
+      const withTimeout = (p: Promise<any>, ms: number) =>
+        Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), ms))]);
       const healthResults = await Promise.allSettled(
-        actives.map((s) => this.statsService.checkSignalHealth(s.symbol)),
+        actives.map((s) => withTimeout(this.statsService.buildHealthCheck(s as any), 3000)),
       );
 
       // Compute summary
@@ -1971,8 +1939,10 @@ export class AiCommandService implements OnModuleInit {
       }
 
       // Fetch health for all active signals (current prices + unrealised PnL)
+      const _to = (p: Promise<any>, ms: number) =>
+        Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), ms))]);
       const healthResults = await Promise.allSettled(
-        actives.map((s) => this.statsService.checkSignalHealth(s.symbol)),
+        actives.map((s) => _to(this.statsService.buildHealthCheck(s as any), 3000)),
       );
 
       for (const sub of targets) {

@@ -41,7 +41,6 @@ export class TelegramBotService implements OnModuleInit {
           `📬 *Dang ky tin hieu*\n` +
           `/ai subscribe — Dang ky nhan tin hieu\n` +
           `/ai unsubscribe — Huy dang ky\n` +
-          `/ai push on|off — Auto push tin hieu moi 10 phut\n\n` +
           `💹 *Giao dich that (Real Mode)*\n` +
           `/ai setkeys — Luu Binance API keys\n` +
           `/ai realmode — Xem/bat/tat dat lenh that\n` +
@@ -54,36 +53,12 @@ export class TelegramBotService implements OnModuleInit {
           `/ai my history — Lich su 10 lenh gan nhat\n` +
           `/ai account — Vi the mo & unrealized PnL\n` +
           `/ai realmode stats — Chi tiet lenh va P&L hom nay\n` +
-          `/ai rank — Xep hang PnL tat ca nguoi dung\n\n` +
           `⚙️ *Cai dat*\n` +
-          `/ai settings — Xem cai dat hien tai\n` +
-          `/ai balance <so> — Set balance mac dinh (USDT/lenh)\n` +
-          `/ai moneyflow on|off — Bat/tat canh bao dong tien\n\n` +
+          `/ai settings — Xem cai dat hien tai\n\n` +
           `🌍 *Thi truong & Tin hieu AI*\n` +
-          `/ai market — Phan tich thi truong AI\n` +
           `/ai signals — Xem tat ca tin hieu AI dang chay\n` +
-          `/ai coins — Xem danh sach coin dang theo doi\n` +
-          `/ai check <SYMBOL> — Kiem tra tin hieu (vd: BTC)\n` +
           `/ai close all — Dong tat ca lenh (co xac nhan)\n` +
           `/ai close <SYMBOL> — Dong mot lenh cu the\n\n` +
-          `📊 *Quan tri (Admin)*\n` +
-          `/ai status — Trang thai he thong\n` +
-          `/ai stats — Thong ke hieu suat tin hieu\n` +
-          `/ai params <SYMBOL> — Xem tham so AI cua coin\n` +
-          `/ai snapshot — Tao/cap nhat daily snapshot\n` +
-          `/ai test on|off — Bat/tat che do test\n` +
-          `/ai pause / /ai resume — Tam dung/tiep tuc\n` +
-          `/ai override — Override chien luoc\n` +
-          `/ai resetall — Reset tat ca tin hieu\n` +
-          `/ai admin close all — Dong tat ca tin hieu + lenh that\n` +
-          `/ai admin reset — Xoa toan bo du lieu (clean DB)\n\n` +
-          `─────────────────────\n` +
-          `💡 *Huong dan nhanh:*\n` +
-          `1. /ai subscribe — bat dau nhan tin hieu\n` +
-          `2. /ai market — xem AI danh gia thi truong\n` +
-          `3. /ai setkeys + /ai realmode on — dat lenh that tu dong\n` +
-          `4. /ai my — xem dashboard ca nhan\n` +
-          `5. /ai signals — theo doi tin hieu AI he thong\n\n` +
           `⚠️ _Tin hieu AI chi mang tinh tham khao. Giao dich tiem an rui ro._`,
       );
     });
@@ -119,7 +94,6 @@ export class TelegramBotService implements OnModuleInit {
         { command: "ai_close", description: "Dong lenh (all hoac SYMBOL)" },
         { command: "ai_rank", description: "Xep hang PnL tat ca nguoi dung" },
         // Market & signals
-        { command: "ai_market", description: "Phan tich thi truong AI" },
         { command: "ai_signals", description: "Xem tin hieu AI dang chay" },
         { command: "ai_coins", description: "Xem danh sach coin dang theo doi" },
         { command: "ai_check", description: "Kiem tra tin hieu coin" },
