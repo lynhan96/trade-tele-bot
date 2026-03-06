@@ -1094,6 +1094,37 @@ export class UserRealTradingService implements OnModuleInit {
             const pp = await getPP(symbol);
             const round = (p: number) => parseFloat(p.toFixed(pp));
 
+            // ── Auto SL to entry at 3% profit ──────────────────────────────
+            // If trade is 3%+ in profit, move SL to entry (break-even) for protection
+            const currentPrice = this.marketDataService.getLatestPrice(symbol);
+            if (currentPrice && trade.entryPrice) {
+              const currentPnlPct = direction === "LONG"
+                ? ((currentPrice - trade.entryPrice) / trade.entryPrice) * 100
+                : ((trade.entryPrice - currentPrice) / trade.entryPrice) * 100;
+              if (currentPnlPct >= 3 && slPrice && slPrice !== trade.entryPrice) {
+                // SL should be at entry — price has moved 3%+ in our favor
+                const roundedEntry = round(trade.entryPrice);
+                this.logger.log(`[RealTrading] ${symbol} user ${telegramId}: PnL ${currentPnlPct.toFixed(1)}% >= 3% — moving SL to entry ${roundedEntry}`);
+                try {
+                  if (trade.binanceSlAlgoId) {
+                    await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, trade.binanceSlAlgoId);
+                  }
+                  const slOrder = await this.binanceService.setStopLoss(
+                    keys.apiKey, keys.apiSecret, symbol, roundedEntry,
+                    direction as "LONG" | "SHORT", trade.quantity,
+                  );
+                  const newId = slOrder?.algoId?.toString() ?? slOrder?.orderId?.toString();
+                  await this.userTradeModel.updateOne({ _id: trade._id }, { $set: { slPrice: roundedEntry, binanceSlAlgoId: newId } });
+                  await this.telegramService.sendTelegramMessage(chatId,
+                    `🛡️ *Bao Ve Vi The: SL -> Entry*\n\n${symbol} ${direction}\nSL moi: *${fmtP(roundedEntry)}* (hoa von)\nPnL: *+${currentPnlPct.toFixed(1)}%*`
+                  ).catch(() => {});
+                } catch (err) {
+                  this.logger.warn(`[RealTrading] ${symbol} user ${telegramId}: SL-to-entry failed: ${err?.message}`);
+                }
+                continue; // SL handled — skip the missing SL check below
+              }
+            }
+
             // ── SL missing ──────────────────────────────────────────────────
             // If slPrice not in trade record, compute from user's customSlPct
             let effectiveSlPrice = slPrice;

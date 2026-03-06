@@ -374,8 +374,8 @@ Reply ONLY with valid JSON (no markdown):
     const result = { ...params };
     result.timeframeProfile = profile as any;
 
-    // Cap TP at 3-4% for all profiles — dynamic boost in PositionMonitor will widen to 4-6% on momentum
-    result.takeProfitPercent = Math.min(4, Math.max(3, result.takeProfitPercent));
+    // Cap TP at 3-5% for all profiles — dynamic boost in PositionMonitor will widen on momentum
+    result.takeProfitPercent = Math.min(5, Math.max(3, result.takeProfitPercent));
 
     if (profile === "SWING") {
       // SWING: 4h primary, 1d HTF, wider SL
@@ -638,10 +638,10 @@ STEP 1 — Choose 1-3 strategies (pipe-delimited). Ranked by real performance:
 - STOCH_BB_PATTERN: Range-bound regime with BBWidth <4%.
 
 STEP 2 — Set SL/TP based on volatility (ATR). MINIMUM SL is 3%:
-- Low ATR (<1%): SL 3.0%, TP 3.0%
-- Medium ATR (1-2%): SL 3.0-4.0%, TP 3.0-4.0%
-- High ATR (>2%): SL 4.0-6.0%, TP 3.0-4.0%
-- IMPORTANT: TP MUST be 3-4%. We scalp with tight TP. System auto-extends TP on strong momentum.
+- Low ATR (<1%): SL 3.0%, TP 3.0-4.0%
+- Medium ATR (1-2%): SL 3.0-4.0%, TP 3.0-5.0%
+- High ATR (>2%): SL 4.0-6.0%, TP 4.0-5.0%
+- IMPORTANT: TP MUST be 3-5%. System auto-extends TP on strong momentum.
 
 STEP 3 — Set confidence. LONGs need higher confidence than SHORTs:
 - SHORT + regime aligned: confidence 65-85
@@ -651,7 +651,7 @@ STEP 3 — Set confidence. LONGs need higher confidence than SHORTs:
 - If recent trades show many SL hits: raise minConfidenceToTrade to 55-65
 
 Reply ONLY JSON:
-{"regime":"${globalRegime}","strategy":"RSI_CROSS|...","confidence":40-85,"stopLossPercent":3.0-8.0,"takeProfitPercent":3.0-4.0,"minConfidenceToTrade":40}`;
+{"regime":"${globalRegime}","strategy":"RSI_CROSS|...","confidence":40-85,"stopLossPercent":3.0-8.0,"takeProfitPercent":3.0-5.0,"minConfidenceToTrade":40}`;
   }
 
   private async callGpt(
@@ -688,7 +688,7 @@ Reply ONLY JSON:
       strategy: isTrend ? "EMA_PULLBACK|TREND_EMA|RSI_CROSS" : isSideways ? "BB_SCALP|RSI_CROSS" : "RSI_CROSS|BB_SCALP",
       confidence: isSideways ? 45 : isTrend ? 60 : 55,
       stopLossPercent: isSideways ? 3.0 : isTrend ? 3.5 : 3.0,
-      takeProfitPercent: isSideways ? 3.0 : isTrend ? 4.0 : 3.5,
+      takeProfitPercent: isSideways ? 3.0 : isTrend ? 5.0 : 4.0,
       minConfidenceToTrade: isSideways ? 42 : isTrend ? 50 : 45,
       rsiCross: {
         primaryKline: "15m",
