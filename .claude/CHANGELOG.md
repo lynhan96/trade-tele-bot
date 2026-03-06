@@ -1,5 +1,72 @@
 # Changelog
 
+## 2026-03-06 (6) - Proxy Rotation for Binance Market Data
+
+### Feature: Round-Robin Proxy for Public API Calls
+All Binance public market data HTTP calls now route through a pool of 10 rotating proxies to avoid IP rate limits. Trading/account API calls (binance.service.ts) remain direct — they're IP-whitelisted by user API keys.
+
+**Proxied calls:**
+- `fetchAndCacheTicker24h()` — 24hr tickers
+- `getPrice()` HTTP fallback — single ticker price
+- `seedCandleHistory()` — kline data for new subscriptions
+- `fetchSingleCoinAnalytics()` — funding rate, OI, L/S ratio, taker ratio (4 calls per coin)
+- `fetchAndCacheSymbolPrecisions()` — exchangeInfo
+
+### Files Modified
+- `src/utils/proxy.ts` — NEW: round-robin `getProxyAgent()` using `https-proxy-agent`
+- `src/market-data/market-data.service.ts` — added `httpsAgent: getProxyAgent()` to 3 axios calls
+- `src/market-data/futures-analytics.service.ts` — added proxy to 4 analytics API calls
+- `src/ai-signal/user-real-trading.service.ts` — added proxy to exchangeInfo call
+- `package.json` — added `https-proxy-agent` dependency
+
+---
+
+## 2026-03-06 (5) - Fix /ai signals Command Hang
+
+### Bug Fix: /ai signals Hangs When Prices Not Cached
+`/ai signals` called `checkSignalHealth()` for every active signal, each doing a redundant MongoDB query + `getPrice()` which falls through to HTTP (5s timeout) when WS/Redis cache is empty. With many signals, timeouts compound causing 15-30s hangs.
+
+**Fix:**
+- Added `buildHealthCheck(signal)` method that accepts already-loaded signal data (skips MongoDB query)
+- Wrapped each health check in a 3s `Promise.race` timeout — signals with slow price fetch show without PnL instead of blocking
+- Applied same fix to `/ai status`, `checkAllActiveSignals()`, and `checkProfitTargets()`
+
+### Files Modified
+- `src/ai-signal/ai-signal-stats.service.ts` — new `buildHealthCheck()` method, 3s timeout in `checkAllActiveSignals()`
+- `src/ai-signal/ai-command.service.ts` — 3s timeout + `buildHealthCheck()` in `formatSignalsMessage()`, `/ai status`, profit target checks
+
+---
+
+## 2026-03-06 (4) - Hedge Mode, Price Architecture, Scan Performance
+
+### Feature: Auto-Enable Hedge Mode
+When user activates `/ai realmode on`, bot automatically enables Binance Futures hedge mode (`dualSidePosition: true`). All orders (open, close, SL, TP) now include `positionSide: LONG/SHORT` for proper hedge mode operation.
+
+### Enhancement: WS → Redis Price Architecture
+Replaced ALL HTTP price calls with pure WebSocket → Redis pattern:
+- `MarketDataService` writes every WS tick to Redis (`price:{SYMBOL}`, 5min TTL)
+- New `getPrice(symbol)` method: in-memory Map first → Redis fallback → null
+- Removed `fetchCurrentPrice()` wrapper — all callers use `marketDataService.getPrice()` directly
+- Eliminated 6 axios HTTP calls across 4 files (user-real-trading, ai-signal, position-monitor, ai-signal-stats)
+- Zero HTTP price calls remain in the entire codebase
+
+### Enhancement: Scan Performance — Event Loop Yield
+Signal scan was processing 125 coins sequentially, blocking Telegram commands for 30-60s. Added `setImmediate()` yield between batches + increased batch size to 10. Commands now respond instantly during scans.
+
+### Enhancement: /ai my Works Without Realmode
+Dashboard now shows trade history and stats even when realmode is off. Balance section only shows when API keys are configured.
+
+### Files Modified
+- `src/binance/binance.service.ts` — `enableHedgeMode()`, `positionSide` on all order methods
+- `src/market-data/market-data.service.ts` — Redis price cache on WS tick, `getPrice()` async method
+- `src/ai-signal/user-real-trading.service.ts` — replaced `fetchCurrentPrice`, removed dead method
+- `src/ai-signal/ai-signal.service.ts` — batch size 10, `setImmediate()` yield, replaced 2 axios price calls
+- `src/ai-signal/ai-signal-stats.service.ts` — replaced axios `getCurrentPrice()` with marketDataService
+- `src/ai-signal/position-monitor.service.ts` — replaced axios `getCurrentPrice()` with marketDataService
+- `src/ai-signal/ai-command.service.ts` — removed realmode gate from `/ai my`
+
+---
+
 ## 2026-03-06 (3) - Strategy Improvements & Error Fixes
 
 ### Bug Fix: Price Precision for SL/TP Orders

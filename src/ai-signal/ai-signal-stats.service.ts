@@ -148,6 +148,13 @@ export class AiSignalStatsService {
 
     if (!signal) return null;
 
+    return this.buildHealthCheck(signal);
+  }
+
+  /**
+   * Build health check from an already-loaded signal document (no extra DB query).
+   */
+  async buildHealthCheck(signal: AiSignalDocument): Promise<SignalHealthCheck | null> {
     const currentPrice = await this.getCurrentPrice(signal.symbol);
     if (currentPrice === 0) return null;
 
@@ -188,8 +195,10 @@ export class AiSignalStatsService {
    */
   async checkAllActiveSignals(): Promise<SignalHealthCheck[]> {
     const activeSignals = await this.aiSignalModel.find({ status: "ACTIVE" });
+    const withTimeout = (p: Promise<any>, ms: number) =>
+      Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), ms))]);
     const results = await Promise.allSettled(
-      activeSignals.map((s) => this.checkSignalHealth(s.symbol)),
+      activeSignals.map((s) => withTimeout(this.buildHealthCheck(s), 3000)),
     );
     return results
       .filter((r) => r.status === "fulfilled" && r.value !== null)

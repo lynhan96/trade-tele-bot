@@ -26,6 +26,7 @@
     "@nestjs/schedule": "^4.0.0",
     "axios": "^1.13.4",
     "binance-api-node": "^0.12.5",
+    "https-proxy-agent": "^7.0.6",
     "mongoose": "^8.9.5",
     "node-telegram-bot-api": "^0.65.1",
     "openai": "^6.25.0",

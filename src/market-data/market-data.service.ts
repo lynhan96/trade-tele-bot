@@ -10,6 +10,7 @@ import { Model } from "mongoose";
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const WebSocket = require("ws");
 import { RedisService } from "../redis/redis.service";
+import { getProxyAgent } from "../utils/proxy";
 import {
   CandleHistory,
   CandleHistoryDocument,
@@ -127,7 +128,7 @@ export class MarketDataService implements OnModuleInit, OnModuleDestroy {
     const axios = require("axios");
     try {
       const url = "https://fapi.binance.com/fapi/v1/ticker/24hr";
-      const res = await axios.get(url, { timeout: 10000 });
+      const res = await axios.get(url, { timeout: 10000, httpsAgent: getProxyAgent() });
       const tickers: Ticker24h[] = res.data;
 
       // Cache for 6 minutes (so it's always fresh for 5min refresh)
@@ -232,7 +233,7 @@ export class MarketDataService implements OnModuleInit, OnModuleDestroy {
       const axios = require("axios");
       const res = await axios.get(
         `https://fapi.binance.com/fapi/v1/ticker/price?symbol=${symbol}`,
-        { timeout: 5000 },
+        { timeout: 5000, httpsAgent: getProxyAgent() },
       );
       const price = parseFloat(res.data.price);
       if (price > 0) {
@@ -419,7 +420,7 @@ export class MarketDataService implements OnModuleInit, OnModuleDestroy {
         }
 
         const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=${interval}&limit=500`;
-        const res = await axios.get(url, { timeout: 15000 });
+        const res = await axios.get(url, { timeout: 15000, httpsAgent: getProxyAgent() });
         const candles: any[] = res.data;
 
         const closes = candles.map((c) => parseFloat(c[4]));

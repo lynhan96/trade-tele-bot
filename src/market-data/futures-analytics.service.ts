@@ -1,5 +1,6 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { RedisService } from "../redis/redis.service";
+import { getProxyAgent } from "../utils/proxy";
 
 export interface CoinAnalytics {
   symbol: string;
@@ -77,18 +78,22 @@ export class FuturesAnalyticsService {
         axios.get("https://fapi.binance.com/fapi/v1/fundingRate", {
           params: { symbol, limit: 1 },
           timeout: 5000,
+          httpsAgent: getProxyAgent(),
         }),
         axios.get("https://fapi.binance.com/fapi/v1/openInterest", {
           params: { symbol },
           timeout: 5000,
+          httpsAgent: getProxyAgent(),
         }),
         axios.get("https://fapi.binance.com/futures/data/globalLongShortAccountRatio", {
           params: { symbol, period: "1h", limit: 1 },
           timeout: 5000,
+          httpsAgent: getProxyAgent(),
         }),
         axios.get("https://fapi.binance.com/futures/data/takerlongshortRatio", {
           params: { symbol, period: "1h", limit: 1 },
           timeout: 5000,
+          httpsAgent: getProxyAgent(),
         }),
       ]);
 

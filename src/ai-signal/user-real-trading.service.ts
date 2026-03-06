@@ -11,6 +11,7 @@ import { SubscriberInfo, UserSignalSubscriptionService } from "./user-signal-sub
 import { UserTrade, UserTradeDocument } from "../schemas/user-trade.schema";
 import { AiSignalDocument } from "../schemas/ai-signal.schema";
 import { AiTunedParams } from "../strategy/ai-optimizer/ai-tuned-params.interface";
+import { getProxyAgent } from "../utils/proxy";
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const axios = require("axios");
@@ -1121,6 +1122,7 @@ export class UserRealTradingService implements OnModuleInit {
     try {
       const res = await axios.get("https://fapi.binance.com/fapi/v1/exchangeInfo", {
         timeout: 5_000,
+        httpsAgent: getProxyAgent(),
       });
       const info = res.data.symbols?.find((s: any) => s.symbol === symbol);
       const qty = info?.quantityPrecision ?? 3;
