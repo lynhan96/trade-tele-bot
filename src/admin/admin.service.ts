@@ -99,9 +99,9 @@ export class AdminService {
 
     const wins = completedSignalDocs.filter((s) => s.pnlPercent > 0).length;
     const winRate = completedSignalDocs.length > 0 ? (wins / completedSignalDocs.length) * 100 : 0;
-    const avgPnl =
+    const totalPnl =
       completedSignalDocs.length > 0
-        ? completedSignalDocs.reduce((sum, s) => sum + s.pnlPercent, 0) / completedSignalDocs.length
+        ? completedSignalDocs.reduce((sum, s) => sum + s.pnlPercent, 0)
         : 0;
 
     const signalsByStrategy: Record<string, number> = {};
@@ -128,7 +128,7 @@ export class AdminService {
       completedSignals,
       cancelledSignals,
       winRate: Math.round(winRate * 100) / 100,
-      avgPnl: Math.round(avgPnl * 100) / 100,
+      totalPnl: Math.round(totalPnl * 100) / 100,
       totalUsers,
       activeUsers,
       realModeUsers,
