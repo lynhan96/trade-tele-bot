@@ -235,15 +235,15 @@ export class PositionMonitorService implements OnModuleInit {
       this.userRealTradingService.moveStopLossForRealUsers(symbol, entryPrice, direction).catch(() => {});
     }
 
-    // ─── Dynamic TP boost: extend TP to 5-8% on strong momentum ─────────
+    // ─── Dynamic TP boost: extend TP to 4-6% on strong momentum ─────────
     // Check once when price reaches 3%+ profit and TP hasn't been boosted yet
     if (pnlPct >= 3 && !(signal as any).tpBoosted && takeProfitPrice) {
       (signal as any).tpBoosted = true; // mark as checked (one-time per signal)
       try {
         const hasMomentum = await this.marketDataService.hasVolumeMomentum(symbol);
         if (hasMomentum) {
-          // Extend TP based on current momentum (5-8% range)
-          const boostedTpPct = Math.min(8, Math.max(5, pnlPct + 3));
+          // Extend TP based on current momentum (4-6% range)
+          const boostedTpPct = Math.min(6, Math.max(4, pnlPct + 2));
           const newTpPrice = direction === "LONG"
             ? entryPrice * (1 + boostedTpPct / 100)
             : entryPrice * (1 - boostedTpPct / 100);
