@@ -84,7 +84,7 @@ export class UserRealTradingService implements OnModuleInit {
       return;
     }
 
-    const currentPrice = await this.fetchCurrentPrice(symbol);
+    const currentPrice = await this.marketDataService.getPrice(symbol);
     if (!currentPrice) {
       this.logger.warn(`[RealTrading] ${symbol}: cannot fetch current price, skipping real orders`);
       return;
@@ -502,7 +502,7 @@ export class UserRealTradingService implements OnModuleInit {
       const closeOrder = await this.binanceService.closePosition(
         keys.apiKey, keys.apiSecret, symbol, trade.quantity, trade.direction,
       );
-      const exitPrice = parseFloat(closeOrder.avgPrice) || (await this.fetchCurrentPrice(symbol)) || trade.entryPrice;
+      const exitPrice = parseFloat(closeOrder.avgPrice) || (await this.marketDataService.getPrice(symbol)) || trade.entryPrice;
 
       const pnlPct = trade.direction === "LONG"
         ? ((exitPrice - trade.entryPrice) / trade.entryPrice) * 100
@@ -571,7 +571,7 @@ export class UserRealTradingService implements OnModuleInit {
 
     // Fetch current prices for open trades
     const openTrades = await Promise.all(openDocs.map(async (t) => {
-      const currentPrice = (await this.fetchCurrentPrice(t.symbol)) ?? t.entryPrice;
+      const currentPrice = (await this.marketDataService.getPrice(t.symbol)) ?? t.entryPrice;
       const unrealizedPnlPct = t.direction === "LONG"
         ? ((currentPrice - t.entryPrice) / t.entryPrice) * 100
         : ((t.entryPrice - currentPrice) / t.entryPrice) * 100;
@@ -727,7 +727,7 @@ export class UserRealTradingService implements OnModuleInit {
         const closeOrder = await this.binanceService.closePosition(
           keys.apiKey, keys.apiSecret, trade.symbol, trade.quantity, trade.direction,
         );
-        const exitPrice = parseFloat(closeOrder.avgPrice) || (await this.fetchCurrentPrice(trade.symbol)) || trade.entryPrice;
+        const exitPrice = parseFloat(closeOrder.avgPrice) || (await this.marketDataService.getPrice(trade.symbol)) || trade.entryPrice;
 
         const pnlPct = trade.direction === "LONG"
           ? ((exitPrice - trade.entryPrice) / trade.entryPrice) * 100
@@ -1149,11 +1149,6 @@ export class UserRealTradingService implements OnModuleInit {
     const cached = await this.redisService.get<number>(PRICE_PRECISION_KEY(symbol));
     if (cached != null) return cached;
     return (await this.fetchAndCacheSymbolPrecisions(symbol)).price;
-  }
-
-  private async fetchCurrentPrice(symbol: string): Promise<number | null> {
-    // In-memory WS first, then Redis fallback (no HTTP calls to Binance)
-    return this.marketDataService.getPrice(symbol);
   }
 
   /** Re-register data streams for users with OPEN trades (called on module init). */

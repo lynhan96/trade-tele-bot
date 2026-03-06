@@ -1,13 +1,40 @@
 # Changelog
 
+## 2026-03-06 (3) - Strategy Improvements & Error Fixes
+
+### Bug Fix: Price Precision for SL/TP Orders
+`moveStopLossForRealUsers()` was sending raw float prices to Binance (e.g., `66740.76590445`), causing "Precision over maximum" errors for BCH, AVAX, BTC. Now rounds to exchange `tickSize` precision via `getPricePrecision()`.
+
+### Bug Fix: TradFi Symbol Blacklist
+XAU, XAG, MSTR require separate Binance TradFi-Perps agreement. Bot was spamming errors trying to place real orders. Added `TRADFI_BLACKLIST` set — these symbols are silently skipped for real trading.
+
+### Bug Fix: "Immediately Trigger" SL Spam
+When SL price is past current price (position already closed by SL), `protectOpenTrades` was retrying every 5 min and sending 85+ error messages. Now detects "immediately trigger" error, marks trade as CLOSED, and adds 1h Redis cooldown for other SL warnings.
+
+### Bug Fix: Orphan Position Handling
+Removed orphan detection that was creating DB records for positions opened directly on Binance (not through bot). Added startup cleanup to close existing orphan records (no `aiSignalId`).
+
+### Enhancement: Volatility-Adaptive SL/TP
+Widened SL cap from fixed `[3%, 6%]` to `[3%, min(8%, ATR×2)]`. Volatile coins (ATR>4%) now get wider SL to avoid noise-triggered exits. AI prompt updated to allow 3-8% SL range.
+
+### Enhancement: /ai my Dashboard Redesign
+- Card-based layout with `━━━` section separators
+- Open positions: PnL label with chart icons, no price line
+- Closed trades: grouped by Win/Loss/Break-even with subtotals
+- All-time stats: compact 3-line card
+
+### Files Modified
+- `src/ai-signal/user-real-trading.service.ts` — precision fix, TradFi blacklist, orphan cleanup, "immediately trigger" handling, SL spam cooldown
+- `src/ai-signal/ai-command.service.ts` — /ai my dashboard UI redesign
+- `src/strategy/ai-optimizer/ai-optimizer.service.ts` — adaptive SL cap, prompt update
+
+---
+
 ## 2026-03-06 (1) - Migrate Existing SL/TP to closePosition:true
 
 ### Enhancement: One-Time SL/TP Migration for Open Trades
 
-Added `migrateSlTpToClosePosition()` startup migration that runs 10s after boot. For all OPEN trades in the DB, cancels old SL/TP algo orders (placed with `quantity`) and re-places them using `closePosition:true` so they display in the Binance app's position TP/SL row. Does NOT open new positions — only updates protective orders. Updates DB with new algo IDs.
-
-### Files Modified
-- `src/ai-signal/user-real-trading.service.ts` — Added `migrateSlTpToClosePosition()` method + call in `onModuleInit()`
+Added and then removed `migrateSlTpToClosePosition()` — was touching external positions not opened by bot.
 
 ---
 
