@@ -79,9 +79,11 @@ async function bootstrap() {
 
   logger.log("Binance Telegram Bot is starting (v2)...");
 
+  app.enableCors();
   await app.init();
+  await app.listen(process.env.ADMIN_PORT || 3001);
 
-  logger.log("✅ Bot is running and listening for commands");
+  logger.log(`✅ Bot is running and Admin API listening on port ${process.env.ADMIN_PORT || 3001}`);
 
   // Graceful shutdown on SIGTERM (hot-reload / container stop)
   process.on("SIGTERM", async () => {

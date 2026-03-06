@@ -7,6 +7,7 @@ import { RedisModule } from "./redis/redis.module";
 import { BinanceModule } from "./binance/binance.module";
 import { LoggerModule } from "./logger/logger.module";
 import { AiSignalModule } from "./ai-signal/ai-signal.module";
+import { AdminModule } from "./admin/admin.module";
 
 @Module({
   imports: [
@@ -29,6 +30,7 @@ import { AiSignalModule } from "./ai-signal/ai-signal.module";
     BinanceModule,
     TelegramModule,
     AiSignalModule,
+    AdminModule,
   ],
 })
 export class AppModule {}

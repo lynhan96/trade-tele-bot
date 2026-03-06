@@ -1,0 +1,371 @@
+import { Injectable } from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
+import { AiSignal, AiSignalDocument } from '../schemas/ai-signal.schema';
+import { UserSignalSubscription, UserSignalSubscriptionDocument } from '../schemas/user-signal-subscription.schema';
+import { UserTrade, UserTradeDocument } from '../schemas/user-trade.schema';
+import { AiCoinProfile, AiCoinProfileDocument } from '../schemas/ai-coin-profile.schema';
+import { AiMarketConfig, AiMarketConfigDocument } from '../schemas/ai-market-config.schema';
+import { AiRegimeHistory, AiRegimeHistoryDocument } from '../schemas/ai-regime-history.schema';
+import { DailyMarketSnapshot, DailyMarketSnapshotDocument } from '../schemas/daily-market-snapshot.schema';
+import { UserSettings, UserSettingsDocument } from '../schemas/user-settings.schema';
+
+@Injectable()
+export class AdminService {
+  constructor(
+    @InjectModel(AiSignal.name) private signalModel: Model<AiSignalDocument>,
+    @InjectModel(UserSignalSubscription.name) private subscriptionModel: Model<UserSignalSubscriptionDocument>,
+    @InjectModel(UserTrade.name) private tradeModel: Model<UserTradeDocument>,
+    @InjectModel(AiCoinProfile.name) private coinProfileModel: Model<AiCoinProfileDocument>,
+    @InjectModel(AiMarketConfig.name) private marketConfigModel: Model<AiMarketConfigDocument>,
+    @InjectModel(AiRegimeHistory.name) private regimeHistoryModel: Model<AiRegimeHistoryDocument>,
+    @InjectModel(DailyMarketSnapshot.name) private snapshotModel: Model<DailyMarketSnapshotDocument>,
+    @InjectModel(UserSettings.name) private userSettingsModel: Model<UserSettingsDocument>,
+  ) {}
+
+  async getDashboardStats() {
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+
+    const [
+      totalSignals,
+      activeSignals,
+      completedSignals,
+      cancelledSignals,
+      totalUsers,
+      activeUsers,
+      realModeUsers,
+      totalTrades,
+      openTrades,
+      closedTrades,
+      todaySignals,
+      longSignals,
+      shortSignals,
+      completedSignalDocs,
+      strategyAgg,
+      regimeAgg,
+      recentSignals,
+      pnlByDayAgg,
+    ] = await Promise.all([
+      this.signalModel.countDocuments(),
+      this.signalModel.countDocuments({ status: 'ACTIVE' }),
+      this.signalModel.countDocuments({ status: 'COMPLETED' }),
+      this.signalModel.countDocuments({ status: 'CANCELLED' }),
+      this.subscriptionModel.countDocuments(),
+      this.subscriptionModel.countDocuments({ isActive: true }),
+      this.subscriptionModel.countDocuments({ realModeEnabled: true }),
+      this.tradeModel.countDocuments(),
+      this.tradeModel.countDocuments({ status: 'OPEN' }),
+      this.tradeModel.countDocuments({ status: 'CLOSED' }),
+      this.signalModel.countDocuments({ createdAt: { $gte: todayStart } }),
+      this.signalModel.countDocuments({ direction: 'LONG' }),
+      this.signalModel.countDocuments({ direction: 'SHORT' }),
+      this.signalModel.find({ status: 'COMPLETED', pnlPercent: { $exists: true } }).select('pnlPercent').lean(),
+      this.signalModel.aggregate([{ $group: { _id: '$strategy', count: { $sum: 1 } } }]),
+      this.signalModel.aggregate([{ $group: { _id: '$regime', count: { $sum: 1 } } }]),
+      this.signalModel.find().sort({ createdAt: -1 }).limit(10).lean(),
+      this.signalModel.aggregate([
+        { $match: { status: 'COMPLETED', pnlPercent: { $exists: true }, positionClosedAt: { $exists: true } } },
+        {
+          $addFields: {
+            dateStr: { $dateToString: { format: '%Y-%m-%d', date: '$positionClosedAt' } },
+          },
+        },
+        { $sort: { positionClosedAt: -1 as 1 | -1 } },
+        { $limit: 10000 },
+        {
+          $group: {
+            _id: '$dateStr',
+            totalPnl: { $sum: '$pnlPercent' },
+            count: { $sum: 1 },
+            wins: { $sum: { $cond: [{ $gt: ['$pnlPercent', 0] }, 1, 0] } },
+            losses: { $sum: { $cond: [{ $lte: ['$pnlPercent', 0] }, 1, 0] } },
+          },
+        },
+        { $sort: { _id: -1 as 1 | -1 } },
+        { $limit: 30 },
+      ]),
+    ]);
+
+    const wins = completedSignalDocs.filter((s) => s.pnlPercent > 0).length;
+    const winRate = completedSignalDocs.length > 0 ? (wins / completedSignalDocs.length) * 100 : 0;
+    const avgPnl =
+      completedSignalDocs.length > 0
+        ? completedSignalDocs.reduce((sum, s) => sum + s.pnlPercent, 0) / completedSignalDocs.length
+        : 0;
+
+    const signalsByStrategy: Record<string, number> = {};
+    for (const s of strategyAgg) {
+      signalsByStrategy[s._id || 'unknown'] = s.count;
+    }
+
+    const signalsByRegime: Record<string, number> = {};
+    for (const r of regimeAgg) {
+      signalsByRegime[r._id || 'unknown'] = r.count;
+    }
+
+    const pnlByDay = pnlByDayAgg.map((d) => ({
+      date: d._id,
+      totalPnl: d.totalPnl,
+      count: d.count,
+      wins: d.wins,
+      losses: d.losses,
+    }));
+
+    return {
+      totalSignals,
+      activeSignals,
+      completedSignals,
+      cancelledSignals,
+      winRate: Math.round(winRate * 100) / 100,
+      avgPnl: Math.round(avgPnl * 100) / 100,
+      totalUsers,
+      activeUsers,
+      realModeUsers,
+      totalTrades,
+      openTrades,
+      closedTrades,
+      todaySignals,
+      signalsByDirection: { long: longSignals, short: shortSignals },
+      signalsByStrategy,
+      signalsByRegime,
+      pnlByDay,
+      recentSignals,
+    };
+  }
+
+  async getSignals(query: {
+    page?: number;
+    limit?: number;
+    status?: string;
+    direction?: string;
+    symbol?: string;
+    strategy?: string;
+    regime?: string;
+    timeframeProfile?: string;
+    dateFrom?: string;
+    dateTo?: string;
+  }) {
+    const page = Math.max(1, query.page || 1);
+    const limit = Math.min(100, Math.max(1, query.limit || 20));
+    const filter: any = {};
+
+    if (query.status) filter.status = query.status;
+    if (query.direction) filter.direction = query.direction;
+    if (query.symbol) filter.symbol = query.symbol.toUpperCase();
+    if (query.strategy) filter.strategy = query.strategy;
+    if (query.regime) filter.regime = query.regime;
+    if (query.timeframeProfile) filter.timeframeProfile = query.timeframeProfile;
+    if (query.dateFrom || query.dateTo) {
+      filter.createdAt = {};
+      if (query.dateFrom) filter.createdAt.$gte = new Date(query.dateFrom);
+      if (query.dateTo) filter.createdAt.$lte = new Date(query.dateTo);
+    }
+
+    const [data, total] = await Promise.all([
+      this.signalModel
+        .find(filter)
+        .sort({ createdAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean(),
+      this.signalModel.countDocuments(filter),
+    ]);
+
+    return { data, total, page, limit, totalPages: Math.ceil(total / limit) };
+  }
+
+  async getSignalById(id: string) {
+    return this.signalModel.findById(id).lean();
+  }
+
+  async updateSignal(id: string, dto: { status?: string; closeReason?: string }) {
+    return this.signalModel.findByIdAndUpdate(id, { $set: dto }, { new: true }).lean();
+  }
+
+  async getUsers(query: {
+    page?: number;
+    limit?: number;
+    isActive?: string;
+    realModeEnabled?: string;
+    search?: string;
+  }) {
+    const page = Math.max(1, query.page || 1);
+    const limit = Math.min(100, Math.max(1, query.limit || 20));
+    const filter: any = {};
+
+    if (query.isActive !== undefined) filter.isActive = query.isActive === 'true';
+    if (query.realModeEnabled !== undefined) filter.realModeEnabled = query.realModeEnabled === 'true';
+    if (query.search) {
+      const searchNum = parseInt(query.search, 10);
+      if (!isNaN(searchNum)) {
+        filter.$or = [
+          { username: { $regex: query.search, $options: 'i' } },
+          { telegramId: searchNum },
+        ];
+      } else {
+        filter.username = { $regex: query.search, $options: 'i' };
+      }
+    }
+
+    const [data, total] = await Promise.all([
+      this.subscriptionModel
+        .find(filter)
+        .sort({ createdAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean(),
+      this.subscriptionModel.countDocuments(filter),
+    ]);
+
+    return { data, total, page, limit, totalPages: Math.ceil(total / limit) };
+  }
+
+  async getUserById(telegramId: number) {
+    const [subscription, settings, trades] = await Promise.all([
+      this.subscriptionModel.findOne({ telegramId }).lean(),
+      this.userSettingsModel.findOne({ telegramId }).lean(),
+      this.tradeModel.find({ telegramId }).lean(),
+    ]);
+
+    const openTrades = trades.filter((t) => t.status === 'OPEN').length;
+    const closedTrades = trades.filter((t) => t.status === 'CLOSED').length;
+    const totalPnl = trades
+      .filter((t) => t.pnlPercent !== undefined)
+      .reduce((sum, t) => sum + t.pnlPercent, 0);
+
+    return {
+      subscription,
+      settings: settings ? { telegramId: settings.telegramId, chatId: settings.chatId, hasBinanceKeys: !!settings.binance, hasOkxKeys: !!settings.okx } : null,
+      tradesSummary: {
+        total: trades.length,
+        open: openTrades,
+        closed: closedTrades,
+        totalPnlPercent: Math.round(totalPnl * 100) / 100,
+      },
+    };
+  }
+
+  async updateUser(
+    telegramId: number,
+    dto: { isActive?: boolean; realModeEnabled?: boolean; maxOpenPositions?: number; tradingBalance?: number },
+  ) {
+    return this.subscriptionModel
+      .findOneAndUpdate({ telegramId }, { $set: dto }, { new: true })
+      .lean();
+  }
+
+  async getTrades(query: {
+    page?: number;
+    limit?: number;
+    status?: string;
+    symbol?: string;
+    telegramId?: string;
+    dateFrom?: string;
+    dateTo?: string;
+  }) {
+    const page = Math.max(1, query.page || 1);
+    const limit = Math.min(100, Math.max(1, query.limit || 20));
+    const filter: any = {};
+
+    if (query.status) filter.status = query.status;
+    if (query.symbol) filter.symbol = query.symbol.toUpperCase();
+    if (query.telegramId) filter.telegramId = parseInt(query.telegramId, 10);
+    if (query.dateFrom || query.dateTo) {
+      filter.createdAt = {};
+      if (query.dateFrom) filter.createdAt.$gte = new Date(query.dateFrom);
+      if (query.dateTo) filter.createdAt.$lte = new Date(query.dateTo);
+    }
+
+    const [data, total] = await Promise.all([
+      this.tradeModel
+        .find(filter)
+        .sort({ createdAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean(),
+      this.tradeModel.countDocuments(filter),
+    ]);
+
+    return { data, total, page, limit, totalPages: Math.ceil(total / limit) };
+  }
+
+  async getCoinProfiles(query: { page?: number; limit?: number; isActive?: string; search?: string }) {
+    const page = Math.max(1, query.page || 1);
+    const limit = Math.min(100, Math.max(1, query.limit || 20));
+    const filter: any = {};
+
+    if (query.isActive !== undefined) filter.isActive = query.isActive === 'true';
+    if (query.search) filter.symbol = { $regex: query.search.toUpperCase(), $options: 'i' };
+
+    const [data, total] = await Promise.all([
+      this.coinProfileModel
+        .find(filter)
+        .sort({ createdAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean(),
+      this.coinProfileModel.countDocuments(filter),
+    ]);
+
+    return { data, total, page, limit, totalPages: Math.ceil(total / limit) };
+  }
+
+  async updateCoinProfile(id: string, dto: { isActive?: boolean; strategyStats?: Record<string, any> }) {
+    return this.coinProfileModel.findByIdAndUpdate(id, { $set: dto }, { new: true }).lean();
+  }
+
+  async getMarketConfigs(query: { page?: number; limit?: number }) {
+    const page = Math.max(1, query.page || 1);
+    const limit = Math.min(100, Math.max(1, query.limit || 20));
+
+    const [data, total] = await Promise.all([
+      this.marketConfigModel
+        .find()
+        .sort({ assessedAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean(),
+      this.marketConfigModel.countDocuments(),
+    ]);
+
+    return { data, total, page, limit, totalPages: Math.ceil(total / limit) };
+  }
+
+  async getRegimeHistory(query: { page?: number; limit?: number; scope?: string }) {
+    const page = Math.max(1, query.page || 1);
+    const limit = Math.min(100, Math.max(1, query.limit || 20));
+    const filter: any = {};
+
+    if (query.scope) filter.scope = query.scope;
+
+    const [data, total] = await Promise.all([
+      this.regimeHistoryModel
+        .find(filter)
+        .sort({ assessedAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean(),
+      this.regimeHistoryModel.countDocuments(filter),
+    ]);
+
+    return { data, total, page, limit, totalPages: Math.ceil(total / limit) };
+  }
+
+  async getSnapshots(query: { page?: number; limit?: number }) {
+    const page = Math.max(1, query.page || 1);
+    const limit = Math.min(100, Math.max(1, query.limit || 20));
+
+    const [data, total] = await Promise.all([
+      this.snapshotModel
+        .find()
+        .sort({ date: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean(),
+      this.snapshotModel.countDocuments(),
+    ]);
+
+    return { data, total, page, limit, totalPages: Math.ceil(total / limit) };
+  }
+}
