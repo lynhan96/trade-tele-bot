@@ -254,19 +254,6 @@ export class UserSignalSubscriptionService {
   }
 
   /**
-   * Set per-user profit target in USDT. null = disable.
-   */
-  async setProfitTarget(telegramId: number, target: number | null): Promise<boolean> {
-    const doc = await this.subscriptionModel.findOne({ telegramId, isActive: true });
-    if (!doc) return false;
-    await this.subscriptionModel.findByIdAndUpdate(doc._id, {
-      profitTarget: target,
-      profitTargetNotified: false, // reset notification state when target changes
-    });
-    return true;
-  }
-
-  /**
    * Mark profit target as notified (prevent spam) or reset (re-enable after positions clear).
    */
   async setProfitTargetNotified(telegramId: number, notified: boolean): Promise<void> {
@@ -291,14 +278,6 @@ export class UserSignalSubscriptionService {
       profitTarget: d.profitTarget,
       profitTargetNotified: d.profitTargetNotified,
     }));
-  }
-
-  /**
-   * Check subscription status for a given user.
-   */
-  async isSubscribed(telegramId: number): Promise<boolean> {
-    const doc = await this.subscriptionModel.findOne({ telegramId, isActive: true });
-    return !!doc;
   }
 
   /**

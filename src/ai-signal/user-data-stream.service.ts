@@ -134,11 +134,6 @@ export class UserDataStreamService implements OnModuleInit, OnModuleDestroy {
     this.logger.log(`[UserDataStream] Unregistered data stream for user ${telegramId}`);
   }
 
-  /** Returns the number of active streams (for status display). */
-  activeStreamCount(): number {
-    return this.streams.size;
-  }
-
   // ─── Event handling ───────────────────────────────────────────────────────
 
   /**
