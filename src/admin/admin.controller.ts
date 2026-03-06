@@ -65,6 +65,18 @@ export class AdminController {
   }
 
   @UseGuards(AdminGuard)
+  @Post("signals/:id/close")
+  closeSignal(@Param("id") id: string) {
+    return this.adminService.closeSignal(id);
+  }
+
+  @UseGuards(AdminGuard)
+  @Post("signals/close-all")
+  closeAllSignals() {
+    return this.adminService.closeAllSignals();
+  }
+
+  @UseGuards(AdminGuard)
   @Get("users")
   getUsers(@Query() query: Record<string, string>) {
     return this.adminService.getUsers(query);

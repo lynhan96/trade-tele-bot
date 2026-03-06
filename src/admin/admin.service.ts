@@ -1,6 +1,7 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
+import { RedisService } from '../redis/redis.service';
 import { AiSignal, AiSignalDocument } from '../schemas/ai-signal.schema';
 import { UserSignalSubscription, UserSignalSubscriptionDocument } from '../schemas/user-signal-subscription.schema';
 import { UserTrade, UserTradeDocument } from '../schemas/user-trade.schema';
@@ -10,8 +11,16 @@ import { AiRegimeHistory, AiRegimeHistoryDocument } from '../schemas/ai-regime-h
 import { DailyMarketSnapshot, DailyMarketSnapshotDocument } from '../schemas/daily-market-snapshot.schema';
 import { UserSettings, UserSettingsDocument } from '../schemas/user-settings.schema';
 
+/** Must match the key in SignalQueueService. */
+const ACTIVE_KEY = (signalKey: string) => `cache:ai-signal:active:${signalKey}`;
+
+/** Coins that run BOTH INTRADAY and SWING strategies simultaneously. */
+const DUAL_TIMEFRAME_COINS = ['BTC', 'ETH', 'SOL', 'BNB', 'XRP'];
+
 @Injectable()
 export class AdminService {
+  private readonly logger = new Logger(AdminService.name);
+
   constructor(
     @InjectModel(AiSignal.name) private signalModel: Model<AiSignalDocument>,
     @InjectModel(UserSignalSubscription.name) private subscriptionModel: Model<UserSignalSubscriptionDocument>,
@@ -21,6 +30,7 @@ export class AdminService {
     @InjectModel(AiRegimeHistory.name) private regimeHistoryModel: Model<AiRegimeHistoryDocument>,
     @InjectModel(DailyMarketSnapshot.name) private snapshotModel: Model<DailyMarketSnapshotDocument>,
     @InjectModel(UserSettings.name) private userSettingsModel: Model<UserSettingsDocument>,
+    private readonly redisService: RedisService,
   ) {}
 
   async getDashboardStats() {
@@ -367,5 +377,110 @@ export class AdminService {
     ]);
 
     return { data, total, page, limit, totalPages: Math.ceil(total / limit) };
+  }
+
+  // ─── Signal close (admin) ────────────────────────────────────────────────
+
+  /**
+   * Close a single active signal from admin panel.
+   * - Fetches current price from Binance public API
+   * - Marks signal as COMPLETED with PnL
+   * - Removes Redis active key so PositionMonitorService detects the close
+   *   and handles real Binance position closes + Telegram notifications
+   */
+  async closeSignal(id: string): Promise<{ success: boolean; pnlPercent?: number; error?: string }> {
+    const signal = await this.signalModel.findById(id);
+    if (!signal) return { success: false, error: 'Signal not found' };
+    if (signal.status !== 'ACTIVE' && signal.status !== 'QUEUED') {
+      return { success: false, error: `Signal is ${signal.status}, not ACTIVE/QUEUED` };
+    }
+
+    // For QUEUED signals, just cancel them
+    if (signal.status === 'QUEUED') {
+      await this.signalModel.findByIdAndUpdate(id, {
+        status: 'CANCELLED',
+        closeReason: 'ADMIN_CLOSE',
+        positionClosedAt: new Date(),
+      });
+      const signalKey = this.getSignalKey(signal);
+      await this.redisService.delete(`cache:ai-signal:queued:${signalKey}`);
+      this.logger.log(`[Admin] Cancelled QUEUED signal ${signal.symbol} (${id})`);
+      return { success: true, pnlPercent: 0 };
+    }
+
+    // For ACTIVE signals, resolve with current price
+    const exitPrice = await this.fetchBinancePrice(signal.symbol);
+    if (!exitPrice) return { success: false, error: 'Failed to fetch current price' };
+
+    const pnlPercent = signal.direction === 'LONG'
+      ? ((exitPrice - signal.entryPrice) / signal.entryPrice) * 100
+      : ((signal.entryPrice - exitPrice) / signal.entryPrice) * 100;
+
+    await this.signalModel.findByIdAndUpdate(id, {
+      status: 'COMPLETED',
+      closeReason: 'ADMIN_CLOSE',
+      exitPrice,
+      pnlPercent,
+      positionClosedAt: new Date(),
+    });
+
+    // Remove from Redis — PositionMonitorService will detect the close
+    // and handle real Binance positions + Telegram notifications on next poll
+    const signalKey = this.getSignalKey(signal);
+    await this.redisService.delete(ACTIVE_KEY(signalKey));
+
+    this.logger.log(
+      `[Admin] Closed signal ${signal.symbol} ${signal.direction} — exit=${exitPrice} pnl=${pnlPercent.toFixed(2)}% (${id})`,
+    );
+    return { success: true, pnlPercent: Math.round(pnlPercent * 100) / 100 };
+  }
+
+  /**
+   * Close all active signals from admin panel.
+   */
+  async closeAllSignals(): Promise<{ closed: number; errors: string[] }> {
+    const activeSignals = await this.signalModel.find({ status: 'ACTIVE' }).lean();
+    let closed = 0;
+    const errors: string[] = [];
+
+    for (const signal of activeSignals) {
+      const result = await this.closeSignal((signal as any)._id.toString());
+      if (result.success) {
+        closed++;
+      } else {
+        errors.push(`${signal.symbol}: ${result.error}`);
+      }
+    }
+
+    // Also cancel all QUEUED
+    const queuedSignals = await this.signalModel.find({ status: 'QUEUED' }).lean();
+    for (const signal of queuedSignals) {
+      const result = await this.closeSignal((signal as any)._id.toString());
+      if (result.success) closed++;
+    }
+
+    this.logger.log(`[Admin] Close all: ${closed} signals closed, ${errors.length} errors`);
+    return { closed, errors };
+  }
+
+  // ─── Helpers ─────────────────────────────────────────────────────────────
+
+  private getSignalKey(signal: { symbol: string; coin?: string; timeframeProfile?: string } & any): string {
+    const coin = (signal.coin || signal.symbol.replace('USDT', '')).toUpperCase();
+    const profile = signal.timeframeProfile;
+    if (DUAL_TIMEFRAME_COINS.includes(coin) && profile) {
+      return `${signal.symbol}:${profile}`;
+    }
+    return signal.symbol;
+  }
+
+  private async fetchBinancePrice(symbol: string): Promise<number | null> {
+    try {
+      const res = await fetch(`https://fapi.binance.com/fapi/v1/ticker/price?symbol=${symbol}`);
+      const data = await res.json();
+      return parseFloat(data.price) || null;
+    } catch {
+      return null;
+    }
   }
 }
