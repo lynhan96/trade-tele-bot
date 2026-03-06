@@ -66,42 +66,6 @@ export class UserSignalSubscriptionService {
   }
 
   /**
-   * Unsubscribe a user from AI signal notifications.
-   */
-  async unsubscribe(telegramId: number): Promise<boolean> {
-    const existing = await this.subscriptionModel.findOne({ telegramId });
-    if (!existing || !existing.isActive) return false;
-
-    await this.subscriptionModel.findByIdAndUpdate(existing._id, {
-      isActive: false,
-      unsubscribedAt: new Date(),
-    });
-    this.logger.log(`[SignalSubscription] Unsubscribed user ${telegramId}`);
-    return true;
-  }
-
-  /**
-   * Get all active subscribers. Used by AiSignalService to broadcast notifications.
-   */
-  async findAllActive(): Promise<SubscriberInfo[]> {
-    const docs = await this.subscriptionModel.find({ isActive: true }).lean();
-    return docs.map((d) => ({
-      telegramId: d.telegramId,
-      chatId: d.chatId,
-      username: d.username,
-      tradingBalance: d.tradingBalance ?? 1000,
-      coinVolumes: d.coinVolumes as Record<string, number> | undefined,
-      customTpPct: d.customTpPct,
-      customSlPct: d.customSlPct,
-      profitTarget: d.profitTarget,
-      profitTargetNotified: d.profitTargetNotified,
-      realModeEnabled: d.realModeEnabled,
-      realModeLeverage: d.realModeLeverage,
-      realModeLeverageMode: d.realModeLeverageMode ?? "AI",
-    }));
-  }
-
-  /**
    * Get active subscribers who have real mode enabled.
    */
   async findRealModeSubscribers(): Promise<SubscriberInfo[]> {

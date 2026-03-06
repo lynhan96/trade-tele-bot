@@ -843,7 +843,7 @@ export class UserRealTradingService implements OnModuleInit {
             `━━━━━━━━━━━━━━━━━━\n\n` +
             `Real mode da duoc *BAT lai* cho ngay hom nay.\n` +
             targetLine + slLine +
-            `\nDung /ai realmode off de tat neu can.`;
+            `\nDung /ai off de tat neu can.`;
           await this.telegramService.sendTelegramMessage(user.chatId, msg).catch(() => {});
 
           this.logger.log(`[RealTrading] Daily reset: re-enabled real mode for user ${user.telegramId}`);

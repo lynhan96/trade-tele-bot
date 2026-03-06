@@ -5,7 +5,7 @@ export type UserSignalSubscriptionDocument = UserSignalSubscription & Document;
 
 /**
  * Stores which users have subscribed to receive AI signal notifications.
- * Users opt-in via /ai subscribe and opt-out via /ai unsubscribe.
+ * Users are auto-registered when enabling trading via /ai on.
  * Replaces the Redis-scan approach for scalability (supports many users).
  */
 @Schema({ collection: "user_signal_subscriptions", timestamps: true })

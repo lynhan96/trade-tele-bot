@@ -589,7 +589,7 @@ export class AiSignalService implements OnModuleInit {
       });
 
       // Broadcast to subscribers
-      const subscribers = await this.subscriptionService.findAllActive();
+      const subscribers = await this.subscriptionService.findRealModeSubscribers();
       for (const sub of subscribers) {
         await this.telegramService.sendTelegramMessage(sub.chatId, msg);
       }
@@ -871,11 +871,11 @@ export class AiSignalService implements OnModuleInit {
       `${this.getProfileTag(signal)}\n` +
       `_${time} • Test mode_`;
 
-    const subscribers = await this.subscriptionService.findAllActive();
+    const subscribers = await this.subscriptionService.findRealModeSubscribers();
     let notified = 0;
     for (const sub of subscribers) {
       // Real-mode users get their own notifications from UserRealTradingService
-      if (sub.realModeEnabled) continue;
+
       await this.telegramService
         .sendTelegramMessage(sub.chatId, text)
         .catch(() => {});
@@ -985,9 +985,9 @@ export class AiSignalService implements OnModuleInit {
       `PnL: *${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}%*\n\n` +
       `_${time}_`;
 
-    const subscribers = await this.subscriptionService.findAllActive();
+    const subscribers = await this.subscriptionService.findRealModeSubscribers();
     for (const sub of subscribers) {
-      if (sub.realModeEnabled) continue;
+
       await this.telegramService.sendTelegramMessage(sub.chatId, text).catch(() => {});
     }
 
@@ -1057,7 +1057,7 @@ export class AiSignalService implements OnModuleInit {
       `${this.getProfileTag(signal)}\n` +
       `_${time}_`;
 
-    const subscribers = await this.subscriptionService.findAllActive();
+    const subscribers = await this.subscriptionService.findRealModeSubscribers();
     for (const sub of subscribers) {
       await this.telegramService
         .sendTelegramMessage(sub.chatId, text)
@@ -1086,9 +1086,9 @@ export class AiSignalService implements OnModuleInit {
       `⏳ _Đang chờ — hết hạn ${hoursLeft.toFixed(1)}h_\n` +
       `_${time}_`;
 
-    const subscribers = await this.subscriptionService.findAllActive();
+    const subscribers = await this.subscriptionService.findRealModeSubscribers();
     for (const sub of subscribers) {
-      if (sub.realModeEnabled) continue;
+
       await this.telegramService
         .sendTelegramMessage(sub.chatId, text)
         .catch(() => {});
@@ -1118,9 +1118,9 @@ export class AiSignalService implements OnModuleInit {
       `SL: ${fmtP(signal.stopLossPrice)}\n\n` +
       `_${time}_`;
 
-    const subscribers = await this.subscriptionService.findAllActive();
+    const subscribers = await this.subscriptionService.findRealModeSubscribers();
     for (const sub of subscribers) {
-      if (sub.realModeEnabled) continue;
+
       await this.telegramService
         .sendTelegramMessage(sub.chatId, text)
         .catch(() => {});
@@ -1136,9 +1136,9 @@ export class AiSignalService implements OnModuleInit {
       `Bao ve loi nhuan, khong con rui ro!\n\n` +
       `_${new Date().toLocaleTimeString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" })}_`;
 
-    const subscribers = await this.subscriptionService.findAllActive();
+    const subscribers = await this.subscriptionService.findRealModeSubscribers();
     for (const sub of subscribers) {
-      if (sub.realModeEnabled) continue;
+
       await this.telegramService.sendTelegramMessage(sub.chatId, text).catch(() => {});
     }
   }
@@ -1168,9 +1168,9 @@ export class AiSignalService implements OnModuleInit {
       pnlLine + `\n` +
       `_${new Date().toLocaleTimeString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" })}_`;
 
-    const subscribers = await this.subscriptionService.findAllActive();
+    const subscribers = await this.subscriptionService.findRealModeSubscribers();
     for (const sub of subscribers) {
-      if (sub.realModeEnabled) continue;
+
       await this.telegramService.sendTelegramMessage(sub.chatId, text).catch(() => {});
     }
   }
@@ -1186,9 +1186,9 @@ export class AiSignalService implements OnModuleInit {
       `Lenh tiep tuc chay, dam bao loi toi thieu +2%\n\n` +
       `_${new Date().toLocaleTimeString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" })}_`;
 
-    const subscribers = await this.subscriptionService.findAllActive();
+    const subscribers = await this.subscriptionService.findRealModeSubscribers();
     for (const sub of subscribers) {
-      if (sub.realModeEnabled) continue;
+
       await this.telegramService.sendTelegramMessage(sub.chatId, text).catch(() => {});
     }
   }
@@ -1223,9 +1223,9 @@ export class AiSignalService implements OnModuleInit {
       `PnL: *${pnlSign}${info.pnlPercent.toFixed(2)}%*\n\n` +
       `_${time}_`;
 
-    const subscribers = await this.subscriptionService.findAllActive();
+    const subscribers = await this.subscriptionService.findRealModeSubscribers();
     for (const sub of subscribers) {
-      if (sub.realModeEnabled) continue;
+
       await this.telegramService
         .sendTelegramMessage(sub.chatId, text)
         .catch(() => {});

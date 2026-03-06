@@ -38,27 +38,22 @@ export class TelegramBotService implements OnModuleInit {
           `• Phat tin hieu LONG/SHORT kem Stop Loss & Take Profit\n` +
           `• Ho tro 2 khung thoi gian: Intraday (15m) va Swing (4h)\n\n` +
           `─────────────────────\n` +
-          `📬 *Dang ky tin hieu*\n` +
-          `/ai subscribe — Dang ky nhan tin hieu\n` +
-          `/ai unsubscribe — Huy dang ky\n` +
-          `💹 *Giao dich that (Real Mode)*\n` +
-          `/ai setkeys — Luu Binance API keys\n` +
-          `/ai realmode — Xem/bat/tat dat lenh that\n` +
-          `/ai realmode leverage AI|MAX|10 — Chon he so don bay\n` +
-          `/ai realmode target 5 — Dat muc tieu loi nhuan +5%/ngay\n` +
-          `/ai realmode stoploss 3 — Dat gioi han lo -3%/ngay\n` +
-          `/ai realmode maxpos 3 — Toi da 3 lenh cung luc\n\n` +
-          `👤 *Tai khoan cua ban*\n` +
-          `/ai my — Dashboard ca nhan (so du, PnL, all-time)\n` +
-          `/ai my history — Lich su 10 lenh gan nhat\n` +
-          `/ai account — Vi the mo & unrealized PnL\n` +
-          `/ai realmode stats — Chi tiet lenh va P&L hom nay\n` +
+          `💹 *Bat dau (chi 2 buoc)*\n` +
+          `1️⃣ /ai setkeys <key> <secret>\n` +
+          `2️⃣ /ai on\n\n` +
           `⚙️ *Cai dat*\n` +
-          `/ai settings — Xem cai dat hien tai\n\n` +
-          `🌍 *Thi truong & Tin hieu AI*\n` +
-          `/ai signals — Xem tat ca tin hieu AI dang chay\n` +
-          `/ai close all — Dong tat ca lenh (co xac nhan)\n` +
-          `/ai close <SYMBOL> — Dong mot lenh cu the\n\n` +
+          `/ai settings — Xem cai dat\n` +
+          `/ai leverage AI|MAX|10 — He so don bay\n` +
+          `/ai target 5 — Muc tieu +5%/ngay\n` +
+          `/ai stoploss 3 — Gioi han lo -3%/ngay\n` +
+          `/ai maxpos 3 — Toi da 3 lenh\n\n` +
+          `👤 *Tai khoan*\n` +
+          `/ai my — Dashboard (so du, PnL, all-time)\n` +
+          `/ai account — Vi the mo & PnL\n` +
+          `/ai close — Dong lenh\n\n` +
+          `🌍 *Tin hieu*\n` +
+          `/ai signals — Tin hieu AI dang chay\n` +
+          `/ai rank — Xep hang PnL\n\n` +
           `⚠️ _Tin hieu AI chi mang tinh tham khao. Giao dich tiem an rui ro._`,
       );
     });
@@ -77,26 +72,27 @@ export class TelegramBotService implements OnModuleInit {
       await this.bot.setMyCommands([
         { command: "start", description: "Gioi thieu bot va huong dan su dung" },
         { command: "ai", description: "Danh sach tat ca lenh AI" },
-        // Signal subscription
-        { command: "ai_subscribe", description: "Dang ky nhan tin hieu AI" },
-        { command: "ai_unsubscribe", description: "Huy dang ky tin hieu AI" },
-        { command: "ai_push", description: "Auto push tin hieu moi 10 phut" },
-        // Real trading mode
+        // Start/stop
         { command: "ai_setkeys", description: "Luu Binance API keys" },
-        { command: "ai_realmode", description: "Xem/bat/tat dat lenh that" },
+        { command: "ai_on", description: "Bat bot giao dich" },
+        { command: "ai_off", description: "Tat bot giao dich" },
         // Settings
         { command: "ai_settings", description: "Xem cai dat hien tai" },
-        { command: "ai_balance", description: "Set balance mac dinh (USDT/lenh)" },
+        { command: "ai_leverage", description: "Dat leverage (AI/MAX/so)" },
+        { command: "ai_target", description: "Muc tieu loi nhuan %/ngay" },
+        { command: "ai_stoploss", description: "Gioi han lo %/ngay" },
+        { command: "ai_maxpos", description: "Toi da vi the cung luc" },
+        { command: "ai_balance", description: "Balance mac dinh (USDT/lenh)" },
+        { command: "ai_push", description: "Auto push tin hieu moi 10 phut" },
         { command: "ai_moneyflow", description: "Bat/tat canh bao dong tien" },
         // My account
-        { command: "ai_my", description: "Dashboard ca nhan (so du, PnL, all-time)" },
-        { command: "ai_account", description: "Vi the mo va PnL real mode" },
-        { command: "ai_close", description: "Dong lenh (all hoac SYMBOL)" },
-        { command: "ai_rank", description: "Xep hang PnL tat ca nguoi dung" },
+        { command: "ai_my", description: "Dashboard (so du, PnL, all-time)" },
+        { command: "ai_account", description: "Vi the mo & PnL" },
+        { command: "ai_close", description: "Dong lenh" },
+        { command: "ai_rank", description: "Xep hang PnL" },
         // Market & signals
-        { command: "ai_signals", description: "Xem tin hieu AI dang chay" },
-        { command: "ai_coins", description: "Xem danh sach coin dang theo doi" },
-        { command: "ai_check", description: "Kiem tra tin hieu coin" },
+        { command: "ai_signals", description: "Tin hieu AI dang chay" },
+        { command: "ai_coins", description: "Danh sach coin dang theo doi" },
         // Admin
         { command: "ai_status", description: "Trang thai he thong (admin)" },
         { command: "ai_stats", description: "Thong ke hieu suat (admin)" },

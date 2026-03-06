@@ -51,76 +51,30 @@ export class AiCommandService implements OnModuleInit {
       const isAdmin = this.isAdmin(msg.from?.id);
       let text =
         `🤖 *AI Signal Commands*\n\n` +
-        `*Dang ky & Cai dat:*\n` +
-        `/ai subscribe — Dang ky nhan tin hieu AI\n` +
-        `/ai unsubscribe — Huy dang ky\n` +
-        `/ai settings — Xem cai dat cua ban\n` +
-        `/ai vol <COIN> <so> — Set vol rieng cho tung coin\n` +
-        `/ai tpsl <tp%> <sl%> — Set TP/SL tuy chinh\n` +
-        `/ai tpsl off — Dung TP/SL tu AI\n` +
+        `*Bat dau:*\n` +
         `/ai setkeys <key> <secret> — Luu Binance API keys\n` +
-        `/ai realmode — Xem/bat/tat che do dat lenh that\n\n` +
-        `*Tai khoan cua ban:*\n` +
-        `/ai my — Dashboard ca nhan (so du, PnL, all-time)\n` +
+        `/ai on — Bat bot giao dich\n` +
+        `/ai off — Tat bot giao dich\n\n` +
+        `*Cai dat:*\n` +
+        `/ai settings — Xem cai dat cua ban\n` +
+        `/ai leverage AI|MAX|<so> — Dat leverage\n` +
+        `/ai target <N|off> — Muc tieu loi nhuan %/ngay\n` +
+        `/ai stoploss <N|off> — Gioi han lo %/ngay\n` +
+        `/ai maxpos <N> — Toi da vi the cung luc\n` +
+        `/ai vol <COIN> <so> — Vol rieng cho tung coin\n` +
+        `/ai balance <so> — Balance mac dinh\n` +
+        `/ai tpsl <tp%> <sl%> — TP/SL tuy chinh\n\n` +
+        `*Tai khoan:*\n` +
+        `/ai my — Dashboard (so du, PnL, all-time)\n` +
         `/ai my history — Lich su 10 lenh gan nhat\n` +
-        `/ai account — Vi the mo va PnL real mode\n` +
-        `/ai close — Dong lenh that (Binance)\n\n` +
+        `/ai account — Vi the mo & PnL\n` +
+        `/ai close — Dong lenh\n\n` +
         `*He thong:*\n` +
-        `/ai signals — Xem tat ca tin hieu AI dang chay\n`;
+        `/ai signals — Tin hieu AI dang chay\n` +
+        `/ai rank — Xep hang PnL\n`;
       await this.telegramService.sendTelegramMessage(chatId, text);
     });
 
-    // /ai subscribe — any user can subscribe (also handles /ai_subscribe from menu)
-    this.telegramService.registerBotCommand(/^\/ai[_ ]subscribe/, async (msg) => {
-      const chatId = msg.chat.id;
-      const telegramId = msg.from?.id;
-      if (!telegramId) return;
-
-      try {
-        const subscribed = await this.subscriptionService.subscribe(
-          telegramId,
-          chatId,
-          msg.from?.username,
-        );
-        if (subscribed) {
-          await this.telegramService.sendTelegramMessage(
-            chatId,
-            `✅ *Đăng ký thành công!*\n\nBạn sẽ nhận được thông báo khi có tín hiệu AI mới.\nDùng /ai unsubscribe để hủy bất cứ lúc nào.`,
-          );
-        } else {
-          await this.telegramService.sendTelegramMessage(
-            chatId,
-            `ℹ️ Bạn đã đăng ký nhận tín hiệu AI rồi.\nDùng /ai unsubscribe để hủy.`,
-          );
-        }
-      } catch (err) {
-        await this.telegramService.sendTelegramMessage(chatId, `❌ Lỗi: ${err?.message}`);
-      }
-    });
-
-    // /ai unsubscribe — any user can unsubscribe (also handles /ai_unsubscribe from menu)
-    this.telegramService.registerBotCommand(/^\/ai[_ ]unsubscribe/, async (msg) => {
-      const chatId = msg.chat.id;
-      const telegramId = msg.from?.id;
-      if (!telegramId) return;
-
-      try {
-        const unsubscribed = await this.subscriptionService.unsubscribe(telegramId);
-        if (unsubscribed) {
-          await this.telegramService.sendTelegramMessage(
-            chatId,
-            `✅ *Hủy đăng ký thành công.*\n\nBạn sẽ không còn nhận tín hiệu AI.\nDùng /ai subscribe để đăng ký lại.`,
-          );
-        } else {
-          await this.telegramService.sendTelegramMessage(
-            chatId,
-            `ℹ️ Bạn chưa đăng ký nhận tín hiệu AI.`,
-          );
-        }
-      } catch (err) {
-        await this.telegramService.sendTelegramMessage(chatId, `❌ Lỗi: ${err?.message}`);
-      }
-    });
 
     // /ai moneyflow on|off — toggle money flow alerts (also handles /ai_moneyflow)
     this.telegramService.registerBotCommand(/^\/ai[_ ]moneyflow(?:\s+(on|off))?$/i, async (msg) => {
@@ -136,7 +90,7 @@ export class AiCommandService implements OnModuleInit {
         if (!sub) {
           await this.telegramService.sendTelegramMessage(
             chatId,
-            `ℹ️ Ban chua đăng ký. Dùng /ai subscribe trước.`,
+            `ℹ️ Dung /ai on de bat bot giao dich.`,
           );
           return;
         }
@@ -180,8 +134,8 @@ export class AiCommandService implements OnModuleInit {
             chatId,
             `⚙️ *Cài đặt của bạn*\n` +
             `━━━━━━━━━━━━━━━━━━\n\n` +
-            `📬 Đăng ký tín hiệu: ❌ Chưa đăng ký\n\n` +
-            `Dùng /ai subscribe để bắt đầu nhận tín hiệu AI.`,
+            `⚡ Bot: ❌ Chưa bật\n\n` +
+            `Dùng /ai setkeys va /ai on de bat dau.`,
           );
           return;
         }
@@ -212,28 +166,26 @@ export class AiCommandService implements OnModuleInit {
           chatId,
           `⚙️ *Cài đặt của bạn*\n` +
           `━━━━━━━━━━━━━━━━━━\n\n` +
-          `📬 Đăng ký tín hiệu: ✅ Đang hoạt động\n` +
-          `🚨 Cảnh báo dòng tiền: ${moneyFlow ? "✅ Bật" : "❌ Tắt"}\n` +
-          `📡 Auto push signals: ${pushEnabled ? "✅ Bật (10 phút)" : "❌ Tắt"}\n` +
-          `📅 Ngày đăng ký: ${subscribedAt}\n\n` +
-          `*Cai dat vol:*\n` +
-          `💰 Balance mac dinh: *${balance.toLocaleString()} USDT/lenh*\n` +
+          `⚡ Bot: ${realMode ? "✅ BẬT" : "❌ TẮT"}\n` +
+          `🔑 Binance API: ${hasKeys ? "✅ Da luu" : "❌ Chua luu"}\n` +
+          `📊 Leverage: *${leverageLabel}*\n` +
+          `📈 Max vi the: *${sub.maxOpenPositions ?? 3} lenh*\n` +
+          (openTrades.length > 0 ? `📊 Lenh mo: *${openTrades.length}*\n` : "") +
+          `🚨 Canh bao dong tien: ${moneyFlow ? "✅ Bat" : "❌ Tat"}\n` +
+          `📡 Auto push: ${pushEnabled ? "✅ Bat (10 phut)" : "❌ Tat"}\n\n` +
+          `*Vol & TP/SL:*\n` +
+          `💰 Balance: *${balance.toLocaleString()} USDT/lenh*\n` +
           (coinVolLines ? `${coinVolLines}\n` : `  _Chua co override coin nao_\n`) +
           `📐 TP/SL: ${tpSlLine}\n\n` +
-          `*Real Trading Mode:*\n` +
-          `🔑 Binance API Keys: ${hasKeys ? "✅ Da luu" : "❌ Chua luu"}\n` +
-          `⚡ Real Mode: ${realMode ? "✅ BẬT" : "❌ TẮT"}\n` +
-          (realMode ? `📊 Leverage: *${leverageLabel}*\n` : "") +
-          (realMode && openTrades.length > 0 ? `📈 Lenh mo: *${openTrades.length}*\n` : "") +
-          `\n*Thay đổi cài đặt:*\n` +
-          `/ai moneyflow ${moneyFlow ? "off" : "on"} — ${moneyFlow ? "Tắt" : "Bật"} cảnh báo dòng tiền\n` +
-          `/ai push ${pushEnabled ? "off" : "on"} — ${pushEnabled ? "Tắt" : "Bật"} auto push signals\n` +
-          `/ai balance <so> — Doi balance mac dinh\n` +
-          `/ai vol BTC 5000 — Set vol BTC rieng\n` +
-          `/ai tpsl 2.5 1.5 — Set TP/SL tuy chinh\n` +
-          `/ai setkeys <key> <secret> — Luu Binance API keys\n` +
-          `/ai realmode on|off — Bat/tat real mode\n` +
-          `/ai unsubscribe — Hủy đăng ký tất cả`,
+          `*Thay doi:*\n` +
+          `/ai on|off — Bat/tat bot\n` +
+          `/ai leverage AI|MAX|10 — Dat leverage\n` +
+          `/ai target 5 — Muc tieu +5%/ngay\n` +
+          `/ai stoploss 3 — Gioi han lo -3%/ngay\n` +
+          `/ai maxpos 3 — Toi da 3 lenh\n` +
+          `/ai balance <so> — Balance mac dinh\n` +
+          `/ai vol BTC 5000 — Vol BTC rieng\n` +
+          `/ai tpsl 2.5 1.5 — TP/SL tuy chinh`,
         );
       } catch (err) {
         await this.telegramService.sendTelegramMessage(chatId, `❌ Lỗi: ${err?.message}`);
@@ -325,7 +277,7 @@ export class AiCommandService implements OnModuleInit {
       try {
         const sub = await this.subscriptionService.getSubscription(telegramId);
         if (!sub) {
-          await this.telegramService.sendTelegramMessage(chatId, `❌ Ban chua subscribe. Dung /ai subscribe truoc.`);
+          await this.telegramService.sendTelegramMessage(chatId, `❌ Ban chua bat bot. Dung /ai on de bat.`);
           return;
         }
 
@@ -352,57 +304,6 @@ export class AiCommandService implements OnModuleInit {
       }
     });
 
-    // /ai target <amount|off> — set per-user profit target in USDT
-    this.telegramService.registerBotCommand(/^\/ai[_ ]target(?:\s+(\S+))?$/i, async (msg) => {
-      const chatId = msg.chat.id;
-      const telegramId = msg.from?.id;
-      if (!telegramId) return;
-
-      const match = msg.text?.match(/^\/ai[_ ]target(?:\s+(\S+))?$/i);
-      const arg = match?.[1]?.toLowerCase();
-
-      try {
-        const sub = await this.subscriptionService.getSubscription(telegramId);
-        if (!sub) {
-          await this.telegramService.sendTelegramMessage(chatId, `❌ Ban chua subscribe. Dung /ai subscribe truoc.`);
-          return;
-        }
-
-        if (!arg) {
-          const cur = sub.profitTarget;
-          const msg2 = cur
-            ? `🎯 Profit target hien tai: *${cur} USDT*\n\nDung /ai target off de tat, hoac /ai target <so> de doi`
-            : `🎯 Profit target: *chua dat*\n\nDung: /ai target <so USDT>\nVi du: /ai target 50 _(khi tong PnL dat +50 USDT, bot se thong bao)_`;
-          await this.telegramService.sendTelegramMessage(chatId,
-            `💼 *Profit Target*\n━━━━━━━━━━━━━━━━━━\n\n${msg2}`
-          );
-          return;
-        }
-
-        if (arg === "off") {
-          await this.subscriptionService.setProfitTarget(telegramId, null);
-          await this.telegramService.sendTelegramMessage(chatId,
-            `✅ *Profit target da tat*\n_Bot se khong thong bao khi dat muc tieu_`
-          );
-          return;
-        }
-
-        const amount = parseFloat(arg);
-        if (isNaN(amount) || amount <= 0) {
-          await this.telegramService.sendTelegramMessage(chatId, `❌ Nhap so USDT hop le (vi du: /ai target 50)`);
-          return;
-        }
-
-        await this.subscriptionService.setProfitTarget(telegramId, amount);
-        const balance = sub.tradingBalance ?? 1000;
-        await this.telegramService.sendTelegramMessage(chatId,
-          `✅ *Profit Target da dat*\n━━━━━━━━━━━━━━━━━━\n\nMuc tieu: *+${amount} USDT*\nBalance hien tai: ${balance.toLocaleString()} USDT/lenh\n\n_Khi tong PnL mo cua dat +${amount} USDT, bot se thong bao va tu dong dong tat ca lenh_`
-        );
-      } catch (err) {
-        await this.telegramService.sendTelegramMessage(chatId, `❌ Lỗi: ${err?.message}`);
-      }
-    });
-
     // /ai vol [COIN] [amount|off] — per-coin volume override
     this.telegramService.registerBotCommand(/^\/ai[_ ]vol(?:\s+(\S+))?(?:\s+(\S+))?$/i, async (msg, match) => {
       const chatId = msg.chat.id;
@@ -415,7 +316,7 @@ export class AiCommandService implements OnModuleInit {
       try {
         const sub = await this.subscriptionService.getSubscription(telegramId);
         if (!sub) {
-          await this.telegramService.sendTelegramMessage(chatId, `❌ Ban chua subscribe. Dung /ai subscribe truoc.`);
+          await this.telegramService.sendTelegramMessage(chatId, `❌ Ban chua bat bot. Dung /ai on de bat.`);
           return;
         }
 
@@ -469,7 +370,7 @@ export class AiCommandService implements OnModuleInit {
       try {
         const sub = await this.subscriptionService.getSubscription(telegramId);
         if (!sub) {
-          await this.telegramService.sendTelegramMessage(chatId, `❌ Ban chua subscribe. Dung /ai subscribe truoc.`);
+          await this.telegramService.sendTelegramMessage(chatId, `❌ Ban chua bat bot. Dung /ai on de bat.`);
           return;
         }
 
@@ -527,7 +428,7 @@ export class AiCommandService implements OnModuleInit {
         if (!sub) {
           await this.telegramService.sendTelegramMessage(
             chatId,
-            `ℹ️ Ban chua đăng ký. Dùng /ai subscribe trước.`,
+            `ℹ️ Dung /ai on de bat bot giao dich.`,
           );
           return;
         }
@@ -852,20 +753,16 @@ export class AiCommandService implements OnModuleInit {
         }
 
         try {
-          // Must be subscribed first
+          // Auto-subscribe if not yet registered
           const sub = await this.subscriptionService.getSubscription(telegramId);
           if (!sub) {
-            await this.telegramService.sendTelegramMessage(
-              chatId,
-              `ℹ️ Ban chua dang ky. Dung /ai subscribe truoc.`,
-            );
-            return;
+            await this.subscriptionService.subscribe(telegramId, chatId, msg.from?.username);
           }
 
           await this.userSettingsService.saveApiKeys(telegramId, chatId, "binance", apiKey, apiSecret);
           await this.telegramService.sendTelegramMessage(
             chatId,
-            `✅ *Binance API Keys da duoc luu!*\n\nBat real trading voi /ai realmode on`,
+            `✅ *Binance API Keys da duoc luu!*\n\nDung /ai on de bat bot giao dich`,
           );
         } catch (err) {
           await this.telegramService.sendTelegramMessage(chatId, `❌ Loi: ${err?.message}`);
@@ -873,309 +770,228 @@ export class AiCommandService implements OnModuleInit {
       },
     );
 
-    // /ai realmode [on|off|leverage <N|AI|MAX>] — manage real trading mode
-    this.telegramService.registerBotCommand(
-      /^\/ai[_ ]realmode(?:\s+(.+))?$/i,
-      async (msg, match) => {
-        const chatId = msg.chat.id;
-        const telegramId = msg.from?.id;
-        if (!telegramId) return;
+    // /ai on — start trading (auto-subscribe + enable real mode)
+    this.telegramService.registerBotCommand(/^\/ai[_ ]on$/i, async (msg) => {
+      const chatId = msg.chat.id;
+      const telegramId = msg.from?.id;
+      if (!telegramId) return;
 
-        const arg = (match?.[1] ?? "").trim().toLowerCase();
-
-        try {
-          const sub = await this.subscriptionService.getSubscription(telegramId);
-          if (!sub) {
-            await this.telegramService.sendTelegramMessage(
-              chatId,
-              `ℹ️ Ban chua dang ky. Dung /ai subscribe truoc.`,
-            );
-            return;
-          }
-
-          // No arg — show full overview
-          if (!arg) {
-            const realMode = sub.realModeEnabled === true;
-            const leverageMode = sub.realModeLeverageMode ?? "AI";
-            const leverageLabel =
-              leverageMode === "FIXED" ? `Fixed ${sub.realModeLeverage ?? "?"}x` :
-              leverageMode === "MAX" ? "Max (Binance)" : "AI Signal";
-            const hasKeys = !!(await this.userSettingsService.getApiKeys(telegramId, "binance"));
-            const dailyTarget = sub.realModeDailyTargetPct;
-            const dailySl = sub.realModeDailyStopLossPct;
-            const disabledAt = sub.realModeDailyDisabledAt;
-
-            let overviewText =
-              `⚡ *Real Trading Mode*\n━━━━━━━━━━━━━━━━━━\n\n` +
-              `Trang thai: ${realMode ? "✅ BẬT" : "❌ TẮT"}\n` +
-              `Binance API: ${hasKeys ? "✅ Da luu" : "❌ Chua luu"}\n` +
-              `Leverage: *${leverageLabel}*\n`;
-
-            if (disabledAt) {
-              const startOfToday = new Date(); startOfToday.setUTCHours(0, 0, 0, 0);
-              if (disabledAt >= startOfToday) {
-                overviewText += `⚠️ Tu dong tat hom nay (se mo lai ngay mai)\n`;
-              }
-            }
-
-            const maxPos = sub.maxOpenPositions ?? 3;
-            overviewText += `Toi da vi the: *${maxPos} lenh*\n`;
-
-            overviewText += `\n*Gioi han ngay:*\n`;
-            overviewText += `Muc tieu loi nhuan: ${dailyTarget != null ? `*+${dailyTarget}%*` : "_chua dat_"}\n`;
-            overviewText += `Gioi han lo: ${dailySl != null ? `*-${dailySl}%*` : "_chua dat_"}\n`;
-
-            if (realMode) {
-              try {
-                const stats = await this.userRealTradingService.getDailyStats(telegramId);
-                const sign = stats.totalPnlUsdt >= 0 ? "+" : "";
-                const pnlIcon = stats.totalPnlUsdt >= 0 ? "📗" : "📕";
-                overviewText += `\n*Hom nay:*\n`;
-                overviewText += `${pnlIcon} PnL: *${sign}${stats.totalPnlUsdt.toFixed(2)} USDT* (*${sign}${stats.dailyPnlPct.toFixed(2)}%*)\n`;
-                overviewText += `Lenh mo: *${stats.openTrades.length}*, Lenh dong: *${stats.closedToday.length}*\n`;
-                overviewText += `Xem chi tiet: /ai realmode stats\n`;
-              } catch { /* ignore */ }
-            }
-
-            overviewText +=
-              `\n*Lenh:*\n` +
-              `/ai realmode on|off — Bat/tat real mode\n` +
-              `/ai realmode leverage AI|MAX|10 — Dat leverage\n` +
-              `/ai realmode target 5 — Dat muc tieu loi nhuan +5%\n` +
-              `/ai realmode target off — Tat muc tieu\n` +
-              `/ai realmode stoploss 3 — Dat gioi han lo -3%\n` +
-              `/ai realmode stoploss off — Tat gioi han lo\n` +
-              `/ai realmode maxpos 3 — Toi da 3 lenh cung luc\n` +
-              `/ai realmode stats — Chi tiet lenh hom nay`;
-            await this.telegramService.sendTelegramMessage(chatId, overviewText);
-            return;
-          }
-
-          // /ai realmode on
-          if (arg === "on") {
-            const keys = await this.userSettingsService.getApiKeys(telegramId, "binance");
-            if (!keys?.apiKey) {
-              await this.telegramService.sendTelegramMessage(
-                chatId,
-                `❌ Ban chua luu Binance API keys.\nDung: \`/ai setkeys <apiKey> <apiSecret>\``,
-              );
-              return;
-            }
-
-            // Enable hedge mode (dual side position) so bot can hold LONG + SHORT simultaneously
-            const hedgeOk = await this.binanceService.enableHedgeMode(keys.apiKey, keys.apiSecret);
-            if (!hedgeOk) {
-              await this.telegramService.sendTelegramMessage(
-                chatId,
-                `⚠️ Khong the bat Hedge Mode tren Binance.\nHay bat thu cong: Binance App → Futures → Settings → Position Mode → Hedge Mode.\nSau do thu lai /ai realmode on.`,
-              );
-              return;
-            }
-
-            await this.subscriptionService.setRealMode(telegramId, true);
-            // Clear daily-disabled flag so the user gets a fresh daily counter
-            await this.subscriptionService.setRealModeDailyDisabled(telegramId, null).catch(() => {});
-            await this.telegramService.sendTelegramMessage(
-              chatId,
-              `✅ *Real Mode da bat!*\n\n🔄 Hedge Mode: ON\nBot se tu dong dat lenh that khi co tin hieu moi.\nDung /ai realmode off de tat.`,
-            );
-            return;
-          }
-
-          // /ai realmode off
-          if (arg === "off") {
-            await this.subscriptionService.setRealMode(telegramId, false);
-            // Close data stream if active
-            await this.userDataStreamService.unregisterUser(telegramId).catch(() => {});
-            await this.telegramService.sendTelegramMessage(
-              chatId,
-              `✅ *Real Mode da tat.*\n\nKhong co them lenh that nao duoc dat.`,
-            );
-            return;
-          }
-
-          // /ai realmode target <N|off>
-          if (arg.startsWith("target")) {
-            const parts = arg.split(/\s+/);
-            const val = parts[1] ?? "";
-            if (val === "off") {
-              await this.subscriptionService.setDailyTargetPct(telegramId, null);
-              await this.telegramService.sendTelegramMessage(chatId, `✅ Muc tieu loi nhuan ngay da tat.`);
-            } else {
-              const n = parseFloat(val);
-              if (isNaN(n) || n <= 0 || n > 100) {
-                await this.telegramService.sendTelegramMessage(chatId,
-                  `❌ Nhap % hop le (1–100).\nVD: /ai realmode target 5 — dat muc tieu +5% moi ngay`);
-                return;
-              }
-              await this.subscriptionService.setDailyTargetPct(telegramId, n);
-              await this.telegramService.sendTelegramMessage(chatId,
-                `✅ *Muc Tieu Loi Nhuan Ngay: +${n}%*\n\nKhi tong PnL hom nay dat +${n}%, bot se tu dong dong tat ca lenh va tat real mode.\nSe mo lai tu dong vao ngay mai.`);
-            }
-            return;
-          }
-
-          // /ai realmode stoploss <N|off>
-          if (arg.startsWith("stoploss")) {
-            const parts = arg.split(/\s+/);
-            const val = parts[1] ?? "";
-            if (val === "off") {
-              await this.subscriptionService.setDailyStopLossPct(telegramId, null);
-              await this.telegramService.sendTelegramMessage(chatId, `✅ Gioi han lo ngay da tat.`);
-            } else {
-              const n = parseFloat(val);
-              if (isNaN(n) || n <= 0 || n > 100) {
-                await this.telegramService.sendTelegramMessage(chatId,
-                  `❌ Nhap % hop le (1–100).\nVD: /ai realmode stoploss 3 — dat gioi han lo -3% moi ngay`);
-                return;
-              }
-              await this.subscriptionService.setDailyStopLossPct(telegramId, n);
-              await this.telegramService.sendTelegramMessage(chatId,
-                `✅ *Gioi Han Lo Ngay: -${n}%*\n\nKhi tong PnL hom nay giam -${n}%, bot se tu dong dong tat ca lenh va tat real mode.\nSe mo lai tu dong vao ngay mai.`);
-            }
-            return;
-          }
-
-          // /ai realmode maxpos <N>
-          if (arg.startsWith("maxpos")) {
-            const parts = arg.split(/\s+/);
-            const val = parts[1] ?? "";
-            const n = parseInt(val, 10);
-            if (isNaN(n) || n < 1 || n > 20) {
-              await this.telegramService.sendTelegramMessage(chatId,
-                `❌ Nhap so hop le (1–20).\nVD: /ai realmode maxpos 3 — toi da 3 lenh cung luc`);
-              return;
-            }
-            await this.subscriptionService.setMaxOpenPositions(telegramId, n);
-            await this.telegramService.sendTelegramMessage(chatId,
-              `✅ *Gioi Han Vi The: ${n} lenh*\n\nBot se chi mo toi da ${n} vi the cung luc.\nLenh moi se bi bo qua khi dat gioi han.`);
-            return;
-          }
-
-          // /ai realmode stats — detailed today's stats
-          if (arg === "stats") {
-            const fmtP = (p: number) =>
-              p >= 1000 ? `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :
-              p >= 1 ? `$${p.toFixed(2)}` : `$${p.toFixed(4)}`;
-            try {
-              const keys = await this.userSettingsService.getApiKeys(telegramId, "binance");
-              const [stats, balance] = await Promise.all([
-                this.userRealTradingService.getDailyStats(telegramId),
-                keys ? this.binanceService.getFuturesBalance(keys.apiKey, keys.apiSecret) : Promise.resolve(null),
-              ]);
-              const sign = (v: number) => v >= 0 ? "+" : "";
-              const pnlIcon = stats.totalPnlUsdt >= 0 ? "📗" : "📕";
-
-              // % based on wallet balance (not notional)
-              const balancePct = balance && balance.walletBalance > 0
-                ? (stats.totalPnlUsdt / balance.walletBalance) * 100
-                : stats.dailyPnlPct;
-
-              // Win rate from closed trades
-              const wins = stats.closedToday.filter(t => t.pnlUsdt >= 0).length;
-              const totalClosed = stats.closedToday.length;
-              const winRateLine = totalClosed > 0
-                ? `🏆 Win: *${wins}/${totalClosed}* (${Math.round(wins / totalClosed * 100)}%)\n`
-                : ``;
-
-              let text = `📊 *Real Mode: Thong Ke Hom Nay*\n━━━━━━━━━━━━━━━━━━\n\n`;
-
-              if (balance) {
-                text +=
-                  `💰 *So Du Binance Futures (USDT)*\n` +
-                  `Vi: *${balance.walletBalance.toFixed(2)} USDT*\n` +
-                  `Kha dung: *${balance.availableBalance.toFixed(2)} USDT*\n` +
-                  `Unrealized PnL: *${sign(balance.unrealizedPnl)}${balance.unrealizedPnl.toFixed(2)} USDT*\n\n`;
-              }
-
-              text +=
-                `${pnlIcon} PnL Hom Nay: *${sign(stats.totalPnlUsdt)}${stats.totalPnlUsdt.toFixed(2)} USDT* (*${sign(balancePct)}${balancePct.toFixed(2)}%*)\n` +
-                `Lenh mo: *${stats.openTrades.length}* · Dong hom nay: *${stats.closedToday.length}*\n` +
-                winRateLine;
-
-              if (stats.openTrades.length > 0) {
-                text += `\n*Lenh Dang Mo:*\n`;
-                for (const t of stats.openTrades) {
-                  const icon = t.unrealizedPnlUsdt >= 0 ? "📗" : "📕";
-                  const dir = t.direction === "LONG" ? "🟢" : "🔴";
-                  text +=
-                    `${dir} *${t.symbol}* ${t.direction} ${t.leverage}x\n` +
-                    `${icon} ${sign(t.unrealizedPnlPct)}${t.unrealizedPnlPct.toFixed(2)}% (${sign(t.unrealizedPnlUsdt)}${t.unrealizedPnlUsdt.toFixed(2)} USDT)\n` +
-                    `Entry: ${fmtP(t.entryPrice)} · Vol: ${t.notionalUsdt.toFixed(0)} USDT\n`;
-                }
-              }
-
-              if (stats.closedToday.length > 0) {
-                text += `\n*Dong Hom Nay:*\n`;
-                for (const t of stats.closedToday) {
-                  const icon = t.pnlUsdt >= 0 ? "✅" : "❌";
-                  const reasonVi =
-                    t.closeReason === "TAKE_PROFIT" ? "TP" :
-                    t.closeReason === "STOP_LOSS" ? "SL" :
-                    t.closeReason === "DAILY_TARGET" ? "Daily TP" :
-                    t.closeReason === "DAILY_STOP_LOSS" ? "Daily SL" : "Thu cong";
-                  text += `${icon} *${t.symbol}* ${sign(t.pnlUsdt)}${t.pnlUsdt.toFixed(2)} USDT (${reasonVi})\n`;
-                }
-              }
-
-              if (stats.openTrades.length === 0 && stats.closedToday.length === 0) {
-                text += `\n_Chua co lenh nao hom nay._`;
-              }
-
-              // All-time stats
-              const at = stats.allTime;
-              if (at.total > 0) {
-                const atIcon = at.pnlUsdt >= 0 ? "📈" : "📉";
-                const atWinRate = Math.round((at.wins / at.total) * 100);
-                text += `\n━━━━━━━━━━━━━━━━━━\n`;
-                text += `${atIcon} *Tong Ket (All-time)*\n`;
-                text += `Tong lenh: *${at.total}* · Win: *${at.wins}* · Loss: *${at.losses}*\n`;
-                text += `🏆 Win rate: *${atWinRate}%*\n`;
-                text += `💰 Tong PnL: *${sign(at.pnlUsdt)}${at.pnlUsdt.toFixed(2)} USDT*\n`;
-              }
-
-              text += `\n━━━━━━━━━━━━━━━━━━\n_${new Date().toLocaleTimeString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" })}_`;
-              await this.telegramService.sendTelegramMessage(chatId, text);
-            } catch (err) {
-              await this.telegramService.sendTelegramMessage(chatId, `❌ Loi lay thong ke: ${err?.message}`);
-            }
-            return;
-          }
-
-          // /ai realmode leverage <AI|MAX|N>
-          if (arg.startsWith("leverage")) {
-            const parts = arg.split(/\s+/);
-            const leverageArg = parts[1] ?? "";
-            if (leverageArg === "ai") {
-              await this.subscriptionService.setRealModeLeverage(telegramId, "AI");
-              await this.telegramService.sendTelegramMessage(chatId, `✅ Leverage: *AI Signal* (dung leverage tu tin hieu AI)`);
-            } else if (leverageArg === "max") {
-              await this.subscriptionService.setRealModeLeverage(telegramId, "MAX");
-              await this.telegramService.sendTelegramMessage(chatId, `✅ Leverage: *MAX* (dung max leverage Binance cho moi cap)`);
-            } else {
-              const n = parseInt(leverageArg);
-              if (isNaN(n) || n < 1 || n > 125) {
-                await this.telegramService.sendTelegramMessage(
-                  chatId,
-                  `❌ Leverage khong hop le. Dung: AI, MAX, hoac so tu 1-125.\nVD: /ai realmode leverage 10`,
-                );
-                return;
-              }
-              await this.subscriptionService.setRealModeLeverage(telegramId, "FIXED", n);
-              await this.telegramService.sendTelegramMessage(chatId, `✅ Leverage: *Fixed ${n}x*`);
-            }
-            return;
-          }
-
+      try {
+        const keys = await this.userSettingsService.getApiKeys(telegramId, "binance");
+        if (!keys?.apiKey) {
           await this.telegramService.sendTelegramMessage(
             chatId,
-            `❌ Lenh khong hop le.\nDung: /ai realmode [on|off|target <N|off>|stoploss <N|off>|leverage <AI|MAX|N>|stats]`,
+            `❌ Ban chua luu Binance API keys.\nDung: \`/ai setkeys <apiKey> <apiSecret>\``,
           );
-        } catch (err) {
-          await this.telegramService.sendTelegramMessage(chatId, `❌ Loi: ${err?.message}`);
+          return;
         }
-      },
-    );
+
+        // Enable hedge mode (dual side position) so bot can hold LONG + SHORT simultaneously
+        const hedgeOk = await this.binanceService.enableHedgeMode(keys.apiKey, keys.apiSecret);
+        if (!hedgeOk) {
+          await this.telegramService.sendTelegramMessage(
+            chatId,
+            `⚠️ Khong the bat Hedge Mode tren Binance.\nHay bat thu cong: Binance App → Futures → Settings → Position Mode → Hedge Mode.\nSau do thu lai /ai on.`,
+          );
+          return;
+        }
+
+        // Auto-subscribe if not yet registered
+        const sub = await this.subscriptionService.getSubscription(telegramId);
+        if (!sub) {
+          await this.subscriptionService.subscribe(telegramId, chatId, msg.from?.username);
+        }
+        await this.subscriptionService.setRealMode(telegramId, true);
+        // Clear daily-disabled flag so the user gets a fresh daily counter
+        await this.subscriptionService.setRealModeDailyDisabled(telegramId, null).catch(() => {});
+        await this.telegramService.sendTelegramMessage(
+          chatId,
+          `✅ *Bot da bat!*\n\n🔄 Hedge Mode: ON\nBot se tu dong dat lenh that khi co tin hieu moi.\nDung /ai off de tat.`,
+        );
+      } catch (err) {
+        await this.telegramService.sendTelegramMessage(chatId, `❌ Loi: ${err?.message}`);
+      }
+    });
+
+    // /ai off — stop trading
+    this.telegramService.registerBotCommand(/^\/ai[_ ]off$/i, async (msg) => {
+      const chatId = msg.chat.id;
+      const telegramId = msg.from?.id;
+      if (!telegramId) return;
+
+      try {
+        await this.subscriptionService.setRealMode(telegramId, false);
+        await this.userDataStreamService.unregisterUser(telegramId).catch(() => {});
+        await this.telegramService.sendTelegramMessage(
+          chatId,
+          `✅ *Bot da tat.*\n\nKhong co them lenh that nao duoc dat.\nDung /ai on de bat lai.`,
+        );
+      } catch (err) {
+        await this.telegramService.sendTelegramMessage(chatId, `❌ Loi: ${err?.message}`);
+      }
+    });
+
+    // /ai leverage <AI|MAX|N> — set leverage mode
+    this.telegramService.registerBotCommand(/^\/ai[_ ]leverage(?:\s+(\S+))?$/i, async (msg, match) => {
+      const chatId = msg.chat.id;
+      const telegramId = msg.from?.id;
+      if (!telegramId) return;
+
+      try {
+        const sub = await this.subscriptionService.getSubscription(telegramId);
+        if (!sub) {
+          await this.telegramService.sendTelegramMessage(chatId, `ℹ️ Dung /ai on de bat bot truoc.`);
+          return;
+        }
+
+        const leverageArg = (match?.[1] ?? "").toLowerCase();
+        if (!leverageArg) {
+          const mode = sub.realModeLeverageMode ?? "AI";
+          const label = mode === "FIXED" ? `Fixed ${sub.realModeLeverage ?? "?"}x` : mode === "MAX" ? "Max (Binance)" : "AI Signal";
+          await this.telegramService.sendTelegramMessage(chatId,
+            `📊 *Leverage hien tai: ${label}*\n\nDung: /ai leverage AI|MAX|<so>\nVD: /ai leverage 10`);
+          return;
+        }
+
+        if (leverageArg === "ai") {
+          await this.subscriptionService.setRealModeLeverage(telegramId, "AI");
+          await this.telegramService.sendTelegramMessage(chatId, `✅ Leverage: *AI Signal* (dung leverage tu tin hieu AI)`);
+        } else if (leverageArg === "max") {
+          await this.subscriptionService.setRealModeLeverage(telegramId, "MAX");
+          await this.telegramService.sendTelegramMessage(chatId, `✅ Leverage: *MAX* (dung max leverage Binance cho moi cap)`);
+        } else {
+          const n = parseInt(leverageArg);
+          if (isNaN(n) || n < 1 || n > 125) {
+            await this.telegramService.sendTelegramMessage(chatId,
+              `❌ Leverage khong hop le. Dung: AI, MAX, hoac so tu 1-125.\nVD: /ai leverage 10`);
+            return;
+          }
+          await this.subscriptionService.setRealModeLeverage(telegramId, "FIXED", n);
+          await this.telegramService.sendTelegramMessage(chatId, `✅ Leverage: *Fixed ${n}x*`);
+        }
+      } catch (err) {
+        await this.telegramService.sendTelegramMessage(chatId, `❌ Loi: ${err?.message}`);
+      }
+    });
+
+    // /ai target <N|off> — daily profit target %
+    this.telegramService.registerBotCommand(/^\/ai[_ ]target(?:\s+(\S+))?$/i, async (msg, match) => {
+      const chatId = msg.chat.id;
+      const telegramId = msg.from?.id;
+      if (!telegramId) return;
+
+      const val = (match?.[1] ?? "").toLowerCase();
+
+      try {
+        const sub = await this.subscriptionService.getSubscription(telegramId);
+        if (!sub) {
+          await this.telegramService.sendTelegramMessage(chatId, `ℹ️ Dung /ai on de bat bot truoc.`);
+          return;
+        }
+
+        if (!val) {
+          const cur = sub.realModeDailyTargetPct;
+          await this.telegramService.sendTelegramMessage(chatId,
+            `🎯 *Muc tieu loi nhuan ngay*\n\n` +
+            (cur != null ? `Hien tai: *+${cur}%*\nDung /ai target off de tat` : `_Chua dat_\nDung: /ai target 5 — dat +5%/ngay`));
+          return;
+        }
+
+        if (val === "off") {
+          await this.subscriptionService.setDailyTargetPct(telegramId, null);
+          await this.telegramService.sendTelegramMessage(chatId, `✅ Muc tieu loi nhuan ngay da tat.`);
+        } else {
+          const n = parseFloat(val);
+          if (isNaN(n) || n <= 0 || n > 100) {
+            await this.telegramService.sendTelegramMessage(chatId,
+              `❌ Nhap % hop le (1–100).\nVD: /ai target 5 — dat muc tieu +5% moi ngay`);
+            return;
+          }
+          await this.subscriptionService.setDailyTargetPct(telegramId, n);
+          await this.telegramService.sendTelegramMessage(chatId,
+            `✅ *Muc Tieu Loi Nhuan Ngay: +${n}%*\n\nKhi tong PnL hom nay dat +${n}%, bot se tu dong dong tat ca lenh.\nSe mo lai tu dong vao ngay mai.`);
+        }
+      } catch (err) {
+        await this.telegramService.sendTelegramMessage(chatId, `❌ Loi: ${err?.message}`);
+      }
+    });
+
+    // /ai stoploss <N|off> — daily stop loss %
+    this.telegramService.registerBotCommand(/^\/ai[_ ]stoploss(?:\s+(\S+))?$/i, async (msg, match) => {
+      const chatId = msg.chat.id;
+      const telegramId = msg.from?.id;
+      if (!telegramId) return;
+
+      const val = (match?.[1] ?? "").toLowerCase();
+
+      try {
+        const sub = await this.subscriptionService.getSubscription(telegramId);
+        if (!sub) {
+          await this.telegramService.sendTelegramMessage(chatId, `ℹ️ Dung /ai on de bat bot truoc.`);
+          return;
+        }
+
+        if (!val) {
+          const cur = sub.realModeDailyStopLossPct;
+          await this.telegramService.sendTelegramMessage(chatId,
+            `🛑 *Gioi han lo ngay*\n\n` +
+            (cur != null ? `Hien tai: *-${cur}%*\nDung /ai stoploss off de tat` : `_Chua dat_\nDung: /ai stoploss 3 — dat -3%/ngay`));
+          return;
+        }
+
+        if (val === "off") {
+          await this.subscriptionService.setDailyStopLossPct(telegramId, null);
+          await this.telegramService.sendTelegramMessage(chatId, `✅ Gioi han lo ngay da tat.`);
+        } else {
+          const n = parseFloat(val);
+          if (isNaN(n) || n <= 0 || n > 100) {
+            await this.telegramService.sendTelegramMessage(chatId,
+              `❌ Nhap % hop le (1–100).\nVD: /ai stoploss 3 — dat gioi han lo -3% moi ngay`);
+            return;
+          }
+          await this.subscriptionService.setDailyStopLossPct(telegramId, n);
+          await this.telegramService.sendTelegramMessage(chatId,
+            `✅ *Gioi Han Lo Ngay: -${n}%*\n\nKhi tong PnL hom nay giam -${n}%, bot se tu dong dong tat ca lenh.\nSe mo lai tu dong vao ngay mai.`);
+        }
+      } catch (err) {
+        await this.telegramService.sendTelegramMessage(chatId, `❌ Loi: ${err?.message}`);
+      }
+    });
+
+    // /ai maxpos <N> — max concurrent positions
+    this.telegramService.registerBotCommand(/^\/ai[_ ]maxpos(?:\s+(\S+))?$/i, async (msg, match) => {
+      const chatId = msg.chat.id;
+      const telegramId = msg.from?.id;
+      if (!telegramId) return;
+
+      try {
+        const sub = await this.subscriptionService.getSubscription(telegramId);
+        if (!sub) {
+          await this.telegramService.sendTelegramMessage(chatId, `ℹ️ Dung /ai on de bat bot truoc.`);
+          return;
+        }
+
+        const val = match?.[1];
+        if (!val) {
+          const cur = sub.maxOpenPositions ?? 3;
+          await this.telegramService.sendTelegramMessage(chatId,
+            `📊 *Toi da vi the: ${cur} lenh*\n\nDung: /ai maxpos <so>\nVD: /ai maxpos 5`);
+          return;
+        }
+
+        const n = parseInt(val, 10);
+        if (isNaN(n) || n < 1 || n > 20) {
+          await this.telegramService.sendTelegramMessage(chatId,
+            `❌ Nhap so hop le (1–20).\nVD: /ai maxpos 3 — toi da 3 lenh cung luc`);
+          return;
+        }
+        await this.subscriptionService.setMaxOpenPositions(telegramId, n);
+        await this.telegramService.sendTelegramMessage(chatId,
+          `✅ *Gioi Han Vi The: ${n} lenh*\n\nBot se chi mo toi da ${n} vi the cung luc.\nLenh moi se bi bo qua khi dat gioi han.`);
+      } catch (err) {
+        await this.telegramService.sendTelegramMessage(chatId, `❌ Loi: ${err?.message}`);
+      }
+    });
 
     // /ai close [all|SYMBOL] — close REAL Binance positions (user-facing)
     this.telegramService.registerBotCommand(
@@ -1187,7 +1003,7 @@ export class AiCommandService implements OnModuleInit {
 
         const sub = await this.subscriptionService.getSubscription(telegramId);
         if (!sub?.realModeEnabled) {
-          await this.telegramService.sendTelegramMessage(chatId, `ℹ️ Real mode chua bat. Dung \`/ai realmode on\` de bat.`);
+          await this.telegramService.sendTelegramMessage(chatId, `ℹ️ Bot chua bat. Dung \`/ai on\` de bat.`);
           return;
         }
 
@@ -1357,12 +1173,12 @@ export class AiCommandService implements OnModuleInit {
       try {
         const sub = await this.subscriptionService.getSubscription(telegramId);
         if (!sub) {
-          await this.telegramService.sendTelegramMessage(chatId, `ℹ️ Ban chua dang ky. Dung /ai subscribe truoc.`);
+          await this.telegramService.sendTelegramMessage(chatId, `ℹ️ Dung /ai on de bat bot giao dich.`);
           return;
         }
         if (!sub.realModeEnabled) {
           await this.telegramService.sendTelegramMessage(chatId,
-            `⚡ *Real Mode chua bat*\n\nDung /ai realmode on de bat dat lenh that.`);
+            `⚡ *Bot chua bat*\n\nDung /ai on de bat.`);
           return;
         }
 
@@ -1447,7 +1263,7 @@ export class AiCommandService implements OnModuleInit {
       try {
         const sub = await this.subscriptionService.getSubscription(telegramId);
         if (!sub) {
-          await this.telegramService.sendTelegramMessage(chatId, `ℹ️ Ban chua dang ky. Dung /ai subscribe truoc.`);
+          await this.telegramService.sendTelegramMessage(chatId, `ℹ️ Dung /ai on de bat bot giao dich.`);
           return;
         }
         const keys = sub.realModeEnabled
@@ -1578,7 +1394,7 @@ export class AiCommandService implements OnModuleInit {
         const sub = await this.subscriptionService.getSubscription(telegramId);
         if (!sub?.realModeEnabled) {
           await this.telegramService.sendTelegramMessage(chatId,
-            `⚡ *Real Mode chua bat*\n\nDung /ai realmode on de bat dat lenh that.`);
+            `⚡ *Bot chua bat*\n\nDung /ai on de bat.`);
           return;
         }
 
@@ -1626,7 +1442,7 @@ export class AiCommandService implements OnModuleInit {
         const sub = await this.subscriptionService.getSubscription(telegramId);
         if (!sub?.realModeEnabled) {
           await this.telegramService.sendTelegramMessage(chatId,
-            `⚡ *Real Mode chua bat*\n\nChi nguoi dung Real Mode moi xem duoc xep hang.\nDung /ai realmode on de bat.`);
+            `⚡ *Bot chua bat*\n\nDung /ai on de bat bot truoc khi xem xep hang.`);
           return;
         }
 
@@ -1637,7 +1453,7 @@ export class AiCommandService implements OnModuleInit {
         const nameOf = (u: { telegramId: number; username?: string }) =>
           u.username ? `@${u.username}` : `User #${u.telegramId}`;
 
-        let text = `🏆 *Xep Hang Real Mode*\n━━━━━━━━━━━━━━━━━━\n`;
+        let text = `🏆 *Xep Hang*\n━━━━━━━━━━━━━━━━━━\n`;
 
         text += `\n📅 *Hom Nay:*\n`;
         if (today.length === 0) {
