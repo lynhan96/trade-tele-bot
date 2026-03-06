@@ -54,6 +54,9 @@ export class PositionMonitorService implements OnModuleInit {
   /** Callback for SL raised to +2% profit (5% milestone). */
   private sl5PctCallback?: (symbol: string, newSl: number, direction: string) => Promise<void>;
 
+  /** Callback for TP boosted on momentum. */
+  private tpBoostedCallback?: (symbol: string, newTp: number, newTpPct: number, direction: string) => Promise<void>;
+
   setResolveCallback(cb: (info: ResolvedSignalInfo) => Promise<void>): void {
     this.resolveCallback = cb;
   }
@@ -64,6 +67,10 @@ export class PositionMonitorService implements OnModuleInit {
 
   setSl5PctCallback(cb: (symbol: string, newSl: number, direction: string) => Promise<void>): void {
     this.sl5PctCallback = cb;
+  }
+
+  setTpBoostedCallback(cb: (symbol: string, newTp: number, newTpPct: number, direction: string) => Promise<void>): void {
+    this.tpBoostedCallback = cb;
   }
 
   constructor(
@@ -228,14 +235,47 @@ export class PositionMonitorService implements OnModuleInit {
       this.userRealTradingService.moveStopLossForRealUsers(symbol, entryPrice, direction).catch(() => {});
     }
 
+    // ─── Dynamic TP boost: extend TP to 5-8% on strong momentum ─────────
+    // Check once when price reaches 3%+ profit and TP hasn't been boosted yet
+    if (pnlPct >= 3 && !(signal as any).tpBoosted && takeProfitPrice) {
+      (signal as any).tpBoosted = true; // mark as checked (one-time per signal)
+      try {
+        const hasMomentum = await this.marketDataService.hasVolumeMomentum(symbol);
+        if (hasMomentum) {
+          // Extend TP based on current momentum (5-8% range)
+          const boostedTpPct = Math.min(8, Math.max(5, pnlPct + 3));
+          const newTpPrice = direction === "LONG"
+            ? entryPrice * (1 + boostedTpPct / 100)
+            : entryPrice * (1 - boostedTpPct / 100);
+          (signal as any).takeProfitPrice = newTpPrice;
+          await this.signalQueueService.extendTakeProfit(
+            (signal as any)._id.toString(), newTpPrice, boostedTpPct,
+          );
+          this.logger.log(
+            `[PositionMonitor] 🚀 ${sigKey} TP boosted to ${boostedTpPct.toFixed(1)}% (${newTpPrice.toFixed(4)}) — volume momentum detected`,
+          );
+          // Propagate TP change to real Binance orders
+          this.userRealTradingService.moveTpForRealUsers(symbol, newTpPrice, direction).catch(() => {});
+          // Notify via callback
+          if (this.tpBoostedCallback) {
+            await this.tpBoostedCallback(symbol, newTpPrice, boostedTpPct, direction).catch(() => {});
+          }
+        }
+      } catch (err) {
+        this.logger.warn(`[PositionMonitor] TP boost check error for ${sigKey}: ${err?.message}`);
+      }
+    }
+
     // ─── Original TP/SL check ─────────────────────────────────────────────
+    // Re-read takeProfitPrice in case it was boosted above
+    const effectiveTpPrice = (signal as any).takeProfitPrice ?? takeProfitPrice;
     const stopLossPrice = (signal as any).stopLossPrice;
     const slHit =
       direction === "LONG" ? price <= stopLossPrice : price >= stopLossPrice;
-    const tpHit = takeProfitPrice
+    const tpHit = effectiveTpPrice
       ? direction === "LONG"
-        ? price >= takeProfitPrice
-        : price <= takeProfitPrice
+        ? price >= effectiveTpPrice
+        : price <= effectiveTpPrice
       : false;
 
     if (!slHit && !tpHit) return;

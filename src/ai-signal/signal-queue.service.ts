@@ -264,6 +264,23 @@ export class SignalQueueService {
     );
   }
 
+  /**
+   * Extend take profit price (dynamic TP boost on momentum).
+   * Called when strong volume/price momentum is detected.
+   */
+  async extendTakeProfit(signalId: string, newTpPrice: number, newTpPct: number): Promise<void> {
+    const signal = await this.aiSignalModel.findById(signalId);
+    if (!signal || signal.status !== "ACTIVE") return;
+
+    await this.aiSignalModel.findByIdAndUpdate(signalId, {
+      takeProfitPrice: newTpPrice,
+      takeProfitPercent: newTpPct,
+    });
+    this.logger.log(
+      `[SignalQueue] ${signal.symbol} TP extended to ${newTpPrice.toFixed(4)} (${newTpPct.toFixed(1)}%) — momentum boost`,
+    );
+  }
+
   // ─── Helpers ──────────────────────────────────────────────────────────────
 
   /** Get the profile-aware signal key from a document. */

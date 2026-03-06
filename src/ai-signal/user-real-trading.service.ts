@@ -401,6 +401,71 @@ export class UserRealTradingService implements OnModuleInit {
     }
   }
 
+  /**
+   * Move TP for all real users with an OPEN trade for this symbol.
+   * Called when dynamic TP boost triggers (momentum detected).
+   */
+  async moveTpForRealUsers(
+    symbol: string,
+    newTpPrice: number,
+    direction: string,
+  ): Promise<void> {
+    const openTrades = await this.userTradeModel.find({ symbol, status: "OPEN" }).lean();
+    if (openTrades.length === 0) return;
+
+    const pricePrecision = await this.getPricePrecision(symbol);
+    const roundedTpPrice = parseFloat(newTpPrice.toFixed(pricePrecision));
+
+    for (const trade of openTrades) {
+      try {
+        const keys = await this.userSettingsService.getApiKeys(trade.telegramId, "binance");
+        if (!keys?.apiKey) continue;
+
+        // Cancel existing TP algo order
+        if (trade.binanceTpAlgoId) {
+          await this.binanceService.cancelAlgoOrder(
+            keys.apiKey,
+            keys.apiSecret,
+            trade.binanceTpAlgoId,
+          );
+        }
+
+        // Place new TP
+        const tpOrder = await this.binanceService.setTakeProfitAtPrice(
+          keys.apiKey,
+          keys.apiSecret,
+          symbol,
+          roundedTpPrice,
+          direction as "LONG" | "SHORT",
+          trade.quantity,
+        );
+        const newAlgoId = tpOrder?.algoId?.toString() ?? tpOrder?.orderId?.toString();
+
+        await this.userTradeModel.findByIdAndUpdate((trade as any)._id, {
+          tpPrice: roundedTpPrice,
+          binanceTpAlgoId: newAlgoId,
+        });
+
+        const fmtP = (p: number) =>
+          p >= 1000 ? `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :
+          p >= 1 ? `$${p.toFixed(2)}` : `$${p.toFixed(4)}`;
+        const msg =
+          `🚀 *Real Mode: TP Mo Rong*\n\n` +
+          `${symbol} ${direction}\n` +
+          `TP moi: *${fmtP(roundedTpPrice)}* (momentum boost)`;
+        await this.telegramService.sendTelegramMessage(trade.chatId, msg).catch(() => {});
+
+        this.logger.log(
+          `[RealTrading] ${symbol} TP extended to ${roundedTpPrice} for user ${trade.telegramId}`,
+        );
+      } catch (err) {
+        this.logger.error(
+          `[RealTrading] moveTp failed for user ${trade.telegramId} ${symbol}: ${err?.message}`,
+        );
+      }
+    }
+  }
+
   // ─── Trade close handler ──────────────────────────────────────────────────
 
   /**

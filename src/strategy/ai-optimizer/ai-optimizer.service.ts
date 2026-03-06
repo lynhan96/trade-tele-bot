@@ -374,10 +374,12 @@ Reply ONLY with valid JSON (no markdown):
     const result = { ...params };
     result.timeframeProfile = profile as any;
 
+    // Cap TP at 3-5% for all profiles — dynamic boost in PositionMonitor will widen to 5-8% on momentum
+    result.takeProfitPercent = Math.min(5, Math.max(3, result.takeProfitPercent));
+
     if (profile === "SWING") {
       // SWING: 4h primary, 1d HTF, wider SL
       result.stopLossPercent = Math.max(3, result.stopLossPercent);
-      result.takeProfitPercent = Math.max(result.stopLossPercent * 2, result.takeProfitPercent);
       if (result.rsiCross) {
         result.rsiCross = { ...result.rsiCross, primaryKline: "4h", htfKline: "1d", candleKline: "4h" };
       }
@@ -385,8 +387,7 @@ Reply ONLY with valid JSON (no markdown):
         result.rsiZone = { ...result.rsiZone, primaryKline: "4h", htfKline: "1d" };
       }
     } else {
-      // INTRADAY: 15m primary, 1h HTF, cap TP for scalping
-      result.takeProfitPercent = Math.min(4, result.takeProfitPercent);
+      // INTRADAY: 15m primary, 1h HTF
       if (result.rsiCross) {
         result.rsiCross = { ...result.rsiCross, primaryKline: "15m", htfKline: "1h", candleKline: "15m" };
       }
@@ -638,9 +639,9 @@ STEP 1 — Choose 1-3 strategies (pipe-delimited). Ranked by real performance:
 
 STEP 2 — Set SL/TP based on volatility (ATR). MINIMUM SL is 3%:
 - Low ATR (<1%): SL 3.0%, TP 3.0-4.0%
-- Medium ATR (1-2%): SL 3.0-4.0%, TP 3.0-4.0%
-- High ATR (>2%): SL 4.0-6.0%, TP 4.0-8.0%
-- For INTRADAY/scalping: keep TP tight (3-4%), quick profits are better than waiting
+- Medium ATR (1-2%): SL 3.0-4.0%, TP 3.0-5.0%
+- High ATR (>2%): SL 4.0-6.0%, TP 4.0-5.0%
+- IMPORTANT: TP MUST be 3-5%. We use tight TP for quick profits. System auto-extends TP to 5-8% on strong momentum.
 
 STEP 3 — Set confidence. LONGs need higher confidence than SHORTs:
 - SHORT + regime aligned: confidence 65-85
@@ -650,7 +651,7 @@ STEP 3 — Set confidence. LONGs need higher confidence than SHORTs:
 - If recent trades show many SL hits: raise minConfidenceToTrade to 55-65
 
 Reply ONLY JSON:
-{"regime":"${globalRegime}","strategy":"RSI_CROSS|...","confidence":40-85,"stopLossPercent":3.0-8.0,"takeProfitPercent":3.0-8.0,"minConfidenceToTrade":40}`;
+{"regime":"${globalRegime}","strategy":"RSI_CROSS|...","confidence":40-85,"stopLossPercent":3.0-8.0,"takeProfitPercent":3.0-5.0,"minConfidenceToTrade":40}`;
   }
 
   private async callGpt(

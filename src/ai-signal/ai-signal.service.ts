@@ -135,6 +135,11 @@ export class AiSignalService implements OnModuleInit {
       await this.notifySl5PctMilestone(symbol, newSl, direction);
     });
 
+    // Register callback for TP boost on momentum
+    this.positionMonitorService.setTpBoostedCallback(async (symbol, newTp, newTpPct, direction) => {
+      await this.notifyTpBoosted(symbol, newTp, newTpPct, direction);
+    });
+
     // Cleanup orphaned actives + duplicate completed signals on startup
     try {
       const orphans = await this.signalQueueService.cleanupOrphanedActives();
@@ -1319,6 +1324,23 @@ export class AiSignalService implements OnModuleInit {
     const subscribers = await this.subscriptionService.findRealModeSubscribers();
     for (const sub of subscribers) {
 
+      await this.telegramService.sendTelegramMessage(sub.chatId, text).catch(() => {});
+    }
+  }
+
+  private async notifyTpBoosted(symbol: string, newTp: number, newTpPct: number, direction: string): Promise<void> {
+    const fmtP = this.fmtPrice;
+    const dirLabel = direction === "LONG" ? "LONG" : "SHORT";
+    const text =
+      `🚀 *${symbol} ${dirLabel} — TP Mo Rong*\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `Volume tang manh! TP mo rong len *+${newTpPct.toFixed(1)}%*\n` +
+      `TP moi: *${fmtP(newTp)}*\n` +
+      `Lenh tiep tuc chay voi muc tieu cao hon\n\n` +
+      `_${new Date().toLocaleTimeString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" })}_`;
+
+    const subscribers = await this.subscriptionService.findRealModeSubscribers();
+    for (const sub of subscribers) {
       await this.telegramService.sendTelegramMessage(sub.chatId, text).catch(() => {});
     }
   }

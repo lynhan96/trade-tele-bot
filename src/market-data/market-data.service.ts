@@ -483,6 +483,32 @@ export class MarketDataService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  /**
+   * Check if a symbol has strong volume momentum.
+   * Compares last 3 candles' average volume vs last 20 candles' average on 15m interval.
+   * Returns true if recent volume is >= 2x the average (volume spike).
+   */
+  async hasVolumeMomentum(symbol: string): Promise<boolean> {
+    try {
+      const candles = await this.candleHistoryModel
+        .find({ symbol, interval: "15m" })
+        .sort({ closeTime: -1 })
+        .limit(20)
+        .select("volume")
+        .lean();
+
+      if (candles.length < 10) return false; // not enough data
+
+      const volumes = candles.map((c) => c.volume);
+      const recent3Avg = volumes.slice(0, 3).reduce((s, v) => s + v, 0) / 3;
+      const allAvg = volumes.reduce((s, v) => s + v, 0) / volumes.length;
+
+      return recent3Avg >= allAvg * 2;
+    } catch {
+      return false;
+    }
+  }
+
   private closeAllSockets(): void {
     for (const [key, ws] of this.wsSockets) {
       ws.terminate();
