@@ -440,6 +440,9 @@ export class UserRealTradingService implements OnModuleInit {
       return; // Don't send duplicate notification
     }
 
+    // Accumulate cumulative PnL on user subscription
+    await this.subscriptionService.incrementTradePnl(trade.telegramId, pnlUsdt);
+
     const sign = pnlPct >= 0 ? "+" : "";
     const emoji = pnlPct >= 0 ? "✅" : "❌";
     const reasonVi =
@@ -518,6 +521,8 @@ export class UserRealTradingService implements OnModuleInit {
         pnlUsdt,
         closedAt: new Date(),
       });
+
+      await this.subscriptionService.incrementTradePnl(telegramId, pnlUsdt);
 
       this.logger.log(
         `[RealTrading] closeRealPosition: ${symbol} ${trade.direction} @ ${exitPrice} for user ${telegramId} (${reason})`,
@@ -743,6 +748,8 @@ export class UserRealTradingService implements OnModuleInit {
           pnlUsdt,
           closedAt: new Date(),
         });
+
+        await this.subscriptionService.incrementTradePnl(telegramId, pnlUsdt);
 
         this.logger.log(
           `[RealTrading] closeAllRealPositions: closed ${trade.symbol} ${trade.direction} @ ${exitPrice} for user ${telegramId} (${reason})`,

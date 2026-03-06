@@ -351,6 +351,22 @@ export class UserSignalSubscriptionService {
   }
 
   /**
+   * Atomically increment cumulative PnL stats when a trade closes.
+   */
+  async incrementTradePnl(telegramId: number, pnlUsdt: number): Promise<void> {
+    const isWin = pnlUsdt >= 0;
+    await this.subscriptionModel.updateOne(
+      { telegramId },
+      {
+        $inc: {
+          totalPnlUsdt: pnlUsdt,
+          ...(isWin ? { totalWins: 1 } : { totalLosses: 1 }),
+        },
+      },
+    );
+  }
+
+  /**
    * Set or clear the daily-disabled timestamp.
    * Pass a Date to mark as disabled; pass null to clear (re-enable for next day).
    */

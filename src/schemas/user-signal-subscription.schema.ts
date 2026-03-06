@@ -67,6 +67,15 @@ export class UserSignalSubscription {
   @Prop({ default: 3 })
   maxOpenPositions?: number; // max concurrent real positions per user (default: 3)
 
+  @Prop({ default: 0 })
+  totalPnlUsdt?: number; // cumulative realized PnL in USDT
+
+  @Prop({ default: 0 })
+  totalWins?: number; // cumulative winning trades count
+
+  @Prop({ default: 0 })
+  totalLosses?: number; // cumulative losing trades count
+
   @Prop({ required: true, default: new Date() })
   subscribedAt: Date;
 

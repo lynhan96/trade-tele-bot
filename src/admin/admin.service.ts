@@ -333,10 +333,29 @@ export class AdminService {
 
   async updateUser(
     telegramId: number,
-    dto: { isActive?: boolean; realModeEnabled?: boolean; maxOpenPositions?: number; tradingBalance?: number },
+    dto: {
+      isActive?: boolean;
+      realModeEnabled?: boolean;
+      maxOpenPositions?: number;
+      tradingBalance?: number;
+      realModeDailyTargetPct?: number | null;
+      realModeDailyStopLossPct?: number | null;
+    },
   ) {
+    const $set: any = {};
+    const $unset: any = {};
+    for (const [key, val] of Object.entries(dto)) {
+      if (val === null || val === undefined) {
+        $unset[key] = 1;
+      } else {
+        $set[key] = val;
+      }
+    }
+    const update: any = {};
+    if (Object.keys($set).length) update.$set = $set;
+    if (Object.keys($unset).length) update.$unset = $unset;
     return this.subscriptionModel
-      .findOneAndUpdate({ telegramId }, { $set: dto }, { new: true })
+      .findOneAndUpdate({ telegramId }, update, { new: true })
       .lean();
   }
 
