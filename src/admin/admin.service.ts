@@ -269,8 +269,8 @@ export class AdminService {
     const limit = Math.min(100, Math.max(1, query.limit || 20));
     const filter: any = {};
 
-    if (query.isActive !== undefined) filter.isActive = query.isActive === 'true';
-    if (query.realModeEnabled !== undefined) filter.realModeEnabled = query.realModeEnabled === 'true';
+    if (query.isActive !== undefined && query.isActive !== '') filter.isActive = query.isActive === 'true';
+    if (query.realModeEnabled !== undefined && query.realModeEnabled !== '') filter.realModeEnabled = query.realModeEnabled === 'true';
     if (query.search) {
       const searchNum = parseInt(query.search, 10);
       if (!isNaN(searchNum)) {
