@@ -416,15 +416,6 @@ export class PositionMonitorService implements OnModuleInit {
   }
 
   private async getCurrentPrice(symbol: string): Promise<number> {
-    try {
-      const axios = require("axios");
-      const res = await axios.get(
-        `https://fapi.binance.com/fapi/v1/ticker/price?symbol=${symbol}`,
-        { timeout: 5000 },
-      );
-      return parseFloat(res.data.price);
-    } catch {
-      return 0;
-    }
+    return (await this.marketDataService.getPrice(symbol)) ?? 0;
   }
 }

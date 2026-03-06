@@ -891,17 +891,7 @@ export class AiSignalService implements OnModuleInit {
    * In test mode, periodically check if current price would have hit TP or SL.
    */
   private async checkTestModeSignal(signal: AiSignalDocument): Promise<void> {
-    const axios = require("axios");
-    let currentPrice: number;
-    try {
-      const res = await axios.get(
-        `https://fapi.binance.com/fapi/v1/ticker/price?symbol=${signal.symbol}`,
-        { timeout: 5000 },
-      );
-      currentPrice = parseFloat(res.data.price);
-    } catch {
-      return;
-    }
+    const currentPrice = await this.marketDataService.getPrice(signal.symbol);
     if (!currentPrice || currentPrice <= 0) return;
 
     const isLong = signal.direction === "LONG";
@@ -1160,21 +1150,14 @@ export class AiSignalService implements OnModuleInit {
 
     // Fetch current price to show unrealized PnL at expiry
     let pnlLine = "";
-    try {
-      const axios = require("axios");
-      const res = await axios.get(
-        `https://fapi.binance.com/fapi/v1/ticker/price?symbol=${signal.symbol}`,
-        { timeout: 5000 },
-      );
-      const currentPrice = parseFloat(res.data.price);
-      if (currentPrice > 0) {
-        const pnl = signal.direction === "LONG"
-          ? ((currentPrice - signal.entryPrice) / signal.entryPrice) * 100
-          : ((signal.entryPrice - currentPrice) / signal.entryPrice) * 100;
-        const pnlSign = pnl >= 0 ? "+" : "";
-        pnlLine = `PnL: *${pnlSign}${pnl.toFixed(2)}%* (gia: ${fmtP(currentPrice)})\n`;
-      }
-    } catch { /* ignore */ }
+    const currentPrice = await this.marketDataService.getPrice(signal.symbol);
+    if (currentPrice && currentPrice > 0) {
+      const pnl = signal.direction === "LONG"
+        ? ((currentPrice - signal.entryPrice) / signal.entryPrice) * 100
+        : ((signal.entryPrice - currentPrice) / signal.entryPrice) * 100;
+      const pnlSign = pnl >= 0 ? "+" : "";
+      pnlLine = `PnL: *${pnlSign}${pnl.toFixed(2)}%* (gia: ${fmtP(currentPrice)})\n`;
+    }
 
     const text =
       `⏰ *${signal.symbol} ${signal.direction} — Het han${testMark}*\n` +
