@@ -18,6 +18,9 @@ const axios = require("axios");
 /** Max tolerance — skip order if price moved beyond this from signal entry. */
 const ENTRY_PRICE_TOLERANCE = 0.01; // 1%
 
+/** TradFi-Perps symbols that require separate Binance agreement — skip for real orders. */
+const TRADFI_BLACKLIST = new Set(["XAUUSDT", "XAGUSDT", "MSTRUSDT"]);
+
 /** Redis key for caching symbol quantity precision. */
 const QTY_PRECISION_KEY = (symbol: string) => `cache:binance:qty-precision:${symbol}`;
 /** Redis key for caching symbol price precision (tick size decimals). */
@@ -74,6 +77,13 @@ export class UserRealTradingService implements OnModuleInit {
     if (subscribers.length === 0) return;
 
     const { symbol, direction, entryPrice, stopLossPrice, takeProfitPrice } = signal;
+
+    // Skip TradFi-Perps symbols (require separate Binance agreement)
+    if (TRADFI_BLACKLIST.has(symbol)) {
+      this.logger.log(`[RealTrading] ${symbol}: TradFi symbol — skipping real orders`);
+      return;
+    }
+
     const currentPrice = await this.fetchCurrentPrice(symbol);
     if (!currentPrice) {
       this.logger.warn(`[RealTrading] ${symbol}: cannot fetch current price, skipping real orders`);
@@ -331,6 +341,10 @@ export class UserRealTradingService implements OnModuleInit {
     const openTrades = await this.userTradeModel.find({ symbol, status: "OPEN" }).lean();
     if (openTrades.length === 0) return;
 
+    // Round price to exchange precision before placing orders
+    const pricePrecision = await this.getPricePrecision(symbol);
+    const roundedSlPrice = parseFloat(newSlPrice.toFixed(pricePrecision));
+
     for (const trade of openTrades) {
       try {
         const keys = await this.userSettingsService.getApiKeys(trade.telegramId, "binance");
@@ -345,23 +359,23 @@ export class UserRealTradingService implements OnModuleInit {
           );
         }
 
-        // Place new SL
+        // Place new SL (rounded to exchange precision)
         const slOrder = await this.binanceService.setStopLoss(
           keys.apiKey,
           keys.apiSecret,
           symbol,
-          newSlPrice,
+          roundedSlPrice,
           direction as "LONG" | "SHORT",
           trade.quantity,
         );
         const newAlgoId = slOrder?.algoId?.toString() ?? slOrder?.orderId?.toString();
 
         await this.userTradeModel.findByIdAndUpdate((trade as any)._id, {
-          slPrice: newSlPrice,
+          slPrice: roundedSlPrice,
           binanceSlAlgoId: newAlgoId,
         });
 
-        const isBreakEven = Math.abs(newSlPrice - trade.entryPrice) / trade.entryPrice < 0.001;
+        const isBreakEven = Math.abs(roundedSlPrice - trade.entryPrice) / trade.entryPrice < 0.001;
         const label = isBreakEven ? "hoa von (break-even)" : "+2% profit (trailing stop)";
         const fmtP = (p: number) =>
           p >= 1000 ? `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :
@@ -369,11 +383,11 @@ export class UserRealTradingService implements OnModuleInit {
         const msg =
           `🔒 *Real Mode: SL Duoc Chuyen*\n\n` +
           `${symbol} ${direction}\n` +
-          `SL moi: *${fmtP(newSlPrice)}* (${label})`;
+          `SL moi: *${fmtP(roundedSlPrice)}* (${label})`;
         await this.telegramService.sendTelegramMessage(trade.chatId, msg).catch(() => {});
 
         this.logger.log(
-          `[RealTrading] ${symbol} SL moved to ${newSlPrice} for user ${trade.telegramId} (${label})`,
+          `[RealTrading] ${symbol} SL moved to ${roundedSlPrice} for user ${trade.telegramId} (${label})`,
         );
       } catch (err) {
         this.logger.error(

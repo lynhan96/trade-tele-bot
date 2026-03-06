@@ -640,7 +640,7 @@ Set confidence based on alignment:
 - RSI against regime (e.g. RSI<40 in STRONG_BULL): lower 40-55
 
 Reply ONLY JSON:
-{"regime":"${globalRegime}","strategy":"${strategy}","confidence":40-85,"stopLossPercent":3.0-6.0,"takeProfitPercent":6.0-18.0,"minConfidenceToTrade":40}`;
+{"regime":"${globalRegime}","strategy":"${strategy}","confidence":40-85,"stopLossPercent":3.0-8.0,"takeProfitPercent":6.0-18.0,"minConfidenceToTrade":40}`;
   }
 
   private async callAnthropic(
@@ -808,8 +808,10 @@ Reply ONLY JSON:
 
       const atrPct = this.indicatorService.getAtrPercent(ohlc.highs, ohlc.lows, ohlc.closes, 14);
 
-      // SL = 1.5× ATR, clamped to [3%, 6%]
-      const slPct = Math.max(3, Math.min(6, atrPct * 1.5));
+      // SL = 1.5× ATR, clamped to [3%, min(8%, ATR×2)]
+      // Volatile coins (ATR>4%) get wider SL to avoid noise stops
+      const maxSl = Math.min(8, Math.max(6, atrPct * 2));
+      const slPct = Math.max(3, Math.min(maxSl, atrPct * 1.5));
       defaults.stopLossPercent = parseFloat(slPct.toFixed(1));
       defaults.takeProfitPercent = parseFloat((slPct * 2).toFixed(1));
     } catch {
