@@ -99,6 +99,10 @@ export class AdminService {
 
     const wins = completedSignalDocs.filter((s) => s.pnlPercent > 0).length;
     const winRate = completedSignalDocs.length > 0 ? (wins / completedSignalDocs.length) * 100 : 0;
+    const avgPnl =
+      completedSignalDocs.length > 0
+        ? completedSignalDocs.reduce((sum, s) => sum + s.pnlPercent, 0) / completedSignalDocs.length
+        : 0;
     const totalPnl =
       completedSignalDocs.length > 0
         ? completedSignalDocs.reduce((sum, s) => sum + s.pnlPercent, 0)
@@ -128,6 +132,7 @@ export class AdminService {
       completedSignals,
       cancelledSignals,
       winRate: Math.round(winRate * 100) / 100,
+      avgPnl: Math.round(avgPnl * 100) / 100,
       totalPnl: Math.round(totalPnl * 100) / 100,
       totalUsers,
       activeUsers,
@@ -183,6 +188,51 @@ export class AdminService {
     ]);
 
     return { data, total, page, limit, totalPages: Math.ceil(total / limit) };
+  }
+
+  async getSignalStats(query: { status?: string; direction?: string }) {
+    // Tab counts — always global (unfiltered)
+    const [total, active, completed, cancelled, queued, expired] = await Promise.all([
+      this.signalModel.countDocuments(),
+      this.signalModel.countDocuments({ status: 'ACTIVE' }),
+      this.signalModel.countDocuments({ status: 'COMPLETED' }),
+      this.signalModel.countDocuments({ status: 'CANCELLED' }),
+      this.signalModel.countDocuments({ status: 'QUEUED' }),
+      this.signalModel.countDocuments({ status: { $in: ['EXPIRED', 'SKIPPED'] } }),
+    ]);
+
+    // Filtered counts for cards (L/S, PnL stats)
+    const dirFilter: any = {};
+    if (query.direction) dirFilter.direction = query.direction;
+
+    // PnL stats from completed signals (optionally filtered by direction)
+    const pnlFilter: any = { pnlPercent: { $exists: true }, ...dirFilter };
+    pnlFilter.status = query.status || 'COMPLETED';
+
+    const [longCount, shortCount, pnlDocs] = await Promise.all([
+      this.signalModel.countDocuments({ ...(query.status ? { status: query.status } : {}), direction: 'LONG' }),
+      this.signalModel.countDocuments({ ...(query.status ? { status: query.status } : {}), direction: 'SHORT' }),
+      this.signalModel.find(pnlFilter).select('pnlPercent closeReason').lean(),
+    ]);
+
+    const wins = pnlDocs.filter((s) => s.pnlPercent > 0).length;
+    const losses = pnlDocs.filter((s) => s.pnlPercent <= 0).length;
+    const winRate = pnlDocs.length > 0 ? (wins / pnlDocs.length) * 100 : 0;
+    const avgPnl = pnlDocs.length > 0
+      ? pnlDocs.reduce((sum, s) => sum + s.pnlPercent, 0) / pnlDocs.length
+      : 0;
+    const totalPnl = pnlDocs.reduce((sum, s) => sum + s.pnlPercent, 0);
+    const tpCount = pnlDocs.filter((s) => s.closeReason === 'TAKE_PROFIT').length;
+    const slCount = pnlDocs.filter((s) => s.closeReason === 'STOP_LOSS').length;
+
+    return {
+      total, active, completed, cancelled, queued, expired,
+      long: longCount, short: shortCount,
+      wins, losses, winRate: Math.round(winRate * 100) / 100,
+      avgPnl: Math.round(avgPnl * 100) / 100,
+      totalPnl: Math.round(totalPnl * 100) / 100,
+      tpCount, slCount,
+    };
   }
 
   async getSignalById(id: string) {

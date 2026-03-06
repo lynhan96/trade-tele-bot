@@ -53,6 +53,12 @@ export class AdminController {
   }
 
   @UseGuards(AdminGuard)
+  @Get("signals/stats")
+  getSignalStats(@Query() query: Record<string, string>) {
+    return this.adminService.getSignalStats(query);
+  }
+
+  @UseGuards(AdminGuard)
   @Get("signals/:id")
   getSignalById(@Param("id") id: string) {
     return this.adminService.getSignalById(id);
