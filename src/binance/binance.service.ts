@@ -43,6 +43,29 @@ export class BinanceService {
     });
   }
 
+  /**
+   * Enable hedge mode (dual side position) so the account can hold LONG and SHORT
+   * positions simultaneously on the same symbol. Safe to call if already enabled.
+   */
+  async enableHedgeMode(apiKey: string, apiSecret: string): Promise<boolean> {
+    try {
+      const client = this.createClient(apiKey, apiSecret);
+      await (client as any).privateRequest('POST', '/fapi/v1/positionSide/dual', {
+        dualSidePosition: 'true',
+      });
+      this.logger.log('Hedge mode (dual side position) enabled');
+      return true;
+    } catch (error) {
+      // "No need to change position side." means it's already enabled
+      if (error?.message?.includes('No need to change')) {
+        this.logger.debug('Hedge mode already enabled');
+        return true;
+      }
+      this.logger.warn(`Failed to enable hedge mode: ${error?.message}`);
+      return false;
+    }
+  }
+
   async getOpenPositions(
     apiKey: string,
     apiSecret: string,
@@ -138,13 +161,13 @@ export class BinanceService {
     try {
       const client = this.createClient(apiKey, apiSecret);
 
-      // Close position by creating opposite order
+      // Close position by creating opposite order (hedge mode: include positionSide)
       const order = await client.futuresOrder({
         symbol,
         side: side === "LONG" ? "SELL" : "BUY",
+        positionSide: side as any,
         type: "MARKET",
         quantity: quantity.toString(),
-        reduceOnly: "true",
       });
 
       this.logger.log(`Closed position ${symbol}: ${side} ${quantity}`);
@@ -192,10 +215,11 @@ export class BinanceService {
         effectiveLeverage = maxLeverage;
       }
 
-      // Open position with market order
+      // Open position with market order (hedge mode: include positionSide)
       const order = await client.futuresOrder({
         symbol: params.symbol,
         side: params.side === "LONG" ? "BUY" : "SELL",
+        positionSide: params.side,
         type: "MARKET",
         quantity: params.quantity.toString(),
       });
@@ -255,6 +279,7 @@ export class BinanceService {
         algoType: 'CONDITIONAL',
         symbol,
         side: orderSide,
+        positionSide: side as any,
         type: "STOP_MARKET",
         triggerPrice: stopPrice.toString(),
         closePosition: "true",
@@ -271,6 +296,7 @@ export class BinanceService {
         algoType: 'CONDITIONAL',
         symbol,
         side: orderSide,
+        positionSide: side as any,
         type: "STOP_MARKET",
         triggerPrice: stopPrice.toString(),
         quantity: quantity.toString(),
@@ -303,6 +329,7 @@ export class BinanceService {
         algoType: 'CONDITIONAL',
         symbol,
         side: orderSide,
+        positionSide: side as any,
         type: "TAKE_PROFIT_MARKET",
         triggerPrice: tpPrice.toString(),
         closePosition: "true",
@@ -320,6 +347,7 @@ export class BinanceService {
           algoType: 'CONDITIONAL',
           symbol,
           side: orderSide,
+          positionSide: side as any,
           type: "TAKE_PROFIT_MARKET",
           triggerPrice: tpPrice.toString(),
           quantity: quantity.toString(),

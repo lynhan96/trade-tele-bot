@@ -988,20 +988,31 @@ export class AiCommandService implements OnModuleInit {
 
           // /ai realmode on
           if (arg === "on") {
-            const hasKeys = !!(await this.userSettingsService.getApiKeys(telegramId, "binance"));
-            if (!hasKeys) {
+            const keys = await this.userSettingsService.getApiKeys(telegramId, "binance");
+            if (!keys?.apiKey) {
               await this.telegramService.sendTelegramMessage(
                 chatId,
                 `❌ Ban chua luu Binance API keys.\nDung: \`/ai setkeys <apiKey> <apiSecret>\``,
               );
               return;
             }
+
+            // Enable hedge mode (dual side position) so bot can hold LONG + SHORT simultaneously
+            const hedgeOk = await this.binanceService.enableHedgeMode(keys.apiKey, keys.apiSecret);
+            if (!hedgeOk) {
+              await this.telegramService.sendTelegramMessage(
+                chatId,
+                `⚠️ Khong the bat Hedge Mode tren Binance.\nHay bat thu cong: Binance App → Futures → Settings → Position Mode → Hedge Mode.\nSau do thu lai /ai realmode on.`,
+              );
+              return;
+            }
+
             await this.subscriptionService.setRealMode(telegramId, true);
             // Clear daily-disabled flag so the user gets a fresh daily counter
             await this.subscriptionService.setRealModeDailyDisabled(telegramId, null).catch(() => {});
             await this.telegramService.sendTelegramMessage(
               chatId,
-              `✅ *Real Mode da bat!*\n\nBot se tu dong dat lenh that khi co tin hieu moi.\nDung /ai realmode off de tat.`,
+              `✅ *Real Mode da bat!*\n\n🔄 Hedge Mode: ON\nBot se tu dong dat lenh that khi co tin hieu moi.\nDung /ai realmode off de tat.`,
             );
             return;
           }
