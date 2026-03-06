@@ -71,7 +71,17 @@ export class AdminService {
       this.signalModel.countDocuments({ direction: 'LONG' }),
       this.signalModel.countDocuments({ direction: 'SHORT' }),
       this.signalModel.find({ status: 'COMPLETED', pnlPercent: { $exists: true } }).select('pnlPercent').lean(),
-      this.signalModel.aggregate([{ $group: { _id: '$strategy', count: { $sum: 1 } } }]),
+      this.signalModel.aggregate([
+        {
+          $group: {
+            _id: '$strategy',
+            count: { $sum: 1 },
+            wins: { $sum: { $cond: [{ $and: [{ $eq: ['$status', 'COMPLETED'] }, { $gt: ['$pnlPercent', 0] }] }, 1, 0] } },
+            losses: { $sum: { $cond: [{ $and: [{ $eq: ['$status', 'COMPLETED'] }, { $lte: ['$pnlPercent', 0] }, { $ne: [{ $type: '$pnlPercent' }, 'missing'] }] }, 1, 0] } },
+            totalPnl: { $sum: { $cond: [{ $ne: [{ $type: '$pnlPercent' }, 'missing'] }, '$pnlPercent', 0] } },
+          },
+        },
+      ]),
       this.signalModel.aggregate([{ $group: { _id: '$regime', count: { $sum: 1 } } }]),
       this.signalModel.find().sort({ createdAt: -1 }).limit(10).lean(),
       this.signalModel.aggregate([
@@ -108,9 +118,14 @@ export class AdminService {
         ? completedSignalDocs.reduce((sum, s) => sum + s.pnlPercent, 0)
         : 0;
 
-    const signalsByStrategy: Record<string, number> = {};
+    const signalsByStrategy: Record<string, { count: number; wins: number; losses: number; totalPnl: number }> = {};
     for (const s of strategyAgg) {
-      signalsByStrategy[s._id || 'unknown'] = s.count;
+      signalsByStrategy[s._id || 'unknown'] = {
+        count: s.count,
+        wins: s.wins,
+        losses: s.losses,
+        totalPnl: Math.round((s.totalPnl || 0) * 100) / 100,
+      };
     }
 
     const signalsByRegime: Record<string, number> = {};
@@ -285,23 +300,33 @@ export class AdminService {
     const [subscription, settings, trades] = await Promise.all([
       this.subscriptionModel.findOne({ telegramId }).lean(),
       this.userSettingsModel.findOne({ telegramId }).lean(),
-      this.tradeModel.find({ telegramId }).lean(),
+      this.tradeModel.find({ telegramId }).sort({ createdAt: -1 }).lean(),
     ]);
 
     const openTrades = trades.filter((t) => t.status === 'OPEN').length;
-    const closedTrades = trades.filter((t) => t.status === 'CLOSED').length;
-    const totalPnl = trades
-      .filter((t) => t.pnlPercent !== undefined)
-      .reduce((sum, t) => sum + t.pnlPercent, 0);
+    const closedTrades = trades.filter((t) => t.status === 'CLOSED');
+    const tradesWithPnl = closedTrades.filter((t) => t.pnlPercent !== undefined);
+    const totalPnl = tradesWithPnl.reduce((sum, t) => sum + t.pnlPercent, 0);
+    const totalPnlUsdt = tradesWithPnl.reduce((sum, t) => sum + (t.pnlUsdt ?? 0), 0);
+    const wins = tradesWithPnl.filter((t) => t.pnlPercent > 0).length;
+    const losses = tradesWithPnl.filter((t) => t.pnlPercent <= 0).length;
+    const winRate = tradesWithPnl.length > 0 ? (wins / tradesWithPnl.length) * 100 : 0;
+    const avgPnl = tradesWithPnl.length > 0 ? totalPnl / tradesWithPnl.length : 0;
 
     return {
       subscription,
       settings: settings ? { telegramId: settings.telegramId, chatId: settings.chatId, hasBinanceKeys: !!settings.binance, hasOkxKeys: !!settings.okx } : null,
+      trades,
       tradesSummary: {
         total: trades.length,
         open: openTrades,
-        closed: closedTrades,
+        closed: closedTrades.length,
+        wins,
+        losses,
+        winRate: Math.round(winRate * 100) / 100,
+        avgPnl: Math.round(avgPnl * 100) / 100,
         totalPnlPercent: Math.round(totalPnl * 100) / 100,
+        totalPnlUsdt: Math.round(totalPnlUsdt * 100) / 100,
       },
     };
   }
