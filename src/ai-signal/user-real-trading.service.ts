@@ -981,7 +981,7 @@ export class UserRealTradingService implements OnModuleInit {
    * If SL or TP is missing (failed at placement or silently dropped), place it immediately.
    * This protects clients from unprotected open positions.
    */
-  @Cron("0 */3 * * * *")
+  @Cron("*/30 * * * * *")
   async protectOpenTrades(): Promise<void> {
     try {
       const openTrades = await this.userTradeModel.find({ status: "OPEN" }).exec();
