@@ -207,13 +207,44 @@ export class MarketDataService implements OnModuleInit, OnModuleDestroy {
 
   /**
    * Get latest price with Redis fallback (async).
-   * Use this when the symbol may not be in the current WS subscription.
+   * If the symbol has no WS subscription and no Redis cache,
+   * auto-subscribes the coin and fetches initial price via HTTP.
    */
   async getPrice(symbol: string): Promise<number | null> {
+    // 1. In-memory WS cache (fastest)
     const mem = this.latestPrices.get(symbol);
     if (mem && mem > 0) return mem;
+
+    // 2. Redis fallback
     const cached = await this.redisService.get<number>(`price:${symbol}`);
-    return cached && cached > 0 ? cached : null;
+    if (cached && cached > 0) return cached;
+
+    // 3. Not subscribed — open WS for this coin + fetch initial price via HTTP
+    const coin = symbol.replace("USDT", "");
+    if (!this.subscribedCoins.has(coin.toUpperCase())) {
+      this.logger.log(`[MarketData] Auto-subscribing ${coin} (price requested but no WS)`);
+      this.subscribedCoins.add(coin.toUpperCase());
+      this.subscribeCoin(coin).catch(() => {});
+    }
+
+    // One-time HTTP fetch for immediate return
+    try {
+      const axios = require("axios");
+      const res = await axios.get(
+        `https://fapi.binance.com/fapi/v1/ticker/price?symbol=${symbol}`,
+        { timeout: 5000 },
+      );
+      const price = parseFloat(res.data.price);
+      if (price > 0) {
+        this.latestPrices.set(symbol, price);
+        this.redisService.set(`price:${symbol}`, price, 300).catch(() => {});
+        return price;
+      }
+    } catch {
+      // ignore — WS will populate soon
+    }
+
+    return null;
   }
 
   // ─── Internal: WebSocket subscription ────────────────────────────────────
