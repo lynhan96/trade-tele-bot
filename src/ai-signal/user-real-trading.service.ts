@@ -1152,9 +1152,8 @@ export class UserRealTradingService implements OnModuleInit {
   }
 
   private async fetchCurrentPrice(symbol: string): Promise<number | null> {
-    // Use in-memory WebSocket price only — no HTTP calls to Binance
-    const wsPrice = this.marketDataService.getLatestPrice(symbol);
-    return wsPrice && wsPrice > 0 ? wsPrice : null;
+    // In-memory WS first, then Redis fallback (no HTTP calls to Binance)
+    return this.marketDataService.getPrice(symbol);
   }
 
   /** Re-register data streams for users with OPEN trades (called on module init). */

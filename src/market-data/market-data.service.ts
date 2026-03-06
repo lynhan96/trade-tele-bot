@@ -198,11 +198,22 @@ export class MarketDataService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Get the latest known price for a symbol from the WebSocket feed.
-   * Returns null if the symbol is not in the current subscription (not in shortlist).
+   * Get the latest known price for a symbol.
+   * Checks in-memory WS cache first, then Redis.
    */
   getLatestPrice(symbol: string): number | null {
     return this.latestPrices.get(symbol) ?? null;
+  }
+
+  /**
+   * Get latest price with Redis fallback (async).
+   * Use this when the symbol may not be in the current WS subscription.
+   */
+  async getPrice(symbol: string): Promise<number | null> {
+    const mem = this.latestPrices.get(symbol);
+    if (mem && mem > 0) return mem;
+    const cached = await this.redisService.get<number>(`price:${symbol}`);
+    return cached && cached > 0 ? cached : null;
   }
 
   // ─── Internal: WebSocket subscription ────────────────────────────────────
@@ -296,7 +307,11 @@ export class MarketDataService implements OnModuleInit, OnModuleDestroy {
     // Emit live price to registered listeners on every tick (including non-final).
     // This is used by PositionMonitorService for real-time TP/SL checking (~250ms resolution).
     const currentPrice = parseFloat(close);
-    this.latestPrices.set(symbol, currentPrice); // cache for getLatestPrice()
+    this.latestPrices.set(symbol, currentPrice);
+    // Persist to Redis so any service can read current price without WS subscription
+    if (!this.isShuttingDown) {
+      this.redisService.set(`price:${symbol}`, currentPrice, 300).catch(() => {}); // 5 min TTL
+    }
     this.priceListeners.get(symbol)?.forEach((cb) => cb(currentPrice));
 
     // Only process when candle is CLOSED (isFinal = true)

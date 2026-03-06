@@ -1485,13 +1485,9 @@ export class AiCommandService implements OnModuleInit {
           await this.telegramService.sendTelegramMessage(chatId, `ℹ️ Ban chua dang ky. Dung /ai subscribe truoc.`);
           return;
         }
-        if (!sub.realModeEnabled) {
-          await this.telegramService.sendTelegramMessage(chatId,
-            `⚡ *Real Mode chua bat*\n\nDung /ai realmode on de bat dat lenh that.`);
-          return;
-        }
-
-        const keys = await this.userSettingsService.getApiKeys(telegramId, "binance");
+        const keys = sub.realModeEnabled
+          ? await this.userSettingsService.getApiKeys(telegramId, "binance")
+          : null;
         const [stats, balance] = await Promise.all([
           this.userRealTradingService.getDailyStats(telegramId),
           keys ? this.binanceService.getFuturesBalance(keys.apiKey, keys.apiSecret) : Promise.resolve(null),
