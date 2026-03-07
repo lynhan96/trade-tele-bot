@@ -175,6 +175,8 @@ export class AdminService {
     timeframeProfile?: string;
     dateFrom?: string;
     dateTo?: string;
+    closedFrom?: string;
+    closedTo?: string;
   }) {
     const page = Math.max(1, query.page || 1);
     const limit = Math.min(100, Math.max(1, query.limit || 20));
@@ -190,6 +192,11 @@ export class AdminService {
       filter.createdAt = {};
       if (query.dateFrom) filter.createdAt.$gte = new Date(query.dateFrom);
       if (query.dateTo) filter.createdAt.$lte = new Date(query.dateTo);
+    }
+    if (query.closedFrom || query.closedTo) {
+      filter.positionClosedAt = {};
+      if (query.closedFrom) filter.positionClosedAt.$gte = new Date(query.closedFrom);
+      if (query.closedTo) filter.positionClosedAt.$lte = new Date(query.closedTo + 'T23:59:59.999Z');
     }
 
     const [data, total] = await Promise.all([
@@ -256,6 +263,81 @@ export class AdminService {
 
   async updateSignal(id: string, dto: { status?: string; closeReason?: string }) {
     return this.signalModel.findByIdAndUpdate(id, { $set: dto }, { new: true }).lean();
+  }
+
+  async getUserRanking(query: {
+    limit?: number;
+    sortBy?: string;
+  }) {
+    const limit = Math.min(50, Math.max(1, query.limit || 20));
+    const sortField = query.sortBy === 'monthlyPnlUsdt' ? 'monthlyPnlUsdt' : 'totalPnlUsdt';
+
+    // Current month boundaries
+    const now = new Date();
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+
+    // Aggregate all-time stats from trades
+    const allTimeStats = await this.tradeModel.aggregate([
+      { $match: { status: 'CLOSED', pnlPercent: { $exists: true } } },
+      {
+        $group: {
+          _id: '$telegramId',
+          totalPnlUsdt: { $sum: { $ifNull: ['$pnlUsdt', 0] } },
+          totalPnlPercent: { $sum: { $ifNull: ['$pnlPercent', 0] } },
+          wins: { $sum: { $cond: [{ $gt: ['$pnlPercent', 0] }, 1, 0] } },
+          losses: { $sum: { $cond: [{ $lte: ['$pnlPercent', 0] }, 1, 0] } },
+          totalTrades: { $sum: 1 },
+        },
+      },
+    ]);
+
+    // Aggregate monthly stats from trades
+    const monthlyStats = await this.tradeModel.aggregate([
+      { $match: { status: 'CLOSED', pnlPercent: { $exists: true }, closedAt: { $gte: monthStart } } },
+      {
+        $group: {
+          _id: '$telegramId',
+          monthlyPnlUsdt: { $sum: { $ifNull: ['$pnlUsdt', 0] } },
+          monthlyPnlPercent: { $sum: { $ifNull: ['$pnlPercent', 0] } },
+          monthlyWins: { $sum: { $cond: [{ $gt: ['$pnlPercent', 0] }, 1, 0] } },
+          monthlyLosses: { $sum: { $cond: [{ $lte: ['$pnlPercent', 0] }, 1, 0] } },
+        },
+      },
+    ]);
+
+    // Get all active users
+    const users = await this.subscriptionModel.find({ isActive: true })
+      .select('telegramId username tradingBalance totalPnlUsdt totalWins totalLosses')
+      .lean();
+
+    const allTimeMap = new Map(allTimeStats.map((s) => [s._id, s]));
+    const monthlyMap = new Map(monthlyStats.map((s) => [s._id, s]));
+
+    const ranked = users.map((u) => {
+      const at = allTimeMap.get(u.telegramId) || { totalPnlUsdt: 0, totalPnlPercent: 0, wins: 0, losses: 0, totalTrades: 0 };
+      const mo = monthlyMap.get(u.telegramId) || { monthlyPnlUsdt: 0, monthlyPnlPercent: 0, monthlyWins: 0, monthlyLosses: 0 };
+      const totalTrades = at.wins + at.losses;
+      const winRate = totalTrades > 0 ? (at.wins / totalTrades) * 100 : 0;
+      return {
+        telegramId: u.telegramId,
+        username: u.username || `User ${u.telegramId}`,
+        tradingBalance: u.tradingBalance ?? 1000,
+        totalPnlUsdt: Math.round(at.totalPnlUsdt * 100) / 100,
+        totalPnlPercent: Math.round(at.totalPnlPercent * 100) / 100,
+        monthlyPnlUsdt: Math.round(mo.monthlyPnlUsdt * 100) / 100,
+        monthlyPnlPercent: Math.round(mo.monthlyPnlPercent * 100) / 100,
+        wins: at.wins,
+        losses: at.losses,
+        monthlyWins: mo.monthlyWins,
+        monthlyLosses: mo.monthlyLosses,
+        winRate: Math.round(winRate * 10) / 10,
+        totalTrades,
+      };
+    });
+
+    ranked.sort((a, b) => b[sortField] - a[sortField]);
+
+    return ranked.slice(0, limit).map((u, i) => ({ ...u, rank: i + 1 }));
   }
 
   async getUsers(query: {

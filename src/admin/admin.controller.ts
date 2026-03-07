@@ -83,6 +83,12 @@ export class AdminController {
   }
 
   @UseGuards(AdminGuard)
+  @Get("users/ranking")
+  getUserRanking(@Query() query: Record<string, string>) {
+    return this.adminService.getUserRanking(query);
+  }
+
+  @UseGuards(AdminGuard)
   @Get("users")
   getUsers(@Query() query: Record<string, string>) {
     return this.adminService.getUsers(query);
