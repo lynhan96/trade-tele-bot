@@ -1083,8 +1083,8 @@ export class AiSignalService implements OnModuleInit {
       await this.notifySl5PctMilestone(signal.symbol, newSl, signal.direction);
     }
 
-    // Move SL to entry (break-even) at >= 4% profit
-    if (pnlPct >= 4 && !(signal as any).slMovedToEntry) {
+    // Move SL to entry (break-even) at >= 3% profit (matches PositionMonitor threshold)
+    if (pnlPct >= 3 && !(signal as any).slMovedToEntry) {
       await this.signalQueueService.moveStopLossToEntry((signal as any)._id.toString());
       (signal as any).stopLossPrice = signal.entryPrice;
       (signal as any).slMovedToEntry = true;
