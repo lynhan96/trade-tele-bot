@@ -10,6 +10,7 @@ import { AiMarketConfig, AiMarketConfigDocument } from '../schemas/ai-market-con
 import { AiRegimeHistory, AiRegimeHistoryDocument } from '../schemas/ai-regime-history.schema';
 import { DailyMarketSnapshot, DailyMarketSnapshotDocument } from '../schemas/daily-market-snapshot.schema';
 import { UserSettings, UserSettingsDocument } from '../schemas/user-settings.schema';
+import { UserRealTradingService } from '../ai-signal/user-real-trading.service';
 
 /** Must match the key in SignalQueueService. */
 const ACTIVE_KEY = (signalKey: string) => `cache:ai-signal:active:${signalKey}`;
@@ -31,6 +32,7 @@ export class AdminService {
     @InjectModel(DailyMarketSnapshot.name) private snapshotModel: Model<DailyMarketSnapshotDocument>,
     @InjectModel(UserSettings.name) private userSettingsModel: Model<UserSettingsDocument>,
     private readonly redisService: RedisService,
+    private readonly userRealTradingService: UserRealTradingService,
   ) {}
 
   async getDashboardStats() {
@@ -680,5 +682,26 @@ export class AdminService {
     } catch {
       return null;
     }
+  }
+
+  // ─── Trade Close ─────────────────────────────────────────────────────────────
+
+  async closeTrade(tradeId: string): Promise<{ success: boolean; error?: string; pnlPct?: number }> {
+    const trade = await this.tradeModel.findById(tradeId).lean();
+    if (!trade) return { success: false, error: "Trade not found" };
+    if (trade.status !== "OPEN") return { success: false, error: "Trade is not open" };
+
+    const result = await this.userRealTradingService.closeRealPosition(
+      trade.telegramId, trade.telegramId, trade.symbol, "ADMIN_CLOSE",
+    );
+    if (!result.success) return { success: false, error: "Failed to close position on Binance" };
+    return { success: true, pnlPct: result.pnlPct };
+  }
+
+  async closeAllTrades(telegramId: number): Promise<{ success: boolean; closed: number; error?: string }> {
+    const count = await this.userRealTradingService.closeAllRealPositions(
+      telegramId, telegramId, "ADMIN_CLOSE",
+    );
+    return { success: true, closed: count };
   }
 }

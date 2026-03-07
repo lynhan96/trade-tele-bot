@@ -6,6 +6,7 @@ import { AdminAuthService } from "./admin-auth.service";
 import { AdminGuard } from "./admin.guard";
 import { AdminGateway } from "./admin.gateway";
 import { RedisModule } from "../redis/redis.module";
+import { AiSignalModule } from "../ai-signal/ai-signal.module";
 import { AiSignal, AiSignalSchema } from "../schemas/ai-signal.schema";
 import { UserSignalSubscription, UserSignalSubscriptionSchema } from "../schemas/user-signal-subscription.schema";
 import { UserTrade, UserTradeSchema } from "../schemas/user-trade.schema";
@@ -30,6 +31,7 @@ import { AdminAccount, AdminAccountSchema } from "../schemas/admin-account.schem
       { name: AdminAccount.name, schema: AdminAccountSchema },
     ]),
     RedisModule,
+    AiSignalModule,
   ],
   controllers: [AdminController],
   providers: [AdminService, AdminAuthService, AdminGuard, AdminGateway],

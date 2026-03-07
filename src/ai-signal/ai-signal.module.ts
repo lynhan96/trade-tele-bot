@@ -77,6 +77,6 @@ import {
     UserDataStreamService,
     HealthMonitorService,
   ],
-  exports: [AiSignalService, UserSignalSubscriptionService],
+  exports: [AiSignalService, UserSignalSubscriptionService, UserRealTradingService],
 })
 export class AiSignalModule {}

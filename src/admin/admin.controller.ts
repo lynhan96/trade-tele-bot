@@ -113,6 +113,18 @@ export class AdminController {
   }
 
   @UseGuards(AdminGuard)
+  @Post("trades/:tradeId/close")
+  closeTrade(@Param("tradeId") tradeId: string) {
+    return this.adminService.closeTrade(tradeId);
+  }
+
+  @UseGuards(AdminGuard)
+  @Post("users/:telegramId/trades/close-all")
+  closeAllTrades(@Param("telegramId") telegramId: string) {
+    return this.adminService.closeAllTrades(parseInt(telegramId, 10));
+  }
+
+  @UseGuards(AdminGuard)
   @Get("coin-profiles")
   getCoinProfiles(@Query() query: Record<string, string>) {
     return this.adminService.getCoinProfiles(query);
