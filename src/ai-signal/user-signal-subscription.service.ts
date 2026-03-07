@@ -67,6 +67,23 @@ export class UserSignalSubscriptionService {
   }
 
   /**
+   * Get active subscribers who do NOT have real trading on.
+   * These users receive signal notifications (real traders get trade-specific msgs instead).
+   */
+  async findSignalOnlySubscribers(): Promise<SubscriberInfo[]> {
+    const docs = await this.subscriptionModel
+      .find({ isActive: true, $or: [{ realModeEnabled: false }, { realModeEnabled: { $exists: false } }] })
+      .lean();
+    return docs.map((d) => ({
+      telegramId: d.telegramId,
+      chatId: d.chatId,
+      username: d.username,
+      tradingBalance: d.tradingBalance ?? 1000,
+      coinVolumes: d.coinVolumes as Record<string, number> | undefined,
+    }));
+  }
+
+  /**
    * Get active subscribers who have real mode enabled.
    */
   async findRealModeSubscribers(): Promise<SubscriberInfo[]> {
