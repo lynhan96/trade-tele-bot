@@ -191,6 +191,9 @@ export class AiCommandService implements OnModuleInit {
           (openTrades.length > 0 ? `📊 Lenh mo: *${openTrades.length}*\n` : "") +
           `🚨 Canh bao dong tien: ${moneyFlow ? "✅ Bat" : "❌ Tat"}\n` +
           `📡 Auto push: ${pushEnabled ? "✅ Bat (10 phut)" : "❌ Tat"}\n\n` +
+          `*Daily Limit:*\n` +
+          `🎯 Muc tieu loi: ${sub.realModeDailyTargetPct ? `*+${sub.realModeDailyTargetPct}%/ngay*` : "_Chua dat_"}\n` +
+          `🛑 Gioi han lo: ${sub.realModeDailyStopLossPct ? `*-${sub.realModeDailyStopLossPct}%/ngay*` : "_Chua dat_"}\n\n` +
           `*Vol & TP/SL:*\n` +
           `💰 Balance: *${balance.toLocaleString()} USDT/lenh*\n` +
           (coinVolLines ? `${coinVolLines}\n` : `  _Chua co override coin nao_\n`) +
