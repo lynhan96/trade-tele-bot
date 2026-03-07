@@ -31,6 +31,8 @@ const PRICE_PRECISION_KEY = (symbol: string) => `cache:binance:price-precision:$
 const ORDER_LOCK_KEY = (telegramId: number, symbol: string) => `cache:order-lock:${telegramId}:${symbol}`;
 /** Redis counter for atomic position slot reservation. */
 const POS_SLOT_KEY = (telegramId: number) => `cache:pos-slots:${telegramId}`;
+/** Redis key for temporarily blacklisting closed/errored symbols (1h TTL). */
+const CLOSED_SYMBOL_KEY = (symbol: string) => `cache:closed-symbol:${symbol}`;
 
 @Injectable()
 export class UserRealTradingService implements OnModuleInit {
@@ -87,6 +89,13 @@ export class UserRealTradingService implements OnModuleInit {
     // Skip TradFi-Perps symbols (require separate Binance agreement)
     if (TRADFI_BLACKLIST.has(symbol)) {
       this.logger.log(`[RealTrading] ${symbol}: TradFi symbol — skipping real orders`);
+      return;
+    }
+
+    // Skip symbols temporarily marked as closed (e.g. maintenance)
+    const closedFlag = await this.redisService.get<boolean>(CLOSED_SYMBOL_KEY(symbol));
+    if (closedFlag) {
+      this.logger.log(`[RealTrading] ${symbol}: symbol temporarily closed — skipping`);
       return;
     }
 
@@ -244,46 +253,73 @@ export class UserRealTradingService implements OnModuleInit {
           : fillPrice * (1 - sub.customTpPct / 100);
         this.logger.debug(`[RealTrading] ${symbol} TP: using user config ${sub.customTpPct}%`);
       }
-      const roundedSl = roundPrice(effectiveSl);
-      const roundedTp = effectiveTp ? roundPrice(effectiveTp) : undefined;
+      let roundedSl = roundPrice(effectiveSl);
+      let roundedTp = effectiveTp ? roundPrice(effectiveTp) : undefined;
 
-      // Place SL algo order
+      // Place SL algo order (with precision retry)
       let binanceSlAlgoId: string | undefined;
       try {
         const slOrder = await this.binanceService.setStopLoss(
-          keys.apiKey,
-          keys.apiSecret,
-          symbol,
-          roundedSl,
-          direction as "LONG" | "SHORT",
-          quantity,
+          keys.apiKey, keys.apiSecret, symbol, roundedSl, direction as "LONG" | "SHORT", quantity,
         );
         binanceSlAlgoId = slOrder?.algoId?.toString() ?? slOrder?.orderId?.toString();
       } catch (err) {
-        this.logger.error(`[RealTrading] ${symbol} SL order failed for user ${telegramId}: ${err?.message}`);
-        await this.telegramService.sendTelegramMessage(chatId,
-          `⚠️ *Real Mode: SL Order That Bai*\n\n${symbol} — SL tai $${roundedSl} khong duoc dat.\nLoi: ${err?.message}\n\n_Hay tu dat SL tren Binance._`
-        ).catch(() => {});
+        if (err?.message?.includes("Precision")) {
+          // Precision stale — refresh and retry once
+          const freshPrec = await this.refreshPricePrecision(symbol);
+          const retriedSl = parseFloat(effectiveSl.toFixed(freshPrec));
+          this.logger.warn(`[RealTrading] ${symbol} SL precision retry: ${roundedSl} → ${retriedSl}`);
+          try {
+            const slOrder = await this.binanceService.setStopLoss(
+              keys.apiKey, keys.apiSecret, symbol, retriedSl, direction as "LONG" | "SHORT", quantity,
+            );
+            binanceSlAlgoId = slOrder?.algoId?.toString() ?? slOrder?.orderId?.toString();
+            roundedSl = retriedSl;
+          } catch (err2) {
+            this.logger.error(`[RealTrading] ${symbol} SL retry also failed for user ${telegramId}: ${err2?.message}`);
+            await this.telegramService.sendTelegramMessage(chatId,
+              `⚠️ *Real Mode: SL Order That Bai*\n\n${symbol} — SL tai $${retriedSl} khong duoc dat.\nLoi: ${err2?.message}\n\n_Hay tu dat SL tren Binance._`
+            ).catch(() => {});
+          }
+        } else {
+          this.logger.error(`[RealTrading] ${symbol} SL order failed for user ${telegramId}: ${err?.message}`);
+          await this.telegramService.sendTelegramMessage(chatId,
+            `⚠️ *Real Mode: SL Order That Bai*\n\n${symbol} — SL tai $${roundedSl} khong duoc dat.\nLoi: ${err?.message}\n\n_Hay tu dat SL tren Binance._`
+          ).catch(() => {});
+        }
       }
 
-      // Place TP algo order (if signal has TP price)
+      // Place TP algo order (if signal has TP price, with precision retry)
       let binanceTpAlgoId: string | undefined;
       if (roundedTp) {
         try {
           const tpOrder = await this.binanceService.setTakeProfitAtPrice(
-            keys.apiKey,
-            keys.apiSecret,
-            symbol,
-            roundedTp,
-            direction as "LONG" | "SHORT",
-            quantity,
+            keys.apiKey, keys.apiSecret, symbol, roundedTp, direction as "LONG" | "SHORT", quantity,
           );
           binanceTpAlgoId = tpOrder?.algoId?.toString() ?? tpOrder?.orderId?.toString();
         } catch (err) {
-          this.logger.warn(`[RealTrading] ${symbol} TP order failed for user ${telegramId}: ${err?.message}`);
-          await this.telegramService.sendTelegramMessage(chatId,
-            `⚠️ *Real Mode: TP Order That Bai*\n\n${symbol} — TP tai $${roundedTp} khong duoc dat.\nLoi: ${err?.message}\n\n_Lenh van mo, SL van hoat dong._`
-          ).catch(() => {});
+          if (err?.message?.includes("Precision")) {
+            const freshPrec = await this.refreshPricePrecision(symbol);
+            const retriedTp = parseFloat(effectiveTp!.toFixed(freshPrec));
+            this.logger.warn(`[RealTrading] ${symbol} TP precision retry: ${roundedTp} → ${retriedTp}`);
+            try {
+              const tpOrder = await this.binanceService.setTakeProfitAtPrice(
+                keys.apiKey, keys.apiSecret, symbol, retriedTp, direction as "LONG" | "SHORT", quantity,
+              );
+              binanceTpAlgoId = tpOrder?.algoId?.toString() ?? tpOrder?.orderId?.toString();
+              roundedTp = retriedTp;
+            } catch (err2) {
+              this.logger.warn(`[RealTrading] ${symbol} TP retry also failed for user ${telegramId}: ${err2?.message}`);
+              await this.telegramService.sendTelegramMessage(chatId,
+                `⚠️ *Real Mode: TP Order That Bai*\n\n${symbol} — TP tai $${retriedTp} khong duoc dat.\nLoi: ${err2?.message}\n\n_Lenh van mo, SL van hoat dong._`
+              ).catch(() => {});
+            }
+          } else {
+            this.logger.warn(`[RealTrading] ${symbol} TP order failed for user ${telegramId}: ${err?.message}`);
+            await this.telegramService.sendTelegramMessage(chatId,
+              `⚠️ *Real Mode: TP Order That Bai*\n\n${symbol} — TP tai $${roundedTp} khong duoc dat.\nLoi: ${err?.message}\n\n_Lenh van mo, SL van hoat dong._`
+            ).catch(() => {});
+          }
         }
       }
 
@@ -337,6 +373,10 @@ export class UserRealTradingService implements OnModuleInit {
       await this.redisService.decr(slotKey); // release reserved slot on failure
       await this.redisService.delete(lockKey); // release order lock so next signal isn't blocked
       this.logger.error(`[RealTrading] ${symbol} order failed for user ${telegramId}: ${err?.message}`);
+      // Temporarily blacklist closed symbols so other users don't also fail
+      if (err?.message?.includes("Symbol is closed")) {
+        await this.redisService.set(CLOSED_SYMBOL_KEY(symbol), true, 3600); // 1h TTL
+      }
       const errMsg = `❌ *Real Mode: Dat Lenh That Bai*\n\n${symbol} ${direction}\nLoi: ${err?.message ?? "unknown"}`;
       await this.telegramService.sendTelegramMessage(chatId, errMsg).catch(() => {});
     }
@@ -374,19 +414,29 @@ export class UserRealTradingService implements OnModuleInit {
           );
         }
 
-        // Place new SL (rounded to exchange precision)
-        const slOrder = await this.binanceService.setStopLoss(
-          keys.apiKey,
-          keys.apiSecret,
-          symbol,
-          roundedSlPrice,
-          direction as "LONG" | "SHORT",
-          trade.quantity,
-        );
+        // Place new SL (rounded to exchange precision, with precision retry)
+        let finalSlPrice = roundedSlPrice;
+        let slOrder: any;
+        try {
+          slOrder = await this.binanceService.setStopLoss(
+            keys.apiKey, keys.apiSecret, symbol, finalSlPrice, direction as "LONG" | "SHORT", trade.quantity,
+          );
+        } catch (slErr) {
+          if (slErr?.message?.includes("Precision")) {
+            const freshPrec = await this.refreshPricePrecision(symbol);
+            finalSlPrice = parseFloat(newSlPrice.toFixed(freshPrec));
+            this.logger.warn(`[RealTrading] ${symbol} SL precision retry: ${roundedSlPrice} → ${finalSlPrice}`);
+            slOrder = await this.binanceService.setStopLoss(
+              keys.apiKey, keys.apiSecret, symbol, finalSlPrice, direction as "LONG" | "SHORT", trade.quantity,
+            );
+          } else {
+            throw slErr;
+          }
+        }
         const newAlgoId = slOrder?.algoId?.toString() ?? slOrder?.orderId?.toString();
 
         await this.userTradeModel.findByIdAndUpdate((trade as any)._id, {
-          slPrice: roundedSlPrice,
+          slPrice: finalSlPrice,
           binanceSlAlgoId: newAlgoId,
         });
 
@@ -441,19 +491,29 @@ export class UserRealTradingService implements OnModuleInit {
           );
         }
 
-        // Place new TP
-        const tpOrder = await this.binanceService.setTakeProfitAtPrice(
-          keys.apiKey,
-          keys.apiSecret,
-          symbol,
-          roundedTpPrice,
-          direction as "LONG" | "SHORT",
-          trade.quantity,
-        );
+        // Place new TP (with precision retry)
+        let finalTpPrice = roundedTpPrice;
+        let tpOrder: any;
+        try {
+          tpOrder = await this.binanceService.setTakeProfitAtPrice(
+            keys.apiKey, keys.apiSecret, symbol, finalTpPrice, direction as "LONG" | "SHORT", trade.quantity,
+          );
+        } catch (tpErr) {
+          if (tpErr?.message?.includes("Precision")) {
+            const freshPrec = await this.refreshPricePrecision(symbol);
+            finalTpPrice = parseFloat(newTpPrice.toFixed(freshPrec));
+            this.logger.warn(`[RealTrading] ${symbol} TP precision retry: ${roundedTpPrice} → ${finalTpPrice}`);
+            tpOrder = await this.binanceService.setTakeProfitAtPrice(
+              keys.apiKey, keys.apiSecret, symbol, finalTpPrice, direction as "LONG" | "SHORT", trade.quantity,
+            );
+          } else {
+            throw tpErr;
+          }
+        }
         const newAlgoId = tpOrder?.algoId?.toString() ?? tpOrder?.orderId?.toString();
 
         await this.userTradeModel.findByIdAndUpdate((trade as any)._id, {
-          tpPrice: roundedTpPrice,
+          tpPrice: finalTpPrice,
           binanceTpAlgoId: newAlgoId,
         });
 
@@ -1312,6 +1372,13 @@ export class UserRealTradingService implements OnModuleInit {
   private async getPricePrecision(symbol: string): Promise<number> {
     const cached = await this.redisService.get<number>(PRICE_PRECISION_KEY(symbol));
     if (cached != null) return cached;
+    return (await this.fetchAndCacheSymbolPrecisions(symbol)).price;
+  }
+
+  /** Invalidate cached precision and re-fetch from Binance exchangeInfo. */
+  private async refreshPricePrecision(symbol: string): Promise<number> {
+    await this.redisService.delete(PRICE_PRECISION_KEY(symbol));
+    await this.redisService.delete(QTY_PRECISION_KEY(symbol));
     return (await this.fetchAndCacheSymbolPrecisions(symbol)).price;
   }
 
