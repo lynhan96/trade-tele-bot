@@ -247,13 +247,22 @@ export class AiCommandService implements OnModuleInit {
       }
     });
 
-    // /ai signals — view all active + queued signals (personalized with user's balance)
+    // /ai signals — view user's open trades (real mode) or all signals (signal-only mode)
     this.telegramService.registerBotCommand(/^\/ai[_ ]signals/, async (msg) => {
       const chatId = msg.chat.id;
       const telegramId = msg.from?.id;
 
       try {
         const sub = telegramId ? await this.subscriptionService.getSubscription(telegramId) : null;
+
+        // Real trading users see their own trades
+        if (sub?.realModeEnabled && telegramId) {
+          const text = await this.formatUserTradesMessage(telegramId);
+          await this.telegramService.sendTelegramMessage(chatId, text);
+          return;
+        }
+
+        // Signal-only users see all system signals
         const text = await this.formatSignalsMessage({
           tradingBalance: sub?.tradingBalance,
           coinVolumes: sub?.coinVolumes,
@@ -1766,6 +1775,80 @@ export class AiCommandService implements OnModuleInit {
         const hoursLeft = Math.max(0, (s.expiresAt.getTime() - Date.now()) / 3600000);
         text += `${dirIcon} *${s.symbol}* ${s.direction} · ${fmtPrice(s.entryPrice)} · _${hoursLeft.toFixed(1)}h left_\n`;
       }
+    }
+
+    text += `━━━━━━━━━━━━━━━━━━\n`;
+    text += `_${new Date().toLocaleTimeString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" })}_`;
+
+    return text;
+  }
+
+  /**
+   * Format user's own open trades for /ai signals (real trading mode).
+   */
+  private async formatUserTradesMessage(telegramId: number): Promise<string> {
+    const trades = await this.userRealTradingService.getOpenTrades(telegramId);
+
+    if (trades.length === 0) {
+      return `📊 *My Trades*\n━━━━━━━━━━━━━━━━━━\n\n_Chua co lenh nao dang mo._`;
+    }
+
+    const fmtPrice = (p: number) =>
+      p >= 1000 ? `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :
+      p >= 1 ? `$${p.toFixed(2)}` :
+      p >= 0.01 ? `$${p.toFixed(4)}` : `$${p.toFixed(6)}`;
+
+    let totalPnlUsdt = 0;
+    let totalNotional = 0;
+    let winning = 0;
+    let losing = 0;
+
+    // Pre-compute PnL for each trade
+    const tradeData: { trade: typeof trades[0]; currentPrice: number; pnlPct: number; pnlUsdt: number }[] = [];
+    for (const trade of trades) {
+      const currentPrice = this.marketDataService.getLatestPrice(trade.symbol) || 0;
+      const pnlPct = currentPrice > 0
+        ? trade.direction === "LONG"
+          ? ((currentPrice - trade.entryPrice) / trade.entryPrice) * 100
+          : ((trade.entryPrice - currentPrice) / trade.entryPrice) * 100
+        : 0;
+      const pnlUsdt = (pnlPct / 100) * trade.notionalUsdt;
+      totalPnlUsdt += pnlUsdt;
+      totalNotional += trade.notionalUsdt;
+      if (pnlPct >= 0) winning++; else losing++;
+      tradeData.push({ trade, currentPrice, pnlPct, pnlUsdt });
+    }
+
+    const totalPnlPct = totalNotional > 0 ? (totalPnlUsdt / totalNotional) * 100 : 0;
+
+    let text = `📊 *My Trades* (${trades.length} open)\n━━━━━━━━━━━━━━━━━━\n`;
+
+    const totalIcon = totalPnlUsdt >= 0 ? "📗" : "📕";
+    const totalSign = totalPnlUsdt >= 0 ? "+" : "";
+    text += `\n${totalIcon} Tong PnL: *${totalSign}${totalPnlPct.toFixed(2)}%* (*${totalSign}${totalPnlUsdt.toFixed(2)} USDT*)`;
+    text += ` · ✅ ${winning} 🟢  ❌ ${losing} 🔴\n`;
+
+    for (const { trade, currentPrice, pnlPct, pnlUsdt } of tradeData) {
+      const dirIcon = trade.direction === "LONG" ? "🟢" : "🔴";
+      const heldMs = trade.openedAt ? Date.now() - new Date(trade.openedAt).getTime() : 0;
+      const heldH = Math.floor(heldMs / 3600000);
+      const heldM = Math.floor((heldMs % 3600000) / 60000);
+      const heldStr = heldH >= 24
+        ? `${Math.floor(heldH / 24)}d${heldH % 24}h`
+        : heldH > 0 ? `${heldH}h${heldM}m` : `${heldM}m`;
+
+      const pnlIcon = pnlPct >= 0 ? "📗" : "📕";
+      const pnlSign = pnlPct >= 0 ? "+" : "";
+      const usdSign = pnlUsdt >= 0 ? "+" : "";
+
+      text += `\n┌ ${dirIcon} *${trade.symbol}* ${trade.direction} · ${heldStr} · _x${trade.leverage}_\n`;
+      text += `│ ${pnlIcon} *${pnlSign}${pnlPct.toFixed(2)}%* (*${usdSign}${pnlUsdt.toFixed(2)} USDT*)`;
+      if (currentPrice > 0) text += ` · Now ${fmtPrice(currentPrice)}`;
+      text += `\n`;
+      text += `│ Entry  ${fmtPrice(trade.entryPrice)} · Vol ${trade.notionalUsdt.toFixed(0)} USDT\n`;
+      if (trade.tpPrice) text += `│ TP     ${fmtPrice(trade.tpPrice)}\n`;
+      text += `│ SL     ${fmtPrice(trade.slPrice)}\n`;
+      text += `└─────────────────\n`;
     }
 
     text += `━━━━━━━━━━━━━━━━━━\n`;
