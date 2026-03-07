@@ -1,21 +1,26 @@
 # AI Signal System — Full Plan + Sample Trading + Flow
 
+> **Last updated**: 2026-03-07
+> **Status**: FULLY IMPLEMENTED — all features live in production. This doc preserves the original plan + sample scenarios for reference.
+
 ---
 
 ## Part 1: System Overview
 
 ### What It Is
 An autonomous signal generator **living inside `binance-tele-bot`** that:
-- Scans the top 10 most active futures coins every 5 minutes
-- Uses Claude AI (Haiku) to read each coin's market regime and tune formula parameters
-- Runs the battle-tested formula logic (ported from F1–F8 in bot-signal)
-- Queues the next signal if a position is already open, then auto-executes when it closes
-- Calls `handleIncomingSignal()` — zero changes to position execution
+- Scans the top 50 most active futures coins every 2 minutes (composite scoring)
+- Uses AI waterfall (Haiku --> GPT-4o-mini --> GPT-4o --> static defaults) to tune parameters
+- Runs 8 strategies (F1-F8 + EMA_PULLBACK + BB_SCALP) with pipe-delimited fallbacks
+- Dual timeframe: INTRADAY (15m) + SWING (4h) for top 5 coins
+- Signal queue with ACTIVE/QUEUED/SKIPPED state machine
+- Places real Binance Futures orders with position monitoring + trailing stops
+- Market cooldown, health monitoring, 15+ Telegram /ai commands
 
 ### What It Is NOT
 - NOT a new exchange integration
 - NOT a separate app (runs inside existing `binance-tele-bot`)
-- NOT a black-box AI — Claude only tunes parameters, formula logic decides the signal
+- NOT a black-box AI — AI only tunes parameters, formula logic decides the signal
 - NOT replacing F8 / bot-signal — it runs in parallel as `BOT_FUTURE_AI_1`
 
 ---
@@ -52,15 +57,17 @@ An autonomous signal generator **living inside `binance-tele-bot`** that:
 ║                    (every 30 seconds)                                     ║
 ║                              ▼                                            ║
 ║  ┌─────────────────────────────────────────────────────────────────────┐  ║
-║  │  RULE ENGINE LAYER                                                  │  ║
+║  │  RULE ENGINE LAYER (8 strategies, pipe-delimited fallbacks)         │  ║
 ║  │                                                                     │  ║
 ║  │  For each coin in shortlist:                                        │  ║
-║  │    evalRsiCross()    ← F8 Config 2 logic (proven)                  │  ║
-║  │    evalRsiZone()     ← F8 Config 3 logic (proven)                  │  ║
-║  │    evalTrendEma()    ← F1 logic                                     │  ║
-║  │    evalMeanRevertRsi() ← F2 logic                                  │  ║
-║  │    evalStochBbPattern() ← F4 logic (2-stage + Redis state)         │  ║
-║  │    evalStochEmaKdj() ← F5 logic (2-stage + Redis state)            │  ║
+║  │    evalRsiCross()        ← F8 Config 2 logic (proven)              │  ║
+║  │    evalRsiZone()         ← F8 Config 3 logic (proven)              │  ║
+║  │    evalTrendEma()        ← F1 + ADX strength filter                │  ║
+║  │    evalMeanRevertRsi()   ← F2 + ADX < 30 + bounce candle          │  ║
+║  │    evalStochBbPattern()  ← F4 (2-stage + Redis state)              │  ║
+║  │    evalStochEmaKdj()     ← F5 (2-stage + Redis state + KDJ)       │  ║
+║  │    evalEmaPullback()     ← NEW: EMA21 dip/rally in trend           │  ║
+║  │    evalBbScalp()         ← NEW: BB bounce + deep RSI              │  ║
 ║  └─────────────────────────────────────────────────────────────────────┘  ║
 ║                              │                                            ║
 ║                     (on signal found)                                     ║
@@ -72,20 +79,33 @@ An autonomous signal generator **living inside `binance-tele-bot`** that:
 ║  │  Active + opposite  ──► QUEUED (stored in MongoDB, waits)          │  ║
 ║  │  Active + same dir  ──► SKIPPED                                    │  ║
 ║  │                                                                     │  ║
-║  │  PositionMonitorService (every 30s):                               │  ║
-║  │    position closed? ──► resolveActive() ──► activateQueued()       │  ║
+║  │  PositionMonitorService (real-time ~250ms):                         │  ║
+║  │    SL/TP monitoring + trailing stops                                │  ║
+║  │    SL-to-entry (break-even) | 5% milestone | TP boost              │  ║
 ║  └─────────────────────────────────────────────────────────────────────┘  ║
 ║                              │                                            ║
 ║                   (signal executed)                                       ║
 ║                              ▼                                            ║
 ║  ┌─────────────────────────────────────────────────────────────────────┐  ║
-║  │  EXISTING EXECUTION LAYER         (zero changes needed)             │  ║
+║  │  EXECUTION + REAL TRADING LAYER                                     │  ║
 ║  │                                                                     │  ║
-║  │  handleIncomingSignal(botType='BOT_FUTURE_AI_1')                   │  ║
-║  │    → loop all users with BOT_FUTURE_AI_1 enabled                   │  ║
-║  │    → check position dedup per user                                  │  ║
-║  │    → executeSignalTrade() → Binance/OKX order placement            │  ║
-║  │    → TP / SL set automatically                                     │  ║
+║  │  UserRealTradingService:                                            │  ║
+║  │    → MARKET order on Binance Futures                                │  ║
+║  │    → Entry price tolerance (1% deviation)                           │  ║
+║  │    → Position slot reservation (atomic Redis Lua)                   │  ║
+║  │    → Per-user max positions + daily limits                          │  ║
+║  │                                                                     │  ║
+║  │  UserDataStreamService:                                             │  ║
+║  │    → Binance Futures WebSocket (order fill events)                  │  ║
+║  │    → Detects SL/TP fills in real-time                              │  ║
+║  │    → Keepalive + auto-reconnect                                    │  ║
+║  │                                                                     │  ║
+║  │  Market Cooldown:                                                   │  ║
+║  │    → 3 consecutive SL hits → 30min pause                           │  ║
+║  │    → Per-signal cooldown (30min after resolution)                   │  ║
+║  │                                                                     │  ║
+║  │  HealthMonitorService (every 10min):                                │  ║
+║  │    → Error logs, stale signals, orphan trades, near-SL warnings    │  ║
 ║  └─────────────────────────────────────────────────────────────────────┘  ║
 ╚═══════════════════════════════════════════════════════════════════════════╝
 ```
@@ -921,135 +941,57 @@ AI_EMERGENCY_THRESHOLD_PCT=5.0
 
 ---
 
-## Part 9: Implementation Plan (Exact Tasks)
+## Part 9: Implementation Status (ALL COMPLETE)
 
-### Phase 0 — Foundation (3 days)
+All phases have been implemented and are running in production.
+
 ```
-Day 1:
-  □ Add dependencies: @nestjs/mongoose, mongoose, @anthropic-ai/sdk
-  □ Create ai-signal.module.ts with MongooseModule.forFeature
-  □ Create 3 Mongoose schemas with all fields
-  □ Add MongooseModule.forRoot to app.module.ts
-  □ Register BOT_FUTURE_AI_1 in BOT_TYPE_MAP
+Phase 0 — Foundation                    [DONE]
+  Mongoose schemas, MarketDataService (WebSocket + REST),
+  FuturesAnalyticsService, CoinFilterService (composite scoring)
 
-Day 2:
-  □ MarketDataService:
-    □ startTickerScan() — GET /fapi/v1/ticker/24hr every 5min → cache:market:scan
-    □ subscribeKlines(coins, intervals) — WebSocket handler
-    □ onKlineClose() — writes close/open/HIGH/LOW to Redis (4 arrays)
-    □ updateSubscriptions(newShortlist) — diff old vs new, subscribe/unsubscribe
+Phase 1 — Signal Loop + Queue           [DONE]
+  IndicatorService (RSI, EMA, BB, Stoch, KDJ, ADX),
+  RuleEngineService (8 strategies), SignalQueueService,
+  AiSignalService (crons: 2m filter, 3m signals)
 
-Day 3:
-  □ CoinFilterService:
-    □ scanAndFilter() — reads cache:market:scan, applies volume/change/range filters
-    □ getShortlist() — returns cached shortlist
-    □ notifySubscriptionChange() — calls MarketDataService.updateSubscriptions
-  □ Test: Redis has live OHLC arrays for top 10 coins
-  □ Test: Shortlist updates every 5 min
-```
+Phase 2 — All Strategies                [DONE]
+  evalTrendEma (+ ADX), evalMeanRevertRsi (+ ADX < 30 + bounce),
+  evalStochBbPattern (2-stage), evalStochEmaKdj (2-stage + KDJ),
+  evalEmaPullback (NEW), evalBbScalp (NEW)
 
-### Phase 1 — Signal Loop + Queue (4 days)
-```
-Day 4:
-  □ IndicatorService (port from auto-trade-service):
-    □ getRsiWithCross()
-    □ getCurrentRsi()
-    □ getLastCandle()
-    □ getLastNCandles()
-    □ getCandlePriceCache()
+Phase 3 — AI Optimizer                  [DONE]
+  Waterfall: Haiku --> GPT-4o-mini --> GPT-4o --> static defaults,
+  preComputeIndicators (~5ms), 7 regime types,
+  pipe-delimited strategy fallbacks, 10-min regime cache
 
-Day 5:
-  □ RuleEngineService:
-    □ evalRsiCross() — F8 Config 2 exact port
-    □ evalRsiZone()  — F8 Config 3 exact port
-    □ evaluate() — router, calls correct eval method based on strategy
+Phase 4 — Real Trading                  [DONE]
+  UserRealTradingService: MARKET orders, entry tolerance (1%),
+  position slot reservation (atomic Redis Lua),
+  per-user max positions + daily limits,
+  symbol blacklist (XAUUSDT, XAGUSDT, MSTRUSDT)
 
-Day 6:
-  □ SignalQueueService:
-    □ handleNewSignal() — state machine (ACTIVE/QUEUED/SKIPPED)
-    □ executeSignal() — MongoDB create + Redis set + broadcastSignal()
-    □ activateQueuedSignal() — promote QUEUED to ACTIVE
-    □ resolveActiveSignal() — COMPLETED + trigger queued
-    □ cancelSignal() — mark CANCELLED + update MongoDB
-    □ broadcastSignal() → handleIncomingSignal()
+Phase 5 — Position Monitoring           [DONE]
+  Real-time price listeners (~250ms resolution),
+  SL-moved-to-entry (break-even), 5% milestone raise,
+  TP boost on volume momentum
 
-Day 7:
-  □ PositionMonitorService:
-    □ checkAndResolve() — fetch monitor account positions vs ACTIVE signals
-    □ getOpenPositionSymbols() — Binance API call
-  □ AiSignalService:
-    □ runSignalScan() — main 30s cron
-    □ refreshCoinFilter() — 5min cron
-    □ monitorActiveSignals() — 30s cron
-    □ cleanupExpiredQueued() — 5min cron
+Phase 6 — Dual Timeframe               [DONE]
+  INTRADAY (15m primary, 1h HTF) for BTC/ETH/SOL/BNB/XRP,
+  SWING (4h primary, 1d HTF) for all coins,
+  profile-aware Redis keys, cross-profile conflict detection
 
-  TEST: Generate manual signal, verify queue flow, verify MongoDB state
-```
+Phase 7 — Safety + Monitoring           [DONE]
+  Market cooldown (3 SL --> 30min pause),
+  HealthMonitorService (every 10min),
+  UserDataStreamService (Binance WebSocket order fills),
+  AiSignalStatsService (win rate, PnL analytics)
 
-### Phase 2 — More Strategies (3 days)
-```
-Day 8:
-  □ evalTrendEma() — F1 port
-  □ evalMeanRevertRsi() — F2 port
-  □ Test both strategies with hardcoded params
-
-Day 9:
-  □ Extend IndicatorService:
-    □ getCandleOhlc() — returns {opens, highs, lows, closes} from Redis
-    □ getStochastic() — uses calculateStochastic() from helper.ts
-    □ getBollingerBands() — uses BollingerBands from technicalindicators
-    □ getKdj() — uses calculateKDJ() from helper.ts
-  □ Confirm candle-high-price + candle-low-price are being written
-
-Day 10:
-  □ evalStochBbPattern() — F4 port with 2-stage Redis state
-  □ evalStochEmaKdj() — F5 port with 2-stage Redis state
-  □ Test: Stage 1 stores Redis state, Stage 2 fires on correct candle
-```
-
-### Phase 3 — AI Optimizer (3 days)
-```
-Day 11:
-  □ AiOptimizerService:
-    □ preComputeIndicators() — EMA, BB, RSI, ATR, volume (pure math, no API)
-    □ buildHaikuPrompt() — structured prompt with indicators
-    □ parseHaikuResponse() — JSON parse + validate schema
-    □ getDefaultParams() — F8 fallback
-    □ checkRateLimit() + incrementRateLimit()
-
-Day 12:
-  □ tuneParamsForSymbol() — full Haiku call with cost logging
-  □ assessGlobalRegime() — Sonnet call
-  □ getOrRefreshParams() in AiSignalService — cache check + trigger refresh
-  □ Store ai_regime_history on each call
-
-Day 13:
-  □ Test with real Haiku calls
-  □ Verify params are sensible
-  □ Verify rate limiting works
-  □ Verify fallback triggers on 429/error
-```
-
-### Phase 4 — Telegram UX + Monitoring (2 days)
-```
-Day 14:
-  □ Telegram notifications:
-    □ notifySignalActive() — new ACTIVE signal message
-    □ notifySignalQueued() — QUEUED signal message
-    □ notifyQueueReplaced() — when queued signal is replaced
-    □ notifySignalCompleted() — position closed + PnL
-    □ notifyQueueActivated() — queued signal now executing
-    □ notifySignalExpired() — TTL expired
-
-Day 15:
-  □ Telegram commands:
-    □ /ai status — show all active/queued signals
-    □ /ai params {symbol} — show AI params for a coin
-    □ /ai stats — win rate per strategy
-    □ /ai override {symbol} {strategy} — force strategy
-    □ /ai pause / /ai resume
-  □ PriceWatchService: detect 5% moves → handleEmergencyOverride()
-  □ updateCoinProfile() — update ai_coin_profiles after signal resolves
+Phase 8 — Telegram Commands             [DONE]
+  15+ /ai commands: on/off, setkeys, settings, leverage,
+  target, stoploss, maxpos, vol, balance, tpsl,
+  my, signals, rank, daily history, moneyflow,
+  status, pause/resume, override
 ```
 
 ---
