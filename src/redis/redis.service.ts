@@ -87,6 +87,16 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     return result === "OK";
   }
 
+  /** Atomic increment. Returns the new value. */
+  async incr(key: string): Promise<number> {
+    return this.client.incr(this.getKey(key));
+  }
+
+  /** Atomic decrement. Returns the new value. */
+  async decr(key: string): Promise<number> {
+    return this.client.decr(this.getKey(key));
+  }
+
   async keys(pattern: string): Promise<string[]> {
     const fullPattern = this.getKey(pattern);
     const allKeys: string[] = [];

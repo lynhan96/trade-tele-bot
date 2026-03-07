@@ -29,6 +29,8 @@ const QTY_PRECISION_KEY = (symbol: string) => `cache:binance:qty-precision:${sym
 const PRICE_PRECISION_KEY = (symbol: string) => `cache:binance:price-precision:${symbol}`;
 /** Redis lock to prevent duplicate order placement (30s TTL). */
 const ORDER_LOCK_KEY = (telegramId: number, symbol: string) => `cache:order-lock:${telegramId}:${symbol}`;
+/** Redis counter for atomic position slot reservation. */
+const POS_SLOT_KEY = (telegramId: number) => `cache:pos-slots:${telegramId}`;
 
 @Injectable()
 export class UserRealTradingService implements OnModuleInit {
@@ -114,7 +116,6 @@ export class UserRealTradingService implements OnModuleInit {
     }
 
     // Filter out subscribers who already have an open trade on this symbol
-    // or who have reached their max open positions limit
     const eligibleSubs: typeof subscribers = [];
     for (const sub of subscribers) {
       const existing = await this.userTradeModel.findOne({ telegramId: sub.telegramId, symbol, status: "OPEN" }).lean();
@@ -123,12 +124,20 @@ export class UserRealTradingService implements OnModuleInit {
         continue;
       }
 
-      // Max concurrent positions check
+      // Atomic position slot reservation via Redis (prevents race condition with simultaneous signals)
       const maxPos = sub.maxOpenPositions ?? 3;
-      const openCount = await this.userTradeModel.countDocuments({ telegramId: sub.telegramId, status: "OPEN" });
-      if (openCount >= maxPos) {
+      const slotKey = POS_SLOT_KEY(sub.telegramId);
+      // Initialize counter from DB if not set (first use or expired)
+      const exists = await this.redisService.get<string>(slotKey);
+      if (exists === null) {
+        const dbCount = await this.userTradeModel.countDocuments({ telegramId: sub.telegramId, status: "OPEN" });
+        await this.redisService.set(slotKey, dbCount, 300); // 5 min TTL as safety
+      }
+      const reserved = await this.redisService.incr(slotKey);
+      if (reserved > maxPos) {
+        await this.redisService.decr(slotKey);
         this.logger.log(
-          `[RealTrading] ${symbol}: user ${sub.telegramId} at max positions (${openCount}/${maxPos}), skipping`,
+          `[RealTrading] ${symbol}: user ${sub.telegramId} at max positions (${reserved - 1}/${maxPos}), skipping`,
         );
         continue;
       }
@@ -159,6 +168,7 @@ export class UserRealTradingService implements OnModuleInit {
   ): Promise<void> {
     const { telegramId, chatId } = sub;
     const { symbol, direction, entryPrice, stopLossPrice, takeProfitPrice } = signal;
+    const slotKey = POS_SLOT_KEY(telegramId);
 
     try {
       // Redis lock to prevent duplicate orders when INTRADAY + SWING fire simultaneously
@@ -166,12 +176,14 @@ export class UserRealTradingService implements OnModuleInit {
       const acquired = await this.redisService.setNX(lockKey, "1", 30);
       if (!acquired) {
         this.logger.debug(`[RealTrading] ${symbol}: user ${telegramId} order lock active, skipping duplicate`);
+        await this.redisService.decr(slotKey); // release reserved slot
         return;
       }
 
       const keys = await this.userSettingsService.getApiKeys(telegramId, "binance");
       if (!keys?.apiKey) {
         this.logger.debug(`[RealTrading] ${symbol}: user ${telegramId} has no Binance API keys`);
+        await this.redisService.decr(slotKey);
         return;
       }
 
@@ -181,6 +193,7 @@ export class UserRealTradingService implements OnModuleInit {
         const existing = positions.find(p => p.symbol === symbol && p.quantity !== 0);
         if (existing) {
           this.logger.debug(`[RealTrading] ${symbol}: user ${telegramId} already has Binance position (qty=${existing.quantity}), skipping`);
+          await this.redisService.decr(slotKey);
           return;
         }
       } catch (err) {
@@ -191,6 +204,7 @@ export class UserRealTradingService implements OnModuleInit {
       const existingTrade = await this.userTradeModel.findOne({ telegramId, symbol, status: "OPEN" });
       if (existingTrade) {
         this.logger.warn(`[RealTrading] ${symbol}: user ${telegramId} already has OPEN trade in DB, skipping`);
+        await this.redisService.decr(slotKey);
         return;
       }
 
@@ -325,6 +339,7 @@ export class UserRealTradingService implements OnModuleInit {
         await this.userDataStreamService.registerUser(telegramId, keys.apiKey, keys.apiSecret).catch(() => {});
       }
     } catch (err) {
+      await this.redisService.decr(slotKey); // release reserved slot on failure
       this.logger.error(`[RealTrading] ${symbol} order failed for user ${telegramId}: ${err?.message}`);
       const errMsg = `❌ *Real Mode: Dat Lenh That Bai*\n\n${symbol} ${direction}\nLoi: ${err?.message ?? "unknown"}`;
       await this.telegramService.sendTelegramMessage(chatId, errMsg).catch(() => {});
