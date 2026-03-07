@@ -40,8 +40,6 @@ export class HealthMonitorService {
   async runHealthCheck(): Promise<void> {
     try {
       const issues: string[] = [];
-      const info: string[] = [];
-
       // 1. Check error logs (last 10 min)
       const logErrors = await this.checkRecentErrors();
       if (logErrors.length > 0) {
@@ -66,30 +64,13 @@ export class HealthMonitorService {
       const sysIssues = await this.checkSystemHealth();
       issues.push(...sysIssues);
 
-      // 5. Build performance summary (always include)
-      const perfSummary = await this.buildPerformanceSummary();
-      info.push(...perfSummary);
-
-      // Only send if there are issues OR every hour (for regular status)
-      const now = new Date();
-      const isHourlyReport = now.getMinutes() < 10; // first 10-min window of each hour
-
-      if (issues.length > 0 || isHourlyReport) {
-        let text = "";
-        if (issues.length > 0) {
-          text += `*Health Monitor*\n`;
-          text += `━━━━━━━━━━━━━━━━━━\n\n`;
-          for (const issue of issues) {
-            text += `${issue}\n`;
-          }
-        }
-
-        if (isHourlyReport && info.length > 0) {
-          if (text) text += `\n`;
-          else text += `*Hourly Report*\n━━━━━━━━━━━━━━━━━━\n\n`;
-          for (const line of info) {
-            text += `${line}\n`;
-          }
+      // Only send if there are issues
+      if (issues.length > 0) {
+        const now = new Date();
+        let text = `*Health Monitor*\n`;
+        text += `━━━━━━━━━━━━━━━━━━\n\n`;
+        for (const issue of issues) {
+          text += `${issue}\n`;
         }
 
         text += `\n_${now.toLocaleTimeString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" })}_`;
@@ -223,71 +204,6 @@ export class HealthMonitorService {
     if (cooldown) issues.push("*Market cooldown active*");
 
     return issues;
-  }
-
-  private async buildPerformanceSummary(): Promise<string[]> {
-    const lines: string[] = [];
-
-    // Active signals count
-    const activeCount = await this.signalModel.countDocuments({ status: "ACTIVE" });
-    const queuedCount = await this.signalModel.countDocuments({ status: "QUEUED" });
-    const openTradeCount = await this.tradeModel.countDocuments({ status: "OPEN" });
-
-    lines.push(`Signals: ${activeCount} active, ${queuedCount} queued`);
-    lines.push(`User trades: ${openTradeCount} open`);
-
-    // Today's performance
-    const todayStart = new Date();
-    todayStart.setUTCHours(0, 0, 0, 0);
-    const todayClosed = await this.signalModel
-      .find({ status: "COMPLETED", positionClosedAt: { $gte: todayStart } })
-      .lean();
-
-    if (todayClosed.length > 0) {
-      let totalPnl = 0;
-      let wins = 0;
-      let losses = 0;
-      for (const s of todayClosed) {
-        const pnl = s.pnlPercent || 0;
-        totalPnl += pnl;
-        if (pnl >= 0) wins++;
-        else losses++;
-      }
-      const winRate = todayClosed.length > 0 ? (wins / todayClosed.length) * 100 : 0;
-      lines.push(
-        `Today: ${todayClosed.length} closed | W${wins}/L${losses} (${winRate.toFixed(0)}%) | PnL: ${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(2)}%`,
-      );
-    } else {
-      lines.push(`Today: 0 closed`);
-    }
-
-    // Active signals PnL summary
-    const actives = await this.signalModel.find({ status: "ACTIVE" }).lean();
-    if (actives.length > 0) {
-      let totalUnrealized = 0;
-      let count = 0;
-      for (const s of actives) {
-        const price = this.marketDataService.getLatestPrice(s.symbol);
-        if (!price) continue;
-        const pnl =
-          s.direction === "LONG"
-            ? ((price - s.entryPrice) / s.entryPrice) * 100
-            : ((s.entryPrice - price) / s.entryPrice) * 100;
-        totalUnrealized += pnl;
-        count++;
-      }
-      if (count > 0) {
-        lines.push(
-          `Unrealized: ${totalUnrealized >= 0 ? "+" : ""}${totalUnrealized.toFixed(2)}% (${count} signals)`,
-        );
-      }
-    }
-
-    // Regime
-    const regime = await this.redisService.get<string>("cache:ai:regime");
-    if (regime) lines.push(`Regime: ${regime}`);
-
-    return lines;
   }
 
   private async notifyAdmin(text: string): Promise<void> {
