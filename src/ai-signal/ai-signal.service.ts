@@ -338,6 +338,24 @@ export class AiSignalService implements OnModuleInit {
 
       const globalRegime = await this.aiOptimizerService.assessGlobalRegime();
 
+      // ── System-wide max active signals cap (based on market regime) ─────
+      // Prevents over-exposure: fewer signals in volatile/uncertain markets
+      const MAX_SIGNALS_BY_REGIME: Record<string, number> = {
+        STRONG_BULL: 10,
+        STRONG_BEAR: 10,
+        MIXED: 8,
+        VOLATILE: 6,
+        SIDEWAYS: 6,
+      };
+      const maxActiveSignals = MAX_SIGNALS_BY_REGIME[globalRegime] ?? 8;
+      const currentActives = await this.signalQueueService.getAllActiveSignals();
+      if (currentActives.length >= maxActiveSignals) {
+        this.logger.debug(
+          `[AiSignal] Max active signals reached (${currentActives.length}/${maxActiveSignals}, regime: ${globalRegime}), skipping scan`,
+        );
+        return;
+      }
+
       // ── Extreme move filter: skip coins with >30% 24h price change ──────
       // After a 30%+ dump/pump the move is done, high risk of reversal/dead cat bounce.
       const EXTREME_MOVE_PCT = 30;
