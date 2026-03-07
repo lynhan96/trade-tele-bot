@@ -98,6 +98,9 @@ export class AiSignal {
   @Prop({ default: false })
   sl5PctRaised?: boolean; // true = SL raised to +2% profit at 5% milestone (trailing stop)
 
+  @Prop({ default: false })
+  tpBoosted?: boolean; // true = TP extended on volume momentum (one-time per signal)
+
   @Prop()
   exitPrice?: number; // Filled when status → COMPLETED
 

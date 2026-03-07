@@ -124,16 +124,11 @@ export class UserRealTradingService implements OnModuleInit {
         continue;
       }
 
-      // Atomic position slot reservation via Redis (prevents race condition with simultaneous signals)
+      // Atomic position slot reservation via Redis Lua script (prevents race condition)
       const maxPos = sub.maxOpenPositions ?? 3;
       const slotKey = POS_SLOT_KEY(sub.telegramId);
-      // Initialize counter from DB if not set (first use or expired)
-      const exists = await this.redisService.get<string>(slotKey);
-      if (exists === null) {
-        const dbCount = await this.userTradeModel.countDocuments({ telegramId: sub.telegramId, status: "OPEN" });
-        await this.redisService.set(slotKey, dbCount, 300); // 5 min TTL as safety
-      }
-      const reserved = await this.redisService.incr(slotKey);
+      const dbCount = await this.userTradeModel.countDocuments({ telegramId: sub.telegramId, status: "OPEN" });
+      const reserved = await this.redisService.initAndIncr(slotKey, dbCount, 300);
       if (reserved > maxPos) {
         await this.redisService.decr(slotKey);
         this.logger.log(
@@ -170,9 +165,9 @@ export class UserRealTradingService implements OnModuleInit {
     const { symbol, direction, entryPrice, stopLossPrice, takeProfitPrice } = signal;
     const slotKey = POS_SLOT_KEY(telegramId);
 
+    const lockKey = ORDER_LOCK_KEY(telegramId, symbol);
     try {
       // Redis lock to prevent duplicate orders when INTRADAY + SWING fire simultaneously
-      const lockKey = ORDER_LOCK_KEY(telegramId, symbol);
       const acquired = await this.redisService.setNX(lockKey, "1", 30);
       if (!acquired) {
         this.logger.debug(`[RealTrading] ${symbol}: user ${telegramId} order lock active, skipping duplicate`);
@@ -340,6 +335,7 @@ export class UserRealTradingService implements OnModuleInit {
       }
     } catch (err) {
       await this.redisService.decr(slotKey); // release reserved slot on failure
+      await this.redisService.delete(lockKey); // release order lock so next signal isn't blocked
       this.logger.error(`[RealTrading] ${symbol} order failed for user ${telegramId}: ${err?.message}`);
       const errMsg = `❌ *Real Mode: Dat Lenh That Bai*\n\n${symbol} ${direction}\nLoi: ${err?.message ?? "unknown"}`;
       await this.telegramService.sendTelegramMessage(chatId, errMsg).catch(() => {});
@@ -663,9 +659,9 @@ export class UserRealTradingService implements OnModuleInit {
       ]),
     ]);
 
-    // Fetch current prices for open trades
-    const openTrades = await Promise.all(openDocs.map(async (t) => {
-      const currentPrice = (await this.marketDataService.getPrice(t.symbol)) ?? t.entryPrice;
+    // Use in-memory prices (already subscribed via position monitor)
+    const openTrades = openDocs.map((t) => {
+      const currentPrice = this.marketDataService.getLatestPrice(t.symbol) ?? t.entryPrice;
       const unrealizedPnlPct = t.direction === "LONG"
         ? ((currentPrice - t.entryPrice) / t.entryPrice) * 100
         : ((t.entryPrice - currentPrice) / t.entryPrice) * 100;
@@ -677,7 +673,7 @@ export class UserRealTradingService implements OnModuleInit {
         unrealizedPnlPct, unrealizedPnlUsdt,
         openedAt: t.openedAt,
       };
-    }));
+    });
 
     const closedToday = closedDocs.map((t) => ({
       symbol: t.symbol, direction: t.direction, closeReason: t.closeReason,

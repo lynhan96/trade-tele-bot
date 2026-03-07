@@ -154,12 +154,17 @@ export class PositionMonitorService implements OnModuleInit {
     const sigKey = this.getSignalKey(signal);
     if (this.watchedSymbols.has(sigKey)) return;
 
+    // Restore persisted flags from DB so they survive bot restarts
+    if ((signal as any).slMovedToEntry) (signal as any).slMovedToEntry = true;
+    if ((signal as any).sl5PctRaised) (signal as any).sl5PctRaised = true;
+    if ((signal as any).tpBoosted) (signal as any).tpBoosted = true;
+
     const cb = (price: number) => this.handlePriceTick(signal, price);
     this.listenerRefs.set(sigKey, cb);
     this.watchedSymbols.add(sigKey);
     this.marketDataService.registerPriceListener(symbol, cb);
     this.logger.debug(
-      `[PositionMonitor] Watching ${sigKey} — SL: ${signal.stopLossPrice}, TP: ${signal.takeProfitPrice ?? "N/A"}`,
+      `[PositionMonitor] Watching ${sigKey} — SL: ${signal.stopLossPrice}, TP: ${signal.takeProfitPrice ?? "N/A"} flags: slMoved=${!!(signal as any).slMovedToEntry} sl5Pct=${!!(signal as any).sl5PctRaised}`,
     );
   }
 
@@ -214,10 +219,12 @@ export class PositionMonitorService implements OnModuleInit {
         `[PositionMonitor] 🚀 ${sigKey} SL raised to +2% (${newSl.toFixed(4)}) at ${pnlPct.toFixed(2)}% profit — still running`,
       );
       if (this.sl5PctCallback) {
-        await this.sl5PctCallback(symbol, newSl, direction).catch(() => {});
+        await this.sl5PctCallback(symbol, newSl, direction).catch((e) =>
+          this.logger.warn(`[PositionMonitor] sl5PctCallback error ${sigKey}: ${e?.message}`),
+        );
       }
-      // Propagate SL move to real Binance orders
-      this.userRealTradingService.moveStopLossForRealUsers(symbol, newSl, direction).catch(() => {});
+      // Propagate SL move to real Binance orders (with retry)
+      this.propagateSlMove(sigKey, symbol, newSl, direction);
     }
 
     // Move SL to entry (break-even) at >= 3% profit (skipped if 5% milestone already triggered)
@@ -229,10 +236,12 @@ export class PositionMonitorService implements OnModuleInit {
         `[PositionMonitor] 🛡️ ${sigKey} SL moved to entry ${entryPrice} (PnL: ${pnlPct.toFixed(2)}%)`,
       );
       if (this.slMovedCallback) {
-        await this.slMovedCallback(symbol, entryPrice).catch(() => {});
+        await this.slMovedCallback(symbol, entryPrice).catch((e) =>
+          this.logger.warn(`[PositionMonitor] slMovedCallback error ${sigKey}: ${e?.message}`),
+        );
       }
-      // Propagate SL move to real Binance orders
-      this.userRealTradingService.moveStopLossForRealUsers(symbol, entryPrice, direction).catch(() => {});
+      // Propagate SL move to real Binance orders (with retry)
+      this.propagateSlMove(sigKey, symbol, entryPrice, direction);
     }
 
     // ─── Dynamic TP boost: extend TP to 4-6% on strong momentum ─────────
@@ -254,11 +263,13 @@ export class PositionMonitorService implements OnModuleInit {
           this.logger.log(
             `[PositionMonitor] 🚀 ${sigKey} TP boosted to ${boostedTpPct.toFixed(1)}% (${newTpPrice.toFixed(4)}) — volume momentum detected`,
           );
-          // Propagate TP change to real Binance orders
-          this.userRealTradingService.moveTpForRealUsers(symbol, newTpPrice, direction).catch(() => {});
+          // Propagate TP change to real Binance orders (with retry)
+          this.propagateTpMove(sigKey, symbol, newTpPrice, direction);
           // Notify via callback
           if (this.tpBoostedCallback) {
-            await this.tpBoostedCallback(symbol, newTpPrice, boostedTpPct, direction).catch(() => {});
+            await this.tpBoostedCallback(symbol, newTpPrice, boostedTpPct, direction).catch((e) =>
+              this.logger.warn(`[PositionMonitor] tpBoostedCallback error ${sigKey}: ${e?.message}`),
+            );
           }
         }
       } catch (err) {
@@ -434,6 +445,30 @@ export class PositionMonitorService implements OnModuleInit {
     }
 
     return resolved;
+  }
+
+  // ─── Propagate SL/TP moves to real users (with 1 retry) ─────────────────
+
+  private propagateSlMove(sigKey: string, symbol: string, newSl: number, direction: string): void {
+    this.userRealTradingService.moveStopLossForRealUsers(symbol, newSl, direction).catch((err) => {
+      this.logger.error(`[PositionMonitor] ${sigKey} moveStopLoss failed, retrying: ${err?.message}`);
+      setTimeout(() => {
+        this.userRealTradingService.moveStopLossForRealUsers(symbol, newSl, direction).catch((err2) => {
+          this.logger.error(`[PositionMonitor] ${sigKey} moveStopLoss retry failed: ${err2?.message}`);
+        });
+      }, 3000);
+    });
+  }
+
+  private propagateTpMove(sigKey: string, symbol: string, newTp: number, direction: string): void {
+    this.userRealTradingService.moveTpForRealUsers(symbol, newTp, direction).catch((err) => {
+      this.logger.error(`[PositionMonitor] ${sigKey} moveTp failed, retrying: ${err?.message}`);
+      setTimeout(() => {
+        this.userRealTradingService.moveTpForRealUsers(symbol, newTp, direction).catch((err2) => {
+          this.logger.error(`[PositionMonitor] ${sigKey} moveTp retry failed: ${err2?.message}`);
+        });
+      }, 3000);
+    });
   }
 
   // ─── Private: fetch open positions ───────────────────────────────────────

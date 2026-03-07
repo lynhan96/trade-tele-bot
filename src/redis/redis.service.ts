@@ -97,6 +97,26 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     return this.client.decr(this.getKey(key));
   }
 
+  /**
+   * Atomic init-and-increment: if key doesn't exist, set it to `initValue` with TTL,
+   * then increment and return the new value. Prevents race conditions.
+   */
+  async initAndIncr(key: string, initValue: number, ttl: number): Promise<number> {
+    const fullKey = this.getKey(key);
+    const script = `
+      local exists = redis.call('EXISTS', KEYS[1])
+      if exists == 0 then
+        redis.call('SET', KEYS[1], ARGV[1])
+        redis.call('EXPIRE', KEYS[1], ARGV[2])
+      end
+      return redis.call('INCR', KEYS[1])
+    `;
+    return this.client.eval(script, {
+      keys: [fullKey],
+      arguments: [initValue.toString(), ttl.toString()],
+    }) as Promise<number>;
+  }
+
   async keys(pattern: string): Promise<string[]> {
     const fullPattern = this.getKey(pattern);
     const allKeys: string[] = [];
