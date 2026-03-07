@@ -305,10 +305,23 @@ export class AdminService {
       },
     ]);
 
-    // Get all active users
-    const users = await this.subscriptionModel.find({ isActive: true })
-      .select('telegramId username tradingBalance totalPnlUsdt totalWins totalLosses')
-      .lean();
+    // Get all active users + open trades
+    const [users, openTrades] = await Promise.all([
+      this.subscriptionModel.find({ isActive: true })
+        .select('telegramId username tradingBalance totalPnlUsdt totalWins totalLosses')
+        .lean(),
+      this.tradeModel.find({ status: 'OPEN' })
+        .select('telegramId symbol direction entryPrice notionalUsdt leverage')
+        .lean(),
+    ]);
+
+    // Group open trades by telegramId
+    const openTradesMap = new Map<number, typeof openTrades>();
+    for (const t of openTrades) {
+      const arr = openTradesMap.get(t.telegramId) || [];
+      arr.push(t);
+      openTradesMap.set(t.telegramId, arr);
+    }
 
     const allTimeMap = new Map(allTimeStats.map((s) => [s._id, s]));
     const monthlyMap = new Map(monthlyStats.map((s) => [s._id, s]));
@@ -316,6 +329,7 @@ export class AdminService {
     const ranked = users.map((u) => {
       const at = allTimeMap.get(u.telegramId) || { totalPnlUsdt: 0, totalPnlPercent: 0, wins: 0, losses: 0, totalTrades: 0 };
       const mo = monthlyMap.get(u.telegramId) || { monthlyPnlUsdt: 0, monthlyPnlPercent: 0, monthlyWins: 0, monthlyLosses: 0 };
+      const userOpenTrades = openTradesMap.get(u.telegramId) || [];
       const totalTrades = at.wins + at.losses;
       const winRate = totalTrades > 0 ? (at.wins / totalTrades) * 100 : 0;
       return {
@@ -332,6 +346,14 @@ export class AdminService {
         monthlyLosses: mo.monthlyLosses,
         winRate: Math.round(winRate * 10) / 10,
         totalTrades,
+        openOrders: userOpenTrades.length,
+        openPositions: userOpenTrades.map((t) => ({
+          symbol: t.symbol,
+          direction: t.direction,
+          entryPrice: t.entryPrice,
+          notionalUsdt: t.notionalUsdt,
+          leverage: t.leverage,
+        })),
       };
     });
 
