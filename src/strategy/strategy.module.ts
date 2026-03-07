@@ -13,6 +13,10 @@ import {
   AiMarketConfig,
   AiMarketConfigSchema,
 } from "../schemas/ai-market-config.schema";
+import {
+  AiSignalValidation,
+  AiSignalValidationSchema,
+} from "../schemas/ai-signal-validation.schema";
 
 @Module({
   imports: [
@@ -21,6 +25,7 @@ import {
     MongooseModule.forFeature([
       { name: AiRegimeHistory.name, schema: AiRegimeHistorySchema },
       { name: AiMarketConfig.name, schema: AiMarketConfigSchema },
+      { name: AiSignalValidation.name, schema: AiSignalValidationSchema },
     ]),
   ],
   providers: [IndicatorService, RuleEngineService, AiOptimizerService],

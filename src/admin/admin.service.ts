@@ -10,6 +10,7 @@ import { AiMarketConfig, AiMarketConfigDocument } from '../schemas/ai-market-con
 import { AiRegimeHistory, AiRegimeHistoryDocument } from '../schemas/ai-regime-history.schema';
 import { DailyMarketSnapshot, DailyMarketSnapshotDocument } from '../schemas/daily-market-snapshot.schema';
 import { UserSettings, UserSettingsDocument } from '../schemas/user-settings.schema';
+import { AiSignalValidation, AiSignalValidationDocument } from '../schemas/ai-signal-validation.schema';
 import { UserRealTradingService } from '../ai-signal/user-real-trading.service';
 
 /** Must match the key in SignalQueueService. */
@@ -31,6 +32,7 @@ export class AdminService {
     @InjectModel(AiRegimeHistory.name) private regimeHistoryModel: Model<AiRegimeHistoryDocument>,
     @InjectModel(DailyMarketSnapshot.name) private snapshotModel: Model<DailyMarketSnapshotDocument>,
     @InjectModel(UserSettings.name) private userSettingsModel: Model<UserSettingsDocument>,
+    @InjectModel(AiSignalValidation.name) private validationModel: Model<AiSignalValidationDocument>,
     private readonly redisService: RedisService,
     private readonly userRealTradingService: UserRealTradingService,
   ) {}
@@ -703,5 +705,48 @@ export class AdminService {
       telegramId, telegramId, "ADMIN_CLOSE",
     );
     return { success: true, closed: count };
+  }
+
+  // ─── Signal Validations ─────────────────────────────────────────────────────
+
+  async getValidations(query: {
+    page?: number; limit?: number;
+    approved?: string; symbol?: string; direction?: string;
+    dateFrom?: string; dateTo?: string;
+  }) {
+    const page = Math.max(1, Number(query.page) || 1);
+    const limit = Math.min(100, Math.max(1, Number(query.limit) || 20));
+    const filter: any = {};
+
+    if (query.approved === 'true') filter.approved = true;
+    else if (query.approved === 'false') filter.approved = false;
+    if (query.symbol) filter.symbol = query.symbol.toUpperCase();
+    if (query.direction) filter.direction = query.direction;
+    if (query.dateFrom || query.dateTo) {
+      filter.createdAt = {};
+      if (query.dateFrom) filter.createdAt.$gte = new Date(query.dateFrom);
+      if (query.dateTo) filter.createdAt.$lte = new Date(query.dateTo + 'T23:59:59.999Z');
+    }
+
+    const [data, total] = await Promise.all([
+      this.validationModel.find(filter)
+        .sort({ createdAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean(),
+      this.validationModel.countDocuments(filter),
+    ]);
+
+    return { data, total, page, limit, totalPages: Math.ceil(total / limit) };
+  }
+
+  async getValidationStats() {
+    const [total, approved, rejected] = await Promise.all([
+      this.validationModel.countDocuments(),
+      this.validationModel.countDocuments({ approved: true }),
+      this.validationModel.countDocuments({ approved: false }),
+    ]);
+    const approvalRate = total > 0 ? Math.round((approved / total) * 10000) / 100 : 0;
+    return { total, approved, rejected, approvalRate };
   }
 }

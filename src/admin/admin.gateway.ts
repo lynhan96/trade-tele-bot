@@ -64,6 +64,7 @@ export class AdminGateway
     this.watchCollection("ai_signals", "signal");
     this.watchCollection("user_trades", "trade");
     this.watchCollection("user_signal_subscriptions", "user");
+    this.watchCollection("ai_signal_validations", "validation");
   }
 
   private watchCollection(collectionName: string, eventPrefix: string) {

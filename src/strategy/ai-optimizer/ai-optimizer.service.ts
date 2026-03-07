@@ -13,6 +13,10 @@ import {
   AiMarketConfig,
   AiMarketConfigDocument,
 } from "../../schemas/ai-market-config.schema";
+import {
+  AiSignalValidation,
+  AiSignalValidationDocument,
+} from "../../schemas/ai-signal-validation.schema";
 import { AiTunedParams } from "./ai-tuned-params.interface";
 
 const AI_PARAMS_TTL = 2 * 60 * 60; // 2h cache — re-tune more often for better accuracy
@@ -46,6 +50,8 @@ export class AiOptimizerService {
     private readonly regimeHistoryModel: Model<AiRegimeHistoryDocument>,
     @InjectModel(AiMarketConfig.name)
     private readonly marketConfigModel: Model<AiMarketConfigDocument>,
+    @InjectModel(AiSignalValidation.name)
+    private readonly validationModel: Model<AiSignalValidationDocument>,
   ) {
     this.maxGptPerHour = parseInt(configService.get("AI_MAX_GPT_PER_HOUR", "200"));
     this.maxGpt4oPerHour = parseInt(configService.get("AI_MAX_GPT4O_PER_HOUR", "30"));
@@ -834,7 +840,18 @@ Reply ONLY JSON: {"approved":true/false,"reason":"brief reason"}`;
 
       const text = response.choices[0]?.message?.content?.trim() || "";
       const parsed = JSON.parse(text);
-      return { approved: !!parsed.approved, reason: parsed.reason };
+      const result = { approved: !!parsed.approved, reason: parsed.reason };
+
+      // Persist validation to DB for admin review
+      this.validationModel.create({
+        symbol, direction, strategy, regime, confidence,
+        stopLossPercent, takeProfitPercent,
+        approved: result.approved,
+        reason: result.reason,
+        model: GPT_MODEL,
+      }).catch((e) => this.logger.warn(`[AiOptimizer] Failed to save validation: ${e?.message}`));
+
+      return result;
     } catch (err) {
       this.logger.warn(`[AiOptimizer] Signal validation failed: ${err?.message}`);
       return { approved: true }; // fail open — don't block signals if AI is down

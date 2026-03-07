@@ -16,6 +16,7 @@ import { AiRegimeHistory, AiRegimeHistorySchema } from "../schemas/ai-regime-his
 import { DailyMarketSnapshot, DailyMarketSnapshotSchema } from "../schemas/daily-market-snapshot.schema";
 import { UserSettings, UserSettingsSchema } from "../schemas/user-settings.schema";
 import { AdminAccount, AdminAccountSchema } from "../schemas/admin-account.schema";
+import { AiSignalValidation, AiSignalValidationSchema } from "../schemas/ai-signal-validation.schema";
 
 @Module({
   imports: [
@@ -29,6 +30,7 @@ import { AdminAccount, AdminAccountSchema } from "../schemas/admin-account.schem
       { name: DailyMarketSnapshot.name, schema: DailyMarketSnapshotSchema },
       { name: UserSettings.name, schema: UserSettingsSchema },
       { name: AdminAccount.name, schema: AdminAccountSchema },
+      { name: AiSignalValidation.name, schema: AiSignalValidationSchema },
     ]),
     RedisModule,
     AiSignalModule,
