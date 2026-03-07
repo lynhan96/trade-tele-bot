@@ -45,6 +45,23 @@ export class AiCommandService implements OnModuleInit {
   }
 
   private registerCommands() {
+    // /start — auto-create user subscription
+    this.telegramService.registerBotCommand(/^\/start/, async (msg) => {
+      const telegramId = msg.from?.id;
+      const chatId = msg.chat.id;
+      if (!telegramId) return;
+
+      try {
+        const existing = await this.subscriptionService.getSubscription(telegramId);
+        if (!existing) {
+          await this.subscriptionService.subscribe(telegramId, chatId, msg.from?.username);
+          this.logger.log(`[AiCommand] Auto-created subscription for user ${telegramId} (${msg.from?.username ?? "no username"}) via /start`);
+        }
+      } catch (err) {
+        this.logger.warn(`[AiCommand] Failed to auto-subscribe user ${telegramId}: ${err?.message}`);
+      }
+    });
+
     // /ai — show subcommand help
     this.telegramService.registerBotCommand(/^\/ai$/, async (msg) => {
       const chatId = msg.chat.id;
