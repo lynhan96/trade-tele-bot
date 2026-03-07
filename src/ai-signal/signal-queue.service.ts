@@ -62,17 +62,15 @@ export class SignalQueueService {
 
     const active = await this.getActiveSignal(signalKey);
 
-    // For dual-timeframe coins: if same direction already active in another profile, skip
+    // For dual-timeframe coins: if ANY signal already active in another profile, skip
     if (!active && DUAL_TIMEFRAME_COINS.includes(coin.toUpperCase()) && forceProfile) {
-      const otherProfiles = ["INTRADAY", "SWING"].filter((p) => p !== forceProfile);
-      for (const profile of otherProfiles) {
-        const otherActive = await this.getActiveSignal(`${symbol}:${profile}`);
-        if (otherActive && (otherActive.direction === "LONG") === signalResult.isLong) {
-          this.logger.debug(
-            `[SignalQueue] ${signalKey} skip — same direction (${otherActive.direction}) already active in ${profile}`,
-          );
-          return { action: "SKIPPED" };
-        }
+      const otherProfile = forceProfile === "INTRADAY" ? "SWING" : "INTRADAY";
+      const otherActive = await this.getActiveSignal(`${symbol}:${otherProfile}`);
+      if (otherActive) {
+        this.logger.debug(
+          `[SignalQueue] ${signalKey} skip — already active in ${otherProfile} (${otherActive.direction})`,
+        );
+        return { action: "SKIPPED" };
       }
     }
 

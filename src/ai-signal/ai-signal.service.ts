@@ -671,6 +671,14 @@ export class AiSignalService implements OnModuleInit {
     const hasActive = await this.signalQueueService.getActiveSignal(signalKey);
     if (hasActive) return;
 
+    // For dual-timeframe coins: also check if the OTHER profile already has an active signal
+    // This prevents duplicate signals for the same symbol (e.g. ETH INTRADAY + SWING both SHORT)
+    if (isDual && forceProfile) {
+      const otherProfile = forceProfile === "INTRADAY" ? "SWING" : "INTRADAY";
+      const otherActive = await this.signalQueueService.getActiveSignal(`${symbol}:${otherProfile}`);
+      if (otherActive) return;
+    }
+
     // Cooldown after SL/TP — prevent ping-pong recreation
     const cooldown = await this.redisService.get<boolean>(`cache:ai:cooldown:${signalKey}`);
     if (cooldown) return;
