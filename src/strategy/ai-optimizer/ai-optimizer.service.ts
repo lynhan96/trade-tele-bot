@@ -23,14 +23,20 @@ const AI_MARKET_FILTERS_TTL = 8 * 60 * 60; // 8h — re-evaluated on regime chan
 const RATE_WINDOW = 60 * 60; // 1h window
 
 const GPT_MODEL = "gpt-4o-mini";
+const GPT_MODEL_PREMIUM = "gpt-4o"; // for top coins + regime detection
 const GPT_RATE_KEY = "cache:ai:rate:gpt"; // hourly budget for GPT
+const GPT_PREMIUM_RATE_KEY = "cache:ai:rate:gpt4o"; // hourly budget for GPT-4o
 const RECENT_PERF_KEY = "cache:ai:recent-perf"; // recent SL/TP stats for GPT context
+
+/** Top coins get GPT-4o for better SL/TP tuning accuracy. */
+const PREMIUM_COINS = new Set(["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"]);
 
 @Injectable()
 export class AiOptimizerService {
   private readonly logger = new Logger(AiOptimizerService.name);
   private openai: OpenAI | null = null;
   private readonly maxGptPerHour: number;
+  private readonly maxGpt4oPerHour: number;
 
   constructor(
     private readonly configService: ConfigService,
@@ -42,6 +48,7 @@ export class AiOptimizerService {
     private readonly marketConfigModel: Model<AiMarketConfigDocument>,
   ) {
     this.maxGptPerHour = parseInt(configService.get("AI_MAX_GPT_PER_HOUR", "200"));
+    this.maxGpt4oPerHour = parseInt(configService.get("AI_MAX_GPT4O_PER_HOUR", "30"));
 
     const openaiKey = configService.get<string>("OPENAI_API_KEY");
     if (openaiKey) {
@@ -182,7 +189,20 @@ export class AiOptimizerService {
         );
       }
 
-      await this.saveRegimeHistory("global", regime, confidence, null, "algo", null);
+      // ── AI regime refinement: GPT-4o-mini reviews algo decision ──────────
+      // Use AI to validate/override the algorithmic regime with broader context
+      const aiRegime = await this.aiRefineRegime(regime, confidence, {
+        rsi, rsi4h, atr15m, atr4h, bbWidth, priceVsEma9, priceVsEma200,
+      }).catch(() => null);
+
+      if (aiRegime && aiRegime !== regime) {
+        this.logger.log(
+          `[AiOptimizer] AI regime override: ${regime} → ${aiRegime} (algo confidence: ${confidence}%)`,
+        );
+        regime = aiRegime;
+      }
+
+      await this.saveRegimeHistory("global", regime, confidence, null, aiRegime ? "gpt-regime" : "algo", null);
 
       this.logger.log(
         `[AiOptimizer] Global regime: ${regime} (confidence: ${confidence}%, BTC RSI=${rsi.toFixed(0)} ATR=${atr15m}% BB=${bbWidth}%)`,
@@ -191,6 +211,74 @@ export class AiOptimizerService {
     } catch (err) {
       this.logger.warn(`[AiOptimizer] assessGlobalRegime algo failed: ${err?.message}`);
       return "MIXED";
+    }
+  }
+
+  /**
+   * AI regime refinement: ask GPT to validate/override the algorithmic regime.
+   * Returns null if AI is unavailable or agrees with algo.
+   */
+  private async aiRefineRegime(
+    algoRegime: string,
+    algoConfidence: number,
+    indicators: Record<string, number>,
+  ): Promise<string | null> {
+    if (!this.openai) return null;
+    if (!(await this.checkRateLimit(GPT_PREMIUM_RATE_KEY, this.maxGpt4oPerHour))) return null;
+
+    const perfContext = await this.getRecentPerfContext();
+
+    const prompt = `You are a crypto market regime classifier. Based on BTC indicators, decide the current market regime.
+
+Algorithm says: ${algoRegime} (confidence: ${algoConfidence}%)
+
+BTC indicators:
+- RSI(15m): ${indicators.rsi.toFixed(1)}, RSI(4h): ${indicators.rsi4h.toFixed(1)}
+- ATR(15m): ${indicators.atr15m.toFixed(2)}%, ATR(4h): ${indicators.atr4h.toFixed(2)}%
+- BB Width: ${indicators.bbWidth.toFixed(2)}%
+- Price vs EMA9: ${indicators.priceVsEma9.toFixed(2)}%, vs EMA200: ${indicators.priceVsEma200.toFixed(2)}%
+${perfContext}
+
+Regimes (pick one):
+- STRONG_BULL: clear uptrend, RSI >55 both TFs, price above EMAs
+- STRONG_BEAR: clear downtrend, RSI <45 both TFs, price below EMAs
+- VOLATILE: high ATR (>2%), wide BB, rapid moves — dangerous for both directions
+- RANGE_BOUND: tight BB (<3%), RSI 40-60, low ATR — mean reversion works
+- SIDEWAYS: moderate BB (3-4.5%), RSI 40-60 — unclear direction
+- MIXED: none of the above clearly applies
+
+Rules:
+- If algo regime seems correct, reply with SAME regime
+- Only override if indicators clearly contradict algo decision
+- When in doubt, default to MIXED (safest)
+- Consider BOTH timeframes (15m for current, 4h for trend)
+
+Reply ONLY JSON: {"regime":"REGIME_NAME","reason":"brief reason"}`;
+
+    try {
+      const response = await this.openai.chat.completions.create({
+        model: GPT_MODEL,
+        max_tokens: 100,
+        messages: [{ role: "user", content: prompt }],
+        response_format: { type: "json_object" },
+      });
+      await this.incrementRateLimit(GPT_PREMIUM_RATE_KEY);
+
+      const text = response.choices[0]?.message?.content?.trim() || "";
+      const parsed = JSON.parse(text);
+      const aiRegime = parsed.regime?.toUpperCase();
+
+      const validRegimes = ["STRONG_BULL", "STRONG_BEAR", "VOLATILE", "RANGE_BOUND", "SIDEWAYS", "MIXED"];
+      if (!validRegimes.includes(aiRegime)) return null;
+
+      if (parsed.reason) {
+        this.logger.log(`[AiOptimizer] AI regime reason: ${parsed.reason}`);
+      }
+
+      return aiRegime === algoRegime ? null : aiRegime;
+    } catch (err) {
+      this.logger.warn(`[AiOptimizer] AI regime refinement failed: ${err?.message}`);
+      return null;
     }
   }
 
@@ -344,7 +432,20 @@ Reply ONLY with valid JSON (no markdown):
       return params;
     };
 
-    // ── 1. GPT-4o-mini (primary AI tuner) ──────────────────────────────────
+    // ── 1a. GPT-4o for premium coins (BTC, ETH, SOL, BNB, XRP) ────────────
+    if (this.openai && PREMIUM_COINS.has(symbol) &&
+        (await this.checkRateLimit(GPT_PREMIUM_RATE_KEY, this.maxGpt4oPerHour))) {
+      try {
+        const params = await this.callGpt(symbol, globalRegime, indicators, GPT_MODEL_PREMIUM);
+        await this.incrementRateLimit(GPT_PREMIUM_RATE_KEY);
+        return saveAndReturn(params, GPT_MODEL_PREMIUM, " [4o]");
+      } catch (err) {
+        this.logger.warn(`[AiOptimizer] GPT-4o call failed for ${symbol}: ${err?.message}`);
+        // Fall through to GPT-4o-mini
+      }
+    }
+
+    // ── 1b. GPT-4o-mini (primary AI tuner for all coins) ────────────────
     if (this.openai && (await this.checkRateLimit(GPT_RATE_KEY, this.maxGptPerHour))) {
       try {
         const params = await this.callGpt(symbol, globalRegime, indicators);
@@ -658,14 +759,15 @@ Reply ONLY JSON:
     symbol: string,
     globalRegime: string,
     indicators: Record<string, any>,
+    model: string = GPT_MODEL,
   ): Promise<AiTunedParams> {
     const prompt = await this.buildTuningPrompt(symbol, globalRegime, indicators);
 
     const response = await this.openai!.chat.completions.create({
-      model: GPT_MODEL,
+      model,
       max_tokens: 400,
       messages: [{ role: "user", content: prompt }],
-      response_format: { type: "json_object" }, // Forces valid JSON — no repair needed
+      response_format: { type: "json_object" },
     });
 
     const text = response.choices[0].message.content || "";
@@ -673,6 +775,70 @@ Reply ONLY JSON:
     if (!jsonMatch) throw new Error("No JSON in GPT response");
 
     return this.mergeWithDefaults(JSON.parse(jsonMatch[0]));
+  }
+
+  // ─── AI signal validation gate ────────────────────────────────────────────
+
+  /**
+   * Ask AI whether a signal should be taken. Returns true (take) or false (skip).
+   * Uses GPT-4o-mini with minimal tokens. Falls back to true if AI unavailable.
+   */
+  async validateSignal(signal: {
+    symbol: string;
+    direction: string;
+    strategy: string;
+    regime: string;
+    confidence: number;
+    stopLossPercent: number;
+    takeProfitPercent: number;
+    indicators: Record<string, any>;
+  }): Promise<{ approved: boolean; reason?: string }> {
+    if (!this.openai) return { approved: true };
+    if (!(await this.checkRateLimit(GPT_RATE_KEY, this.maxGptPerHour))) return { approved: true };
+
+    const perfContext = await this.getRecentPerfContext();
+    const { symbol, direction, strategy, regime, confidence, stopLossPercent, takeProfitPercent, indicators } = signal;
+
+    const prompt = `Quick trade validation. Should we take this signal? Be strict — reject marginal trades.
+
+Signal: ${symbol} ${direction} via ${strategy}
+Regime: ${regime}, Confidence: ${confidence}%
+SL: ${stopLossPercent}%, TP: ${takeProfitPercent}%
+RSI(15m): ${indicators.rsi14_15m || "N/A"}, RSI(4h): ${indicators.rsi14_4h || "N/A"}
+ATR: ${indicators.atrPct_15m || "N/A"}%, BB Width: ${indicators.bbWidthPct || "N/A"}%
+Price vs EMA9: ${indicators.priceVsEma9_pct || "N/A"}%, vs EMA200: ${indicators.priceVsEma200_pct || "N/A"}%
+${perfContext}
+
+CRITICAL STATS:
+- SHORT signals: +31% PnL, 86% win rate
+- LONG signals: -36% PnL, 2.5% win rate
+- LONGs in non-STRONG_BULL regime almost always lose
+
+Reject if:
+- LONG in bearish/mixed regime (unless very strong bull signals)
+- Confidence < 45%
+- RSI diverges from direction (LONG + RSI>70, SHORT + RSI<30)
+- Risk/reward bad (SL > TP)
+- ATR too high (>3%) for the SL width
+
+Reply ONLY JSON: {"approved":true/false,"reason":"brief reason"}`;
+
+    try {
+      const response = await this.openai.chat.completions.create({
+        model: GPT_MODEL,
+        max_tokens: 80,
+        messages: [{ role: "user", content: prompt }],
+        response_format: { type: "json_object" },
+      });
+      await this.incrementRateLimit(GPT_RATE_KEY);
+
+      const text = response.choices[0]?.message?.content?.trim() || "";
+      const parsed = JSON.parse(text);
+      return { approved: !!parsed.approved, reason: parsed.reason };
+    } catch (err) {
+      this.logger.warn(`[AiOptimizer] Signal validation failed: ${err?.message}`);
+      return { approved: true }; // fail open — don't block signals if AI is down
+    }
   }
 
   // ─── Default params (F8 Config 2 baseline) ───────────────────────────────

@@ -896,6 +896,29 @@ export class AiSignalService implements OnModuleInit {
       this.logger.warn(`[AiSignal] Trend filter error for ${signalKey}: ${err?.message}`);
     }
 
+    // AI validation gate — lightweight GPT check to filter low-quality signals
+    try {
+      const validation = await this.aiOptimizerService.validateSignal({
+        symbol: `${coin.toUpperCase()}${currency.toUpperCase()}`,
+        direction: signalResult.isLong ? "LONG" : "SHORT",
+        strategy: signalResult.strategy,
+        confidence: params.confidence ?? 0,
+        regime: params.regime,
+        indicators: params as any,
+        stopLossPercent: params.stopLossPercent,
+        takeProfitPercent: params.takeProfitPercent,
+      });
+      if (!validation.approved) {
+        this.logger.log(
+          `[AiSignal] ${signalKey} REJECTED by AI gate: ${validation.reason}`,
+        );
+        return;
+      }
+    } catch (err) {
+      // On error, let signal through (fail-open)
+      this.logger.warn(`[AiSignal] AI validation gate error for ${signalKey}: ${err?.message}`);
+    }
+
     const isTestMode = await this.isTestModeEnabled();
 
     this.logger.log(
