@@ -1088,8 +1088,8 @@ export class AiSignalService implements OnModuleInit {
       ? ((currentPrice - signal.entryPrice) / signal.entryPrice) * 100
       : ((signal.entryPrice - currentPrice) / signal.entryPrice) * 100;
 
-    // At >= 5% profit — raise SL to lock in 2% profit (trailing stop milestone, don't auto-close)
-    if (pnlPct >= 5 && !(signal as any).sl5PctRaised) {
+    // At >= 4% profit — raise SL to lock in 2% profit (trailing stop milestone, don't auto-close)
+    if (pnlPct >= 4 && !(signal as any).sl5PctRaised) {
       const newSl = isLong
         ? signal.entryPrice * 1.02
         : signal.entryPrice * 0.98;
