@@ -62,10 +62,16 @@ export class UserSignalSubscription {
   realModeDailyStopLossPct?: number; // auto-close all + disable real mode when daily PnL drops to this % (e.g. 3 = -3%)
 
   @Prop()
-  realModeDailyDisabledAt?: Date; // set when auto-disabled by daily limit; cleared on next-day reset
+  realModeDailyDisabledAt?: Date; // set when auto-disabled by cycle SL limit; cleared on next-day reset
 
   @Prop()
-  realModeDailyTpHitAt?: Date; // set when daily TP target hit; trades after this start a new PnL cycle
+  cycleResetAt?: Date; // when current PnL cycle started (trades after this count toward cycle)
+
+  @Prop()
+  cyclePeakPct?: number; // highest PnL% reached in current cycle (for trailing floor)
+
+  @Prop({ default: false })
+  cyclePaused?: boolean; // true = stop opening new trades (target hit, let existing ride)
 
   @Prop({ default: 3 })
   maxOpenPositions?: number; // max concurrent real positions per user (default: 3)

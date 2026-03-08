@@ -11,6 +11,7 @@ import { AiRegimeHistory, AiRegimeHistoryDocument } from '../schemas/ai-regime-h
 import { DailyMarketSnapshot, DailyMarketSnapshotDocument } from '../schemas/daily-market-snapshot.schema';
 import { UserSettings, UserSettingsDocument } from '../schemas/user-settings.schema';
 import { AiSignalValidation, AiSignalValidationDocument } from '../schemas/ai-signal-validation.schema';
+import { DailyLimitHistory, DailyLimitHistoryDocument } from '../schemas/daily-limit-history.schema';
 import { UserRealTradingService } from '../ai-signal/user-real-trading.service';
 
 /** Must match the key in SignalQueueService. */
@@ -33,6 +34,7 @@ export class AdminService {
     @InjectModel(DailyMarketSnapshot.name) private snapshotModel: Model<DailyMarketSnapshotDocument>,
     @InjectModel(UserSettings.name) private userSettingsModel: Model<UserSettingsDocument>,
     @InjectModel(AiSignalValidation.name) private validationModel: Model<AiSignalValidationDocument>,
+    @InjectModel(DailyLimitHistory.name) private dailyLimitHistoryModel: Model<DailyLimitHistoryDocument>,
     private readonly redisService: RedisService,
     private readonly userRealTradingService: UserRealTradingService,
   ) {}
@@ -181,6 +183,7 @@ export class AdminService {
     dateTo?: string;
     closedFrom?: string;
     closedTo?: string;
+    sortBy?: string;
   }) {
     const page = Math.max(1, query.page || 1);
     const limit = Math.min(100, Math.max(1, query.limit || 20));
@@ -203,10 +206,13 @@ export class AdminService {
       if (query.closedTo) filter.positionClosedAt.$lte = new Date(query.closedTo + 'T23:59:59.999Z');
     }
 
+    const allowedSortFields = ['createdAt', 'positionClosedAt', 'pnlPercent'];
+    const sortField = allowedSortFields.includes(query.sortBy) ? query.sortBy : 'createdAt';
+
     const [data, total] = await Promise.all([
       this.signalModel
         .find(filter)
-        .sort({ createdAt: -1 })
+        .sort({ [sortField]: -1 })
         .skip((page - 1) * limit)
         .limit(limit)
         .lean(),
@@ -748,5 +754,30 @@ export class AdminService {
     ]);
     const approvalRate = total > 0 ? Math.round((approved / total) * 10000) / 100 : 0;
     return { total, approved, rejected, approvalRate };
+  }
+
+  // ─── Cycle limit history ──────────────────────────────────────────────────
+
+  async getCycleHistory(query: {
+    page?: number;
+    limit?: number;
+    telegramId?: string;
+  }) {
+    const page = Math.max(1, query.page || 1);
+    const limit = Math.min(100, Math.max(1, query.limit || 20));
+    const filter: any = {};
+    if (query.telegramId) filter.telegramId = parseInt(query.telegramId, 10);
+
+    const [data, total] = await Promise.all([
+      this.dailyLimitHistoryModel
+        .find(filter)
+        .sort({ triggeredAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean(),
+      this.dailyLimitHistoryModel.countDocuments(filter),
+    ]);
+
+    return { data, total, page, limit, totalPages: Math.ceil(total / limit) };
   }
 }

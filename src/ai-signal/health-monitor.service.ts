@@ -131,25 +131,6 @@ export class HealthMonitorService {
 
     const actives = await this.signalModel.find({ status: "ACTIVE" }).lean();
 
-    // Check for stale signals (open > 24h without movement)
-    const staleThreshold = 24 * 3600 * 1000;
-    const staleSignals = actives.filter(
-      (s) => s.executedAt && Date.now() - new Date(s.executedAt).getTime() > staleThreshold,
-    );
-    if (staleSignals.length > 0) {
-      issues.push(`*Stale signals (>24h):* ${staleSignals.length}`);
-      for (const s of staleSignals.slice(0, 3)) {
-        const hours = ((Date.now() - new Date(s.executedAt).getTime()) / 3600000).toFixed(0);
-        const price = this.marketDataService.getLatestPrice(s.symbol);
-        const pnl = price
-          ? s.direction === "LONG"
-            ? ((price - s.entryPrice) / s.entryPrice) * 100
-            : ((s.entryPrice - price) / s.entryPrice) * 100
-          : 0;
-        issues.push(`  ${s.symbol} ${s.direction} ${hours}h PnL:${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}%`);
-      }
-    }
-
     // Check for signals close to SL (within 0.5%)
     for (const s of actives) {
       const price = this.marketDataService.getLatestPrice(s.symbol);

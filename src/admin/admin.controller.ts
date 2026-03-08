@@ -165,4 +165,10 @@ export class AdminController {
   getValidationStats() {
     return this.adminService.getValidationStats();
   }
+
+  @UseGuards(AdminGuard)
+  @Get("cycle-history")
+  getCycleHistory(@Query() query: Record<string, string>) {
+    return this.adminService.getCycleHistory(query);
+  }
 }

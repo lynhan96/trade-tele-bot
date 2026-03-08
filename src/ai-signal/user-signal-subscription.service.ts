@@ -20,10 +20,12 @@ export interface SubscriberInfo {
   maxOpenPositions?: number;            // max concurrent positions (default: 3)
   realModeLeverage?: number;            // fixed leverage value (only used when mode = FIXED)
   realModeLeverageMode?: string;        // "AI" | "FIXED" | "MAX"
-  realModeDailyTargetPct?: number;      // close all + disable when daily PnL reaches this % (e.g. 5 = +5%)
-  realModeDailyStopLossPct?: number;    // close all + disable when daily PnL drops to this % (e.g. 3 = -3%)
-  realModeDailyDisabledAt?: Date;       // set when auto-disabled by daily limit
-  realModeDailyTpHitAt?: Date;          // set when daily TP hit; PnL resets from this point
+  realModeDailyTargetPct?: number;      // cycle target: pause new trades when PnL reaches this %
+  realModeDailyStopLossPct?: number;    // cycle SL: close all + disable when PnL drops to this %
+  realModeDailyDisabledAt?: Date;       // set when auto-disabled by cycle SL
+  cycleResetAt?: Date;                  // when current PnL cycle started
+  cyclePeakPct?: number;               // highest PnL% in current cycle (for trailing floor)
+  cyclePaused?: boolean;               // true = stop opening new trades (target hit)
 }
 
 @Injectable()
@@ -102,37 +104,23 @@ export class UserSignalSubscriptionService {
       realModeDailyTargetPct: d.realModeDailyTargetPct,
       realModeDailyStopLossPct: d.realModeDailyStopLossPct,
       realModeDailyDisabledAt: d.realModeDailyDisabledAt,
+      cyclePaused: d.cyclePaused,
       maxOpenPositions: d.maxOpenPositions,
     }));
   }
 
   /**
-   * Find real-mode subscribers who have at least one daily limit configured
-   * and whose real mode is currently enabled (not disabled today).
+   * Find real-mode subscribers who have at least one cycle limit configured
+   * and whose real mode is currently enabled (not disabled by SL).
    */
-  async findRealModeSubscribersWithDailyLimits(): Promise<SubscriberInfo[]> {
-    const startOfToday = new Date();
-    startOfToday.setUTCHours(0, 0, 0, 0);
-
+  async findRealModeSubscribersWithCycleLimits(): Promise<SubscriberInfo[]> {
     const docs = await this.subscriptionModel
       .find({
         isActive: true,
         realModeEnabled: true,
-        $and: [
-          {
-            $or: [
-              { realModeDailyTargetPct: { $gt: 0 } },
-              { realModeDailyStopLossPct: { $gt: 0 } },
-            ],
-          },
-          {
-            // Only check users who have NOT been disabled today
-            $or: [
-              { realModeDailyDisabledAt: { $lt: startOfToday } },
-              { realModeDailyDisabledAt: null },
-              { realModeDailyDisabledAt: { $exists: false } },
-            ],
-          },
+        $or: [
+          { realModeDailyTargetPct: { $gt: 0 } },
+          { realModeDailyStopLossPct: { $gt: 0 } },
         ],
       })
       .lean();
@@ -148,12 +136,14 @@ export class UserSignalSubscriptionService {
       realModeDailyTargetPct: d.realModeDailyTargetPct,
       realModeDailyStopLossPct: d.realModeDailyStopLossPct,
       realModeDailyDisabledAt: d.realModeDailyDisabledAt,
-      realModeDailyTpHitAt: d.realModeDailyTpHitAt,
+      cycleResetAt: d.cycleResetAt,
+      cyclePeakPct: d.cyclePeakPct,
+      cyclePaused: d.cyclePaused,
     }));
   }
 
   /**
-   * Find users whose real mode was auto-disabled by daily limit on a previous day
+   * Find users whose real mode was auto-disabled by cycle SL on a previous day
    * (for next-day reset cron).
    */
   async findUsersForDailyReset(): Promise<SubscriberInfo[]> {
@@ -404,21 +394,35 @@ export class UserSignalSubscriptionService {
   }
 
   /**
-   * Set or clear the daily TP hit timestamp.
-   * When set, getDailyStats only counts trades AFTER this time for PnL calculation.
-   * This allows the "loop forever" behavior — after hitting TP, PnL resets for next cycle.
+   * Set or clear cycle reset timestamp. All trades after this date count toward the current cycle.
    */
-  async setRealModeDailyTpHitAt(telegramId: number, date: Date | null): Promise<void> {
+  async setCycleResetAt(telegramId: number, date: Date | null): Promise<void> {
     if (date == null) {
       await this.subscriptionModel.findOneAndUpdate(
         { telegramId },
-        { $unset: { realModeDailyTpHitAt: 1 } },
+        { $unset: { cycleResetAt: 1, cyclePeakPct: 1, cyclePaused: 1 } },
       );
     } else {
       await this.subscriptionModel.findOneAndUpdate(
         { telegramId },
-        { $set: { realModeDailyTpHitAt: date } },
+        { $set: { cycleResetAt: date, cyclePeakPct: 0, cyclePaused: false } },
       );
     }
+  }
+
+  /** Update cycle peak PnL% (for trailing floor calculation). */
+  async setCyclePeakPct(telegramId: number, peakPct: number): Promise<void> {
+    await this.subscriptionModel.findOneAndUpdate(
+      { telegramId },
+      { $set: { cyclePeakPct: peakPct } },
+    );
+  }
+
+  /** Set or clear the cyclePaused flag (stop opening new trades). */
+  async setCyclePaused(telegramId: number, paused: boolean): Promise<void> {
+    await this.subscriptionModel.findOneAndUpdate(
+      { telegramId },
+      { $set: { cyclePaused: paused } },
+    );
   }
 }

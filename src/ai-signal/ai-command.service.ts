@@ -191,9 +191,11 @@ export class AiCommandService implements OnModuleInit {
           (openTrades.length > 0 ? `📊 Lenh mo: *${openTrades.length}*\n` : "") +
           `🚨 Canh bao dong tien: ${moneyFlow ? "✅ Bat" : "❌ Tat"}\n` +
           `📡 Auto push: ${pushEnabled ? "✅ Bat (10 phut)" : "❌ Tat"}\n\n` +
-          `*Daily Limit:*\n` +
-          `🎯 Muc tieu loi: ${sub.realModeDailyTargetPct ? `*+${sub.realModeDailyTargetPct}%/ngay*` : "_Chua dat_"}\n` +
-          `🛑 Gioi han lo: ${sub.realModeDailyStopLossPct ? `*-${sub.realModeDailyStopLossPct}%/ngay*` : "_Chua dat_"}\n\n` +
+          `*Cycle Limit:*\n` +
+          `🎯 Muc tieu: ${sub.realModeDailyTargetPct ? `*+${sub.realModeDailyTargetPct}%*` : "_Chua dat_"}${sub.cyclePaused ? " ⏸️ PAUSED" : ""}\n` +
+          `🛑 Gioi han lo: ${sub.realModeDailyStopLossPct ? `*-${sub.realModeDailyStopLossPct}%*` : "_Chua dat_"}\n` +
+          (sub.cycleResetAt ? `📊 Cycle tu: ${new Date(sub.cycleResetAt).toLocaleDateString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" })}${sub.cyclePeakPct ? ` · Peak: +${sub.cyclePeakPct.toFixed(2)}%` : ""}\n` : ``) +
+          `\n` +
           `*Vol & TP/SL:*\n` +
           `💰 Balance: *${balance.toLocaleString()} USDT/lenh*\n` +
           (coinVolLines ? `${coinVolLines}\n` : `  _Chua co override coin nao_\n`) +
@@ -201,8 +203,8 @@ export class AiCommandService implements OnModuleInit {
           `*Thay doi:*\n` +
           `/ai on|off — Bat/tat bot\n` +
           `/ai leverage AI|MAX|10 — Dat leverage\n` +
-          `/ai target 5 — Muc tieu +5%/ngay\n` +
-          `/ai stoploss 3 — Gioi han lo -3%/ngay\n` +
+          `/ai target 5 — Muc tieu +5%/cycle\n` +
+          `/ai stoploss 3 — Gioi han lo -3%/cycle\n` +
           `/ai maxpos 3 — Toi da 3 lenh\n` +
           `/ai balance <so> — Balance mac dinh\n` +
           `/ai vol BTC 5000 — Vol BTC rieng\n` +
@@ -904,7 +906,7 @@ export class AiCommandService implements OnModuleInit {
       }
     });
 
-    // /ai target <N|off> — daily profit target %
+    // /ai target <N|off> — cycle profit target %
     this.telegramService.registerBotCommand(/^\/ai[_ ]target(?:\s+(\S+))?$/i, async (msg, match) => {
       const chatId = msg.chat.id;
       const telegramId = msg.from?.id;
@@ -922,31 +924,37 @@ export class AiCommandService implements OnModuleInit {
         if (!val) {
           const cur = sub.realModeDailyTargetPct;
           await this.telegramService.sendTelegramMessage(chatId,
-            `🎯 *Muc tieu loi nhuan ngay*\n\n` +
-            (cur != null ? `Hien tai: *+${cur}%*\nDung /ai target off de tat` : `_Chua dat_\nDung: /ai target 5 — dat +5%/ngay`));
+            `🎯 *Muc tieu loi nhuan (Cycle)*\n\n` +
+            (cur != null ? `Hien tai: *+${cur}%*\nDung /ai target off de tat` : `_Chua dat_\nDung: /ai target 5 — dat +5%`));
           return;
         }
 
         if (val === "off") {
           await this.subscriptionService.setDailyTargetPct(telegramId, null);
-          await this.telegramService.sendTelegramMessage(chatId, `✅ Muc tieu loi nhuan ngay da tat.`);
+          await this.subscriptionService.setCyclePaused(telegramId, false);
+          await this.telegramService.sendTelegramMessage(chatId, `✅ Muc tieu loi nhuan da tat.`);
         } else {
           const n = parseFloat(val);
           if (isNaN(n) || n <= 0 || n > 100) {
             await this.telegramService.sendTelegramMessage(chatId,
-              `❌ Nhap % hop le (1–100).\nVD: /ai target 5 — dat muc tieu +5% moi ngay`);
+              `❌ Nhap % hop le (1–100).\nVD: /ai target 5 — dat muc tieu +5%`);
             return;
           }
           await this.subscriptionService.setDailyTargetPct(telegramId, n);
           await this.telegramService.sendTelegramMessage(chatId,
-            `✅ *Muc Tieu Loi Nhuan Ngay: +${n}%*\n\nKhi tong PnL hom nay dat +${n}%, bot se tu dong dong tat ca lenh.\nSe mo lai tu dong vao ngay mai.`);
+            `✅ *Muc Tieu Cycle: +${n}%*\n\n` +
+            `Khi PnL cycle dat +${n}%:\n` +
+            `• Bot *ngung mo lenh moi*\n` +
+            `• Lenh dang mo tiep tuc chay TP/SL\n` +
+            `• Trailing floor *${(n * 0.6).toFixed(1)}%* — khoa loi khi PnL giam ve muc nay\n` +
+            `• Cycle moi bat dau tu dong sau khi khoa`);
         }
       } catch (err) {
         await this.telegramService.sendTelegramMessage(chatId, `❌ Loi: ${err?.message}`);
       }
     });
 
-    // /ai stoploss <N|off> — daily stop loss %
+    // /ai stoploss <N|off> — cycle stop loss %
     this.telegramService.registerBotCommand(/^\/ai[_ ]stoploss(?:\s+(\S+))?$/i, async (msg, match) => {
       const chatId = msg.chat.id;
       const telegramId = msg.from?.id;
@@ -964,24 +972,26 @@ export class AiCommandService implements OnModuleInit {
         if (!val) {
           const cur = sub.realModeDailyStopLossPct;
           await this.telegramService.sendTelegramMessage(chatId,
-            `🛑 *Gioi han lo ngay*\n\n` +
-            (cur != null ? `Hien tai: *-${cur}%*\nDung /ai stoploss off de tat` : `_Chua dat_\nDung: /ai stoploss 3 — dat -3%/ngay`));
+            `🛑 *Gioi han lo (Cycle)*\n\n` +
+            (cur != null ? `Hien tai: *-${cur}%*\nDung /ai stoploss off de tat` : `_Chua dat_\nDung: /ai stoploss 3 — dat -3%`));
           return;
         }
 
         if (val === "off") {
           await this.subscriptionService.setDailyStopLossPct(telegramId, null);
-          await this.telegramService.sendTelegramMessage(chatId, `✅ Gioi han lo ngay da tat.`);
+          await this.telegramService.sendTelegramMessage(chatId, `✅ Gioi han lo cycle da tat.`);
         } else {
           const n = parseFloat(val);
           if (isNaN(n) || n <= 0 || n > 100) {
             await this.telegramService.sendTelegramMessage(chatId,
-              `❌ Nhap % hop le (1–100).\nVD: /ai stoploss 3 — dat gioi han lo -3% moi ngay`);
+              `❌ Nhap % hop le (1–100).\nVD: /ai stoploss 3 — dat gioi han lo -3%`);
             return;
           }
           await this.subscriptionService.setDailyStopLossPct(telegramId, n);
           await this.telegramService.sendTelegramMessage(chatId,
-            `✅ *Gioi Han Lo Ngay: -${n}%*\n\nKhi tong PnL hom nay giam -${n}%, bot se tu dong dong tat ca lenh.\nSe mo lai tu dong vao ngay mai.`);
+            `✅ *Gioi Han Lo Cycle: -${n}%*\n\n` +
+            `Khi tong PnL cycle giam -${n}%, bot se tu dong dong tat ca lenh.\n` +
+            `Real mode se *TAT* va tu dong BAT lai vao ngay mai.`);
         }
       } catch (err) {
         await this.telegramService.sendTelegramMessage(chatId, `❌ Loi: ${err?.message}`);
@@ -1447,8 +1457,8 @@ export class AiCommandService implements OnModuleInit {
           const reasonVi =
             t.closeReason === "TAKE_PROFIT" ? "TP" :
             t.closeReason === "STOP_LOSS" ? "SL" :
-            t.closeReason === "DAILY_TARGET" ? "Daily TP" :
-            t.closeReason === "DAILY_STOP_LOSS" ? "Daily SL" : "Thu cong";
+            t.closeReason === "DAILY_TARGET" || t.closeReason === "CYCLE_TARGET" ? "Cycle TP" :
+            t.closeReason === "DAILY_STOP_LOSS" || t.closeReason === "CYCLE_STOP_LOSS" ? "Cycle SL" : "Thu cong";
           const dateStr = t.closedAt
             ? new Date(t.closedAt).toLocaleDateString("vi-VN", { day: "2-digit", month: "2-digit", timeZone: "Asia/Ho_Chi_Minh" })
             : "";
@@ -1481,18 +1491,19 @@ export class AiCommandService implements OnModuleInit {
         }
 
         const sign = (v: number) => v >= 0 ? "+" : "";
-        const title = isAdmin ? "Daily Limit History (All Users)" : "Daily Limit History";
+        const title = isAdmin ? "Cycle Limit History (All Users)" : "Cycle Limit History";
         let text = `📊 *${title}*\n━━━━━━━━━━━━━━━━━━\n\n`;
 
         for (const r of records) {
-          const icon = r.type === "DAILY_TARGET" ? "🎯" : "🛑";
-          const typeVi = r.type === "DAILY_TARGET" ? "TP" : "SL";
+          const isTarget = r.type === "DAILY_TARGET" || r.type === "CYCLE_TARGET";
+          const icon = isTarget ? "🎯" : "🛑";
+          const typeVi = isTarget ? "TP" : "SL";
           const dateStr = new Date(r.triggeredAt).toLocaleString("vi-VN", {
             day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit",
             timeZone: "Asia/Ho_Chi_Minh",
           });
           const userTag = isAdmin ? ` · @${r.username ?? r.telegramId}` : "";
-          text += `${icon} *${typeVi}* ${sign(r.pnlUsdt)}${r.pnlUsdt.toFixed(2)} USDT (${sign(r.pnlPct)}${r.pnlPct.toFixed(2)}%) · Limit: ${r.type === "DAILY_TARGET" ? "+" : "-"}${r.limitPct}% · Dong: ${r.positionsClosed} lenh · ${dateStr}${userTag}\n`;
+          text += `${icon} *${typeVi}* ${sign(r.pnlUsdt)}${r.pnlUsdt.toFixed(2)} USDT (${sign(r.pnlPct)}${r.pnlPct.toFixed(2)}%) · Limit: ${isTarget ? "+" : "-"}${r.limitPct}% · Dong: ${r.positionsClosed} lenh · ${dateStr}${userTag}\n`;
         }
 
         text += `\n━━━━━━━━━━━━━━━━━━\n_${new Date().toLocaleTimeString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" })}_`;

@@ -17,6 +17,7 @@ import { DailyMarketSnapshot, DailyMarketSnapshotSchema } from "../schemas/daily
 import { UserSettings, UserSettingsSchema } from "../schemas/user-settings.schema";
 import { AdminAccount, AdminAccountSchema } from "../schemas/admin-account.schema";
 import { AiSignalValidation, AiSignalValidationSchema } from "../schemas/ai-signal-validation.schema";
+import { DailyLimitHistory, DailyLimitHistorySchema } from "../schemas/daily-limit-history.schema";
 
 @Module({
   imports: [
@@ -31,6 +32,7 @@ import { AiSignalValidation, AiSignalValidationSchema } from "../schemas/ai-sign
       { name: UserSettings.name, schema: UserSettingsSchema },
       { name: AdminAccount.name, schema: AdminAccountSchema },
       { name: AiSignalValidation.name, schema: AiSignalValidationSchema },
+      { name: DailyLimitHistory.name, schema: DailyLimitHistorySchema },
     ]),
     RedisModule,
     AiSignalModule,
