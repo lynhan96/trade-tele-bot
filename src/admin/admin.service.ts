@@ -219,7 +219,28 @@ export class AdminService {
       this.signalModel.countDocuments(filter),
     ]);
 
-    return { data, total, page, limit, totalPages: Math.ceil(total / limit) };
+    // Include win/loss counts for COMPLETED signals (across ALL matching, not just current page)
+    let wins: number | undefined;
+    let losses: number | undefined;
+    let totalPnl: number | undefined;
+    if (filter.status === "COMPLETED") {
+      const agg = await this.signalModel.aggregate([
+        { $match: { ...filter, pnlPercent: { $exists: true } } },
+        {
+          $group: {
+            _id: null,
+            wins: { $sum: { $cond: [{ $gt: ["$pnlPercent", 0] }, 1, 0] } },
+            losses: { $sum: { $cond: [{ $lte: ["$pnlPercent", 0] }, 1, 0] } },
+            totalPnl: { $sum: "$pnlPercent" },
+          },
+        },
+      ]);
+      wins = agg[0]?.wins ?? 0;
+      losses = agg[0]?.losses ?? 0;
+      totalPnl = agg[0]?.totalPnl ?? 0;
+    }
+
+    return { data, total, page, limit, totalPages: Math.ceil(total / limit), wins, losses, totalPnl };
   }
 
   async getSignalStats(query: { status?: string; direction?: string }) {
