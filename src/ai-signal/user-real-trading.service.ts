@@ -1041,6 +1041,11 @@ export class UserRealTradingService implements OnModuleInit {
           const peak = user.cyclePeakPct ?? 0;
           const paused = user.cyclePaused === true;
 
+          // ── Always track peak (before target hit too) ──
+          if (pnlPct > peak && pnlPct > 0) {
+            await this.subscriptionService.setCyclePeakPct(user.telegramId, pnlPct);
+          }
+
           // ── SL check (always active) ──
           if (slLimit != null && pnlPct <= -slLimit) {
             const closedCount = await this.closeAllRealPositions(user.telegramId, user.chatId, "CYCLE_STOP_LOSS");
@@ -1071,7 +1076,6 @@ export class UserRealTradingService implements OnModuleInit {
           // ── PAUSE: target hit → stop new trades ──
           if (!paused && pnlPct >= target) {
             await this.subscriptionService.setCyclePaused(user.telegramId, true);
-            await this.subscriptionService.setCyclePeakPct(user.telegramId, pnlPct);
 
             const sign = stats.totalPnlUsdt >= 0 ? "+" : "";
             const floor = (pnlPct * this.TRAILING_FLOOR_RATIO).toFixed(2);
@@ -1088,14 +1092,8 @@ export class UserRealTradingService implements OnModuleInit {
             continue;
           }
 
-          // ── Already paused: update peak + check trailing floor ──
+          // ── Already paused: check trailing floor ──
           if (paused) {
-            // Update peak if new high
-            if (pnlPct > peak) {
-              await this.subscriptionService.setCyclePeakPct(user.telegramId, pnlPct);
-              continue;
-            }
-
             // Check trailing floor: close all when PnL drops to 60% of peak
             const floor = peak * this.TRAILING_FLOOR_RATIO;
             if (pnlPct <= floor) {
