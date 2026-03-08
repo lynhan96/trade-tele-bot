@@ -228,7 +228,7 @@ export class PositionMonitorService implements OnModuleInit {
     }
 
     // ── Milestone 2: At >= 3% profit — raise SL to +1.5% profit lock ──
-    if (pnlPct >= 3 && !(signal as any).sl3PctRaised) {
+    if (pnlPct >= 3 && !(signal as any).sl3PctRaised && !(signal as any).sl5PctRaised) {
       const newSl = direction === "LONG"
         ? entryPrice * 1.015
         : entryPrice * 0.985;
