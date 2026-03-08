@@ -26,8 +26,8 @@ const AI_MARKET_FILTERS_KEY = "cache:ai:market-filters"; // AI-decided coin filt
 const AI_MARKET_FILTERS_TTL = 8 * 60 * 60; // 8h — re-evaluated on regime change
 const RATE_WINDOW = 60 * 60; // 1h window
 
-const GPT_MODEL = "gpt-4o-mini";
-const GPT_MODEL_PREMIUM = "gpt-4o"; // for top coins + regime detection
+const GPT_MODEL = "gpt-4o";
+const GPT_MODEL_PREMIUM = "gpt-4o"; // all calls now use gpt-4o
 const GPT_RATE_KEY = "cache:ai:rate:gpt"; // hourly budget for GPT
 const GPT_PREMIUM_RATE_KEY = "cache:ai:rate:gpt4o"; // hourly budget for GPT-4o
 const RECENT_PERF_KEY = "cache:ai:recent-perf"; // recent SL/TP stats for GPT context
@@ -54,12 +54,12 @@ export class AiOptimizerService {
     private readonly validationModel: Model<AiSignalValidationDocument>,
   ) {
     this.maxGptPerHour = parseInt(configService.get("AI_MAX_GPT_PER_HOUR", "200"));
-    this.maxGpt4oPerHour = parseInt(configService.get("AI_MAX_GPT4O_PER_HOUR", "30"));
+    this.maxGpt4oPerHour = parseInt(configService.get("AI_MAX_GPT4O_PER_HOUR", "200"));
 
     const openaiKey = configService.get<string>("OPENAI_API_KEY");
     if (openaiKey) {
       this.openai = new OpenAI({ apiKey: openaiKey });
-      this.logger.log("[AiOptimizer] GPT-4o-mini AI tuning enabled");
+      this.logger.log("[AiOptimizer] GPT-4o AI tuning enabled");
     } else {
       this.logger.warn("[AiOptimizer] OPENAI_API_KEY not set, using static defaults");
     }
