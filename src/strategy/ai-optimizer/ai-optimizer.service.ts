@@ -438,7 +438,7 @@ Reply ONLY with valid JSON (no markdown):
       return params;
     };
 
-    // ── 1a. GPT-4o for premium coins (BTC, ETH, SOL, BNB, XRP) ────────────
+    // ── 1. GPT-4o for premium coins only (BTC, ETH, SOL, BNB, XRP) ────────
     if (this.openai && PREMIUM_COINS.has(symbol) &&
         (await this.checkRateLimit(GPT_PREMIUM_RATE_KEY, this.maxGpt4oPerHour))) {
       try {
@@ -447,29 +447,19 @@ Reply ONLY with valid JSON (no markdown):
         return saveAndReturn(params, GPT_MODEL_PREMIUM, " [4o]");
       } catch (err) {
         this.logger.warn(`[AiOptimizer] GPT-4o call failed for ${symbol}: ${err?.message}`);
-        // Fall through to GPT-4o-mini
       }
     }
 
-    // ── 1b. GPT-4o-mini (primary AI tuner for all coins) ────────────────
-    if (this.openai && (await this.checkRateLimit(GPT_RATE_KEY, this.maxGptPerHour))) {
-      try {
-        const params = await this.callGpt(symbol, globalRegime, indicators);
-        await this.incrementRateLimit(GPT_RATE_KEY);
-        return saveAndReturn(params, GPT_MODEL);
-      } catch (err) {
-        this.logger.warn(`[AiOptimizer] GPT call failed for ${symbol}: ${err?.message}`);
-      }
-    }
-
-    // ── 2. Static ATR-adjusted defaults (when GPT unavailable/rate-limited) ──
-    // When no AI available, fall back to algorithmic strategy selection
+    // ── 2. All other coins: fixed SL/TP + ATR floor + algorithmic strategy ──
     let defaults = atrDefaults;
+    // Fixed SL=3%, TP=4% baseline — ATR may widen SL for volatile coins
+    if (defaults.stopLossPercent < 3) defaults.stopLossPercent = 3;
+    if (defaults.takeProfitPercent < 4) defaults.takeProfitPercent = 4;
     if (algoStrategy) defaults.strategy = algoStrategy;
     if (forceProfile) defaults = this.applyForcedProfile(defaults, forceProfile);
     const jitter = Math.floor(Math.random() * AI_PARAMS_JITTER);
     await this.redisService.set(cacheKey, defaults, AI_PARAMS_TTL + jitter);
-    this.logger.debug(`[AiOptimizer] ${symbol}${forceProfile ? `:${forceProfile}` : ""} using static defaults SL=${defaults.stopLossPercent}%`);
+    this.logger.debug(`[AiOptimizer] ${symbol}${forceProfile ? `:${forceProfile}` : ""} SL=${defaults.stopLossPercent}% TP=${defaults.takeProfitPercent}% (static)`);
     return defaults;
   }
 
