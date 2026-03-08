@@ -802,30 +802,35 @@ Reply ONLY JSON:
     if (!this.openai) return { approved: true };
     if (!(await this.checkRateLimit(GPT_RATE_KEY, this.maxGptPerHour))) return { approved: true };
 
-    const perfContext = await this.getRecentPerfContext();
+    const [perfContext, btcContext] = await Promise.all([
+      this.getRecentPerfContext(),
+      this.getBtcMarketContext(),
+    ]);
     const { symbol, direction, strategy, regime, confidence, stopLossPercent, takeProfitPercent, indicators } = signal;
 
-    const prompt = `Quick trade validation. Should we take this signal? Be strict — reject marginal trades.
+    const prompt = `Bạn là chuyên gia phân tích crypto. Đánh giá nhanh tín hiệu giao dịch này. Hãy nghiêm khắc — từ chối giao dịch không chắc chắn.
 
-Signal: ${symbol} ${direction} via ${strategy}
+Tín hiệu: ${symbol} ${direction} — chiến lược ${strategy}
 Regime: ${regime}, Confidence: ${confidence}%
 SL: ${stopLossPercent}%, TP: ${takeProfitPercent}%
 RSI(15m): ${indicators.rsi14_15m || "N/A"}, RSI(4h): ${indicators.rsi14_4h || "N/A"}
 ATR: ${indicators.atrPct_15m || "N/A"}%, BB Width: ${indicators.bbWidthPct || "N/A"}%
 Price vs EMA9: ${indicators.priceVsEma9_pct || "N/A"}%, vs EMA200: ${indicators.priceVsEma200_pct || "N/A"}%
+${btcContext}
 ${perfContext}
 
-CRITICAL STATS:
-- SHORT signals: +31% PnL, 86% win rate
-- LONG signals: -36% PnL, 2.5% win rate
-- LONGs in non-STRONG_BULL regime almost always lose
+THỐNG KÊ QUAN TRỌNG:
+- Tín hiệu SHORT: +31% PnL, 86% win rate
+- Tín hiệu LONG: -36% PnL, 2.5% win rate — gần như luôn thua
+- LONGs trong regime không phải STRONG_BULL gần như luôn lỗ
 
-Reject if:
-- LONG in bearish/mixed regime (unless very strong bull signals)
+Từ chối nếu:
+- LONG trong regime bearish/mixed (trừ khi có tín hiệu bull rất mạnh)
 - Confidence < 45%
-- RSI diverges from direction (LONG + RSI>70, SHORT + RSI<30)
-- Risk/reward bad (SL > TP)
-- ATR too high (>3%) for the SL width
+- RSI ngược hướng (LONG + RSI>70, SHORT + RSI<30)
+- Risk/reward kém (SL > TP)
+- ATR quá cao (>3%) so với SL
+- BTC đang đi ngược hướng tín hiệu (VD: signal SHORT nhưng BTC đang tăng mạnh)
 
 Reply ONLY JSON: {"approved":true/false,"reason":"lý do ngắn gọn bằng tiếng Việt"}`;
 
@@ -1060,6 +1065,44 @@ Reply ONLY JSON: {"approved":true/false,"reason":"lý do ngắn gọn bằng ti�
     // Keep last 20 results, 4h TTL
     const trimmed = perf.slice(-20);
     await this.redisService.set(RECENT_PERF_KEY, trimmed, 4 * 60 * 60);
+  }
+
+  private async getBtcMarketContext(): Promise<string> {
+    try {
+      const [ohlc15m, ohlc4h, ohlc1d] = await Promise.all([
+        this.indicatorService.getOhlc("BTCUSDT", "15m"),
+        this.indicatorService.getOhlc("BTCUSDT", "4h"),
+        this.indicatorService.getOhlc("BTCUSDT", "1d"),
+      ]);
+
+      const closes15m = ohlc15m.closes;
+      const closes4h = ohlc4h.closes;
+      const closes1d = ohlc1d.closes;
+      if (closes15m.length < 50) return "";
+
+      const btcPrice = closes15m[closes15m.length - 1];
+      const rsi15m = this.indicatorService.getRsi(closes15m, 14);
+      const rsi4h = closes4h.length >= 20 ? this.indicatorService.getRsi(closes4h, 14) : null;
+      const ema200 = closes15m.length >= 200 ? this.indicatorService.getEma(closes15m, 200) : null;
+      const priceVsEma200 = ema200 ? ((btcPrice - ema200.last) / ema200.last * 100).toFixed(2) : "N/A";
+
+      // 24h change
+      const price24hAgo = closes15m.length >= 96 ? closes15m[closes15m.length - 96] : closes15m[0];
+      const change24h = ((btcPrice - price24hAgo) / price24hAgo * 100).toFixed(2);
+
+      // 7d change from daily candles
+      const price7dAgo = closes1d.length >= 7 ? closes1d[closes1d.length - 7] : closes1d[0];
+      const change7d = ((btcPrice - price7dAgo) / price7dAgo * 100).toFixed(2);
+
+      return `
+BTC MARKET CONTEXT:
+- BTC Price: $${btcPrice.toLocaleString()} | 24h: ${change24h}% | 7d: ${change7d}%
+- BTC RSI(15m): ${Number(rsi15m).toFixed(1)} | RSI(4h): ${rsi4h ? Number(rsi4h).toFixed(1) : "N/A"}
+- BTC vs EMA200: ${priceVsEma200}%`;
+    } catch (err) {
+      this.logger.debug(`[AiOptimizer] getBtcMarketContext failed: ${err?.message}`);
+      return "";
+    }
   }
 
   private async getRecentPerfContext(): Promise<string> {
