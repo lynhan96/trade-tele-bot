@@ -710,6 +710,14 @@ export class AdminService {
     const count = await this.userRealTradingService.closeAllRealPositions(
       telegramId, telegramId, "ADMIN_CLOSE",
     );
+
+    // Reset cycle and start a new one
+    const resetAt = new Date(Date.now() + 1000);
+    await this.subscriptionModel.findOneAndUpdate(
+      { telegramId },
+      { $set: { cycleResetAt: resetAt, cyclePeakPct: 0, cyclePaused: false } },
+    );
+
     return { success: true, closed: count };
   }
 
