@@ -37,7 +37,7 @@ const AI_SL_COUNTER_KEY = "cache:ai:sl-hits"; // rolling SL hit counter (1h wind
 const MARKET_COOLDOWN_DURATION = 30 * 60; // 30 min cooldown after too many SLs
 const MAX_SL_BEFORE_COOLDOWN = 3; // trigger cooldown after 3 SL hits in 1 hour
 const AI_LAST_REGIME_KEY = "cache:ai:last-regime-for-reversal"; // track regime for reversal detection
-const MAX_ACTIVE_SIGNALS = 10; // Cap concurrent positions to reduce correlated risk
+const MAX_ACTIVE_SIGNALS = 15; // Cap concurrent positions to reduce correlated risk
 
 /** Coins that run BOTH INTRADAY (15m) and SWING (4h) strategies simultaneously.
  * Top 5 by market cap — 15m catches more frequent signals than 4h alone. */
