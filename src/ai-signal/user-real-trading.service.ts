@@ -1014,8 +1014,9 @@ export class UserRealTradingService implements OnModuleInit {
 
   // ─── Cycle P&L limit crons ───────────────────────────────────────────────
 
-  /** Trailing floor ratio: lock profits when PnL drops to 60% of peak. */
-  private readonly TRAILING_FLOOR_RATIO = 0.6;
+  /** Trailing floor ratio: 50% normally, 70% after target hit (paused). */
+  private readonly FLOOR_RATIO_NORMAL = 0.5;
+  private readonly FLOOR_RATIO_TARGET = 0.7;
 
   /**
    * Every 1 minute: check cycle P&L limits for real-mode users.
@@ -1073,12 +1074,40 @@ export class UserRealTradingService implements OnModuleInit {
 
           if (target == null) continue;
 
+          // ── Normal trailing floor (before target): close all when PnL drops to 50% of peak ──
+          if (!paused && peak > 0 && stats.openTrades.length > 0) {
+            const normalFloor = peak * this.FLOOR_RATIO_NORMAL;
+            if (pnlPct <= normalFloor && peak >= target * 0.5) {
+              // Only trigger normal floor if peak was meaningful (at least half of target)
+              const closedCount = await this.closeAllRealPositions(user.telegramId, user.chatId, "CYCLE_TARGET");
+              await this.dailyLimitHistoryModel.create({
+                telegramId: user.telegramId, username: user.username,
+                type: "CYCLE_TARGET", pnlUsdt: stats.totalPnlUsdt, pnlPct,
+                limitPct: target, positionsClosed: closedCount, triggeredAt: new Date(),
+              });
+              const resetAt = new Date(Date.now() + 1000);
+              await this.subscriptionService.setCycleResetAt(user.telegramId, resetAt);
+
+              const sign = stats.totalPnlUsdt >= 0 ? "+" : "";
+              const msg =
+                `🔒 *Cycle Floor: Bao Ve Loi Nhuan*\n` +
+                `━━━━━━━━━━━━━━━━━━\n\n` +
+                `Cycle PnL: *${sign}${stats.totalPnlUsdt.toFixed(2)} USDT* (*${sign}${pnlPct.toFixed(2)}%*)\n` +
+                `Peak: *+${peak.toFixed(2)}%* · Floor: *+${normalFloor.toFixed(2)}%*\n` +
+                (closedCount > 0 ? `Da dong: *${closedCount} lenh*\n` : ``) +
+                `\nCycle moi bat dau — bot tiep tuc mo lenh.`;
+              await this.telegramService.sendTelegramMessage(user.chatId, msg).catch(() => {});
+              this.logger.log(`[RealTrading] Cycle NORMAL FLOOR for user ${user.telegramId}: ${pnlPct.toFixed(2)}% (peak ${peak.toFixed(2)}%, floor ${normalFloor.toFixed(2)}%)`);
+              continue;
+            }
+          }
+
           // ── PAUSE: target hit → stop new trades ──
           if (!paused && pnlPct >= target) {
             await this.subscriptionService.setCyclePaused(user.telegramId, true);
 
             const sign = stats.totalPnlUsdt >= 0 ? "+" : "";
-            const floor = (pnlPct * this.TRAILING_FLOOR_RATIO).toFixed(2);
+            const floor = (pnlPct * this.FLOOR_RATIO_TARGET).toFixed(2);
             const msg =
               `🎯 *Cycle Target: Dat Muc Tieu!*\n` +
               `━━━━━━━━━━━━━━━━━━\n\n` +
@@ -1094,8 +1123,8 @@ export class UserRealTradingService implements OnModuleInit {
 
           // ── Already paused: check trailing floor ──
           if (paused) {
-            // Check trailing floor: close all when PnL drops to 60% of peak
-            const floor = peak * this.TRAILING_FLOOR_RATIO;
+            // Check trailing floor: close all when PnL drops to 70% of peak (tighter after target hit)
+            const floor = peak * this.FLOOR_RATIO_TARGET;
             if (pnlPct <= floor) {
               const closedCount = await this.closeAllRealPositions(user.telegramId, user.chatId, "CYCLE_TARGET");
               await this.dailyLimitHistoryModel.create({
