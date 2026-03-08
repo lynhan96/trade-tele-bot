@@ -484,12 +484,11 @@ export class AiSignalService implements OnModuleInit {
 
       // 2. Auto-close stale ACTIVE signals to free up slots for fresh signals
       // 24h+ profitable → close with profit
-      // 36h+ any PnL → force close (stale signals block new entries)
-      const ONE_DAY_MS = 24 * 60 * 60 * 1000;
-      const STALE_MS = 36 * 60 * 60 * 1000; // 36h = max lifetime for any signal
+      // 48h = max lifetime — force close any signal regardless of PnL
+      const STALE_MS = 48 * 60 * 60 * 1000;
       const isTestMode = await this.isTestModeEnabled();
 
-      const oldActives = await this.signalQueueService.findOldActiveSignals(ONE_DAY_MS);
+      const oldActives = await this.signalQueueService.findOldActiveSignals(STALE_MS);
 
       for (const signal of oldActives) {
         try {
@@ -504,14 +503,14 @@ export class AiSignalService implements OnModuleInit {
           const ageMs = Date.now() - new Date((signal as any).createdAt).getTime();
 
           if (pnlPercent > 0) {
-            // 24h+ and profitable → close with profit
+            // 48h+ and profitable → close with profit
             await this.signalQueueService.closeActiveSignalWithPnl(
               signal, currentPrice, "AUTO_CLOSE_PROFIT",
             );
             this.logger.log(
               `[AiSignal] Auto-closed ${signal.symbol} after ${(ageMs / 3600000).toFixed(0)}h (pnl: +${pnlPercent.toFixed(2)}%)`,
             );
-          } else if (ageMs >= STALE_MS) {
+          } else {
             // 36h+ and losing → force close to free slot
             const reason = "AUTO_CLOSE_STALE";
             await this.signalQueueService.closeActiveSignalWithPnl(signal, currentPrice, reason);
