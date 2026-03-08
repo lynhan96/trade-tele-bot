@@ -907,7 +907,14 @@ export class AiSignalService implements OnModuleInit {
     }
 
     // AI validation gate — lightweight GPT check to filter low-quality signals
+    const validationCooldownKey = `cache:ai:validation-cooldown:${signalKey}`;
     try {
+      // Check cooldown — skip validation (and signal) if recently rejected
+      const cooldown = await this.redisService.get<boolean>(validationCooldownKey);
+      if (cooldown) {
+        return; // silently skip — coin is on cooldown from recent rejection
+      }
+
       const validation = await this.aiOptimizerService.validateSignal({
         symbol: `${coin.toUpperCase()}${currency.toUpperCase()}`,
         direction: signalResult.isLong ? "LONG" : "SHORT",
@@ -919,8 +926,10 @@ export class AiSignalService implements OnModuleInit {
         takeProfitPercent: params.takeProfitPercent,
       });
       if (!validation.approved) {
+        // Set 30-minute cooldown for this coin
+        await this.redisService.set(validationCooldownKey, true, 30 * 60);
         this.logger.log(
-          `[AiSignal] ${signalKey} REJECTED by AI gate: ${validation.reason}`,
+          `[AiSignal] ${signalKey} REJECTED by AI gate (30min cooldown): ${validation.reason}`,
         );
         return;
       }
