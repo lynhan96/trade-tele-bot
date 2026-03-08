@@ -187,7 +187,7 @@ export class AiCommandService implements OnModuleInit {
           `⚡ Bot: ${realMode ? "✅ BẬT" : "❌ TẮT"}\n` +
           `🔑 Binance API: ${hasKeys ? "✅ Da luu" : "❌ Chua luu"}\n` +
           `📊 Leverage: *${leverageLabel}*\n` +
-          `📈 Max vi the: *${sub.maxOpenPositions ?? 3} lenh*\n` +
+          `📈 Max vi the: *${sub.maxOpenPositions ?? 10} lenh*\n` +
           (openTrades.length > 0 ? `📊 Lenh mo: *${openTrades.length}*\n` : "") +
           `🚨 Canh bao dong tien: ${moneyFlow ? "✅ Bat" : "❌ Tat"}\n` +
           `📡 Auto push: ${pushEnabled ? "✅ Bat (10 phut)" : "❌ Tat"}\n\n` +
@@ -1013,7 +1013,7 @@ export class AiCommandService implements OnModuleInit {
 
         const val = match?.[1];
         if (!val) {
-          const cur = sub.maxOpenPositions ?? 3;
+          const cur = sub.maxOpenPositions ?? 10;
           await this.telegramService.sendTelegramMessage(chatId,
             `📊 *Toi da vi the: ${cur} lenh*\n\nDung: /ai maxpos <so>\nVD: /ai maxpos 5`);
           return;

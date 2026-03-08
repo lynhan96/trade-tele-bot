@@ -73,8 +73,8 @@ export class UserSignalSubscription {
   @Prop({ default: false })
   cyclePaused?: boolean; // true = stop opening new trades (target hit, let existing ride)
 
-  @Prop({ default: 3 })
-  maxOpenPositions?: number; // max concurrent real positions per user (default: 3)
+  @Prop({ default: 10 })
+  maxOpenPositions?: number; // max concurrent real positions per user (default: 10)
 
   @Prop({ default: 0 })
   totalPnlUsdt?: number; // cumulative realized PnL in USDT
