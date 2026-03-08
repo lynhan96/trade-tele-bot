@@ -26,8 +26,8 @@ const AI_MARKET_FILTERS_KEY = "cache:ai:market-filters"; // AI-decided coin filt
 const AI_MARKET_FILTERS_TTL = 8 * 60 * 60; // 8h — re-evaluated on regime change
 const RATE_WINDOW = 60 * 60; // 1h window
 
-const GPT_MODEL = "gpt-4o";
-const GPT_MODEL_PREMIUM = "gpt-4o"; // all calls now use gpt-4o
+const GPT_MODEL = "gpt-4o-mini"; // regular coin tuning (cheap, high volume)
+const GPT_MODEL_PREMIUM = "gpt-4o"; // premium coins + validation + regime (better reasoning)
 const GPT_RATE_KEY = "cache:ai:rate:gpt"; // hourly budget for GPT
 const GPT_PREMIUM_RATE_KEY = "cache:ai:rate:gpt4o"; // hourly budget for GPT-4o
 const RECENT_PERF_KEY = "cache:ai:recent-perf"; // recent SL/TP stats for GPT context
@@ -263,7 +263,7 @@ Reply ONLY JSON: {"regime":"REGIME_NAME","reason":"brief reason"}`;
 
     try {
       const response = await this.openai.chat.completions.create({
-        model: GPT_MODEL,
+        model: GPT_MODEL_PREMIUM, // regime assessment needs better reasoning
         max_tokens: 100,
         messages: [{ role: "user", content: prompt }],
         response_format: { type: "json_object" },
