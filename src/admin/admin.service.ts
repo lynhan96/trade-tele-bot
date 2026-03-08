@@ -223,6 +223,8 @@ export class AdminService {
     let wins: number | undefined;
     let losses: number | undefined;
     let totalPnl: number | undefined;
+    let winPnl: number | undefined;
+    let lossPnl: number | undefined;
     if (filter.status === "COMPLETED") {
       const agg = await this.signalModel.aggregate([
         { $match: { ...filter, pnlPercent: { $exists: true } } },
@@ -232,15 +234,19 @@ export class AdminService {
             wins: { $sum: { $cond: [{ $gt: ["$pnlPercent", 0] }, 1, 0] } },
             losses: { $sum: { $cond: [{ $lte: ["$pnlPercent", 0] }, 1, 0] } },
             totalPnl: { $sum: "$pnlPercent" },
+            winPnl: { $sum: { $cond: [{ $gt: ["$pnlPercent", 0] }, "$pnlPercent", 0] } },
+            lossPnl: { $sum: { $cond: [{ $lte: ["$pnlPercent", 0] }, "$pnlPercent", 0] } },
           },
         },
       ]);
       wins = agg[0]?.wins ?? 0;
       losses = agg[0]?.losses ?? 0;
       totalPnl = agg[0]?.totalPnl ?? 0;
+      winPnl = agg[0]?.winPnl ?? 0;
+      lossPnl = agg[0]?.lossPnl ?? 0;
     }
 
-    return { data, total, page, limit, totalPages: Math.ceil(total / limit), wins, losses, totalPnl };
+    return { data, total, page, limit, totalPages: Math.ceil(total / limit), wins, losses, totalPnl, winPnl, lossPnl };
   }
 
   async getSignalStats(query: { status?: string; direction?: string }) {
