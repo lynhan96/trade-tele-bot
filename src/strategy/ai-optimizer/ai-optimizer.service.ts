@@ -796,7 +796,7 @@ Reply ONLY JSON:
       return { approved: false, reason: "No OpenAI key — cannot validate" };
     }
     // Validation has its own dedicated rate limit so regime/tuning calls can't starve it
-    if (!(await this.checkRateLimit(GPT_VALIDATION_RATE_KEY, 30))) {
+    if (!(await this.checkRateLimit(GPT_VALIDATION_RATE_KEY, 100))) {
       this.logger.warn(`[AiOptimizer] Validation BLOCKED (rate limit hit)`);
       return { approved: false, reason: "Validation rate limit — try again later" };
     }
