@@ -969,8 +969,9 @@ export class AiSignalService implements OnModuleInit {
         return;
       }
     } catch (err) {
-      // On error, let signal through (fail-open)
-      this.logger.warn(`[AiSignal] AI validation gate error for ${signalKey}: ${err?.message}`);
+      // On error, block signal (fail-closed — all signals must be validated)
+      this.logger.warn(`[AiSignal] AI validation gate error for ${signalKey}: ${err?.message} — BLOCKED`);
+      return;
     }
 
     const isTestMode = await this.isTestModeEnabled();

@@ -792,13 +792,13 @@ Reply ONLY JSON:
     indicators: Record<string, any>;
   }): Promise<{ approved: boolean; reason?: string }> {
     if (!this.openai) {
-      this.logger.warn(`[AiOptimizer] Validation skipped (no OpenAI key) — auto-approved`);
-      return { approved: true };
+      this.logger.warn(`[AiOptimizer] Validation BLOCKED (no OpenAI key)`);
+      return { approved: false, reason: "No OpenAI key — cannot validate" };
     }
     // Validation has its own dedicated rate limit so regime/tuning calls can't starve it
     if (!(await this.checkRateLimit(GPT_VALIDATION_RATE_KEY, 30))) {
-      this.logger.warn(`[AiOptimizer] Validation rate limit hit — auto-approved`);
-      return { approved: true };
+      this.logger.warn(`[AiOptimizer] Validation BLOCKED (rate limit hit)`);
+      return { approved: false, reason: "Validation rate limit — try again later" };
     }
 
     const [perfContext, btcContext] = await Promise.all([
