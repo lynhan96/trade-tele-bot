@@ -51,7 +51,10 @@ export class PositionMonitorService implements OnModuleInit {
   /** Callback for SL-moved-to-entry notification. */
   private slMovedCallback?: (symbol: string, entryPrice: number) => Promise<void>;
 
-  /** Callback for SL raised to +2% profit (5% milestone). */
+  /** Callback for SL raised to +1.5% profit (3% milestone). */
+  private sl3PctCallback?: (symbol: string, newSl: number, direction: string) => Promise<void>;
+
+  /** Callback for SL raised to +3% profit (5% milestone). */
   private sl5PctCallback?: (symbol: string, newSl: number, direction: string) => Promise<void>;
 
   /** Callback for TP boosted on momentum. */
@@ -63,6 +66,10 @@ export class PositionMonitorService implements OnModuleInit {
 
   setSlMovedCallback(cb: (symbol: string, entryPrice: number) => Promise<void>): void {
     this.slMovedCallback = cb;
+  }
+
+  setSl3PctCallback(cb: (symbol: string, newSl: number, direction: string) => Promise<void>): void {
+    this.sl3PctCallback = cb;
   }
 
   setSl5PctCallback(cb: (symbol: string, newSl: number, direction: string) => Promise<void>): void {
@@ -169,9 +176,9 @@ export class PositionMonitorService implements OnModuleInit {
     );
   }
 
-  private unregisterListener(signal: AiSignalDocument): void;
-  private unregisterListener(sigKey: string, symbol?: string): void;
-  private unregisterListener(signalOrKey: AiSignalDocument | string, symbol?: string): void {
+  unregisterListener(signal: AiSignalDocument): void;
+  unregisterListener(sigKey: string, symbol?: string): void;
+  unregisterListener(signalOrKey: AiSignalDocument | string, symbol?: string): void {
     let sigKey: string;
     let realSymbol: string;
     if (typeof signalOrKey === "string") {
@@ -239,8 +246,8 @@ export class PositionMonitorService implements OnModuleInit {
       this.logger.log(
         `[PositionMonitor] 📈 ${sigKey} SL raised to +1.5% (${newSl.toFixed(4)}) at ${pnlPct.toFixed(2)}% profit`,
       );
-      if (this.sl5PctCallback) {
-        await this.sl5PctCallback(symbol, newSl, direction).catch((e) =>
+      if (this.sl3PctCallback) {
+        await this.sl3PctCallback(symbol, newSl, direction).catch((e) =>
           this.logger.warn(`[PositionMonitor] sl3PctCallback error ${sigKey}: ${e?.message}`),
         );
       }
