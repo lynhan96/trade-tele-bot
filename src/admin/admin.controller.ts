@@ -135,6 +135,12 @@ export class AdminController {
   }
 
   @UseGuards(AdminGuard)
+  @Get("trades/stats")
+  getTradeStats(@Query() query: Record<string, string>) {
+    return this.adminService.getTradeStats(query);
+  }
+
+  @UseGuards(AdminGuard)
   @Get("trades")
   getTrades(@Query() query: Record<string, string>) {
     return this.adminService.getTrades(query);

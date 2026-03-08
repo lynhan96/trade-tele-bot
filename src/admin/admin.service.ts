@@ -507,6 +507,38 @@ export class AdminService {
     return { success: true };
   }
 
+  async getTradeStats(query: { status?: string; symbol?: string; telegramId?: string; dateFrom?: string; dateTo?: string }) {
+    const filter: any = {};
+    if (query.status) filter.status = query.status;
+    if (query.symbol) filter.symbol = query.symbol.toUpperCase();
+    if (query.telegramId) filter.telegramId = parseInt(query.telegramId, 10);
+    if (query.dateFrom || query.dateTo) {
+      filter.createdAt = {};
+      if (query.dateFrom) filter.createdAt.$gte = new Date(query.dateFrom);
+      if (query.dateTo) filter.createdAt.$lte = new Date(query.dateTo);
+    }
+
+    const [total, pnlDocs] = await Promise.all([
+      this.tradeModel.countDocuments(filter),
+      this.tradeModel.find({ ...filter, pnlPercent: { $exists: true }, status: 'CLOSED' }).select('pnlPercent').lean(),
+    ]);
+
+    const wins = pnlDocs.filter((t) => t.pnlPercent > 0).length;
+    const losses = pnlDocs.filter((t) => t.pnlPercent <= 0).length;
+    const winRate = pnlDocs.length > 0 ? (wins / pnlDocs.length) * 100 : 0;
+    const totalPnl = pnlDocs.reduce((sum, t) => sum + t.pnlPercent, 0);
+    const avgPnl = pnlDocs.length > 0 ? totalPnl / pnlDocs.length : 0;
+
+    return {
+      total,
+      wins,
+      losses,
+      winRate: Math.round(winRate * 10) / 10,
+      avgPnl: Math.round(avgPnl * 100) / 100,
+      totalPnl: Math.round(totalPnl * 100) / 100,
+    };
+  }
+
   async getTrades(query: {
     page?: number;
     limit?: number;
