@@ -478,6 +478,34 @@ export class AdminService {
       .lean();
   }
 
+  async setUserApiKeys(
+    telegramId: number,
+    exchange: 'binance' | 'okx',
+    dto: { apiKey: string; apiSecret: string; passphrase?: string },
+  ) {
+    const exchangeData: any = {
+      apiKey: dto.apiKey,
+      apiSecret: dto.apiSecret,
+      createdAt: new Date(),
+    };
+    if (dto.passphrase) exchangeData.passphrase = dto.passphrase;
+
+    await this.userSettingsModel.updateOne(
+      { telegramId },
+      { $set: { [exchange]: exchangeData, telegramId } },
+      { upsert: true },
+    );
+    return { success: true };
+  }
+
+  async removeUserApiKeys(telegramId: number, exchange: 'binance' | 'okx') {
+    await this.userSettingsModel.updateOne(
+      { telegramId },
+      { $unset: { [exchange]: 1 } },
+    );
+    return { success: true };
+  }
+
   async getTrades(query: {
     page?: number;
     limit?: number;

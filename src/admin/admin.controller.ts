@@ -2,7 +2,9 @@ import {
   Controller,
   Get,
   Post,
+  Put,
   Patch,
+  Delete,
   Param,
   Query,
   Body,
@@ -104,6 +106,32 @@ export class AdminController {
   @Patch("users/:telegramId")
   updateUser(@Param("telegramId") telegramId: string, @Body() dto: Record<string, unknown>) {
     return this.adminService.updateUser(parseInt(telegramId, 10), dto);
+  }
+
+  @UseGuards(AdminGuard)
+  @Put("users/:telegramId/api-keys/:exchange")
+  setUserApiKeys(
+    @Param("telegramId") telegramId: string,
+    @Param("exchange") exchange: string,
+    @Body() dto: { apiKey: string; apiSecret: string; passphrase?: string },
+  ) {
+    return this.adminService.setUserApiKeys(
+      parseInt(telegramId, 10),
+      exchange as 'binance' | 'okx',
+      dto,
+    );
+  }
+
+  @UseGuards(AdminGuard)
+  @Delete("users/:telegramId/api-keys/:exchange")
+  removeUserApiKeys(
+    @Param("telegramId") telegramId: string,
+    @Param("exchange") exchange: string,
+  ) {
+    return this.adminService.removeUserApiKeys(
+      parseInt(telegramId, 10),
+      exchange as 'binance' | 'okx',
+    );
   }
 
   @UseGuards(AdminGuard)
