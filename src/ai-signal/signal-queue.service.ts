@@ -240,8 +240,24 @@ export class SignalQueueService {
   }
 
   /**
+   * Raise stop loss to +1.5% profit at 3% milestone.
+   */
+  async raiseStopLoss3Pct(signalId: string, newStopLoss: number): Promise<void> {
+    const signal = await this.aiSignalModel.findById(signalId);
+    if (!signal || signal.status !== "ACTIVE") return;
+
+    await this.aiSignalModel.findByIdAndUpdate(signalId, {
+      stopLossPrice: newStopLoss,
+      sl3PctRaised: true,
+    });
+    this.logger.log(
+      `[SignalQueue] ${signal.symbol} SL raised to ${newStopLoss.toFixed(4)} (+1.5% lock-in at 3% milestone)`,
+    );
+  }
+
+  /**
    * Raise stop loss to lock in profit (trailing stop milestone).
-   * Called when unrealized PnL reaches 5% — moves SL to +2% profit.
+   * Called when unrealized PnL reaches 5% — moves SL to +3% profit.
    */
   async raiseStopLoss(signalId: string, newStopLoss: number): Promise<void> {
     const signal = await this.aiSignalModel.findById(signalId);
@@ -252,7 +268,7 @@ export class SignalQueueService {
       sl5PctRaised: true,
     });
     this.logger.log(
-      `[SignalQueue] ${signal.symbol} SL raised to ${newStopLoss.toFixed(4)} (+2% lock-in at 5% milestone)`,
+      `[SignalQueue] ${signal.symbol} SL raised to ${newStopLoss.toFixed(4)} (+3% lock-in at 5% milestone)`,
     );
   }
 

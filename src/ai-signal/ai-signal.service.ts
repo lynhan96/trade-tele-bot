@@ -1199,29 +1199,44 @@ export class AiSignalService implements OnModuleInit {
       ? ((currentPrice - signal.entryPrice) / signal.entryPrice) * 100
       : ((signal.entryPrice - currentPrice) / signal.entryPrice) * 100;
 
-    // At >= 5% profit — raise SL to lock in 2% profit (trailing stop milestone, don't auto-close)
+    // ── Milestone 3: At >= 5% profit — raise SL to +3% profit lock ──────
     if (pnlPct >= 5 && !(signal as any).sl5PctRaised) {
       const newSl = isLong
-        ? signal.entryPrice * 1.02
-        : signal.entryPrice * 0.98;
+        ? signal.entryPrice * 1.03
+        : signal.entryPrice * 0.97;
       await this.signalQueueService.raiseStopLoss((signal as any)._id.toString(), newSl);
       (signal as any).stopLossPrice = newSl;
       (signal as any).sl5PctRaised = true;
+      (signal as any).sl3PctRaised = true;
+      (signal as any).slMovedToEntry = true;
       this.logger.log(
-        `[AiSignal] [TEST] 🚀 ${signal.symbol} SL raised to +2% (${newSl.toFixed(4)}) at ${pnlPct.toFixed(2)}% profit — still running`,
+        `[AiSignal] [TEST] 🚀 ${signal.symbol} SL raised to +3% (${newSl.toFixed(4)}) at ${pnlPct.toFixed(2)}% profit — still running`,
       );
       await this.notifySl5PctMilestone(signal.symbol, newSl, signal.direction);
     }
 
-    // Move SL to entry (break-even) at >= 3% profit (matches PositionMonitor threshold)
-    if (pnlPct >= 3 && !(signal as any).slMovedToEntry) {
+    // ── Milestone 2: At >= 3% profit — raise SL to +1.5% profit lock ──
+    if (pnlPct >= 3 && !(signal as any).sl3PctRaised) {
+      const newSl = isLong
+        ? signal.entryPrice * 1.015
+        : signal.entryPrice * 0.985;
+      await this.signalQueueService.raiseStopLoss3Pct((signal as any)._id.toString(), newSl);
+      (signal as any).stopLossPrice = newSl;
+      (signal as any).sl3PctRaised = true;
+      (signal as any).slMovedToEntry = true;
+      this.logger.log(
+        `[AiSignal] [TEST] 📈 ${signal.symbol} SL raised to +1.5% (${newSl.toFixed(4)}) at ${pnlPct.toFixed(2)}% profit`,
+      );
+    }
+
+    // ── Milestone 1: At >= 1.5% profit — move SL to entry (break-even) ─
+    if (pnlPct >= 1.5 && !(signal as any).slMovedToEntry) {
       await this.signalQueueService.moveStopLossToEntry((signal as any)._id.toString());
       (signal as any).stopLossPrice = signal.entryPrice;
       (signal as any).slMovedToEntry = true;
       this.logger.log(
         `[AiSignal] [TEST] 🛡️ ${signal.symbol} SL moved to entry ${signal.entryPrice} (PnL: ${pnlPct.toFixed(2)}%)`,
       );
-      // Notify subscribers of SL move
       await this.notifySlMovedToEntry(signal.symbol, signal.entryPrice);
     }
 

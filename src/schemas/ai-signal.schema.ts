@@ -93,10 +93,13 @@ export class AiSignal {
   isTestMode: boolean; // true = signal generated in test mode (no real trades placed)
 
   @Prop({ default: false })
-  slMovedToEntry?: boolean; // true = SL moved to entry (break-even protection)
+  slMovedToEntry?: boolean; // true = SL moved to entry at 1.5% profit (break-even protection)
 
   @Prop({ default: false })
-  sl5PctRaised?: boolean; // true = SL raised to +2% profit at 5% milestone (trailing stop)
+  sl3PctRaised?: boolean; // true = SL raised to +1.5% profit at 3% milestone
+
+  @Prop({ default: false })
+  sl5PctRaised?: boolean; // true = SL raised to +3% profit at 5% milestone (trailing stop)
 
   @Prop({ default: false })
   tpBoosted?: boolean; // true = TP extended on volume momentum (one-time per signal)

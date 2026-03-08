@@ -156,6 +156,7 @@ export class PositionMonitorService implements OnModuleInit {
 
     // Restore persisted flags from DB so they survive bot restarts
     if ((signal as any).slMovedToEntry) (signal as any).slMovedToEntry = true;
+    if ((signal as any).sl3PctRaised) (signal as any).sl3PctRaised = true;
     if ((signal as any).sl5PctRaised) (signal as any).sl5PctRaised = true;
     if ((signal as any).tpBoosted) (signal as any).tpBoosted = true;
 
@@ -205,29 +206,49 @@ export class PositionMonitorService implements OnModuleInit {
         ? ((price - entryPrice) / entryPrice) * 100
         : ((entryPrice - price) / entryPrice) * 100;
 
-    // At >= 5% profit — raise SL to lock in 2% profit (trailing stop milestone, don't auto-close)
+    // ── Milestone 3: At >= 5% profit — raise SL to +3% profit lock ──────
     if (pnlPct >= 5 && !(signal as any).sl5PctRaised) {
       const newSl = direction === "LONG"
-        ? entryPrice * 1.02
-        : entryPrice * 0.98;
+        ? entryPrice * 1.03
+        : entryPrice * 0.97;
       (signal as any).stopLossPrice = newSl;
       (signal as any).sl5PctRaised = true;
-      (signal as any).slMovedToEntry = true; // prevents the 4% block from overwriting this SL on same tick
+      (signal as any).sl3PctRaised = true;
+      (signal as any).slMovedToEntry = true;
       await this.signalQueueService.raiseStopLoss((signal as any)._id.toString(), newSl);
       this.logger.log(
-        `[PositionMonitor] 🚀 ${sigKey} SL raised to +2% (${newSl.toFixed(4)}) at ${pnlPct.toFixed(2)}% profit — still running`,
+        `[PositionMonitor] 🚀 ${sigKey} SL raised to +3% (${newSl.toFixed(4)}) at ${pnlPct.toFixed(2)}% profit — still running`,
       );
       if (this.sl5PctCallback) {
         await this.sl5PctCallback(symbol, newSl, direction).catch((e) =>
           this.logger.warn(`[PositionMonitor] sl5PctCallback error ${sigKey}: ${e?.message}`),
         );
       }
-      // Propagate SL move to real Binance orders (with retry)
       this.propagateSlMove(sigKey, symbol, newSl, direction);
     }
 
-    // Move SL to entry (break-even) at >= 3% profit (skipped if 5% milestone already triggered)
-    if (pnlPct >= 3 && !(signal as any).slMovedToEntry) {
+    // ── Milestone 2: At >= 3% profit — raise SL to +1.5% profit lock ──
+    if (pnlPct >= 3 && !(signal as any).sl3PctRaised) {
+      const newSl = direction === "LONG"
+        ? entryPrice * 1.015
+        : entryPrice * 0.985;
+      (signal as any).stopLossPrice = newSl;
+      (signal as any).sl3PctRaised = true;
+      (signal as any).slMovedToEntry = true;
+      await this.signalQueueService.raiseStopLoss3Pct((signal as any)._id.toString(), newSl);
+      this.logger.log(
+        `[PositionMonitor] 📈 ${sigKey} SL raised to +1.5% (${newSl.toFixed(4)}) at ${pnlPct.toFixed(2)}% profit`,
+      );
+      if (this.sl5PctCallback) {
+        await this.sl5PctCallback(symbol, newSl, direction).catch((e) =>
+          this.logger.warn(`[PositionMonitor] sl3PctCallback error ${sigKey}: ${e?.message}`),
+        );
+      }
+      this.propagateSlMove(sigKey, symbol, newSl, direction);
+    }
+
+    // ── Milestone 1: At >= 1.5% profit — move SL to entry (break-even) ─
+    if (pnlPct >= 1.5 && !(signal as any).slMovedToEntry) {
       (signal as any).stopLossPrice = entryPrice;
       (signal as any).slMovedToEntry = true;
       await this.signalQueueService.moveStopLossToEntry((signal as any)._id.toString());
@@ -239,7 +260,6 @@ export class PositionMonitorService implements OnModuleInit {
           this.logger.warn(`[PositionMonitor] slMovedCallback error ${sigKey}: ${e?.message}`),
         );
       }
-      // Propagate SL move to real Binance orders (with retry)
       this.propagateSlMove(sigKey, symbol, entryPrice, direction);
     }
 

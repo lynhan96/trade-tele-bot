@@ -809,7 +809,7 @@ Reply ONLY JSON:
     ]);
     const { symbol, direction, strategy, regime, confidence, stopLossPercent, takeProfitPercent, indicators } = signal;
 
-    const prompt = `Bạn là chuyên gia phân tích crypto. Đánh giá nhanh tín hiệu giao dịch này. Hãy nghiêm khắc — từ chối giao dịch không chắc chắn.
+    const prompt = `Bạn là bộ lọc tín hiệu giao dịch crypto. Duyệt tín hiệu — CHỈ từ chối khi có rủi ro RÕ RÀNG.
 
 Tín hiệu: ${symbol} ${direction} — chiến lược ${strategy}
 Regime: ${regime}, Confidence: ${confidence}%
@@ -820,19 +820,17 @@ Price vs EMA9: ${indicators.priceVsEma9_pct || "N/A"}%, vs EMA200: ${indicators.
 ${btcContext}
 ${perfContext}
 
-HƯỚNG DẪN ĐÁNH GIÁ:
-- Dựa vào BTC context ở trên để xác định xu hướng thị trường
-- Nếu BTC đang hồi phục (24h/7d tăng, RSI tăng) → LONG có thể hợp lý, SHORT cẩn thận
-- Nếu BTC đang giảm mạnh → SHORT ưu tiên, LONG cần tín hiệu rất mạnh
-- Regime MIXED/RANGE_BOUND: cả 2 hướng đều OK nếu indicators phù hợp
+QUY TẮC QUAN TRỌNG — TUÂN THỦ CHÍNH XÁC, KHÔNG TỰ ĐẶT NGƯỠNG MỚI:
+1. DUYỆT (approved=true) nếu confidence >= 45% VÀ không có lý do từ chối rõ ràng
+2. Dữ liệu "N/A" KHÔNG phải lý do từ chối — hệ thống đã kiểm tra trước khi gửi tín hiệu
+3. Hiệu suất gần đây chỉ là THAM KHẢO — KHÔNG từ chối chỉ vì lệnh gần đây thua lỗ
+4. KHÔNG tự đặt ngưỡng confidence cao hơn 45% (không dùng 60%, 70% hay bất kỳ số nào khác)
 
-Từ chối nếu:
-- Confidence < 45%
-- RSI ngược hướng (LONG + RSI>70, SHORT + RSI<30)
-- Risk/reward kém (SL > TP)
-- ATR quá cao (>3%) so với SL
-- BTC đi ngược hướng tín hiệu rõ ràng
-- Tín hiệu yếu, thiếu xác nhận từ nhiều indicators
+CHỈ từ chối khi:
+- Confidence < 45% (ĐÚNG 45%, không cao hơn)
+- RSI ngược hướng rõ ràng (LONG + RSI>75, SHORT + RSI<25)
+- BTC đi ngược hướng tín hiệu MỘT CÁCH RÕ RÀNG (>3% ngược hướng trong 24h)
+- Risk/reward quá kém (SL > TP * 1.5)
 
 Reply ONLY JSON: {"approved":true/false,"reason":"lý do ngắn gọn bằng tiếng Việt"}`;
 
@@ -1118,9 +1116,8 @@ BTC MARKET CONTEXT:
     const recentSLs = perf.slice(-5).filter((p) => p.closeReason === "STOP_LOSS").length;
 
     let context = `\nRecent performance (last ${perf.length} trades): ${wins}W/${losses}L.`;
-    if (longLosses > losses / 2) context += ` LONGs losing heavily (${longLosses} losses).`;
-    if (shortLosses > losses / 2) context += ` SHORTs losing heavily (${shortLosses} losses).`;
-    if (recentSLs >= 3) context += ` WARNING: ${recentSLs}/5 recent trades hit SL — market unstable, use higher confidence threshold and wider SL.`;
+    if (recentSLs >= 4) context += ` Note: ${recentSLs}/5 recent SLs — consider wider SL.`;
+    context += ` (Chỉ tham khảo — KHÔNG từ chối chỉ vì hiệu suất gần đây.)`;
     return context;
   }
 
