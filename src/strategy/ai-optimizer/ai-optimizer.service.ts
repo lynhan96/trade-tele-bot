@@ -870,8 +870,8 @@ Reply ONLY JSON: {"approved":true/false,"reason":"brief reason"}`;
       // MEAN_REVERT_RSI removed from defaults (1 win / 22 trades = -21.54% PnL)
       strategy: isTrend ? "EMA_PULLBACK|TREND_EMA|RSI_CROSS" : isSideways ? "BB_SCALP|RSI_CROSS" : "RSI_CROSS|BB_SCALP",
       confidence: isSideways ? 45 : isTrend ? 60 : 55,
-      stopLossPercent: isSideways ? 3.0 : isTrend ? 3.5 : 3.0,
-      takeProfitPercent: isSideways ? 3.0 : isTrend ? 5.0 : 4.0,
+      stopLossPercent: 3.0,
+      takeProfitPercent: 4.0,
       minConfidenceToTrade: isSideways ? 42 : isTrend ? 50 : 45,
       rsiCross: {
         primaryKline: "15m",
