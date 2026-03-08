@@ -482,9 +482,8 @@ export class AiSignalService implements OnModuleInit {
         );
       }
 
-      // 2. Auto-close stale ACTIVE signals to free up slots for fresh signals
-      // 24h+ profitable → close with profit
-      // 48h = max lifetime — force close any signal regardless of PnL
+      // 2. Auto-close ACTIVE signals after 48h — ONLY if profitable
+      // Losing signals are left to hit their SL naturally
       const STALE_MS = 48 * 60 * 60 * 1000;
       const isTestMode = await this.isTestModeEnabled();
 
@@ -501,22 +500,15 @@ export class AiSignalService implements OnModuleInit {
               : ((signal.entryPrice - currentPrice) / signal.entryPrice) * 100;
 
           const ageMs = Date.now() - new Date((signal as any).createdAt).getTime();
+          const ageH = (ageMs / 3600000).toFixed(0);
 
           if (pnlPercent > 0) {
-            // 48h+ and profitable → close with profit
+            // 48h+ and profitable → close with descriptive reason
+            const reason = `Auto-closed +${pnlPercent.toFixed(2)}% after ${ageH}h`;
             await this.signalQueueService.closeActiveSignalWithPnl(
-              signal, currentPrice, "AUTO_CLOSE_PROFIT",
+              signal, currentPrice, reason,
             );
-            this.logger.log(
-              `[AiSignal] Auto-closed ${signal.symbol} after ${(ageMs / 3600000).toFixed(0)}h (pnl: +${pnlPercent.toFixed(2)}%)`,
-            );
-          } else {
-            // 36h+ and losing → force close to free slot
-            const reason = "AUTO_CLOSE_STALE";
-            await this.signalQueueService.closeActiveSignalWithPnl(signal, currentPrice, reason);
-            this.logger.log(
-              `[AiSignal] Force-closed stale ${signal.symbol} after ${(ageMs / 3600000).toFixed(0)}h (pnl: ${pnlPercent.toFixed(2)}%)`,
-            );
+            this.logger.log(`[AiSignal] ${reason} — ${signal.symbol}`);
 
             // Close real Binance positions if not test mode
             if (!isTestMode) {
@@ -527,6 +519,11 @@ export class AiSignalService implements OnModuleInit {
                 ).catch(() => {});
               }
             }
+          } else {
+            // 48h+ but losing → skip, let SL handle it naturally
+            this.logger.log(
+              `[AiSignal] Skipping auto-close for ${signal.symbol} — losing (${pnlPercent.toFixed(2)}%) after ${ageH}h, waiting for SL`,
+            );
           }
         } catch (err) {
           this.logger.error(
