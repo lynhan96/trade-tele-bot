@@ -800,7 +800,7 @@ Reply ONLY JSON:
     indicators: Record<string, any>;
   }): Promise<{ approved: boolean; reason?: string }> {
     if (!this.openai) return { approved: true };
-    if (!(await this.checkRateLimit(GPT_RATE_KEY, this.maxGptPerHour))) return { approved: true };
+    if (!(await this.checkRateLimit(GPT_PREMIUM_RATE_KEY, this.maxGpt4oPerHour))) return { approved: true };
 
     const [perfContext, btcContext] = await Promise.all([
       this.getRecentPerfContext(),
@@ -836,12 +836,12 @@ Reply ONLY JSON: {"approved":true/false,"reason":"lý do ngắn gọn bằng ti�
 
     try {
       const response = await this.openai.chat.completions.create({
-        model: GPT_MODEL,
-        max_tokens: 120,
+        model: GPT_MODEL_PREMIUM,
+        max_tokens: 150,
         messages: [{ role: "user", content: prompt }],
         response_format: { type: "json_object" },
       });
-      await this.incrementRateLimit(GPT_RATE_KEY);
+      await this.incrementRateLimit(GPT_PREMIUM_RATE_KEY);
 
       const text = response.choices[0]?.message?.content?.trim() || "";
       const parsed = JSON.parse(text);
@@ -853,7 +853,7 @@ Reply ONLY JSON: {"approved":true/false,"reason":"lý do ngắn gọn bằng ti�
         stopLossPercent, takeProfitPercent,
         approved: result.approved,
         reason: result.reason,
-        model: GPT_MODEL,
+        model: GPT_MODEL_PREMIUM,
       }).catch((e) => this.logger.warn(`[AiOptimizer] Failed to save validation: ${e?.message}`));
 
       return result;
