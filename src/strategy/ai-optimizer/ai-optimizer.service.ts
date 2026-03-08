@@ -30,6 +30,7 @@ const GPT_MODEL = "gpt-4o-mini"; // regular coin tuning (cheap, high volume)
 const GPT_MODEL_PREMIUM = "gpt-4o"; // premium coins + validation + regime (better reasoning)
 const GPT_RATE_KEY = "cache:ai:rate:gpt"; // hourly budget for GPT
 const GPT_PREMIUM_RATE_KEY = "cache:ai:rate:gpt4o"; // hourly budget for GPT-4o
+const GPT_VALIDATION_RATE_KEY = "cache:ai:rate:validation"; // dedicated budget for validation gate
 const RECENT_PERF_KEY = "cache:ai:recent-perf"; // recent SL/TP stats for GPT context
 
 /** Top coins get GPT-4o for better SL/TP tuning accuracy. */
@@ -790,8 +791,15 @@ Reply ONLY JSON:
     takeProfitPercent: number;
     indicators: Record<string, any>;
   }): Promise<{ approved: boolean; reason?: string }> {
-    if (!this.openai) return { approved: true };
-    if (!(await this.checkRateLimit(GPT_RATE_KEY, this.maxGptPerHour))) return { approved: true };
+    if (!this.openai) {
+      this.logger.warn(`[AiOptimizer] Validation skipped (no OpenAI key) — auto-approved`);
+      return { approved: true };
+    }
+    // Validation has its own dedicated rate limit so regime/tuning calls can't starve it
+    if (!(await this.checkRateLimit(GPT_VALIDATION_RATE_KEY, 30))) {
+      this.logger.warn(`[AiOptimizer] Validation rate limit hit — auto-approved`);
+      return { approved: true };
+    }
 
     const [perfContext, btcContext] = await Promise.all([
       this.getRecentPerfContext(),
@@ -831,7 +839,7 @@ Reply ONLY JSON: {"approved":true/false,"reason":"lý do ngắn gọn bằng ti�
         messages: [{ role: "user", content: prompt }],
         response_format: { type: "json_object" },
       });
-      await this.incrementRateLimit(GPT_RATE_KEY);
+      await this.incrementRateLimit(GPT_VALIDATION_RATE_KEY);
 
       const text = response.choices[0]?.message?.content?.trim() || "";
       const parsed = JSON.parse(text);
