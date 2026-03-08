@@ -37,6 +37,7 @@ const AI_SL_COUNTER_KEY = "cache:ai:sl-hits"; // rolling SL hit counter (1h wind
 const MARKET_COOLDOWN_DURATION = 30 * 60; // 30 min cooldown after too many SLs
 const MAX_SL_BEFORE_COOLDOWN = 3; // trigger cooldown after 3 SL hits in 1 hour
 const AI_LAST_REGIME_KEY = "cache:ai:last-regime-for-reversal"; // track regime for reversal detection
+const MAX_ACTIVE_SIGNALS = 10; // Cap concurrent positions to reduce correlated risk
 
 /** Coins that run BOTH INTRADAY (15m) and SWING (4h) strategies simultaneously.
  * Top 5 by market cap — 15m catches more frequent signals than 4h alone. */
@@ -481,9 +482,14 @@ export class AiSignalService implements OnModuleInit {
         );
       }
 
-      // 2. Auto-close ACTIVE signals older than 2 days if profitable
-      const TWO_DAYS_MS = 2 * 24 * 60 * 60 * 1000;
-      const oldActives = await this.signalQueueService.findOldActiveSignals(TWO_DAYS_MS);
+      // 2. Auto-close stale ACTIVE signals to free up slots for fresh signals
+      // 24h+ profitable → close with profit
+      // 36h+ any PnL → force close (stale signals block new entries)
+      const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+      const STALE_MS = 36 * 60 * 60 * 1000; // 36h = max lifetime for any signal
+      const isTestMode = await this.isTestModeEnabled();
+
+      const oldActives = await this.signalQueueService.findOldActiveSignals(ONE_DAY_MS);
 
       for (const signal of oldActives) {
         try {
@@ -495,16 +501,34 @@ export class AiSignalService implements OnModuleInit {
               ? ((currentPrice - signal.entryPrice) / signal.entryPrice) * 100
               : ((signal.entryPrice - currentPrice) / signal.entryPrice) * 100;
 
+          const ageMs = Date.now() - new Date((signal as any).createdAt).getTime();
+
           if (pnlPercent > 0) {
-            // Profitable → auto-close with PnL
+            // 24h+ and profitable → close with profit
             await this.signalQueueService.closeActiveSignalWithPnl(
               signal, currentPrice, "AUTO_CLOSE_PROFIT",
             );
             this.logger.log(
-              `[AiSignal] Auto-closed ${signal.symbol} after 2d+ (pnl: +${pnlPercent.toFixed(2)}%)`,
+              `[AiSignal] Auto-closed ${signal.symbol} after ${(ageMs / 3600000).toFixed(0)}h (pnl: +${pnlPercent.toFixed(2)}%)`,
             );
+          } else if (ageMs >= STALE_MS) {
+            // 36h+ and losing → force close to free slot
+            const reason = "AUTO_CLOSE_STALE";
+            await this.signalQueueService.closeActiveSignalWithPnl(signal, currentPrice, reason);
+            this.logger.log(
+              `[AiSignal] Force-closed stale ${signal.symbol} after ${(ageMs / 3600000).toFixed(0)}h (pnl: ${pnlPercent.toFixed(2)}%)`,
+            );
+
+            // Close real Binance positions if not test mode
+            if (!isTestMode) {
+              const subscribers = await this.subscriptionService.findRealModeSubscribers();
+              for (const sub of subscribers) {
+                await this.userRealTradingService.closeRealPosition(
+                  sub.telegramId, sub.chatId, signal.symbol, reason,
+                ).catch(() => {});
+              }
+            }
           }
-          // PnL <= 0 → keep open, don't cancel
         } catch (err) {
           this.logger.error(
             `[AiSignal] Auto-close check failed for ${signal.symbol}: ${err?.message}`,
@@ -702,6 +726,10 @@ export class AiSignalService implements OnModuleInit {
     const signalKey = isDual && forceProfile ? `${symbol}:${forceProfile}` : symbol;
     const hasActive = await this.signalQueueService.getActiveSignal(signalKey);
     if (hasActive) return;
+
+    // Cap total active signals to reduce correlated risk
+    const allActives = await this.signalQueueService.getAllActiveSignals();
+    if (allActives.length >= MAX_ACTIVE_SIGNALS) return;
 
     // For dual-timeframe coins: also check if the OTHER profile already has an active signal
     // This prevents duplicate signals for the same symbol (e.g. ETH INTRADAY + SWING both SHORT)
