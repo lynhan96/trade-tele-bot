@@ -37,6 +37,8 @@ const AI_SL_COUNTER_KEY = "cache:ai:sl-hits"; // rolling SL hit counter (1h wind
 const MARKET_COOLDOWN_DURATION = 30 * 60; // 30 min cooldown after too many SLs
 const MAX_SL_BEFORE_COOLDOWN = 3; // trigger cooldown after 3 SL hits in 1 hour
 const AI_LAST_REGIME_KEY = "cache:ai:last-regime-for-reversal"; // track regime for reversal detection
+const AI_PENDING_REVERSAL_KEY = "cache:ai:pending-regime-reversal"; // 15-min cooldown before acting
+const REGIME_REVERSAL_COOLDOWN_SEC = 15 * 60; // 15 minutes confirmation window
 const MAX_ACTIVE_SIGNALS = 15; // Cap concurrent positions to reduce correlated risk
 
 /** Coins that run BOTH INTRADAY (15m) and SWING (4h) strategies simultaneously.
@@ -1072,7 +1074,11 @@ export class AiSignalService implements OnModuleInit {
     const lastRegime = await this.redisService.get<string>(AI_LAST_REGIME_KEY);
     await this.redisService.set(AI_LAST_REGIME_KEY, currentRegime, 24 * 60 * 60);
 
-    if (!lastRegime || lastRegime === currentRegime) return;
+    if (!lastRegime || lastRegime === currentRegime) {
+      // Regime stable — clear any pending reversal
+      await this.redisService.delete(AI_PENDING_REVERSAL_KEY);
+      return;
+    }
 
     // Only act on significant regime shifts
     const bearRegimes = ["STRONG_BEAR"];
@@ -1082,16 +1088,46 @@ export class AiSignalService implements OnModuleInit {
     const nowBear = bearRegimes.includes(currentRegime);
     const nowBull = bullRegimes.includes(currentRegime);
 
-    // BEAR → BULL/MIXED: close SHORTs that are losing or near entry
-    // BULL → BEAR/MIXED: close LONGs that are losing or near entry
     let closeDirection: string | null = null;
-    if (wasBear && !nowBear) closeDirection = "SHORT"; // market recovering, close shorts
-    if (wasBull && !nowBull) closeDirection = "LONG";  // market dropping, close longs
+    if (wasBear && !nowBear) closeDirection = "SHORT";
+    if (wasBull && !nowBull) closeDirection = "LONG";
 
     if (!closeDirection) return;
 
+    // ── Phase 1: Detect change → store pending reversal with 15-min cooldown ──
+    const pending = await this.redisService.get<{ from: string; to: string; direction: string; detectedAt: number }>(AI_PENDING_REVERSAL_KEY);
+
+    if (!pending) {
+      // First detection — start cooldown, do NOT close yet
+      await this.redisService.set(AI_PENDING_REVERSAL_KEY, {
+        from: lastRegime,
+        to: currentRegime,
+        direction: closeDirection,
+        detectedAt: Date.now(),
+      }, REGIME_REVERSAL_COOLDOWN_SEC + 60); // TTL slightly longer than cooldown
+
+      this.logger.log(
+        `[AiSignal] ⏳ Regime shift detected: ${lastRegime} → ${currentRegime} — waiting 15min to confirm before closing ${closeDirection} positions`,
+      );
+      return;
+    }
+
+    // ── Phase 2: Check if 15 min have passed since detection ──
+    const elapsed = Date.now() - pending.detectedAt;
+    if (elapsed < REGIME_REVERSAL_COOLDOWN_SEC * 1000) {
+      // Still in cooldown — log and wait
+      const remainMin = ((REGIME_REVERSAL_COOLDOWN_SEC * 1000 - elapsed) / 60000).toFixed(1);
+      this.logger.debug(
+        `[AiSignal] ⏳ Regime reversal pending — ${remainMin}min remaining before confirmation`,
+      );
+      return;
+    }
+
+    // ── Phase 3: Confirmed — regime still changed after 15 min, execute closes ──
+    await this.redisService.delete(AI_PENDING_REVERSAL_KEY);
+
     this.logger.log(
-      `[AiSignal] ⚡ Regime reversal: ${lastRegime} → ${currentRegime} — checking ${closeDirection} positions to close`,
+      `[AiSignal] ⚡ Regime reversal CONFIRMED after 15min: ${pending.from} → ${currentRegime} — closing ${closeDirection} positions`,
     );
 
     try {
@@ -1113,21 +1149,18 @@ export class AiSignalService implements OnModuleInit {
 
         // Close if losing or small profit (< +1.5%) — positions with good profit can ride
         if (pnlPct < 1.5) {
-          const reason = `REGIME_REVERSAL (${lastRegime}→${currentRegime})`;
+          const reason = `REGIME_REVERSAL (${pending.from}→${currentRegime})`;
           this.logger.log(
             `[AiSignal] ⚡ Closing ${signal.symbol} ${signal.direction} — PnL: ${pnlPct.toFixed(2)}% — ${reason}`,
           );
 
           if (isTestMode) {
-            // Test mode: just close in DB
             await this.signalQueueService.closeActiveSignalWithPnl(signal, currentPrice, reason);
           } else {
-            // Real mode: close signal in DB + close real Binance positions
             await this.signalQueueService.resolveActiveSignal(
               signal.symbol, currentPrice, reason as any,
             ).catch(() => {});
 
-            // Close real Binance positions for all subscribers
             const subscribers = await this.subscriptionService.findRealModeSubscribers();
             for (const sub of subscribers) {
               await this.userRealTradingService.closeRealPosition(
@@ -1138,7 +1171,6 @@ export class AiSignalService implements OnModuleInit {
             }
           }
 
-          // Clear cooldown so we can open in the new direction
           const sigKey = signal.symbol;
           await this.redisService.delete(`cache:ai:cooldown:${sigKey}`);
           closedCount++;
@@ -1150,12 +1182,11 @@ export class AiSignalService implements OnModuleInit {
           `[AiSignal] ⚡ Regime reversal closed ${closedCount} ${closeDirection} positions`,
         );
 
-        // Notify admin
         const subscribers = await this.subscriptionService.findRealModeSubscribers();
         const text =
-          `⚡ *Đảo Chiều Regime*\n` +
+          `⚡ *Đảo Chiều Regime (xác nhận 15 phút)*\n` +
           `━━━━━━━━━━━━━━━━━━\n\n` +
-          `${lastRegime} → *${currentRegime}*\n\n` +
+          `${pending.from} → *${currentRegime}*\n\n` +
           `Đã đóng *${closedCount}* lệnh ${closeDirection} đang lỗ/hòa vốn.\n` +
           `Lệnh đang có lời (+1.5%+) hoặc đã khóa SL vẫn giữ.\n\n` +
           `_Bot sẽ tìm tín hiệu mới theo regime mới._`;
@@ -1163,6 +1194,10 @@ export class AiSignalService implements OnModuleInit {
         for (const sub of subscribers) {
           await this.telegramService.sendTelegramMessage(sub.chatId, text).catch(() => {});
         }
+      } else {
+        this.logger.log(
+          `[AiSignal] ⚡ Regime reversal confirmed but no positions to close`,
+        );
       }
     } catch (err) {
       this.logger.error(`[AiSignal] handleRegimeReversal error: ${err?.message}`);
