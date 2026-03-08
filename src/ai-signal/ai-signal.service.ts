@@ -830,11 +830,10 @@ export class AiSignalService implements OnModuleInit {
       }
     }
 
-    // ── LONG confidence penalty: LONGs have 2.5% win rate vs SHORTs 86% ─────
-    // In non-STRONG_BULL regimes, apply -15 confidence penalty to LONGs
-    // This makes LONGs harder to pass the minConfidenceToTrade threshold
-    if (signalResult.isLong && globalRegime !== "STRONG_BULL") {
-      const penalty = globalRegime === "STRONG_BEAR" ? 25 : 15;
+    // ── LONG confidence penalty: only in STRONG_BEAR (historically LONGs lose in bear markets)
+    // In MIXED/RANGE_BOUND/SIDEWAYS: let GPT-4o validation gate decide instead of hardcoded penalty
+    if (signalResult.isLong && globalRegime === "STRONG_BEAR") {
+      const penalty = 20;
       params.confidence = Math.max(10, params.confidence - penalty);
       this.logger.debug(
         `[AiSignal] ${coin.toUpperCase()} LONG confidence penalty -${penalty} in ${globalRegime} (now ${params.confidence})`,

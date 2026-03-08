@@ -730,10 +730,12 @@ Reply ONLY with valid JSON (no markdown):
     return `Trading signal optimizer for ${symbol}. Regime: ${globalRegime}.
 Key data: RSI(15m)=${rsi.toFixed(1)}, RSI(4h)=${rsi4h.toFixed(1)}, ATR(15m)=${atr.toFixed(2)}%, BBWidth=${bbWidth.toFixed(2)}%, priceVsEMA9=${priceVsEma9}%, priceVsEMA200=${priceVsEma200}%, priceVsEMA21_4h=${priceVsEma21_4h}%.${perfContext}
 
-CRITICAL PERFORMANCE DATA (last 14 days):
-- SHORT signals: +31.42% PnL, 86% admin-closed in profit, only 5 SL
-- LONG signals: -35.69% PnL, 1 TP out of 40 trades, 22 SL hits
-- STRONG BIAS: prefer SHORT signals unless regime is STRONG_BULL
+DIRECTION GUIDELINES:
+- Choose direction based on CURRENT market conditions, not historical bias
+- STRONG_BEAR regime: prefer SHORT
+- STRONG_BULL regime: prefer LONG
+- MIXED/RANGE_BOUND/SIDEWAYS: either direction OK, follow indicators
+- Always check if BTC trend aligns with signal direction
 
 STEP 1 — Choose 1-3 strategies (pipe-delimited). Ranked by real performance:
 - BB_SCALP: BEST performer. SHORT: +30.87%, 0 SL. Use in SIDEWAYS/RANGE_BOUND (BBWidth<3%).
@@ -750,11 +752,10 @@ STEP 2 — Set SL/TP based on volatility (ATR). MINIMUM SL is 3%:
 - High ATR (>2%): SL 4.0-6.0%, TP 4.0-5.0%
 - IMPORTANT: TP MUST be 3-5%. System auto-extends TP on strong momentum.
 
-STEP 3 — Set confidence. LONGs need higher confidence than SHORTs:
-- SHORT + regime aligned: confidence 65-85
-- SHORT + neutral: confidence 55-70
-- LONG + STRONG_BULL: confidence 60-80
-- LONG + other regime: confidence 40-55 (will likely get blocked by LONG penalty)
+STEP 3 — Set confidence based on signal strength:
+- Direction aligned with regime: confidence 65-85
+- Direction neutral (MIXED/RANGE): confidence 55-70
+- Direction against regime: confidence 45-55 (higher bar)
 - If recent trades show many SL hits: raise minConfidenceToTrade to 55-65
 
 Reply ONLY JSON:
@@ -819,18 +820,19 @@ Price vs EMA9: ${indicators.priceVsEma9_pct || "N/A"}%, vs EMA200: ${indicators.
 ${btcContext}
 ${perfContext}
 
-THỐNG KÊ QUAN TRỌNG:
-- Tín hiệu SHORT: +31% PnL, 86% win rate
-- Tín hiệu LONG: -36% PnL, 2.5% win rate — gần như luôn thua
-- LONGs trong regime không phải STRONG_BULL gần như luôn lỗ
+HƯỚNG DẪN ĐÁNH GIÁ:
+- Dựa vào BTC context ở trên để xác định xu hướng thị trường
+- Nếu BTC đang hồi phục (24h/7d tăng, RSI tăng) → LONG có thể hợp lý, SHORT cẩn thận
+- Nếu BTC đang giảm mạnh → SHORT ưu tiên, LONG cần tín hiệu rất mạnh
+- Regime MIXED/RANGE_BOUND: cả 2 hướng đều OK nếu indicators phù hợp
 
 Từ chối nếu:
-- LONG trong regime bearish/mixed (trừ khi có tín hiệu bull rất mạnh)
 - Confidence < 45%
 - RSI ngược hướng (LONG + RSI>70, SHORT + RSI<30)
 - Risk/reward kém (SL > TP)
 - ATR quá cao (>3%) so với SL
-- BTC đang đi ngược hướng tín hiệu (VD: signal SHORT nhưng BTC đang tăng mạnh)
+- BTC đi ngược hướng tín hiệu rõ ràng
+- Tín hiệu yếu, thiếu xác nhận từ nhiều indicators
 
 Reply ONLY JSON: {"approved":true/false,"reason":"lý do ngắn gọn bằng tiếng Việt"}`;
 
