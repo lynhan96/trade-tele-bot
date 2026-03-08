@@ -827,12 +827,12 @@ Reject if:
 - Risk/reward bad (SL > TP)
 - ATR too high (>3%) for the SL width
 
-Reply ONLY JSON: {"approved":true/false,"reason":"brief reason"}`;
+Reply ONLY JSON: {"approved":true/false,"reason":"lý do ngắn gọn bằng tiếng Việt"}`;
 
     try {
       const response = await this.openai.chat.completions.create({
         model: GPT_MODEL,
-        max_tokens: 80,
+        max_tokens: 120,
         messages: [{ role: "user", content: prompt }],
         response_format: { type: "json_object" },
       });
