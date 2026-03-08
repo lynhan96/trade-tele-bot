@@ -454,6 +454,11 @@ export class AdminService {
       tradingBalance?: number;
       realModeDailyTargetPct?: number | null;
       realModeDailyStopLossPct?: number | null;
+      realModeLeverageMode?: string | null;
+      realModeLeverage?: number | null;
+      customTpPct?: number | null;
+      customSlPct?: number | null;
+      coinVolumes?: Record<string, number> | null;
     },
   ) {
     const $set: any = {};
