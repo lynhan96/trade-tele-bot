@@ -99,6 +99,8 @@ export class UserSignalSubscriptionService {
       username: d.username,
       tradingBalance: d.tradingBalance ?? 1000,
       coinVolumes: d.coinVolumes as Record<string, number> | undefined,
+      customTpPct: d.customTpPct,
+      customSlPct: d.customSlPct,
       realModeEnabled: d.realModeEnabled,
       realModeLeverage: d.realModeLeverage,
       realModeLeverageMode: d.realModeLeverageMode ?? "AI",
