@@ -19,9 +19,9 @@ import {
 } from "../../schemas/ai-signal-validation.schema";
 import { AiTunedParams } from "./ai-tuned-params.interface";
 
-const AI_PARAMS_TTL = 2 * 60 * 60; // 2h cache — re-tune more often for better accuracy
-const AI_PARAMS_JITTER = 30 * 60; // ±15 min random offset to stagger expiry
-const AI_REGIME_TTL = 10 * 60; // 10min cache — react fast to market crashes
+const AI_PARAMS_TTL = 6 * 60 * 60; // 6h cache — params don't change fast, save API cost
+const AI_PARAMS_JITTER = 60 * 60; // ±30 min random offset to stagger expiry
+const AI_REGIME_TTL = 30 * 60; // 30min cache — balanced between cost and responsiveness
 const AI_MARKET_FILTERS_KEY = "cache:ai:market-filters"; // AI-decided coin filter settings
 const AI_MARKET_FILTERS_TTL = 8 * 60 * 60; // 8h — re-evaluated on regime change
 const RATE_WINDOW = 60 * 60; // 1h window
@@ -230,7 +230,7 @@ export class AiOptimizerService {
     indicators: Record<string, number>,
   ): Promise<string | null> {
     if (!this.openai) return null;
-    if (!(await this.checkRateLimit(GPT_PREMIUM_RATE_KEY, this.maxGpt4oPerHour))) return null;
+    if (!(await this.checkRateLimit(GPT_RATE_KEY, this.maxGptPerHour))) return null;
 
     const perfContext = await this.getRecentPerfContext();
 
@@ -263,12 +263,12 @@ Reply ONLY JSON: {"regime":"REGIME_NAME","reason":"brief reason"}`;
 
     try {
       const response = await this.openai.chat.completions.create({
-        model: GPT_MODEL_PREMIUM, // regime assessment needs better reasoning
+        model: GPT_MODEL, // mini is sufficient for regime classification
         max_tokens: 100,
         messages: [{ role: "user", content: prompt }],
         response_format: { type: "json_object" },
       });
-      await this.incrementRateLimit(GPT_PREMIUM_RATE_KEY);
+      await this.incrementRateLimit(GPT_RATE_KEY);
 
       const text = response.choices[0]?.message?.content?.trim() || "";
       const parsed = JSON.parse(text);
@@ -801,7 +801,7 @@ Reply ONLY JSON:
     indicators: Record<string, any>;
   }): Promise<{ approved: boolean; reason?: string }> {
     if (!this.openai) return { approved: true };
-    if (!(await this.checkRateLimit(GPT_PREMIUM_RATE_KEY, this.maxGpt4oPerHour))) return { approved: true };
+    if (!(await this.checkRateLimit(GPT_RATE_KEY, this.maxGptPerHour))) return { approved: true };
 
     const [perfContext, btcContext] = await Promise.all([
       this.getRecentPerfContext(),
@@ -836,12 +836,12 @@ Reply ONLY JSON: {"approved":true/false,"reason":"lý do ngắn gọn bằng ti�
 
     try {
       const response = await this.openai.chat.completions.create({
-        model: GPT_MODEL_PREMIUM,
+        model: GPT_MODEL, // mini is sufficient for approve/reject
         max_tokens: 150,
         messages: [{ role: "user", content: prompt }],
         response_format: { type: "json_object" },
       });
-      await this.incrementRateLimit(GPT_PREMIUM_RATE_KEY);
+      await this.incrementRateLimit(GPT_RATE_KEY);
 
       const text = response.choices[0]?.message?.content?.trim() || "";
       const parsed = JSON.parse(text);
@@ -853,7 +853,7 @@ Reply ONLY JSON: {"approved":true/false,"reason":"lý do ngắn gọn bằng ti�
         stopLossPercent, takeProfitPercent,
         approved: result.approved,
         reason: result.reason,
-        model: GPT_MODEL_PREMIUM,
+        model: GPT_MODEL,
       }).catch((e) => this.logger.warn(`[AiOptimizer] Failed to save validation: ${e?.message}`));
 
       return result;
