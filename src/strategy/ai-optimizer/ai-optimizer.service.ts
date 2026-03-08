@@ -834,7 +834,7 @@ Reply ONLY JSON: {"approved":true/false,"reason":"lý do ngắn gọn bằng ti�
 
     try {
       const response = await this.openai.chat.completions.create({
-        model: GPT_MODEL, // mini is sufficient for approve/reject
+        model: GPT_MODEL_PREMIUM, // 4o for better signal filtering
         max_tokens: 150,
         messages: [{ role: "user", content: prompt }],
         response_format: { type: "json_object" },
@@ -851,7 +851,7 @@ Reply ONLY JSON: {"approved":true/false,"reason":"lý do ngắn gọn bằng ti�
         stopLossPercent, takeProfitPercent,
         approved: result.approved,
         reason: result.reason,
-        model: GPT_MODEL,
+        model: GPT_MODEL_PREMIUM,
       }).catch((e) => this.logger.warn(`[AiOptimizer] Failed to save validation: ${e?.message}`));
 
       return result;
