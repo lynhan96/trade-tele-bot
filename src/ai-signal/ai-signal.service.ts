@@ -36,6 +36,7 @@ const AI_MARKET_COOLDOWN_KEY = "cache:ai:market-cooldown"; // market-wide pause 
 const AI_SL_COUNTER_KEY = "cache:ai:sl-hits"; // rolling SL hit counter (1h window)
 const MARKET_COOLDOWN_DURATION = 30 * 60; // 30 min cooldown after too many SLs
 const MAX_SL_BEFORE_COOLDOWN = 3; // trigger cooldown after 3 SL hits in 1 hour
+const AI_LAST_REGIME_KEY = "cache:ai:last-regime-for-reversal"; // track regime for reversal detection
 
 /** Coins that run BOTH INTRADAY (15m) and SWING (4h) strategies simultaneously.
  * Top 5 by market cap — 15m catches more frequent signals than 4h alone. */
@@ -337,6 +338,9 @@ export class AiSignalService implements OnModuleInit {
       if (shortlist.length === 0) return;
 
       const globalRegime = await this.aiOptimizerService.assessGlobalRegime();
+
+      // ── Regime reversal: close counter-regime positions ──────────────────
+      await this.handleRegimeReversal(globalRegime);
 
       // ── Extreme move filter: skip coins with >30% 24h price change ──────
       // After a 30%+ dump/pump the move is done, high risk of reversal/dead cat bounce.
@@ -1030,6 +1034,114 @@ export class AiSignalService implements OnModuleInit {
       for (const sub of subscribers) {
         await this.telegramService.sendTelegramMessage(sub.chatId, text).catch(() => {});
       }
+    }
+  }
+
+  // ─── Regime reversal: auto-close positions going against the new regime ───
+
+  /**
+   * When regime shifts significantly (e.g. BEAR→BULL or BULL→BEAR),
+   * close ACTIVE signals that go against the new regime direction.
+   * Only triggers on major shifts, not every regime fluctuation.
+   */
+  private async handleRegimeReversal(currentRegime: string): Promise<void> {
+    const lastRegime = await this.redisService.get<string>(AI_LAST_REGIME_KEY);
+    await this.redisService.set(AI_LAST_REGIME_KEY, currentRegime, 24 * 60 * 60);
+
+    if (!lastRegime || lastRegime === currentRegime) return;
+
+    // Only act on significant regime shifts
+    const bearRegimes = ["STRONG_BEAR"];
+    const bullRegimes = ["STRONG_BULL"];
+    const wasBear = bearRegimes.includes(lastRegime);
+    const wasBull = bullRegimes.includes(lastRegime);
+    const nowBear = bearRegimes.includes(currentRegime);
+    const nowBull = bullRegimes.includes(currentRegime);
+
+    // BEAR → BULL/MIXED: close SHORTs that are losing or near entry
+    // BULL → BEAR/MIXED: close LONGs that are losing or near entry
+    let closeDirection: string | null = null;
+    if (wasBear && !nowBear) closeDirection = "SHORT"; // market recovering, close shorts
+    if (wasBull && !nowBull) closeDirection = "LONG";  // market dropping, close longs
+
+    if (!closeDirection) return;
+
+    this.logger.log(
+      `[AiSignal] ⚡ Regime reversal: ${lastRegime} → ${currentRegime} — checking ${closeDirection} positions to close`,
+    );
+
+    try {
+      const activeSignals = await this.signalQueueService.getAllActiveSignals();
+      const isTestMode = await this.isTestModeEnabled();
+      let closedCount = 0;
+
+      for (const signal of activeSignals) {
+        if (signal.direction !== closeDirection) continue;
+        // Skip positions already locked in profit
+        if ((signal as any).sl5PctRaised) continue;
+
+        const currentPrice = await this.marketDataService.getPrice(signal.symbol).catch(() => 0);
+        if (!currentPrice) continue;
+
+        const pnlPct = signal.direction === "LONG"
+          ? ((currentPrice - signal.entryPrice) / signal.entryPrice) * 100
+          : ((signal.entryPrice - currentPrice) / signal.entryPrice) * 100;
+
+        // Close if losing or small profit (< +1.5%) — positions with good profit can ride
+        if (pnlPct < 1.5) {
+          const reason = `REGIME_REVERSAL (${lastRegime}→${currentRegime})`;
+          this.logger.log(
+            `[AiSignal] ⚡ Closing ${signal.symbol} ${signal.direction} — PnL: ${pnlPct.toFixed(2)}% — ${reason}`,
+          );
+
+          if (isTestMode) {
+            // Test mode: just close in DB
+            await this.signalQueueService.closeActiveSignalWithPnl(signal, currentPrice, reason);
+          } else {
+            // Real mode: close signal in DB + close real Binance positions
+            await this.signalQueueService.resolveActiveSignal(
+              signal.symbol, currentPrice, reason as any,
+            ).catch(() => {});
+
+            // Close real Binance positions for all subscribers
+            const subscribers = await this.subscriptionService.findRealModeSubscribers();
+            for (const sub of subscribers) {
+              await this.userRealTradingService.closeRealPosition(
+                sub.telegramId, sub.chatId, signal.symbol, reason,
+              ).catch((err) =>
+                this.logger.warn(`[AiSignal] Failed to close real position for ${sub.telegramId}: ${err?.message}`),
+              );
+            }
+          }
+
+          // Clear cooldown so we can open in the new direction
+          const sigKey = signal.symbol;
+          await this.redisService.delete(`cache:ai:cooldown:${sigKey}`);
+          closedCount++;
+        }
+      }
+
+      if (closedCount > 0) {
+        this.logger.log(
+          `[AiSignal] ⚡ Regime reversal closed ${closedCount} ${closeDirection} positions`,
+        );
+
+        // Notify admin
+        const subscribers = await this.subscriptionService.findRealModeSubscribers();
+        const text =
+          `⚡ *Đảo Chiều Regime*\n` +
+          `━━━━━━━━━━━━━━━━━━\n\n` +
+          `${lastRegime} → *${currentRegime}*\n\n` +
+          `Đã đóng *${closedCount}* lệnh ${closeDirection} đang lỗ/hòa vốn.\n` +
+          `Lệnh đang có lời (+1.5%+) hoặc đã khóa SL vẫn giữ.\n\n` +
+          `_Bot sẽ tìm tín hiệu mới theo regime mới._`;
+
+        for (const sub of subscribers) {
+          await this.telegramService.sendTelegramMessage(sub.chatId, text).catch(() => {});
+        }
+      }
+    } catch (err) {
+      this.logger.error(`[AiSignal] handleRegimeReversal error: ${err?.message}`);
     }
   }
 
