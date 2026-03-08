@@ -205,8 +205,8 @@ export class PositionMonitorService implements OnModuleInit {
         ? ((price - entryPrice) / entryPrice) * 100
         : ((entryPrice - price) / entryPrice) * 100;
 
-    // At >= 4% profit — raise SL to lock in 2% profit (trailing stop milestone, don't auto-close)
-    if (pnlPct >= 4 && !(signal as any).sl5PctRaised) {
+    // At >= 5% profit — raise SL to lock in 2% profit (trailing stop milestone, don't auto-close)
+    if (pnlPct >= 5 && !(signal as any).sl5PctRaised) {
       const newSl = direction === "LONG"
         ? entryPrice * 1.02
         : entryPrice * 0.98;

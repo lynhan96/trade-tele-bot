@@ -459,6 +459,7 @@ export class AdminService {
       customTpPct?: number | null;
       customSlPct?: number | null;
       coinVolumes?: Record<string, number> | null;
+      cycleTargetMode?: string;
     },
   ) {
     const $set: any = {};
