@@ -73,6 +73,9 @@ export class UserSignalSubscription {
   @Prop({ default: false })
   cyclePaused?: boolean; // true = stop opening new trades (target hit, let existing ride)
 
+  @Prop({ default: "TRAILING" })
+  cycleTargetMode?: string; // "TRAILING" = pause + trailing floor, "CLOSE_ALL" = close all immediately on target hit
+
   @Prop({ default: 10 })
   maxOpenPositions?: number; // max concurrent real positions per user (default: 10)
 

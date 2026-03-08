@@ -26,6 +26,7 @@ export interface SubscriberInfo {
   cycleResetAt?: Date;                  // when current PnL cycle started
   cyclePeakPct?: number;               // highest PnL% in current cycle (for trailing floor)
   cyclePaused?: boolean;               // true = stop opening new trades (target hit)
+  cycleTargetMode?: string;            // "TRAILING" | "CLOSE_ALL"
 }
 
 @Injectable()
@@ -139,6 +140,7 @@ export class UserSignalSubscriptionService {
       cycleResetAt: d.cycleResetAt,
       cyclePeakPct: d.cyclePeakPct,
       cyclePaused: d.cyclePaused,
+      cycleTargetMode: d.cycleTargetMode ?? "TRAILING",
     }));
   }
 
