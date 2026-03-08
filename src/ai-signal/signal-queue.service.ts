@@ -18,14 +18,8 @@ const QUEUED_KEY = (signalKey: string) => `cache:ai-signal:queued:${signalKey}`;
 const DUAL_TIMEFRAME_COINS = ["BTC", "ETH", "SOL", "BNB", "XRP"];
 
 // TTLs per timeframe profile
-const INTRADAY_ACTIVE_TTL = 24 * 60 * 60; // 24h (was 8h — 8h was too short for long-running signals)
 const INTRADAY_QUEUED_TTL = 4 * 60 * 60; // 4h
-const SWING_ACTIVE_TTL = 72 * 60 * 60; // 72h
 const SWING_QUEUED_TTL = 48 * 60 * 60; // 48h
-
-function getActiveTtl(profile?: string): number {
-  return profile === "SWING" ? SWING_ACTIVE_TTL : INTRADAY_ACTIVE_TTL;
-}
 function getQueuedTtl(profile?: string): number {
   return profile === "SWING" ? SWING_QUEUED_TTL : INTRADAY_QUEUED_TTL;
 }
@@ -77,7 +71,7 @@ export class SignalQueueService {
     if (!active) {
       // No Redis key — but there might be orphaned ACTIVE docs in MongoDB
       // (happens when Redis TTL expires before signal is resolved)
-      await this.cancelOrphanedActives(symbol, signalKey);
+      await this.restoreOrphanedActives(symbol, signalKey);
 
       // No active signal — execute immediately
       const doc = await this.saveSignal(
@@ -92,7 +86,7 @@ export class SignalQueueService {
       await this.redisService.set(
         ACTIVE_KEY(signalKey),
         doc._id.toString(),
-        getActiveTtl(params.timeframeProfile),
+        0, // no TTL — active signals managed by age-based cron
       );
       this.logger.log(
         `[SignalQueue] ${signalKey} ${signalResult.isLong ? "LONG" : "SHORT"} → ACTIVE [${params.timeframeProfile || "INTRADAY"}] (id: ${doc._id})${isTestMode ? " [TEST]" : ""}`,
@@ -218,7 +212,7 @@ export class SignalQueueService {
     await this.redisService.set(
       ACTIVE_KEY(symbol),
       queuedId,
-      getActiveTtl((queued as any).timeframeProfile),
+      0, // no TTL — active signals managed by age-based cron
     );
 
     const updated = await this.aiSignalModel.findById(queuedId);
@@ -296,13 +290,10 @@ export class SignalQueueService {
 
   /**
    * Cancel all QUEUED signals that have passed their expiresAt.
-   * Also cleans up orphaned ACTIVE signals (Redis TTL expired but MongoDB still ACTIVE).
-   * Called every 5 minutes.
-   * Returns cancelled ACTIVE signals so the caller can send notifications.
+   * Returns count of cancelled queued signals.
    */
-  async cleanupExpiredQueued(): Promise<{ count: number; cancelledActives: AiSignalDocument[] }> {
+  async cleanupExpiredQueued(): Promise<{ count: number }> {
     let count = 0;
-    const cancelledActives: AiSignalDocument[] = [];
 
     // Clean expired QUEUED
     const expiredQueued = await this.aiSignalModel.find({
@@ -323,96 +314,110 @@ export class SignalQueueService {
     }
     count += expiredQueued.length;
 
-    // Clean orphaned ACTIVE (Redis key expired but MongoDB still ACTIVE)
-    const activeSignals = await this.aiSignalModel.find({ status: "ACTIVE" });
-    for (const doc of activeSignals) {
-      const sigKey = this.docSignalKey(doc);
-      const redisId = await this.redisService.get<string>(ACTIVE_KEY(sigKey));
-      if (!redisId) {
-        // Redis key gone → signal expired, cancel it
-        await this.aiSignalModel.findByIdAndUpdate(doc._id, {
-          status: "CANCELLED",
-          closeReason: "TTL_EXPIRED",
-        });
-        cancelledActives.push(doc); // return to caller for notification
-        this.logger.log(
-          `[SignalQueue] Orphaned ACTIVE signal cancelled: ${sigKey} (id: ${doc._id})`,
-        );
-        count++;
-      }
-    }
-
-    return { count, cancelledActives };
+    return { count };
   }
 
   /**
-   * Clean ALL orphaned ACTIVE signals globally.
-   * Called on startup before registering listeners.
-   * For each ACTIVE doc, keeps only the one matching its Redis key; cancels the rest.
+   * Find ACTIVE signals older than the given age (in ms).
+   * Returns docs so the caller can check PnL and decide to close or keep.
+   */
+  async findOldActiveSignals(maxAgeMs: number): Promise<AiSignalDocument[]> {
+    const cutoff = new Date(Date.now() - maxAgeMs);
+    return this.aiSignalModel.find({
+      status: "ACTIVE",
+      executedAt: { $lt: cutoff },
+    });
+  }
+
+  /**
+   * Close an active signal as COMPLETED with exit price and PnL.
+   */
+  async closeActiveSignalWithPnl(
+    doc: AiSignalDocument,
+    exitPrice: number,
+    reason: string = "AUTO_CLOSE_PROFIT",
+  ): Promise<void> {
+    const sigKey = this.docSignalKey(doc);
+    const pnlPercent =
+      doc.direction === "LONG"
+        ? ((exitPrice - doc.entryPrice) / doc.entryPrice) * 100
+        : ((doc.entryPrice - exitPrice) / doc.entryPrice) * 100;
+
+    await this.aiSignalModel.findByIdAndUpdate(doc._id, {
+      status: "COMPLETED",
+      closeReason: reason,
+      exitPrice,
+      pnlPercent,
+      positionClosedAt: new Date(),
+    });
+    await this.redisService.delete(ACTIVE_KEY(sigKey));
+    this.logger.log(
+      `[SignalQueue] ${sigKey} COMPLETED (${reason}) — exitPrice=${exitPrice} pnl=${pnlPercent.toFixed(2)}%`,
+    );
+  }
+
+  /**
+   * Restore ACTIVE signals on startup.
+   * Re-creates Redis keys for any ACTIVE doc missing one.
+   * If multiple docs exist for the same symbol, keeps the newest and cancels the rest.
    */
   async cleanupOrphanedActives(): Promise<number> {
     let count = 0;
     const allActives = await this.aiSignalModel.find({ status: "ACTIVE" });
 
-    // Group by symbol to find duplicates
-    const bySymbol = new Map<string, AiSignalDocument[]>();
+    // Group by signal key to find duplicates
+    const byKey = new Map<string, AiSignalDocument[]>();
     for (const doc of allActives) {
-      const key = doc.symbol;
-      if (!bySymbol.has(key)) bySymbol.set(key, []);
-      bySymbol.get(key)!.push(doc);
+      const sigKey = this.docSignalKey(doc);
+      if (!byKey.has(sigKey)) byKey.set(sigKey, []);
+      byKey.get(sigKey)!.push(doc);
     }
 
-    for (const [symbol, docs] of bySymbol) {
+    for (const [sigKey, docs] of byKey) {
       if (docs.length <= 1) {
-        // Single doc — check if its Redis key is still valid
+        // Single doc — ensure Redis key exists
         const doc = docs[0];
-        const sigKey = this.docSignalKey(doc);
         const redisId = await this.redisService.get<string>(ACTIVE_KEY(sigKey));
         if (!redisId) {
-          await this.aiSignalModel.findByIdAndUpdate(doc._id, {
-            status: "CANCELLED",
-            closeReason: "TTL_EXPIRED",
-          });
-          this.logger.log(`[SignalQueue] Startup: cancelled orphan ${sigKey} (no Redis key)`);
+          await this.redisService.set(ACTIVE_KEY(sigKey), doc._id.toString());
+          this.logger.log(`[SignalQueue] Startup: restored Redis key for ${sigKey} (id: ${doc._id})`);
           count++;
         }
         continue;
       }
 
-      // Multiple docs for same symbol — keep the one matching Redis, cancel rest
-      for (const doc of docs) {
-        const sigKey = this.docSignalKey(doc);
-        const redisId = await this.redisService.get<string>(ACTIVE_KEY(sigKey));
-        if (!redisId || redisId !== doc._id.toString()) {
-          await this.aiSignalModel.findByIdAndUpdate(doc._id, {
-            status: "CANCELLED",
-            closeReason: "TTL_EXPIRED",
-          });
-          this.logger.log(`[SignalQueue] Startup: cancelled duplicate ${sigKey} (id: ${doc._id})`);
-          count++;
-        }
+      // Multiple docs for same key — keep newest, cancel rest
+      docs.sort((a, b) => new Date(b.executedAt || (b as any).createdAt).getTime() - new Date(a.executedAt || (a as any).createdAt).getTime());
+      const keep = docs[0];
+      await this.redisService.set(ACTIVE_KEY(sigKey), keep._id.toString());
+      this.logger.log(`[SignalQueue] Startup: kept newest ${sigKey} (id: ${keep._id})`);
+
+      for (let i = 1; i < docs.length; i++) {
+        await this.aiSignalModel.findByIdAndUpdate(docs[i]._id, {
+          status: "CANCELLED",
+          closeReason: "DUPLICATE",
+        });
+        this.logger.log(`[SignalQueue] Startup: cancelled duplicate ${sigKey} (id: ${docs[i]._id})`);
       }
+      count++;
     }
 
     return count;
   }
 
   /**
-   * Cancel any orphaned ACTIVE documents in MongoDB for a symbol
-   * that no longer have a corresponding Redis key.
+   * Restore Redis keys for any ACTIVE documents in MongoDB for a symbol
+   * that are missing their Redis key.
    */
-  private async cancelOrphanedActives(symbol: string, signalKey: string): Promise<void> {
+  private async restoreOrphanedActives(symbol: string, signalKey: string): Promise<void> {
     const orphans = await this.aiSignalModel.find({ symbol, status: "ACTIVE" });
     for (const doc of orphans) {
       const docKey = this.docSignalKey(doc);
       const redisId = await this.redisService.get<string>(ACTIVE_KEY(docKey));
-      if (!redisId || redisId !== doc._id.toString()) {
-        await this.aiSignalModel.findByIdAndUpdate(doc._id, {
-          status: "CANCELLED",
-          closeReason: "TTL_EXPIRED",
-        });
+      if (!redisId) {
+        await this.redisService.set(ACTIVE_KEY(docKey), doc._id.toString());
         this.logger.log(
-          `[SignalQueue] Cancelled orphaned ACTIVE: ${docKey} (id: ${doc._id})`,
+          `[SignalQueue] Restored orphaned ACTIVE: ${docKey} (id: ${doc._id})`,
         );
       }
     }
@@ -609,11 +614,11 @@ export class SignalQueueService {
       : entryPrice * (1 - takeProfitPercent / 100);
 
     const profile = params.timeframeProfile || "INTRADAY";
-    const ttl =
-      status === "QUEUED" ? getQueuedTtl(profile) : getActiveTtl(profile);
-
     const now = new Date();
-    const expiresAt = new Date(now.getTime() + ttl * 1000);
+    // QUEUED signals have a TTL expiry; ACTIVE signals have no expiry (managed by age-based cron)
+    const expiresAt = status === "QUEUED"
+      ? new Date(now.getTime() + getQueuedTtl(profile) * 1000)
+      : new Date(now.getTime() + 365 * 24 * 60 * 60 * 1000); // far future
 
     const primaryKline =
       params.rsiCross?.primaryKline ||

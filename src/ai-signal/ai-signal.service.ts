@@ -464,24 +464,52 @@ export class AiSignalService implements OnModuleInit {
     }
   }
 
-  // ─── Cron: cleanup expired QUEUED signals (every 5 minutes) ──────────────
+  // ─── Cron: cleanup expired QUEUED + auto-close old ACTIVE signals ────────
 
   @Cron("*/5 * * * *")
-  async cleanupExpiredQueued() {
+  async cleanupExpiredSignals() {
     try {
-      const { count, cancelledActives } = await this.signalQueueService.cleanupExpiredQueued();
+      // 1. Clean expired QUEUED signals
+      const { count } = await this.signalQueueService.cleanupExpiredQueued();
       if (count > 0) {
         this.logger.log(
           `[AiSignal] Cleaned up ${count} expired QUEUED signal(s)`,
         );
       }
-      // Notify subscribers for any ACTIVE signals that were TTL-cancelled
-      for (const signal of cancelledActives) {
-        await this.notifySignalExpired(signal).catch(() => {});
+
+      // 2. Auto-close ACTIVE signals older than 2 days if profitable
+      const TWO_DAYS_MS = 2 * 24 * 60 * 60 * 1000;
+      const oldActives = await this.signalQueueService.findOldActiveSignals(TWO_DAYS_MS);
+
+      for (const signal of oldActives) {
+        try {
+          const currentPrice = await this.marketDataService.getPrice(signal.symbol);
+          if (!currentPrice) continue;
+
+          const pnlPercent =
+            signal.direction === "LONG"
+              ? ((currentPrice - signal.entryPrice) / signal.entryPrice) * 100
+              : ((signal.entryPrice - currentPrice) / signal.entryPrice) * 100;
+
+          if (pnlPercent > 0) {
+            // Profitable → auto-close with PnL
+            await this.signalQueueService.closeActiveSignalWithPnl(
+              signal, currentPrice, "AUTO_CLOSE_PROFIT",
+            );
+            this.logger.log(
+              `[AiSignal] Auto-closed ${signal.symbol} after 2d+ (pnl: +${pnlPercent.toFixed(2)}%)`,
+            );
+          }
+          // PnL <= 0 → keep open, don't cancel
+        } catch (err) {
+          this.logger.error(
+            `[AiSignal] Auto-close check failed for ${signal.symbol}: ${err?.message}`,
+          );
+        }
       }
     } catch (err) {
       this.logger.error(
-        `[AiSignal] cleanupExpiredQueued error: ${err?.message}`,
+        `[AiSignal] cleanupExpiredSignals error: ${err?.message}`,
       );
     }
   }
@@ -1295,37 +1323,6 @@ export class AiSignalService implements OnModuleInit {
       `━━━━━━━━━━━━━━━━━━\n\n` +
       `Profit dat 4%, SL da chuyen ve gia entry ${fmtP(entryPrice)}\n` +
       `Bao ve loi nhuan, khong con rui ro!\n\n` +
-      `_${new Date().toLocaleTimeString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" })}_`;
-
-    const subscribers = await this.subscriptionService.findSignalOnlySubscribers();
-    for (const sub of subscribers) {
-      await this.telegramService.sendTelegramMessage(sub.chatId, text).catch(() => {});
-    }
-  }
-
-  private async notifySignalExpired(signal: AiSignalDocument): Promise<void> {
-    const fmtP = this.fmtPrice;
-    const hoursOpen = ((Date.now() - new Date(signal.generatedAt).getTime()) / 3600000).toFixed(1);
-    const testMark = signal.isTestMode ? " 🧪" : "";
-
-    // Fetch current price to show unrealized PnL at expiry
-    let pnlLine = "";
-    const currentPrice = await this.marketDataService.getPrice(signal.symbol);
-    if (currentPrice && currentPrice > 0) {
-      const pnl = signal.direction === "LONG"
-        ? ((currentPrice - signal.entryPrice) / signal.entryPrice) * 100
-        : ((signal.entryPrice - currentPrice) / signal.entryPrice) * 100;
-      const pnlSign = pnl >= 0 ? "+" : "";
-      pnlLine = `PnL: *${pnlSign}${pnl.toFixed(2)}%* (gia: ${fmtP(currentPrice)})\n`;
-    }
-
-    const text =
-      `⏰ *${signal.symbol} ${signal.direction} — Het han${testMark}*\n` +
-      `━━━━━━━━━━━━━━━━━━\n\n` +
-      `Lenh het han (${hoursOpen}h) ma chua dat TP/SL\n` +
-      `Entry: ${fmtP(signal.entryPrice)}\n` +
-      `TP: ${fmtP(signal.takeProfitPrice)} | SL: ${fmtP(signal.stopLossPrice)}\n` +
-      pnlLine + `\n` +
       `_${new Date().toLocaleTimeString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" })}_`;
 
     const subscribers = await this.subscriptionService.findSignalOnlySubscribers();
