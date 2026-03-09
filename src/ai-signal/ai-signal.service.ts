@@ -859,6 +859,18 @@ export class AiSignalService implements OnModuleInit {
       }
     }
 
+    // ── MIXED regime: block SHORT when BTC RSI is bullish (>65) ────────────
+    // BTC RSI > 65 = bullish momentum. Shorting alts when BTC is pumping = high risk of losses.
+    if (globalRegime === "MIXED" && !signalResult.isLong) {
+      const btcCtx = await this.redisService.get<{ rsi: number; priceVsEma9: number }>("cache:ai:regime:btc-context");
+      if (btcCtx && btcCtx.rsi > 65) {
+        this.logger.log(
+          `[AiSignal] ${signalKey} SHORT blocked — MIXED + BTC RSI overbought (${btcCtx.rsi.toFixed(0)})`,
+        );
+        return;
+      }
+    }
+
     // ── LONG confidence penalty: only in STRONG_BEAR (historically LONGs lose in bear markets)
     // In MIXED/RANGE_BOUND/SIDEWAYS: let GPT-4o validation gate decide instead of hardcoded penalty
     if (signalResult.isLong && globalRegime === "STRONG_BEAR") {
