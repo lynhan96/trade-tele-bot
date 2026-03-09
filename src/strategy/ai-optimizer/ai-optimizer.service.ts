@@ -5,6 +5,7 @@ import { Model } from "mongoose";
 import OpenAI from "openai";
 import { RedisService } from "../../redis/redis.service";
 import { IndicatorService } from "../indicators/indicator.service";
+import { MarketDataService } from "../../market-data/market-data.service";
 import {
   AiRegimeHistory,
   AiRegimeHistoryDocument,
@@ -47,6 +48,7 @@ export class AiOptimizerService {
     private readonly configService: ConfigService,
     private readonly redisService: RedisService,
     private readonly indicatorService: IndicatorService,
+    private readonly marketDataService: MarketDataService,
     @InjectModel(AiRegimeHistory.name)
     private readonly regimeHistoryModel: Model<AiRegimeHistoryDocument>,
     @InjectModel(AiMarketConfig.name)
@@ -86,10 +88,39 @@ export class AiOptimizerService {
   async assessGlobalRegime(): Promise<string> {
     const cacheKey = "cache:ai:regime";
     const prevRegimeKey = "cache:ai:regime:prev";
+    const btcPriceKey = "cache:ai:regime:btc-price";
     const cached = await this.redisService.get<string>(cacheKey);
+
+    // Fast invalidation: if BTC moved >2% since last regime assessment, force recompute
     if (cached) {
-      this.logger.debug(`[AiOptimizer] assessGlobalRegime: cached=${cached}`);
-      return cached;
+      try {
+        const lastBtcPrice = await this.redisService.get<number>(btcPriceKey);
+        if (lastBtcPrice) {
+          const currentBtcPrice = await this.marketDataService.getPrice("BTCUSDT");
+          if (currentBtcPrice) {
+            const pctMove = Math.abs((currentBtcPrice - lastBtcPrice) / lastBtcPrice) * 100;
+            if (pctMove >= 2) {
+              this.logger.log(
+                `[AiOptimizer] BTC moved ${pctMove.toFixed(1)}% (${lastBtcPrice.toFixed(0)} → ${currentBtcPrice.toFixed(0)}) — invalidating regime cache`,
+              );
+              await this.redisService.delete(cacheKey);
+              // fall through to recompute
+            } else {
+              this.logger.debug(`[AiOptimizer] assessGlobalRegime: cached=${cached}`);
+              return cached;
+            }
+          } else {
+            this.logger.debug(`[AiOptimizer] assessGlobalRegime: cached=${cached}`);
+            return cached;
+          }
+        } else {
+          this.logger.debug(`[AiOptimizer] assessGlobalRegime: cached=${cached}`);
+          return cached;
+        }
+      } catch {
+        this.logger.debug(`[AiOptimizer] assessGlobalRegime: cached=${cached}`);
+        return cached;
+      }
     }
 
     this.logger.log(`[AiOptimizer] assessGlobalRegime: no cache, computing...`);
@@ -164,6 +195,10 @@ export class AiOptimizerService {
       }
 
       await this.redisService.set(cacheKey, regime, AI_REGIME_TTL);
+      // Store BTC price at time of regime assessment for fast invalidation
+      if (indicators.price) {
+        await this.redisService.set(btcPriceKey, parseFloat(indicators.price), AI_REGIME_TTL * 2);
+      }
       // Store BTC context for VOLATILE direction filter in processCoin
       await this.redisService.set("cache:ai:regime:btc-context", {
         rsi, rsi4h, priceVsEma9, priceVsEma200, atr15m, bbWidth,
