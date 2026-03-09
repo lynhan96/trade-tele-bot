@@ -224,7 +224,7 @@ export class AiOptimizerService {
       }
       await this.redisService.set(prevRegimeKey, regime, AI_REGIME_TTL * 3);
 
-      // Tune market filter settings when regime changes or no cached filters yet
+      // Tune market filter settings when regime changes or cached filters expired
       if (prevRegime !== regime || !(await this.redisService.get(AI_MARKET_FILTERS_KEY))) {
         this.tuneMarketFilters(regime, { rsi15m: rsi, atr15m, bbWidth }).catch((e) =>
           this.logger.warn(`[AiOptimizer] Filter tuning failed: ${e?.message}`),
@@ -394,9 +394,9 @@ Reply ONLY with valid JSON (no markdown):
 
     const minVolumeUsd = Number(parsed.minVolumeUsd);
     const minPriceChangePct = Number(parsed.minPriceChangePct);
-    // Clamp to at least the user-configured minimum from .env
-    const configuredMin = parseInt(this.configService.get("AI_MAX_SHORTLIST_SIZE", "50"));
-    const maxShortlistSize = Math.max(Number(parsed.maxShortlistSize), configuredMin);
+    // Clamp: .env is the hard cap — GPT cannot exceed it
+    const configuredMax = parseInt(this.configService.get("AI_MAX_SHORTLIST_SIZE", "50"));
+    const maxShortlistSize = Math.min(Math.max(Number(parsed.maxShortlistSize), 10), configuredMax);
 
     // 4. Store in MongoDB
     await this.marketConfigModel.create({

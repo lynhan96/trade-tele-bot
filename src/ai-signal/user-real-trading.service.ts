@@ -597,6 +597,10 @@ export class UserRealTradingService implements OnModuleInit {
     exitPrice: number,
     reason: string,
   ): Promise<void> {
+    if (!Number.isFinite(exitPrice) || exitPrice <= 0) {
+      this.logger.warn(`[RealTrading] onTradeClose: invalid exitPrice ${exitPrice} for ${symbol} user ${telegramId}`);
+      return;
+    }
     // Also handle trades that were marked CLOSED by protectOpenTrades but without PnL
     let trade = await this.userTradeModel.findOne({ telegramId, symbol, status: "OPEN" });
     if (!trade) {

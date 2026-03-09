@@ -54,7 +54,7 @@ AppModule
 
 ### Strategy Pipeline
 
-`IndicatorService` (technicalindicators) → `RuleEngineService` (entry rules) → `AiOptimizerService` (Claude Haiku / GPT-4o-mini tunes SL/TP params, cached 4h in Redis)
+`IndicatorService` (technicalindicators) → `RuleEngineService` (entry rules, 7 active strategies) → `AiOptimizerService` (GPT-4o for premium coins, fixed defaults for others, cached 6h in Redis)
 
 ### Market Data Flow
 
@@ -96,11 +96,26 @@ Schema: `AdminAccount` (`admin_accounts` collection) — username, passwordHash,
 
 Copy `.env.example` to `.env`. Required vars: `TELEGRAM_BOT_TOKEN`, `REDIS_*`, `MONGODB_URI`, `ANTHROPIC_API_KEY`, `AI_MONITOR_BINANCE_API_KEY/SECRET`. Optional: `OPENAI_API_KEY` (GPT-4o-mini fallback for AI tuning), `AI_ADMIN_TELEGRAM_ID` (comma-separated).
 
-AI tuning waterfall: Claude Haiku (primary, limit: `AI_MAX_HAIKU_PER_HOUR`) → GPT-4o-mini (fallback, `AI_MAX_GPT_PER_HOUR`) → static ATR defaults.
+AI tuning: GPT-4o for premium coins (BTC/ETH/SOL/BNB/XRP), fixed defaults for others. Validation gate: GPT-4o (100/hr). Regime: gpt-4o-mini (30min cache). Fallback: static ATR defaults.
 
 ## Proxy
 
 `src/utils/proxy.ts` exports `getProxyAgent()` used in WebSocket and HTTP connections when `HTTPS_PROXY` / `HTTP_PROXY` env vars are set.
+
+## Post-Change Checklist
+
+After completing ANY code change (feature, fix, refactor), ALWAYS:
+
+1. **Update Memory** — Update `/Users/elvislee/.claude/projects/-Users-elvislee-Workspace-DTS-elvis-binance-tele-bot/memory/MEMORY.md` to reflect:
+   - Changed strategy parameters (SL/TP values, thresholds, trailing stop config)
+   - New or modified schemas/fields
+   - Architecture changes (new services, removed features, changed flows)
+   - Cost/model config changes
+   - Any behavior that differs from what was previously documented
+2. **Keep memory accurate** — If the change contradicts existing memory, UPDATE the memory (don't add duplicates)
+3. **Keep under 200 lines** — Be concise, use bullet points
+
+This ensures future sessions have correct context and don't review based on outdated information.
 
 ## Telegram Commands
 

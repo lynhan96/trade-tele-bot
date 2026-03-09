@@ -442,8 +442,8 @@ export class AdminService {
         $group: {
           _id: '$telegramId',
           totalPnlUsdt: { $sum: '$pnlUsdt' },
-          totalWins: { $sum: { $cond: [{ $gte: ['$pnlUsdt', 0] }, 1, 0] } },
-          totalLosses: { $sum: { $cond: [{ $lt: ['$pnlUsdt', 0] }, 1, 0] } },
+          totalWins: { $sum: { $cond: [{ $gt: ['$pnlUsdt', 0] }, 1, 0] } },
+          totalLosses: { $sum: { $cond: [{ $lte: ['$pnlUsdt', 0] }, 1, 0] } },
         },
       },
     ]);

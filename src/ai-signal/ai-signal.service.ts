@@ -485,26 +485,30 @@ export class AiSignalService implements OnModuleInit {
               ? ((currentPrice - signal.entryPrice) / signal.entryPrice) * 100
               : ((signal.entryPrice - currentPrice) / signal.entryPrice) * 100;
 
-          const ageMs = Date.now() - new Date((signal as any).createdAt).getTime();
+          // Use executedAt (activation time) if available, fallback to createdAt
+          const ageRef = (signal as any).executedAt ?? (signal as any).createdAt;
+          const ageMs = Date.now() - new Date(ageRef).getTime();
           const ageH = ageMs / 3600000;
 
           // Time-based stop: 8h+ and PnL between -1% and +1% (stagnant signal)
           // If PnL < -1%, let SL handle it naturally (may recover or hit SL at -2.5%)
           if (ageH >= 8 && pnlPercent < 1 && pnlPercent > -1) {
             const reason = `Time-stop ${pnlPercent >= 0 ? "+" : ""}${pnlPercent.toFixed(2)}% after ${ageH.toFixed(0)}h`;
-            await this.signalQueueService.closeActiveSignalWithPnl(
-              signal, currentPrice, reason,
-            );
-            this.positionMonitorService.unregisterListener(signal);
-            this.logger.log(`[AiSignal] ${reason} — ${signal.symbol}`);
-
-            if (!isTestMode) {
-              const subscribers = await this.subscriptionService.findRealModeSubscribers();
-              for (const sub of subscribers) {
-                await this.userRealTradingService.closeRealPosition(
-                  sub.telegramId, sub.chatId, signal.symbol, reason,
-                ).catch(() => {});
+            try {
+              await this.signalQueueService.closeActiveSignalWithPnl(
+                signal, currentPrice, reason,
+              );
+              this.logger.log(`[AiSignal] ${reason} — ${signal.symbol}`);
+              if (!isTestMode) {
+                const subscribers = await this.subscriptionService.findRealModeSubscribers();
+                for (const sub of subscribers) {
+                  await this.userRealTradingService.closeRealPosition(
+                    sub.telegramId, sub.chatId, signal.symbol, reason,
+                  ).catch(() => {});
+                }
               }
+            } finally {
+              this.positionMonitorService.unregisterListener(signal);
             }
             continue;
           }
@@ -512,19 +516,21 @@ export class AiSignalService implements OnModuleInit {
           // 48h+ and profitable >= 1% → close with descriptive reason
           if (ageH >= 48 && pnlPercent >= 1) {
             const reason = `Auto-closed +${pnlPercent.toFixed(2)}% after ${ageH.toFixed(0)}h`;
-            await this.signalQueueService.closeActiveSignalWithPnl(
-              signal, currentPrice, reason,
-            );
-            this.positionMonitorService.unregisterListener(signal);
-            this.logger.log(`[AiSignal] ${reason} — ${signal.symbol}`);
-
-            if (!isTestMode) {
-              const subscribers = await this.subscriptionService.findRealModeSubscribers();
-              for (const sub of subscribers) {
-                await this.userRealTradingService.closeRealPosition(
-                  sub.telegramId, sub.chatId, signal.symbol, reason,
-                ).catch(() => {});
+            try {
+              await this.signalQueueService.closeActiveSignalWithPnl(
+                signal, currentPrice, reason,
+              );
+              this.logger.log(`[AiSignal] ${reason} — ${signal.symbol}`);
+              if (!isTestMode) {
+                const subscribers = await this.subscriptionService.findRealModeSubscribers();
+                for (const sub of subscribers) {
+                  await this.userRealTradingService.closeRealPosition(
+                    sub.telegramId, sub.chatId, signal.symbol, reason,
+                  ).catch(() => {});
+                }
               }
+            } finally {
+              this.positionMonitorService.unregisterListener(signal);
             }
           }
         } catch (err) {
@@ -1150,23 +1156,25 @@ export class AiSignalService implements OnModuleInit {
 
           // Use closeActiveSignalWithPnl for both modes — it uses docSignalKey()
           // which correctly handles dual-timeframe keys (e.g. BTCUSDT:INTRADAY)
-          await this.signalQueueService.closeActiveSignalWithPnl(signal, currentPrice, reason);
+          try {
+            await this.signalQueueService.closeActiveSignalWithPnl(signal, currentPrice, reason);
 
-          // Unregister position monitor listener to free resources
-          this.positionMonitorService.unregisterListener(signal);
-
-          if (!isTestMode) {
-            const subscribers = await this.subscriptionService.findRealModeSubscribers();
-            for (const sub of subscribers) {
-              await this.userRealTradingService.closeRealPosition(
-                sub.telegramId, sub.chatId, signal.symbol, reason,
-              ).catch((err) =>
-                this.logger.warn(`[AiSignal] Failed to close real position for ${sub.telegramId}: ${err?.message}`),
-              );
+            if (!isTestMode) {
+              const subscribers = await this.subscriptionService.findRealModeSubscribers();
+              for (const sub of subscribers) {
+                await this.userRealTradingService.closeRealPosition(
+                  sub.telegramId, sub.chatId, signal.symbol, reason,
+                ).catch((err) =>
+                  this.logger.warn(`[AiSignal] Failed to close real position for ${sub.telegramId}: ${err?.message}`),
+                );
+              }
             }
-          }
 
-          await this.redisService.delete(`cache:ai:cooldown:${signal.symbol}`);
+            await this.redisService.delete(`cache:ai:cooldown:${signal.symbol}`);
+          } finally {
+            // Always unregister listener to free resources, even if close fails
+            this.positionMonitorService.unregisterListener(signal);
+          }
           closedCount++;
         }
       }
