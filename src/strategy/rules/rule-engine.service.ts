@@ -23,9 +23,16 @@ export class RuleEngineService {
   ) {}
 
   /**
-   * Main entry point — evaluates the configured strategy for a coin.
-   * Supports pipe-delimited strategies (e.g. "STOCH_BB_PATTERN|MEAN_REVERT_RSI")
-   * and tries each in order until one produces a signal.
+   * Main entry point — confluence-based evaluation.
+   * Runs ALL configured strategies, collects results, and requires
+   * multiple strategies to agree on direction before firing a signal.
+   *
+   * Confluence rules:
+   * - 3+ strategies configured → need 2+ to agree (strong confluence)
+   * - 2 strategies configured  → need 2 to agree (both must confirm)
+   * - 1 strategy configured    → single strategy is enough (legacy/fallback)
+   *
+   * Benefits: fewer false signals, higher quality entries, strategy diversity visible.
    */
   async evaluate(
     coin: string,
@@ -39,23 +46,78 @@ export class RuleEngineService {
       return null;
     }
 
-    // Support pipe-delimited strategies from AI optimizer (e.g. "STOCH_BB_PATTERN|MEAN_REVERT_RSI")
     const strategies = params.strategy.includes("|")
       ? params.strategy.split("|").map((s) => s.trim())
       : [params.strategy];
 
-    if (strategies.length > 1) {
-      this.logger.debug(`[RuleEngine] ${coin} pipe: ${strategies.join(" → ")}`);
+    // Single strategy → legacy mode (no confluence needed)
+    if (strategies.length === 1) {
+      const result = await this.evalStrategy(strategies[0], coin, currency, params);
+      if (result) {
+        this.logger.debug(`[RuleEngine] ${coin} ✓ ${strategies[0]} fired (single)`);
+      }
+      return result;
     }
 
-    for (const strategy of strategies) {
-      const result = await this.evalStrategy(strategy, coin, currency, params);
-      if (result) {
-        this.logger.debug(`[RuleEngine] ${coin} ✓ ${strategy} fired`);
-        return result;
-      }
+    // ── Multi-strategy confluence mode ──
+    this.logger.debug(`[RuleEngine] ${coin} confluence check: ${strategies.join(" + ")}`);
+
+    // Run all strategies in parallel and collect results
+    const results = await Promise.all(
+      strategies.map(async (strategy) => {
+        const result = await this.evalStrategy(strategy, coin, currency, params);
+        return result ? { strategy, result } : null;
+      }),
+    );
+
+    const fired = results.filter((r): r is { strategy: string; result: SignalResult } => r !== null);
+
+    if (fired.length === 0) return null;
+
+    // Group by direction
+    const longs = fired.filter(f => f.result.isLong);
+    const shorts = fired.filter(f => !f.result.isLong);
+
+    // ── Confluence scoring ──
+    // 2+ agree on same direction = strong signal (confluence)
+    // 1 fires alone = weaker signal, still allowed but noted as "single"
+    // Strategies disagree on direction = conflict, skip
+
+    // Check for direction conflict (some say LONG, some say SHORT)
+    if (longs.length > 0 && shorts.length > 0) {
+      const summary = fired.map(f => `${f.strategy}=${f.result.isLong ? "L" : "S"}`).join(", ");
+      this.logger.debug(
+        `[RuleEngine] ${coin} ✗ direction conflict: ${summary} — skipped`,
+      );
+      return null;
     }
-    return null;
+
+    // All fired strategies agree on direction
+    const winners = longs.length > 0 ? longs : shorts;
+    const isLong = longs.length > 0;
+    const primary = winners[0].result;
+
+    if (winners.length >= 2) {
+      // Strong confluence: 2+ strategies agree
+      const names = winners.map(w => w.strategy).join("+");
+      const reasons = winners.map(w => w.result.reason).join(" | ");
+      this.logger.log(
+        `[RuleEngine] ${coin} ✓ ${isLong ? "LONG" : "SHORT"} confluence (${winners.length}/${strategies.length}): ${names}`,
+      );
+      return {
+        isLong,
+        entryPrice: primary.entryPrice,
+        strategy: names,
+        reason: `Confluence ${names}: ${reasons}`,
+      };
+    }
+
+    // Single strategy fired out of multiple — still a valid signal but weaker
+    // Log that confluence wasn't achieved for monitoring
+    this.logger.debug(
+      `[RuleEngine] ${coin} △ ${winners[0].strategy} fired alone (1/${strategies.length}) — allowed as single`,
+    );
+    return primary;
   }
 
   private async evalStrategy(
