@@ -843,7 +843,8 @@ Reply ONLY JSON: {"approved":true/false,"reason":"lý do ngắn gọn bằng ti�
 
       const text = response.choices[0]?.message?.content?.trim() || "";
       const parsed = JSON.parse(text);
-      const result = { approved: !!parsed.approved, reason: parsed.reason };
+      const reason = parsed.reason || (parsed.approved ? "Tín hiệu đạt tiêu chí, không có rủi ro rõ ràng." : "Không rõ lý do");
+      const result = { approved: !!parsed.approved, reason };
 
       // Persist validation to DB for admin review
       this.validationModel.create({
@@ -857,7 +858,7 @@ Reply ONLY JSON: {"approved":true/false,"reason":"lý do ngắn gọn bằng ti�
       return result;
     } catch (err) {
       this.logger.warn(`[AiOptimizer] Signal validation failed: ${err?.message}`);
-      return { approved: true }; // fail open — don't block signals if AI is down
+      return { approved: false, reason: `Validation error: ${err?.message}` };
     }
   }
 
