@@ -714,6 +714,22 @@ export class UserRealTradingService implements OnModuleInit {
 
       await this.subscriptionService.incrementTradePnl(telegramId, pnlUsdt);
 
+      // Notify user about the close
+      const sign = pnlPct >= 0 ? "+" : "";
+      const emoji = pnlPct >= 0 ? "✅" : "❌";
+      const fmtP = (p: number) =>
+        p >= 1000 ? `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :
+        p >= 1 ? `$${p.toFixed(2)}` : `$${p.toFixed(4)}`;
+      const msg =
+        `${emoji} *Real Mode: Lenh Da Dong*\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `${symbol} ${trade.direction}\n` +
+        `Entry: *${fmtP(trade.entryPrice)}*\n` +
+        `Exit: *${fmtP(exitPrice)}*\n` +
+        `PnL: *${sign}${pnlPct.toFixed(2)}% (${sign}${pnlUsdt.toFixed(2)} USDT)*\n\n` +
+        `_${reason}_`;
+      await this.telegramService.sendTelegramMessage(chatId, msg).catch(() => {});
+
       this.logger.log(
         `[RealTrading] closeRealPosition: ${symbol} ${trade.direction} @ ${exitPrice} for user ${telegramId} (${reason})`,
       );
@@ -1364,10 +1380,25 @@ export class UserRealTradingService implements OnModuleInit {
             const pp = await getPP(symbol);
             const round = (p: number) => parseFloat(p.toFixed(pp));
 
+            // ── Time-based stop for real trades: 8h+ stagnant → close ─────
+            const tradeAgeMs = Date.now() - new Date((trade as any).createdAt).getTime();
+            const tradeAgeH = tradeAgeMs / 3600000;
+            const currentPrice = this.marketDataService.getLatestPrice(symbol);
+            if (currentPrice && trade.entryPrice && tradeAgeH >= 8) {
+              const currentPnl = direction === "LONG"
+                ? ((currentPrice - trade.entryPrice) / trade.entryPrice) * 100
+                : ((trade.entryPrice - currentPrice) / trade.entryPrice) * 100;
+              if (currentPnl < 1 && currentPnl > -1) {
+                const reason = `Time-stop ${currentPnl >= 0 ? "+" : ""}${currentPnl.toFixed(2)}% after ${tradeAgeH.toFixed(0)}h`;
+                this.logger.log(`[RealTrading] ${symbol} user ${telegramId}: ${reason}`);
+                await this.closeRealPosition(telegramId, chatId, symbol, reason).catch(() => {});
+                continue;
+              }
+            }
+
             // ── Safety net: if trailing SL should have moved but didn't ─────
             // Position monitor handles trailing SL in real-time, but if bot restarted
             // or listener missed, ensure SL is at least at entry when PnL >= 2%
-            const currentPrice = this.marketDataService.getLatestPrice(symbol);
             if (currentPrice && trade.entryPrice && slPrice) {
               const currentPnlPct = direction === "LONG"
                 ? ((currentPrice - trade.entryPrice) / trade.entryPrice) * 100
