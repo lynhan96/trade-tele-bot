@@ -493,19 +493,16 @@ export class UserRealTradingService implements OnModuleInit {
 
         const label = isBreakEven ? "hoa von (break-even)" : `+${trailLockPct.toFixed(1)}% (trailing stop)`;
 
-        // Throttle notify: only send if SL moved >= 0.3% from last notified SL (avoid tick spam)
-        const lastNotifiedSl = (trade as any).lastNotifiedSlPrice ?? trade.entryPrice;
-        const slMovePct = Math.abs(roundedSlPrice - lastNotifiedSl) / lastNotifiedSl * 100;
-        if (isBreakEven || slMovePct >= 0.3) {
+        // Only notify break-even (first move to entry) — trailing updates are silent to avoid spam
+        if (isBreakEven) {
           const fmtP = (p: number) =>
             p >= 1000 ? `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :
             p >= 1 ? `$${p.toFixed(2)}` : `$${p.toFixed(4)}`;
           const msg =
             `🔒 *Real Mode: SL Duoc Chuyen*\n\n` +
             `${symbol} ${direction}\n` +
-            `SL moi: *${fmtP(roundedSlPrice)}* (${label})`;
+            `SL moi: *${fmtP(roundedSlPrice)}* (hoa von — break-even)`;
           await this.telegramService.sendTelegramMessage(trade.chatId, msg).catch(() => {});
-          await this.userTradeModel.findByIdAndUpdate((trade as any)._id, { lastNotifiedSlPrice: roundedSlPrice });
         }
 
         this.logger.log(
