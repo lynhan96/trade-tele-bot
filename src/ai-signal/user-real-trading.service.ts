@@ -34,6 +34,9 @@ const POS_SLOT_KEY = (telegramId: number) => `cache:pos-slots:${telegramId}`;
 /** Redis key for temporarily blacklisting closed/errored symbols (1h TTL). */
 const CLOSED_SYMBOL_KEY = (symbol: string) => `cache:closed-symbol:${symbol}`;
 
+/** Binance Futures taker fee: 0.04% per side × 2 (open + close) = 0.08% total. */
+const BINANCE_FEE_PCT = 0.08;
+
 @Injectable()
 export class UserRealTradingService implements OnModuleInit {
   private readonly logger = new Logger(UserRealTradingService.name);
@@ -601,10 +604,11 @@ export class UserRealTradingService implements OnModuleInit {
       if (!trade) return;
     }
 
-    const pnlPct =
+    const rawPnlPct =
       trade.direction === "LONG"
         ? ((exitPrice - trade.entryPrice) / trade.entryPrice) * 100
         : ((trade.entryPrice - exitPrice) / trade.entryPrice) * 100;
+    const pnlPct = rawPnlPct - BINANCE_FEE_PCT; // deduct trading fees
     const pnlUsdt = (pnlPct / 100) * trade.notionalUsdt;
 
     // Atomic: only update if still OPEN (prevents duplicate notification if protectOpenTrades already closed it)
@@ -690,9 +694,10 @@ export class UserRealTradingService implements OnModuleInit {
       );
       const exitPrice = parseFloat(closeOrder.avgPrice) || (await this.marketDataService.getPrice(symbol)) || trade.entryPrice;
 
-      const pnlPct = trade.direction === "LONG"
+      const rawPnlPct = trade.direction === "LONG"
         ? ((exitPrice - trade.entryPrice) / trade.entryPrice) * 100
         : ((trade.entryPrice - exitPrice) / trade.entryPrice) * 100;
+      const pnlPct = rawPnlPct - BINANCE_FEE_PCT;
       const pnlUsdt = (pnlPct / 100) * trade.notionalUsdt;
 
       await this.userTradeModel.findByIdAndUpdate((trade as any)._id, {
@@ -765,9 +770,10 @@ export class UserRealTradingService implements OnModuleInit {
     // Use in-memory prices (already subscribed via position monitor)
     const openTrades = openDocs.map((t) => {
       const currentPrice = this.marketDataService.getLatestPrice(t.symbol) ?? t.entryPrice;
-      const unrealizedPnlPct = t.direction === "LONG"
+      const rawPnlPct = t.direction === "LONG"
         ? ((currentPrice - t.entryPrice) / t.entryPrice) * 100
         : ((t.entryPrice - currentPrice) / t.entryPrice) * 100;
+      const unrealizedPnlPct = rawPnlPct - BINANCE_FEE_PCT; // deduct estimated fees
       const unrealizedPnlUsdt = (unrealizedPnlPct / 100) * t.notionalUsdt;
       return {
         symbol: t.symbol, direction: t.direction,
@@ -831,9 +837,10 @@ export class UserRealTradingService implements OnModuleInit {
 
     const openTrades = openDocs.map((t) => {
       const currentPrice = this.marketDataService.getLatestPrice(t.symbol) ?? t.entryPrice;
-      const unrealizedPnlPct = t.direction === "LONG"
+      const rawPnlPct = t.direction === "LONG"
         ? ((currentPrice - t.entryPrice) / t.entryPrice) * 100
         : ((t.entryPrice - currentPrice) / t.entryPrice) * 100;
+      const unrealizedPnlPct = rawPnlPct - BINANCE_FEE_PCT; // deduct estimated fees
       const unrealizedPnlUsdt = (unrealizedPnlPct / 100) * t.notionalUsdt;
       return {
         symbol: t.symbol, direction: t.direction,
@@ -983,9 +990,10 @@ export class UserRealTradingService implements OnModuleInit {
         );
         const exitPrice = parseFloat(closeOrder.avgPrice) || (await this.marketDataService.getPrice(trade.symbol)) || trade.entryPrice;
 
-        const pnlPct = trade.direction === "LONG"
+        const rawPnlPct = trade.direction === "LONG"
           ? ((exitPrice - trade.entryPrice) / trade.entryPrice) * 100
           : ((trade.entryPrice - exitPrice) / trade.entryPrice) * 100;
+        const pnlPct = rawPnlPct - BINANCE_FEE_PCT;
         const pnlUsdt = (pnlPct / 100) * trade.notionalUsdt;
 
         await this.userTradeModel.findByIdAndUpdate((trade as any)._id, {
@@ -1015,7 +1023,7 @@ export class UserRealTradingService implements OnModuleInit {
   // ─── Cycle P&L limit crons ───────────────────────────────────────────────
 
   /** Trailing floor ratio: 50% normally, 70% after target hit (paused). */
-  private readonly FLOOR_RATIO_NORMAL = 0.5;
+
   private readonly FLOOR_RATIO_TARGET = 0.7;
 
   /**
@@ -1117,33 +1125,6 @@ export class UserRealTradingService implements OnModuleInit {
               this.logger.log(`[RealTrading] Cycle PAUSE for user ${user.telegramId}: ${pnlPct.toFixed(2)}% (target ${target}%)`);
             }
             continue;
-          }
-
-          // ── Normal trailing floor (before target, TRAILING mode only): 50% of peak ──
-          if (!isCloseAllMode && !paused && peak > 0 && stats.openTrades.length > 0) {
-            const normalFloor = peak * this.FLOOR_RATIO_NORMAL;
-            if (pnlPct <= normalFloor && peak >= target * 0.5) {
-              const closedCount = await this.closeAllRealPositions(user.telegramId, user.chatId, "CYCLE_TARGET");
-              await this.dailyLimitHistoryModel.create({
-                telegramId: user.telegramId, username: user.username,
-                type: "CYCLE_TARGET", pnlUsdt: stats.totalPnlUsdt, pnlPct,
-                limitPct: target, positionsClosed: closedCount, triggeredAt: new Date(),
-              });
-              const resetAt = new Date(Date.now() + 1000);
-              await this.subscriptionService.setCycleResetAt(user.telegramId, resetAt);
-
-              const sign = stats.totalPnlUsdt >= 0 ? "+" : "";
-              const msg =
-                `🔒 *Cycle Floor: Bao Ve Loi Nhuan*\n` +
-                `━━━━━━━━━━━━━━━━━━\n\n` +
-                `Cycle PnL: *${sign}${stats.totalPnlUsdt.toFixed(2)} USDT* (*${sign}${pnlPct.toFixed(2)}%*)\n` +
-                `Peak: *+${peak.toFixed(2)}%* · Floor: *+${normalFloor.toFixed(2)}%*\n` +
-                (closedCount > 0 ? `Da dong: *${closedCount} lenh*\n` : ``) +
-                `\nCycle moi bat dau — bot tiep tuc mo lenh.`;
-              await this.telegramService.sendTelegramMessage(user.chatId, msg).catch(() => {});
-              this.logger.log(`[RealTrading] Cycle NORMAL FLOOR for user ${user.telegramId}: ${pnlPct.toFixed(2)}% (peak ${peak.toFixed(2)}%, floor ${normalFloor.toFixed(2)}%)`);
-              continue;
-            }
           }
 
           // ── Already paused (TRAILING mode): check trailing floor at 70% of peak ──
@@ -1338,9 +1319,10 @@ export class UserRealTradingService implements OnModuleInit {
               let pnlPct = 0;
               let pnlUsdt = 0;
               if (exitPrice && trade.entryPrice) {
-                pnlPct = direction === "LONG"
+                const rawPct = direction === "LONG"
                   ? ((exitPrice - trade.entryPrice) / trade.entryPrice) * 100
                   : ((trade.entryPrice - exitPrice) / trade.entryPrice) * 100;
+                pnlPct = rawPct - BINANCE_FEE_PCT;
                 pnlUsdt = (pnlPct / 100) * (trade.notionalUsdt || 0);
               }
 
