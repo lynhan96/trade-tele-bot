@@ -897,6 +897,9 @@ export class AiSignalService implements OnModuleInit {
     // Block signals that go against the coin's own 4h trend, regardless of global regime.
     // Neutral zone (spread below threshold) = no clear trend → both directions allowed.
     // Regime-aware: ranging markets use 2.0% (small trends are noise), trending uses 1.0%.
+    // Confluence signals (2+ strategies confirmed) get a higher threshold — multi-TA agreement
+    // is strong enough to trade against mild 4h trends.
+    const isConfluenceSignal = signalResult.strategy.includes("+");
     try {
       const htf4hCloses = await this.indicatorService.getCloses(coin, "4h");
       if (htf4hCloses.length >= 55) {
@@ -905,13 +908,15 @@ export class AiSignalService implements OnModuleInit {
         const spreadPct = (Math.abs(ema21.last - ema50.last) / ema50.last) * 100;
 
         const isRanging = params.regime === "RANGE_BOUND" || params.regime === "SIDEWAYS";
-        const trendSpreadThreshold = isRanging ? 2.0 : 1.0;
+        // Confluence signals get 50% higher threshold (e.g. 3% instead of 2% for ranging)
+        const baseThreshold = isRanging ? 2.0 : 1.0;
+        const trendSpreadThreshold = isConfluenceSignal ? baseThreshold * 1.5 : baseThreshold;
 
         if (spreadPct > trendSpreadThreshold) {
           const coinTrendUp = ema21.last > ema50.last;
           if (signalResult.isLong && !coinTrendUp) {
             this.logger.log(
-              `[AiSignal] ${signalKey} LONG blocked — 4h downtrend (EMA21 < EMA50, spread=${spreadPct.toFixed(2)}%)`,
+              `[AiSignal] ${signalKey} LONG blocked — 4h downtrend (EMA21 < EMA50, spread=${spreadPct.toFixed(2)}%${isConfluenceSignal ? ", confluence threshold=" + trendSpreadThreshold.toFixed(1) + "%" : ""})`,
             );
             return;
           }
