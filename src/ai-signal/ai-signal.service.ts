@@ -1379,9 +1379,17 @@ export class AiSignalService implements OnModuleInit {
     // TP/SL notifications only for admin (real-mode users get notified via UserRealTradingService)
 
     // Activate queued if any
-    const queued = await this.signalQueueService.activateQueuedSignal(sigKey);
+    let queued = await this.signalQueueService.activateQueuedSignal(sigKey);
     if (queued) {
+      // Refresh entry price — queued signals can be hours old, SL/TP must reflect current market
+      const livePrice = this.marketDataService.getLatestPrice(queued.symbol);
+      if (livePrice && livePrice > 0) {
+        queued = await this.signalQueueService.refreshEntryPrice(queued, livePrice);
+      }
       await this.notifySignalTestMode(queued);
+      this.userRealTradingService.onSignalActivated(queued, {} as any).catch((err) =>
+        this.logger.error(`[AiSignal] Real trading error (queued promoted): ${err?.message}`),
+      );
     }
   }
 

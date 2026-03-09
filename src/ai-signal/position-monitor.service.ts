@@ -318,11 +318,19 @@ export class PositionMonitorService implements OnModuleInit {
       );
 
       if (resolved) {
-        const promoted = await this.signalQueueService.activateQueuedSignal(
+        let promoted = await this.signalQueueService.activateQueuedSignal(
           sigKey,
         );
         if (promoted) {
+          // Refresh entry price — queued signals can be hours old
+          const livePrice = this.marketDataService.getLatestPrice(promoted.symbol);
+          if (livePrice && livePrice > 0) {
+            promoted = await this.signalQueueService.refreshEntryPrice(promoted, livePrice);
+          }
           this.registerListener(promoted);
+          this.userRealTradingService.onSignalActivated(promoted, {} as any).catch((err) =>
+            this.logger.error(`[PositionMonitor] Real trading error (queued promoted): ${err?.message}`),
+          );
           this.logger.log(
             `[PositionMonitor] ${sigKey} queued signal promoted to ACTIVE`,
           );
@@ -415,10 +423,17 @@ export class PositionMonitorService implements OnModuleInit {
               "POSITION_CLOSED",
             );
 
-          const promoted =
+          let promoted =
             await this.signalQueueService.activateQueuedSignal(sigKey);
           if (promoted) {
+            const livePrice = this.marketDataService.getLatestPrice(promoted.symbol);
+            if (livePrice && livePrice > 0) {
+              promoted = await this.signalQueueService.refreshEntryPrice(promoted, livePrice);
+            }
             this.registerListener(promoted);
+            this.userRealTradingService.onSignalActivated(promoted, {} as any).catch((err) =>
+              this.logger.error(`[PositionMonitor] Real trading error (queued promoted): ${err?.message}`),
+            );
           }
 
           const pnlPercent =

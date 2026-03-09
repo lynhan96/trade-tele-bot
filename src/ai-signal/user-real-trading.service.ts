@@ -18,7 +18,7 @@ import { getProxyAgent } from "../utils/proxy";
 const axios = require("axios");
 
 /** Max tolerance — skip order if price moved beyond this from signal entry. */
-const ENTRY_PRICE_TOLERANCE = 0.01; // 1%
+const ENTRY_PRICE_TOLERANCE = 0.02; // 2%
 
 /** TradFi-Perps symbols that require separate Binance agreement — skip for real orders. */
 const TRADFI_BLACKLIST = new Set(["XAUUSDT", "XAGUSDT", "MSTRUSDT"]);
