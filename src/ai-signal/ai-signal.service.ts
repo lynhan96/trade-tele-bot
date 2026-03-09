@@ -488,8 +488,9 @@ export class AiSignalService implements OnModuleInit {
           const ageMs = Date.now() - new Date((signal as any).createdAt).getTime();
           const ageH = ageMs / 3600000;
 
-          // Time-based stop: 8h+ and PnL < 1% → cut early, don't wait for full SL
-          if (ageH >= 8 && pnlPercent < 1) {
+          // Time-based stop: 8h+ and PnL between -1% and +1% (stagnant signal)
+          // If PnL < -1%, let SL handle it naturally (may recover or hit SL at -2.5%)
+          if (ageH >= 8 && pnlPercent < 1 && pnlPercent > -1) {
             const reason = `Time-stop ${pnlPercent >= 0 ? "+" : ""}${pnlPercent.toFixed(2)}% after ${ageH.toFixed(0)}h`;
             await this.signalQueueService.closeActiveSignalWithPnl(
               signal, currentPrice, reason,
