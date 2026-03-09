@@ -44,15 +44,15 @@ export class CoinFilterService {
       maxShortlistSize: number;
     }>(AI_MARKET_FILTERS_KEY);
 
-    const configuredMin = parseInt(
+    const configuredMax = parseInt(
       this.configService.get("AI_MAX_SHORTLIST_SIZE", "25"),
     );
 
     if (aiConfig?.minVolumeUsd) {
-      // Always respect .env as minimum floor — AI can exceed it but never go below
+      // .env is the hard cap — AI can suggest a larger list but we cap it
       return {
         ...aiConfig,
-        maxShortlistSize: Math.max(aiConfig.maxShortlistSize, configuredMin),
+        maxShortlistSize: Math.min(aiConfig.maxShortlistSize, configuredMax),
         source: "ai",
       };
     }
@@ -64,7 +64,7 @@ export class CoinFilterService {
       minPriceChangePct: parseFloat(
         this.configService.get("AI_MIN_PRICE_CHANGE_PCT", "0.3"),
       ),
-      maxShortlistSize: configuredMin,
+      maxShortlistSize: configuredMax,
       source: "env",
     };
   }
