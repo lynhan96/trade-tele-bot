@@ -119,12 +119,15 @@ export class RuleEngineService {
     // RSI threshold gate — tighter thresholds to avoid peak entries
     if (cfg.enableThreshold) {
       const isRanging = params.regime === "RANGE_BOUND" || params.regime === "SIDEWAYS";
-      const isTrendRegime = params.regime === "STRONG_BULL" || params.regime === "STRONG_BEAR";
+      const isBull = params.regime === "STRONG_BULL";
+      const isBear = params.regime === "STRONG_BEAR";
       const threshold = isRanging
-        ? isLong ? 50 : 50   // neutral zone only in ranging
-        : isTrendRegime
-          ? isLong ? 50 : 50  // allow LONG only when RSI < 50 (not extended) even in bull
-          : cfg.rsiThreshold;  // default (50)
+        ? isLong ? 45 : 55   // ranging: LONG needs RSI < 45, SHORT needs RSI > 55
+        : isBull
+          ? isLong ? 55 : 40  // bull: LONG OK up to 55, SHORT needs extreme RSI < 40
+          : isBear
+            ? isLong ? 35 : 60  // bear: LONG needs extreme RSI < 35, SHORT OK up to 60
+            : cfg.rsiThreshold;  // default (50)
 
       if (isLong && rsi.last >= threshold) {
         this.logger.debug(`[RuleEngine] ${coin} RSI_CROSS LONG blocked: RSI=${rsi.last.toFixed(1)} >= threshold ${threshold}`);

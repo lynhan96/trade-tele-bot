@@ -453,9 +453,9 @@ Reply ONLY with valid JSON (no markdown):
 
     // ── 2. All other coins: fixed SL/TP + ATR floor + algorithmic strategy ──
     let defaults = atrDefaults;
-    // Fixed SL=3%, TP=4% baseline — ATR may widen SL for volatile coins
-    if (defaults.stopLossPercent < 3) defaults.stopLossPercent = 3;
-    if (defaults.takeProfitPercent < 4) defaults.takeProfitPercent = 4;
+    // Fixed SL=2.5%, TP=5% baseline (1:2 R:R) — ATR may widen SL for volatile coins
+    if (defaults.stopLossPercent < 2.5) defaults.stopLossPercent = 2.5;
+    if (defaults.takeProfitPercent < 5) defaults.takeProfitPercent = 5;
     if (algoStrategy) defaults.strategy = algoStrategy;
     if (forceProfile) defaults = this.applyForcedProfile(defaults, forceProfile);
     const jitter = Math.floor(Math.random() * AI_PARAMS_JITTER);
@@ -472,8 +472,8 @@ Reply ONLY with valid JSON (no markdown):
     const result = { ...params };
     result.timeframeProfile = profile as any;
 
-    // Cap TP at 3-5% for all profiles — dynamic boost in PositionMonitor will widen on momentum
-    result.takeProfitPercent = Math.min(5, Math.max(3, result.takeProfitPercent));
+    // Ensure minimum 1:2 R:R — TP must be at least 2x SL
+    result.takeProfitPercent = Math.max(result.stopLossPercent * 2, result.takeProfitPercent);
 
     if (profile === "SWING") {
       // SWING: 4h primary, 1d HTF, wider SL
@@ -684,11 +684,10 @@ Reply ONLY with valid JSON (no markdown):
       strategies.push("TREND_EMA");
     }
 
-    // ── MEAN_REVERT_RSI only in RANGE_BOUND/SIDEWAYS (blocked in MIXED/BEAR/VOLATILE by rule engine)
-    // Deprioritized: 22 trades, 1 win, -21.54% PnL
-    if ((isRange || isSideways) && (rsi < 35 || rsi > 65)) {
-      strategies.push("MEAN_REVERT_RSI");
-    }
+    // ── MEAN_REVERT_RSI disabled — 22 trades, 1 win (4.5%), -21.54% PnL
+    // if ((isRange || isSideways) && (rsi < 35 || rsi > 65)) {
+    //   strategies.push("MEAN_REVERT_RSI");
+    // }
 
     // ── Volatile with RSI at extremes → zone trading ───────────────────
     if (isVolatile && (rsi < 30 || rsi > 70)) {

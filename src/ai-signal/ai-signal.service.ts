@@ -470,14 +470,12 @@ export class AiSignalService implements OnModuleInit {
         );
       }
 
-      // 2. Auto-close ACTIVE signals after 48h — ONLY if profitable
-      // Losing signals are left to hit their SL naturally
-      const STALE_MS = 48 * 60 * 60 * 1000;
+      // 2. Time-based stop: close signals not performing after 8h
+      // AND auto-close profitable signals after 48h
       const isTestMode = await this.isTestModeEnabled();
+      const allActives = await this.signalQueueService.getAllActiveSignals();
 
-      const oldActives = await this.signalQueueService.findOldActiveSignals(STALE_MS);
-
-      for (const signal of oldActives) {
+      for (const signal of allActives) {
         try {
           const currentPrice = await this.marketDataService.getPrice(signal.symbol);
           if (!currentPrice) continue;
@@ -488,18 +486,17 @@ export class AiSignalService implements OnModuleInit {
               : ((signal.entryPrice - currentPrice) / signal.entryPrice) * 100;
 
           const ageMs = Date.now() - new Date((signal as any).createdAt).getTime();
-          const ageH = (ageMs / 3600000).toFixed(0);
+          const ageH = ageMs / 3600000;
 
-          if (pnlPercent >= 1) {
-            // 48h+ and profitable >= 1% → close with descriptive reason
-            const reason = `Auto-closed +${pnlPercent.toFixed(2)}% after ${ageH}h`;
+          // Time-based stop: 8h+ and PnL < 1% → cut early, don't wait for full SL
+          if (ageH >= 8 && pnlPercent < 1) {
+            const reason = `Time-stop ${pnlPercent >= 0 ? "+" : ""}${pnlPercent.toFixed(2)}% after ${ageH.toFixed(0)}h`;
             await this.signalQueueService.closeActiveSignalWithPnl(
               signal, currentPrice, reason,
             );
             this.positionMonitorService.unregisterListener(signal);
             this.logger.log(`[AiSignal] ${reason} — ${signal.symbol}`);
 
-            // Close real Binance positions if not test mode
             if (!isTestMode) {
               const subscribers = await this.subscriptionService.findRealModeSubscribers();
               for (const sub of subscribers) {
@@ -508,11 +505,26 @@ export class AiSignalService implements OnModuleInit {
                 ).catch(() => {});
               }
             }
-          } else {
-            // 48h+ but PnL < 1% → skip, let TP/SL handle it naturally
-            this.logger.log(
-              `[AiSignal] Skipping auto-close for ${signal.symbol} — PnL ${pnlPercent.toFixed(2)}% after ${ageH}h (need >= 1%)`,
+            continue;
+          }
+
+          // 48h+ and profitable >= 1% → close with descriptive reason
+          if (ageH >= 48 && pnlPercent >= 1) {
+            const reason = `Auto-closed +${pnlPercent.toFixed(2)}% after ${ageH.toFixed(0)}h`;
+            await this.signalQueueService.closeActiveSignalWithPnl(
+              signal, currentPrice, reason,
             );
+            this.positionMonitorService.unregisterListener(signal);
+            this.logger.log(`[AiSignal] ${reason} — ${signal.symbol}`);
+
+            if (!isTestMode) {
+              const subscribers = await this.subscriptionService.findRealModeSubscribers();
+              for (const sub of subscribers) {
+                await this.userRealTradingService.closeRealPosition(
+                  sub.telegramId, sub.chatId, signal.symbol, reason,
+                ).catch(() => {});
+              }
+            }
           }
         } catch (err) {
           this.logger.error(
@@ -739,13 +751,13 @@ export class AiSignalService implements OnModuleInit {
     // Cap minConfidenceToTrade per regime — in ranging/sideways markets Haiku sets thresholds
     // too high (55-65) while confidence is low (35-55), blocking all signals needlessly
     const regimeThresholdCap: Record<string, number> = {
-      SIDEWAYS: 40,
-      RANGE_BOUND: 48,
-      MIXED: 50,
-      VOLATILE: 55,
-      BTC_CORRELATION: 55,
-      STRONG_BULL: 60,
-      STRONG_BEAR: 60,
+      SIDEWAYS: 55,
+      RANGE_BOUND: 58,
+      MIXED: 60,
+      VOLATILE: 62,
+      BTC_CORRELATION: 60,
+      STRONG_BULL: 65,
+      STRONG_BEAR: 65,
     };
     const cap = regimeThresholdCap[params.regime] ?? 55;
     if (params.minConfidenceToTrade > cap) {
@@ -1239,9 +1251,9 @@ export class AiSignalService implements OnModuleInit {
       ? ((currentPrice - signal.entryPrice) / signal.entryPrice) * 100
       : ((signal.entryPrice - currentPrice) / signal.entryPrice) * 100;
 
-    // ── Trailing SL: after 2% profit, trail SL at peak - 2% (never lower) ──
-    const TRAIL_TRIGGER = 2;
-    const TRAIL_DISTANCE = 2;
+    // ── Trailing SL: after 1.5% profit, trail SL at peak - 1.2% (never lower) ──
+    const TRAIL_TRIGGER = 1.5;
+    const TRAIL_DISTANCE = 1.2;
 
     // Track peak PnL
     const prevPeak = (signal as any).peakPnlPct || 0;

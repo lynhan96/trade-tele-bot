@@ -45,7 +45,7 @@ export class CoinFilterService {
     }>(AI_MARKET_FILTERS_KEY);
 
     const configuredMin = parseInt(
-      this.configService.get("AI_MAX_SHORTLIST_SIZE", "50"),
+      this.configService.get("AI_MAX_SHORTLIST_SIZE", "25"),
     );
 
     if (aiConfig?.minVolumeUsd) {

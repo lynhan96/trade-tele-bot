@@ -198,9 +198,9 @@ export class PositionMonitorService implements OnModuleInit {
         ? ((price - entryPrice) / entryPrice) * 100
         : ((entryPrice - price) / entryPrice) * 100;
 
-    // ── Trailing SL: after 2% profit, trail SL at peak - 2% (never lower) ──
-    const TRAIL_TRIGGER = 2;   // activate trailing at 2% profit
-    const TRAIL_DISTANCE = 2;  // SL stays 2% below peak
+    // ── Trailing SL: after 1.5% profit, trail SL at peak - 1.2% (never lower) ──
+    const TRAIL_TRIGGER = 1.5;   // activate trailing at 1.5% profit
+    const TRAIL_DISTANCE = 1.2;  // SL stays 1.2% below peak — keeps more profit
 
     // Track peak PnL for this signal
     const prevPeak = (signal as any).peakPnlPct || 0;

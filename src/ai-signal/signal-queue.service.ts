@@ -599,9 +599,10 @@ export class SignalQueueService {
     isTestMode = false,
   ): Promise<AiSignalDocument> {
     const symbol = `${coin.toUpperCase()}${currency.toUpperCase()}`;
-    const MIN_PERCENT = 3.0; // minimum SL and TP to avoid noise-triggered exits
-    const stopLossPercent = Math.max(params.stopLossPercent, MIN_PERCENT);
-    const takeProfitPercent = Math.max(params.takeProfitPercent ?? stopLossPercent * 2, MIN_PERCENT);
+    const MIN_SL = 2.5;  // tighter SL — cut losses faster
+    const MIN_TP = 5.0;  // minimum 1:2 risk/reward ratio
+    const stopLossPercent = Math.max(params.stopLossPercent, MIN_SL);
+    const takeProfitPercent = Math.max(params.takeProfitPercent ?? stopLossPercent * 2, MIN_TP);
     const entryPrice = signalResult.entryPrice;
 
     const stopLossPrice = signalResult.isLong
