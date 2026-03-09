@@ -121,13 +121,16 @@ export class RuleEngineService {
       const isRanging = params.regime === "RANGE_BOUND" || params.regime === "SIDEWAYS";
       const isBull = params.regime === "STRONG_BULL";
       const isBear = params.regime === "STRONG_BEAR";
+      const isMixed = params.regime === "MIXED" || params.regime === "VOLATILE" || params.regime === "BTC_CORRELATION";
       const threshold = isRanging
         ? isLong ? 45 : 55   // ranging: LONG needs RSI < 45, SHORT needs RSI > 55
         : isBull
           ? isLong ? 55 : 40  // bull: LONG OK up to 55, SHORT needs extreme RSI < 40
           : isBear
             ? isLong ? 35 : 60  // bear: LONG needs extreme RSI < 35, SHORT OK up to 60
-            : cfg.rsiThreshold;  // default (50)
+            : isMixed
+              ? isLong ? 50 : 45  // mixed/volatile: LONG < 50, SHORT > 45 (more permissive)
+              : cfg.rsiThreshold;  // fallback (50)
 
       if (isLong && rsi.last >= threshold) {
         this.logger.debug(`[RuleEngine] ${coin} RSI_CROSS LONG blocked: RSI=${rsi.last.toFixed(1)} >= threshold ${threshold}`);
