@@ -24,6 +24,8 @@
     "run-complete-simulator.ts",
     "run-skills-simulator.ts",
     "run-all-simulators.ts",
+    "analyze-signals.ts",
+    "fix-user-pnl.ts",
     "dist",
     "node_modules"
   ]
