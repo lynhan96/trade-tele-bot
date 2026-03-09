@@ -217,21 +217,30 @@ export class RuleEngineService {
     }
 
     // HTF RSI confirmation + overbought/oversold check
+    // In ranging regimes (RANGE_BOUND/SIDEWAYS), skip HTF direction check because
+    // daily trends don't dictate short-term range trades — only check overbought/oversold.
     if (cfg.enableHtfRsi) {
       const htfCloses = await this.indicatorService.getCloses(coin, cfg.htfKline);
       if (htfCloses.length >= 50) {
         const htfRsi = this.indicatorService.getRsi(htfCloses, cfg.rsiPeriod);
         const htfRsiEma = this.indicatorService.getRsiEma(htfCloses, cfg.rsiPeriod, cfg.rsiEmaPeriod);
         const htfIsBullish = htfRsi.last > htfRsiEma.last;
-        if (isLong && !htfIsBullish) {
-          this.logger.debug(`[RuleEngine] ${coin} RSI_CROSS LONG blocked: HTF(${cfg.htfKline}) RSI=${htfRsi.last.toFixed(1)} bearish (< EMA ${htfRsiEma.last.toFixed(1)})`);
-          return null;
+
+        const isRangingRegime = params.regime === "RANGE_BOUND" || params.regime === "SIDEWAYS" || params.regime === "MIXED";
+
+        // In trending regimes, HTF direction must align
+        // In ranging regimes, skip direction check — let price action decide
+        if (!isRangingRegime) {
+          if (isLong && !htfIsBullish) {
+            this.logger.debug(`[RuleEngine] ${coin} RSI_CROSS LONG blocked: HTF(${cfg.htfKline}) RSI=${htfRsi.last.toFixed(1)} bearish (< EMA ${htfRsiEma.last.toFixed(1)})`);
+            return null;
+          }
+          if (!isLong && htfIsBullish) {
+            this.logger.debug(`[RuleEngine] ${coin} RSI_CROSS SHORT blocked: HTF(${cfg.htfKline}) RSI=${htfRsi.last.toFixed(1)} bullish (> EMA ${htfRsiEma.last.toFixed(1)})`);
+            return null;
+          }
         }
-        if (!isLong && htfIsBullish) {
-          this.logger.debug(`[RuleEngine] ${coin} RSI_CROSS SHORT blocked: HTF(${cfg.htfKline}) RSI=${htfRsi.last.toFixed(1)} bullish (> EMA ${htfRsiEma.last.toFixed(1)})`);
-          return null;
-        }
-        // Block LONG if HTF RSI overbought, SHORT if oversold
+        // Block LONG if HTF RSI overbought, SHORT if oversold (all regimes)
         if (isLong && htfRsi.last > 70) {
           this.logger.debug(`[RuleEngine] ${coin} RSI_CROSS LONG blocked: HTF RSI=${htfRsi.last.toFixed(1)} overbought (>70)`);
           return null;
