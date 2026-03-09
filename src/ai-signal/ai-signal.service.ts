@@ -1128,8 +1128,8 @@ export class AiSignalService implements OnModuleInit {
 
       for (const signal of activeSignals) {
         if (signal.direction !== closeDirection) continue;
-        // Skip positions already locked in profit
-        if ((signal as any).sl5PctRaised) continue;
+        // Skip positions with trailing SL locked in >= 2% profit (peak >= 4%)
+        if ((signal as any).peakPnlPct >= 4) continue;
 
         const currentPrice = await this.marketDataService.getPrice(signal.symbol).catch(() => 0);
         if (!currentPrice) continue;
@@ -1249,38 +1249,19 @@ export class AiSignalService implements OnModuleInit {
       ? ((currentPrice - signal.entryPrice) / signal.entryPrice) * 100
       : ((signal.entryPrice - currentPrice) / signal.entryPrice) * 100;
 
-    // ── Milestone 3: At >= 5% profit — raise SL to +3% profit lock ──────
-    if (pnlPct >= 5 && !(signal as any).sl5PctRaised) {
-      const newSl = isLong
-        ? signal.entryPrice * 1.03
-        : signal.entryPrice * 0.97;
-      await this.signalQueueService.raiseStopLoss((signal as any)._id.toString(), newSl);
-      (signal as any).stopLossPrice = newSl;
-      (signal as any).sl5PctRaised = true;
-      (signal as any).sl3PctRaised = true;
-      (signal as any).slMovedToEntry = true;
-      this.logger.log(
-        `[AiSignal] [TEST] 🚀 ${signal.symbol} SL raised to +3% (${newSl.toFixed(4)}) at ${pnlPct.toFixed(2)}% profit — still running`,
-      );
-      await this.notifySl5PctMilestone(signal.symbol, newSl, signal.direction);
-    }
+    // ── Trailing SL: after 2% profit, trail SL at peak - 2% (never lower) ──
+    const TRAIL_TRIGGER = 2;
+    const TRAIL_DISTANCE = 2;
 
-    // ── Milestone 2: At >= 3.5% profit — raise SL to +1.5% profit lock ──
-    if (pnlPct >= 3.5 && !(signal as any).sl3PctRaised && !(signal as any).sl5PctRaised) {
-      const newSl = isLong
-        ? signal.entryPrice * 1.015
-        : signal.entryPrice * 0.985;
-      await this.signalQueueService.raiseStopLoss3Pct((signal as any)._id.toString(), newSl);
-      (signal as any).stopLossPrice = newSl;
-      (signal as any).sl3PctRaised = true;
-      (signal as any).slMovedToEntry = true;
-      this.logger.log(
-        `[AiSignal] [TEST] 📈 ${signal.symbol} SL raised to +1.5% (${newSl.toFixed(4)}) at ${pnlPct.toFixed(2)}% profit`,
-      );
+    // Track peak PnL
+    const prevPeak = (signal as any).peakPnlPct || 0;
+    if (pnlPct > prevPeak) {
+      (signal as any).peakPnlPct = pnlPct;
     }
+    const peak = (signal as any).peakPnlPct || 0;
 
-    // ── Milestone 1: At >= 2% profit — move SL to entry (break-even) ─
-    if (pnlPct >= 2 && !(signal as any).slMovedToEntry) {
+    if (peak >= TRAIL_TRIGGER && !(signal as any).slMovedToEntry) {
+      // First time reaching 2% → move SL to entry (break-even)
       await this.signalQueueService.moveStopLossToEntry((signal as any)._id.toString());
       (signal as any).stopLossPrice = signal.entryPrice;
       (signal as any).slMovedToEntry = true;
@@ -1288,6 +1269,25 @@ export class AiSignalService implements OnModuleInit {
         `[AiSignal] [TEST] 🛡️ ${signal.symbol} SL moved to entry ${signal.entryPrice} (PnL: ${pnlPct.toFixed(2)}%)`,
       );
       await this.notifySlMovedToEntry(signal.symbol, signal.entryPrice);
+    }
+
+    // Continuous trailing: SL = entry + (peak - 2%), only raise
+    if ((signal as any).slMovedToEntry && peak > TRAIL_TRIGGER) {
+      const trailPct = Math.max(0, peak - TRAIL_DISTANCE);
+      const trailSl = isLong
+        ? signal.entryPrice * (1 + trailPct / 100)
+        : signal.entryPrice * (1 - trailPct / 100);
+
+      const currentSl = (signal as any).stopLossPrice || signal.entryPrice;
+      const shouldRaise = isLong ? trailSl > currentSl : trailSl < currentSl;
+
+      if (shouldRaise) {
+        (signal as any).stopLossPrice = trailSl;
+        await this.signalQueueService.raiseStopLoss((signal as any)._id.toString(), trailSl, peak);
+        this.logger.log(
+          `[AiSignal] [TEST] 📈 ${signal.symbol} trailing SL → +${trailPct.toFixed(1)}% (${trailSl.toFixed(4)}) peak: ${peak.toFixed(2)}%`,
+        );
+      }
     }
 
     // Check both TP and SL (no auto-close at 5% — we trail instead)

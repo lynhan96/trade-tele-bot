@@ -95,11 +95,8 @@ export class AiSignal {
   @Prop({ default: false })
   slMovedToEntry?: boolean; // true = SL moved to entry at 1.5% profit (break-even protection)
 
-  @Prop({ default: false })
-  sl3PctRaised?: boolean; // true = SL raised to +1.5% profit at 3% milestone
-
-  @Prop({ default: false })
-  sl5PctRaised?: boolean; // true = SL raised to +3% profit at 5% milestone (trailing stop)
+  @Prop()
+  peakPnlPct?: number; // highest PnL% reached (for trailing SL calculation)
 
   @Prop({ default: false })
   tpBoosted?: boolean; // true = TP extended on volume momentum (one-time per signal)

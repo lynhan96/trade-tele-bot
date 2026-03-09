@@ -163,16 +163,15 @@ export class PositionMonitorService implements OnModuleInit {
 
     // Restore persisted flags from DB so they survive bot restarts
     if ((signal as any).slMovedToEntry) (signal as any).slMovedToEntry = true;
-    if ((signal as any).sl3PctRaised) (signal as any).sl3PctRaised = true;
-    if ((signal as any).sl5PctRaised) (signal as any).sl5PctRaised = true;
     if ((signal as any).tpBoosted) (signal as any).tpBoosted = true;
+    if ((signal as any).peakPnlPct) (signal as any).peakPnlPct = (signal as any).peakPnlPct;
 
     const cb = (price: number) => this.handlePriceTick(signal, price);
     this.listenerRefs.set(sigKey, cb);
     this.watchedSymbols.add(sigKey);
     this.marketDataService.registerPriceListener(symbol, cb);
     this.logger.debug(
-      `[PositionMonitor] Watching ${sigKey} — SL: ${signal.stopLossPrice}, TP: ${signal.takeProfitPrice ?? "N/A"} flags: slMoved=${!!(signal as any).slMovedToEntry} sl5Pct=${!!(signal as any).sl5PctRaised}`,
+      `[PositionMonitor] Watching ${sigKey} — SL: ${signal.stopLossPrice}, TP: ${signal.takeProfitPrice ?? "N/A"} slMoved=${!!(signal as any).slMovedToEntry} peak=${(signal as any).peakPnlPct ?? 0}`,
     );
   }
 
@@ -213,49 +212,19 @@ export class PositionMonitorService implements OnModuleInit {
         ? ((price - entryPrice) / entryPrice) * 100
         : ((entryPrice - price) / entryPrice) * 100;
 
-    // ── Milestone 3: At >= 5% profit — raise SL to +3% profit lock ──────
-    if (pnlPct >= 5 && !(signal as any).sl5PctRaised) {
-      const newSl = direction === "LONG"
-        ? entryPrice * 1.03
-        : entryPrice * 0.97;
-      (signal as any).stopLossPrice = newSl;
-      (signal as any).sl5PctRaised = true;
-      (signal as any).sl3PctRaised = true;
-      (signal as any).slMovedToEntry = true;
-      await this.signalQueueService.raiseStopLoss((signal as any)._id.toString(), newSl);
-      this.logger.log(
-        `[PositionMonitor] 🚀 ${sigKey} SL raised to +3% (${newSl.toFixed(4)}) at ${pnlPct.toFixed(2)}% profit — still running`,
-      );
-      if (this.sl5PctCallback) {
-        await this.sl5PctCallback(symbol, newSl, direction).catch((e) =>
-          this.logger.warn(`[PositionMonitor] sl5PctCallback error ${sigKey}: ${e?.message}`),
-        );
-      }
-      this.propagateSlMove(sigKey, symbol, newSl, direction);
-    }
+    // ── Trailing SL: after 2% profit, trail SL at peak - 2% (never lower) ──
+    const TRAIL_TRIGGER = 2;   // activate trailing at 2% profit
+    const TRAIL_DISTANCE = 2;  // SL stays 2% below peak
 
-    // ── Milestone 2: At >= 3.5% profit — raise SL to +1.5% profit lock ──
-    if (pnlPct >= 3.5 && !(signal as any).sl3PctRaised && !(signal as any).sl5PctRaised) {
-      const newSl = direction === "LONG"
-        ? entryPrice * 1.015
-        : entryPrice * 0.985;
-      (signal as any).stopLossPrice = newSl;
-      (signal as any).sl3PctRaised = true;
-      (signal as any).slMovedToEntry = true;
-      await this.signalQueueService.raiseStopLoss3Pct((signal as any)._id.toString(), newSl);
-      this.logger.log(
-        `[PositionMonitor] 📈 ${sigKey} SL raised to +1.5% (${newSl.toFixed(4)}) at ${pnlPct.toFixed(2)}% profit`,
-      );
-      if (this.sl3PctCallback) {
-        await this.sl3PctCallback(symbol, newSl, direction).catch((e) =>
-          this.logger.warn(`[PositionMonitor] sl3PctCallback error ${sigKey}: ${e?.message}`),
-        );
-      }
-      this.propagateSlMove(sigKey, symbol, newSl, direction);
+    // Track peak PnL for this signal
+    const prevPeak = (signal as any).peakPnlPct || 0;
+    if (pnlPct > prevPeak) {
+      (signal as any).peakPnlPct = pnlPct;
     }
+    const peak = (signal as any).peakPnlPct || 0;
 
-    // ── Milestone 1: At >= 2% profit — move SL to entry (break-even) ─
-    if (pnlPct >= 2 && !(signal as any).slMovedToEntry) {
+    if (peak >= TRAIL_TRIGGER && !(signal as any).slMovedToEntry) {
+      // First time reaching 2% → move SL to entry (break-even)
       (signal as any).stopLossPrice = entryPrice;
       (signal as any).slMovedToEntry = true;
       await this.signalQueueService.moveStopLossToEntry((signal as any)._id.toString());
@@ -268,6 +237,29 @@ export class PositionMonitorService implements OnModuleInit {
         );
       }
       this.propagateSlMove(sigKey, symbol, entryPrice, direction);
+    }
+
+    // Continuous trailing: SL = entry + (peak - TRAIL_DISTANCE)%, only raise
+    if ((signal as any).slMovedToEntry && peak > TRAIL_TRIGGER) {
+      const trailPct = Math.max(0, peak - TRAIL_DISTANCE); // lock-in % (never below 0 = entry)
+      const trailSl = direction === "LONG"
+        ? entryPrice * (1 + trailPct / 100)
+        : entryPrice * (1 - trailPct / 100);
+
+      const currentSl = (signal as any).stopLossPrice || entryPrice;
+      // Only raise SL, never lower
+      const shouldRaise = direction === "LONG" ? trailSl > currentSl : trailSl < currentSl;
+
+      if (shouldRaise) {
+        (signal as any).stopLossPrice = trailSl;
+        // Persist to DB
+        await this.signalQueueService.raiseStopLoss((signal as any)._id.toString(), trailSl, peak);
+        this.logger.log(
+          `[PositionMonitor] 📈 ${sigKey} trailing SL → +${trailPct.toFixed(1)}% (${trailSl.toFixed(4)}) peak: ${peak.toFixed(2)}%`,
+        );
+        // Propagate to Binance real orders
+        this.propagateSlMove(sigKey, symbol, trailSl, direction);
+      }
     }
 
     // ─── Dynamic TP boost: extend TP to 4-6% on strong momentum ─────────

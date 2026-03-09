@@ -240,35 +240,18 @@ export class SignalQueueService {
   }
 
   /**
-   * Raise stop loss to +1.5% profit at 3% milestone.
+   * Raise trailing stop loss + persist peak PnL to DB.
    */
-  async raiseStopLoss3Pct(signalId: string, newStopLoss: number): Promise<void> {
+  async raiseStopLoss(signalId: string, newStopLoss: number, peakPnlPct?: number): Promise<void> {
     const signal = await this.aiSignalModel.findById(signalId);
     if (!signal || signal.status !== "ACTIVE") return;
 
-    await this.aiSignalModel.findByIdAndUpdate(signalId, {
-      stopLossPrice: newStopLoss,
-      sl3PctRaised: true,
-    });
-    this.logger.log(
-      `[SignalQueue] ${signal.symbol} SL raised to ${newStopLoss.toFixed(4)} (+1.5% lock-in at 3% milestone)`,
-    );
-  }
+    const update: any = { stopLossPrice: newStopLoss };
+    if (peakPnlPct != null) update.peakPnlPct = peakPnlPct;
 
-  /**
-   * Raise stop loss to lock in profit (trailing stop milestone).
-   * Called when unrealized PnL reaches 5% — moves SL to +3% profit.
-   */
-  async raiseStopLoss(signalId: string, newStopLoss: number): Promise<void> {
-    const signal = await this.aiSignalModel.findById(signalId);
-    if (!signal || signal.status !== "ACTIVE") return;
-
-    await this.aiSignalModel.findByIdAndUpdate(signalId, {
-      stopLossPrice: newStopLoss,
-      sl5PctRaised: true,
-    });
+    await this.aiSignalModel.findByIdAndUpdate(signalId, update);
     this.logger.log(
-      `[SignalQueue] ${signal.symbol} SL raised to ${newStopLoss.toFixed(4)} (+3% lock-in at 5% milestone)`,
+      `[SignalQueue] ${signal.symbol} trailing SL → ${newStopLoss.toFixed(4)}${peakPnlPct ? ` (peak: ${peakPnlPct.toFixed(1)}%)` : ""}`,
     );
   }
 
