@@ -234,8 +234,8 @@ export class PositionMonitorService implements OnModuleInit {
       this.propagateSlMove(sigKey, symbol, newSl, direction);
     }
 
-    // ── Milestone 2: At >= 3% profit — raise SL to +1.5% profit lock ──
-    if (pnlPct >= 3 && !(signal as any).sl3PctRaised && !(signal as any).sl5PctRaised) {
+    // ── Milestone 2: At >= 3.5% profit — raise SL to +1.5% profit lock ──
+    if (pnlPct >= 3.5 && !(signal as any).sl3PctRaised && !(signal as any).sl5PctRaised) {
       const newSl = direction === "LONG"
         ? entryPrice * 1.015
         : entryPrice * 0.985;
@@ -254,8 +254,8 @@ export class PositionMonitorService implements OnModuleInit {
       this.propagateSlMove(sigKey, symbol, newSl, direction);
     }
 
-    // ── Milestone 1: At >= 1.5% profit — move SL to entry (break-even) ─
-    if (pnlPct >= 1.5 && !(signal as any).slMovedToEntry) {
+    // ── Milestone 1: At >= 2% profit — move SL to entry (break-even) ─
+    if (pnlPct >= 2 && !(signal as any).slMovedToEntry) {
       (signal as any).stopLossPrice = entryPrice;
       (signal as any).slMovedToEntry = true;
       await this.signalQueueService.moveStopLossToEntry((signal as any)._id.toString());
@@ -271,8 +271,8 @@ export class PositionMonitorService implements OnModuleInit {
     }
 
     // ─── Dynamic TP boost: extend TP to 4-6% on strong momentum ─────────
-    // Check once when price reaches 3%+ profit and TP hasn't been boosted yet
-    if (pnlPct >= 3 && !(signal as any).tpBoosted && takeProfitPrice) {
+    // Check once when price reaches 3.5%+ profit and TP hasn't been boosted yet
+    if (pnlPct >= 3.5 && !(signal as any).tpBoosted && takeProfitPrice) {
       (signal as any).tpBoosted = true; // mark as checked (one-time per signal)
       try {
         const hasMomentum = await this.marketDataService.hasVolumeMomentum(symbol);
