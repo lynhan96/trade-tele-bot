@@ -491,13 +491,12 @@ export class UserRealTradingService implements OnModuleInit {
           ? ((roundedSlPrice - trade.entryPrice) / trade.entryPrice) * 100
           : ((trade.entryPrice - roundedSlPrice) / trade.entryPrice) * 100;
 
+        const label = isBreakEven ? "hoa von (break-even)" : `+${trailLockPct.toFixed(1)}% (trailing stop)`;
+
         // Throttle notify: only send if SL moved >= 0.3% from last notified SL (avoid tick spam)
         const lastNotifiedSl = (trade as any).lastNotifiedSlPrice ?? trade.entryPrice;
         const slMovePct = Math.abs(roundedSlPrice - lastNotifiedSl) / lastNotifiedSl * 100;
-        if (!isBreakEven && slMovePct < 0.3) {
-          // SL update too small — skip notify, still update DB
-        } else {
-          const label = isBreakEven ? "hoa von (break-even)" : `+${trailLockPct.toFixed(1)}% (trailing stop)`;
+        if (isBreakEven || slMovePct >= 0.3) {
           const fmtP = (p: number) =>
             p >= 1000 ? `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :
             p >= 1 ? `$${p.toFixed(2)}` : `$${p.toFixed(4)}`;
