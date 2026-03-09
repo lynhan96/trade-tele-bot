@@ -202,9 +202,9 @@ export class PositionMonitorService implements OnModuleInit {
         ? ((price - entryPrice) / entryPrice) * 100
         : ((entryPrice - price) / entryPrice) * 100;
 
-    // ── Trailing SL: after 1.5% profit, trail SL at peak - 1.2% (never lower) ──
+    // ── Trailing SL: after 1.5% profit, trail SL at peak - 0.8% (never lower) ──
     const TRAIL_TRIGGER = 1.5;   // activate trailing at 1.5% profit
-    const TRAIL_DISTANCE = 1.2;  // SL stays 1.2% below peak — keeps more profit
+    const TRAIL_DISTANCE = 0.8;  // SL stays 0.8% below peak — tighter trail keeps more gains
 
     // Track peak PnL for this signal
     const prevPeak = (signal as any).peakPnlPct || 0;
@@ -252,15 +252,16 @@ export class PositionMonitorService implements OnModuleInit {
       }
     }
 
-    // ─── Dynamic TP boost: extend TP to 4-6% on strong momentum ─────────
-    // Check once when price reaches 3.5%+ profit and TP hasn't been boosted yet
-    if (pnlPct >= 3.5 && !(signal as any).tpBoosted && takeProfitPrice) {
+    // ─── Dynamic TP boost: extend TP on strong momentum ─────────────────
+    // Triggers at 2.0% profit (was 3.5% — never fired since avg peak is ~2.3%)
+    if (pnlPct >= 2.0 && !(signal as any).tpBoosted && takeProfitPrice) {
       (signal as any).tpBoosted = true; // mark as checked (one-time per signal)
       try {
         const hasMomentum = await this.marketDataService.hasVolumeMomentum(symbol);
         if (hasMomentum) {
-          // Extend TP based on current momentum (4-6% range)
-          const boostedTpPct = Math.min(6, Math.max(4, pnlPct + 2));
+          // Extend TP by 2% from current position, cap at 6%
+          const currentTpPct = Math.abs(takeProfitPrice - entryPrice) / entryPrice * 100;
+          const boostedTpPct = Math.min(6, Math.max(currentTpPct, pnlPct + 2.0));
           const newTpPrice = direction === "LONG"
             ? entryPrice * (1 + boostedTpPct / 100)
             : entryPrice * (1 - boostedTpPct / 100);

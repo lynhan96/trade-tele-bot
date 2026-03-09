@@ -514,7 +514,15 @@ export class AiSignalService implements OnModuleInit {
           }
 
           // 48h+ and profitable >= 1% → close with descriptive reason
+          // SKIP if already close to TP (≥70% of the way) — let price action finish it
           if (ageH >= 48 && pnlPercent >= 1) {
+            const tpPct = (signal as any).takeProfitPercent ?? 5;
+            if (pnlPercent >= tpPct * 0.7) {
+              this.logger.debug(
+                `[AiSignal] ${signal.symbol} 48h skip — ${pnlPercent.toFixed(1)}% ≥ 70% of TP (${tpPct}%), letting it ride`,
+              );
+              continue;
+            }
             const reason = `Auto-closed +${pnlPercent.toFixed(2)}% after ${ageH.toFixed(0)}h`;
             try {
               await this.signalQueueService.closeActiveSignalWithPnl(
