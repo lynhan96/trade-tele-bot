@@ -865,6 +865,15 @@ export class RuleEngineService {
       rsiShortMin: 55,
     };
 
+    // BB_SCALP is a mean-reversion strategy — only valid in tight ranging/sideways markets
+    // Firing in MIXED/BULL/BEAR/VOLATILE leads to false bounces (e.g. BTC SHORT in uptrend)
+    const regime = params.regime ?? "MIXED";
+    const allowedRegimes = ["SIDEWAYS", "RANGE_BOUND"];
+    if (!allowedRegimes.includes(regime)) {
+      this.logger.debug(`[RuleEngine] ${coin} BB_SCALP blocked: regime=${regime} (only SIDEWAYS/RANGE_BOUND)`);
+      return null;
+    }
+
     const ohlc = await this.indicatorService.getOhlc(coin, cfg.primaryKline);
     if (ohlc.closes.length < cfg.bbPeriod + cfg.rsiPeriod + 5) return null;
 
