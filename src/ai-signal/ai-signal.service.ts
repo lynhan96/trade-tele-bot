@@ -328,15 +328,6 @@ export class AiSignalService implements OnModuleInit {
 
       const globalRegime = await this.aiOptimizerService.assessGlobalRegime();
 
-      // ── Daily signal cap: prevent over-trading (Mar 8 = 28 signals, 11% win rate) ──
-      const MAX_DAILY_SIGNALS = 18;
-      const dailyCountKey = "cache:ai:daily-signal-count";
-      const dailyCount = await this.redisService.get<number>(dailyCountKey) || 0;
-      if (dailyCount >= MAX_DAILY_SIGNALS) {
-        this.logger.debug(`[AiSignal] Daily signal cap reached (${dailyCount}/${MAX_DAILY_SIGNALS}) — skipping scan`);
-        return;
-      }
-
       // ── Regime reversal: close counter-regime positions ──────────────────
       await this.handleRegimeReversal(globalRegime);
 
@@ -1020,6 +1011,21 @@ export class AiSignalService implements OnModuleInit {
       return;
     }
 
+    // ── Daily signal cap: atomic check+increment to prevent over-trading ──
+    const MAX_DAILY_SIGNALS = 18;
+    const dailyCountKey = "cache:ai:daily-signal-count";
+    const now = new Date();
+    const midnight = new Date(now);
+    midnight.setUTCDate(midnight.getUTCDate() + 1);
+    midnight.setUTCHours(0, 0, 0, 0);
+    const ttl = Math.ceil((midnight.getTime() - now.getTime()) / 1000);
+    const newDailyCount = await this.redisService.initAndIncr(dailyCountKey, 0, ttl);
+    if (newDailyCount > MAX_DAILY_SIGNALS) {
+      await this.redisService.decr(dailyCountKey); // rollback
+      this.logger.debug(`[AiSignal] Daily signal cap reached (${MAX_DAILY_SIGNALS}) — skipping ${coin.toUpperCase()}`);
+      return;
+    }
+
     const isTestMode = await this.isTestModeEnabled();
 
     this.logger.log(
@@ -1067,17 +1073,11 @@ export class AiSignalService implements OnModuleInit {
         await this.notifySignalQueued(queuedSignal, isTestMode);
       }
     }
-    // Increment daily signal counter (EXECUTED or QUEUED, not SKIPPED)
-    if (queueResult.action === "EXECUTED" || queueResult.action === "QUEUED") {
-      const dailyCountKey = "cache:ai:daily-signal-count";
-      const now = new Date();
-      const midnight = new Date(now);
-      midnight.setUTCDate(midnight.getUTCDate() + 1);
-      midnight.setUTCHours(0, 0, 0, 0);
-      const ttl = Math.ceil((midnight.getTime() - now.getTime()) / 1000);
-      await this.redisService.initAndIncr(dailyCountKey, 0, ttl);
+    // If signal was SKIPPED by queue (already active), rollback the daily count
+    if (queueResult.action === "SKIPPED") {
+      await this.redisService.decr(dailyCountKey).catch(() => {});
     }
-    // SKIPPED — silent
+    // EXECUTED/QUEUED — daily count already incremented above
     } finally {
       this.processingCoins.delete(lockKey);
     }
