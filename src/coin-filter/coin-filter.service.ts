@@ -3,6 +3,7 @@ import { ConfigService } from "@nestjs/config";
 import { RedisService } from "../redis/redis.service";
 import { MarketDataService, Ticker24h } from "../market-data/market-data.service";
 import { FuturesAnalyticsService, CoinAnalytics } from "../market-data/futures-analytics.service";
+import { CoinGeckoService } from "../coingecko/coingecko.service";
 
 export interface CoinShortlistEntry {
   symbol: string; // "BTCUSDT"
@@ -30,6 +31,7 @@ export class CoinFilterService {
     private readonly marketDataService: MarketDataService,
     private readonly futuresAnalyticsService: FuturesAnalyticsService,
     private readonly configService: ConfigService,
+    private readonly coinGeckoService: CoinGeckoService,
   ) {}
 
   private async getEffectiveFilterConfig(): Promise<{
@@ -72,12 +74,15 @@ export class CoinFilterService {
   /**
    * Compute composite quality score for a coin.
    * Higher score = better trading candidate.
+   * Weights: volume (35%) + volatility (25%) + futures analytics (25%) + social momentum (15%)
+   * When CoinGecko is disabled, social weight is redistributed to volume/volatility.
    */
   private computeScore(
-    entry: { quoteVolume: number; priceChangePercent: number },
+    entry: { quoteVolume: number; priceChangePercent: number; coin?: string },
     analytics: CoinAnalytics | undefined,
     volumeMax: number,
     changeMax: number,
+    trendingSymbols?: Set<string>,
   ): number {
     // Volume score (0-1): normalized log scale to avoid mega-cap dominance
     const volScore = volumeMax > 0
@@ -106,6 +111,17 @@ export class CoinFilterService {
       analyticsScore = fundingScore * 0.3 + lsScore * 0.3 + takerScore * 0.4;
     }
 
+    // Social momentum score (0-1): CoinGecko trending boost
+    const hasSocial = trendingSymbols && trendingSymbols.size > 0;
+    let socialScore = 0;
+    if (hasSocial && entry.coin) {
+      socialScore = trendingSymbols.has(entry.coin) ? 1.0 : 0;
+    }
+
+    // Weighted total — redistribute social weight when CoinGecko disabled
+    if (hasSocial) {
+      return volScore * 0.35 + volatilityScore * 0.25 + analyticsScore * 0.25 + socialScore * 0.15;
+    }
     return volScore * 0.4 + volatilityScore * 0.3 + analyticsScore * 0.3;
   }
 
@@ -145,6 +161,20 @@ export class CoinFilterService {
     // Get cached futures analytics for scoring
     const analytics = await this.futuresAnalyticsService.getCachedAnalytics();
 
+    // Get CoinGecko trending coins (if enabled)
+    let trendingSymbols: Set<string> | undefined;
+    if (this.coinGeckoService.isEnabled()) {
+      try {
+        const trending = await this.coinGeckoService.getTrendingSymbols();
+        trendingSymbols = new Set(trending);
+        if (trending.length > 0) {
+          this.logger.debug(`[CoinFilter] CoinGecko trending: ${trending.join(", ")}`);
+        }
+      } catch (err) {
+        this.logger.debug("[CoinFilter] CoinGecko fetch failed, scoring without social data");
+      }
+    }
+
     // Compute normalization bounds
     const volumeMax = Math.max(...entries.map((e) => e.quoteVolume), 1);
     const changeMax = Math.max(...entries.map((e) => e.priceChangePercent), 0.1);
@@ -152,7 +182,7 @@ export class CoinFilterService {
     // Score and sort by composite quality
     const scored: (CoinShortlistEntry & { score: number })[] = entries.map((e) => ({
       ...e,
-      score: this.computeScore(e, analytics.get(e.symbol), volumeMax, changeMax),
+      score: this.computeScore(e, analytics.get(e.symbol), volumeMax, changeMax, trendingSymbols),
     }));
     scored.sort((a, b) => b.score - a.score);
 

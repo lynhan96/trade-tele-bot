@@ -134,4 +134,17 @@ export interface AiTunedParams {
     rsiLongMax: number;   // LONG only when RSI < this (default 52)
     rsiShortMin: number;  // SHORT only when RSI > this (default 48)
   };
+
+  /** SMC_FVG specific params — Smart Money Concepts: Fair Value Gap + Order Block entry */
+  smcFvg?: {
+    primaryKline: string;  // default "15m"
+    htfKline: string;      // default "1h" — HTF for structure break confirmation
+    fvgTolerance: number;  // % distance from FVG zone to trigger (default 0.5)
+    obMinMove: number;     // min % move after OB to qualify (default 1.5)
+    rsiPeriod: number;     // default 14
+    rsiLongMax: number;    // LONG only when RSI < this (default 60)
+    rsiShortMin: number;   // SHORT only when RSI > this (default 40)
+    requireBos: boolean;   // require BOS/CHoCH confirmation on HTF (default true)
+    maxFvgAge: number;     // max candles age for FVG (default 30)
+  };
 }

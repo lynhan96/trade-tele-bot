@@ -81,6 +81,8 @@ export class RuleEngineService {
         return this.evalEmaPullback(coin, currency, params);
       case "BB_SCALP":
         return this.evalBbScalp(coin, currency, params);
+      case "SMC_FVG":
+        return this.evalSmcFvg(coin, currency, params);
       default:
         return null;
     }
@@ -868,5 +870,132 @@ export class RuleEngineService {
     }
 
     return null;
+  }
+
+  // ─── SMC_FVG (Smart Money Concepts: Fair Value Gap + Order Block) ──────
+  // Entry: price enters an unfilled FVG zone near an Order Block,
+  // with BOS/CHoCH structure break confirmation on HTF.
+  // Best in: RANGE_BOUND, SIDEWAYS, MIXED regimes (price respects structure)
+
+  private async evalSmcFvg(
+    coin: string,
+    currency: string,
+    params: AiTunedParams,
+  ): Promise<SignalResult | null> {
+    const cfg = params.smcFvg ?? {
+      primaryKline: "15m",
+      htfKline: "1h",
+      fvgTolerance: 0.5,
+      obMinMove: 1.5,
+      rsiPeriod: 14,
+      rsiLongMax: 60,
+      rsiShortMin: 40,
+      requireBos: true,
+      maxFvgAge: 30,
+    };
+
+    const ohlc = await this.indicatorService.getOhlc(coin, cfg.primaryKline);
+    const { opens, highs, lows, closes } = ohlc;
+    if (closes.length < 60) return null;
+
+    const currentPrice = closes[closes.length - 1];
+
+    // 1. Detect unfilled FVGs near current price
+    const nearFvgs = this.indicatorService.getUnfilledFVGsNearPrice(
+      highs, lows, closes, cfg.fvgTolerance,
+    );
+    if (nearFvgs.length === 0) return null;
+
+    // 2. Find nearby Order Blocks for confluence
+    const orderBlocks = this.indicatorService.detectOrderBlocks(
+      opens, highs, lows, closes, cfg.obMinMove, cfg.maxFvgAge,
+    );
+
+    // 3. Determine direction from FVG type
+    // Prioritize bullish FVG (price dipping into demand) or bearish FVG (price rallying into supply)
+    const bullishFvg = nearFvgs.find(f => f.type === "bullish");
+    const bearishFvg = nearFvgs.find(f => f.type === "bearish");
+
+    let isLong: boolean | null = null;
+    let selectedFvg: typeof nearFvgs[0] | null = null;
+
+    if (bullishFvg) {
+      // Price is near a bullish FVG (demand zone) → potential LONG
+      const bullishOb = orderBlocks.find(ob => ob.type === "bullish" && !ob.mitigated);
+      if (bullishOb || !cfg.requireBos) {
+        isLong = true;
+        selectedFvg = bullishFvg;
+      }
+    }
+
+    if (bearishFvg && isLong === null) {
+      // Price is near a bearish FVG (supply zone) → potential SHORT
+      const bearishOb = orderBlocks.find(ob => ob.type === "bearish" && !ob.mitigated);
+      if (bearishOb || !cfg.requireBos) {
+        isLong = false;
+        selectedFvg = bearishFvg;
+      }
+    }
+
+    if (isLong === null || !selectedFvg) return null;
+
+    // 4. RSI filter — avoid extreme RSI entries
+    const rsi = this.indicatorService.getRsi(closes, cfg.rsiPeriod);
+    if (isLong && rsi.last > cfg.rsiLongMax) {
+      this.logger.debug(`[RuleEngine] ${coin} SMC_FVG LONG blocked: RSI=${rsi.last.toFixed(1)} > ${cfg.rsiLongMax}`);
+      return null;
+    }
+    if (!isLong && rsi.last < cfg.rsiShortMin) {
+      this.logger.debug(`[RuleEngine] ${coin} SMC_FVG SHORT blocked: RSI=${rsi.last.toFixed(1)} < ${cfg.rsiShortMin}`);
+      return null;
+    }
+
+    // 5. HTF structure break confirmation (BOS or CHoCH)
+    if (cfg.requireBos) {
+      const htfOhlc = await this.indicatorService.getOhlc(coin, cfg.htfKline);
+      if (htfOhlc.closes.length >= 30) {
+        const recentBreak = this.indicatorService.getRecentStructureBreak(
+          htfOhlc.highs, htfOhlc.lows, htfOhlc.closes, 5, 10,
+        );
+
+        if (!recentBreak) {
+          this.logger.debug(`[RuleEngine] ${coin} SMC_FVG blocked: no recent BOS/CHoCH on ${cfg.htfKline}`);
+          return null;
+        }
+
+        // Structure break must align with signal direction
+        if (isLong && recentBreak.direction !== "bullish") {
+          this.logger.debug(`[RuleEngine] ${coin} SMC_FVG LONG blocked: HTF structure is ${recentBreak.direction}`);
+          return null;
+        }
+        if (!isLong && recentBreak.direction !== "bearish") {
+          this.logger.debug(`[RuleEngine] ${coin} SMC_FVG SHORT blocked: HTF structure is ${recentBreak.direction}`);
+          return null;
+        }
+      }
+    }
+
+    // 6. Candle direction confirmation
+    const lastOpen = opens[opens.length - 1];
+    const isGreen = currentPrice > lastOpen;
+    if (isLong && !isGreen) {
+      this.logger.debug(`[RuleEngine] ${coin} SMC_FVG LONG blocked: red candle (no demand reaction)`);
+      return null;
+    }
+    if (!isLong && isGreen) {
+      this.logger.debug(`[RuleEngine] ${coin} SMC_FVG SHORT blocked: green candle (no supply reaction)`);
+      return null;
+    }
+
+    const direction = isLong ? "LONG" : "SHORT";
+    const fvgZone = `${selectedFvg.bottom.toFixed(4)}-${selectedFvg.top.toFixed(4)}`;
+    const obCount = orderBlocks.filter(ob => ob.type === (isLong ? "bullish" : "bearish") && !ob.mitigated).length;
+
+    return {
+      isLong,
+      entryPrice: currentPrice,
+      strategy: "SMC_FVG",
+      reason: `${direction} at ${isLong ? "bullish" : "bearish"} FVG zone [${fvgZone}], ${obCount} OB(s) confluence, RSI=${rsi.last.toFixed(1)} on ${cfg.primaryKline}`,
+    };
   }
 }

@@ -194,6 +194,53 @@ export class AiOptimizerService {
         confidence = Math.min(75, 50 + (4.5 - bbWidth) * 5);
       }
 
+      // ── SMC BOS/CHoCH refinement: structure breaks can confirm or override regime ──
+      const bosEnabled = this.configService.get("ENABLE_BOS_CHOCH", "true") === "true";
+      if (bosEnabled) {
+        try {
+          const btcOhlc4h = await this.indicatorService.getOhlc("btc", "4h");
+          if (btcOhlc4h.closes.length >= 30) {
+            const recentBreak = this.indicatorService.getRecentStructureBreak(
+              btcOhlc4h.highs, btcOhlc4h.lows, btcOhlc4h.closes, 5, 10,
+            );
+
+            if (recentBreak) {
+              // CHoCH (Change of Character) on 4h = potential regime reversal signal
+              if (recentBreak.type === "CHoCH") {
+                if (recentBreak.direction === "bullish" && (regime === "STRONG_BEAR" || regime === "MIXED")) {
+                  this.logger.log(`[AiOptimizer] BOS/CHoCH: bullish CHoCH on BTC 4h — upgrading regime from ${regime}`);
+                  if (regime === "STRONG_BEAR") {
+                    regime = "MIXED"; // Don't jump straight to BULL, soften to MIXED
+                    confidence = Math.min(confidence, 60);
+                  }
+                }
+                if (recentBreak.direction === "bearish" && (regime === "STRONG_BULL" || regime === "MIXED")) {
+                  this.logger.log(`[AiOptimizer] BOS/CHoCH: bearish CHoCH on BTC 4h — downgrading regime from ${regime}`);
+                  if (regime === "STRONG_BULL") {
+                    regime = "MIXED";
+                    confidence = Math.min(confidence, 60);
+                  }
+                }
+              }
+
+              // BOS (Break of Structure) confirms existing trend — boost confidence
+              if (recentBreak.type === "BOS") {
+                if (recentBreak.direction === "bullish" && regime === "STRONG_BULL") {
+                  confidence = Math.min(95, confidence + 5);
+                  this.logger.debug(`[AiOptimizer] BOS/CHoCH: bullish BOS confirms STRONG_BULL, confidence +5`);
+                }
+                if (recentBreak.direction === "bearish" && regime === "STRONG_BEAR") {
+                  confidence = Math.min(95, confidence + 5);
+                  this.logger.debug(`[AiOptimizer] BOS/CHoCH: bearish BOS confirms STRONG_BEAR, confidence +5`);
+                }
+              }
+            }
+          }
+        } catch (err) {
+          this.logger.debug(`[AiOptimizer] BOS/CHoCH detection failed: ${err?.message}`);
+        }
+      }
+
       await this.redisService.set(cacheKey, regime, AI_REGIME_TTL);
       // Store BTC price at time of regime assessment for fast invalidation
       if (indicators.price) {
@@ -734,6 +781,12 @@ Reply ONLY with valid JSON (no markdown):
       strategies.push("STOCH_BB_PATTERN");
     }
 
+    // ── SMC_FVG: Fair Value Gap + Order Block — works in range/sideways/mixed ──
+    const smcEnabled = this.configService.get("ENABLE_SMC_FVG", "true") === "true";
+    if (smcEnabled && (isRange || isSideways || globalRegime === "MIXED")) {
+      strategies.push("SMC_FVG");
+    }
+
     // Cap at 3 strategies
     return strategies.slice(0, 3).join("|");
   }
@@ -995,6 +1048,17 @@ Reply ONLY JSON: {"approved":true/false,"reason":"lý do ngắn gọn bằng ti�
         rsiLongMax: 45, // stricter: need some oversold condition (was 52)
         rsiShortMin: 55, // stricter: need some overbought condition (was 48)
       },
+      smcFvg: {
+        primaryKline: "15m",
+        htfKline: "1h",
+        fvgTolerance: 0.5,
+        obMinMove: 1.5,
+        rsiPeriod: 14,
+        rsiLongMax: 60,
+        rsiShortMin: 40,
+        requireBos: true,
+        maxFvgAge: 30,
+      },
     };
   }
 
@@ -1025,6 +1089,36 @@ Reply ONLY JSON: {"approved":true/false,"reason":"lý do ngắn gọn bằng ti�
       const slPct = Math.max(3, Math.min(maxSl, atrPct * 1.5));
       defaults.stopLossPercent = parseFloat(slPct.toFixed(1));
       defaults.takeProfitPercent = parseFloat((slPct * 2).toFixed(1));
+
+      // ── Fibonacci-enhanced TP: use Fib extension levels when available ──
+      // Toggle: ENABLE_FIBONACCI env var (default: true)
+      const fibEnabled = this.configService.get("ENABLE_FIBONACCI", "true") === "true";
+      if (fibEnabled && ohlc.closes.length >= 30) {
+        const fib = this.indicatorService.getFibonacciLevels(ohlc.highs, ohlc.lows, 5);
+        if (fib) {
+          const currentPrice = ohlc.closes[ohlc.closes.length - 1];
+          const range = fib.swingHigh - fib.swingLow;
+          const rangePct = (range / currentPrice) * 100;
+
+          // Only use Fib TP if swing range is meaningful (>2%)
+          if (rangePct > 2) {
+            // For LONG: TP at nearest extension above entry (1.272 or 1.618)
+            // For SHORT: TP at nearest retracement below entry (0.618 or 0.786)
+            // Use the 1.272 extension as conservative TP target
+            const ext1272 = fib.extensions.find(e => e.level === 1.272);
+            if (ext1272) {
+              const fibTpPct = Math.abs((ext1272.price - currentPrice) / currentPrice) * 100;
+              // Only use Fib TP if it's between SL and 2×SL (reasonable R:R)
+              if (fibTpPct >= slPct && fibTpPct <= slPct * 3) {
+                defaults.takeProfitPercent = parseFloat(fibTpPct.toFixed(1));
+                this.logger.debug(
+                  `[AiOptimizer] ${coin} Fib TP: ${fibTpPct.toFixed(1)}% (1.272 ext at ${ext1272.price.toFixed(2)}, swing ${fib.direction})`,
+                );
+              }
+            }
+          }
+        }
+      }
     } catch {
       // fallback to static defaults
     }
@@ -1063,6 +1157,7 @@ Reply ONLY JSON: {"approved":true/false,"reason":"lý do ngắn gọn bằng ti�
       },
       stochEmaKdj: { ...defaults.stochEmaKdj, ...(parsed.stochEmaKdj || {}) },
       emaPullback: { ...defaults.emaPullback, ...(parsed.emaPullback || {}) },
+      smcFvg: { ...defaults.smcFvg, ...(parsed.smcFvg || {}) },
     };
 
     // Cap HTF kline to max 4h — GPT sometimes sets "1d" which is too slow for intraday signals

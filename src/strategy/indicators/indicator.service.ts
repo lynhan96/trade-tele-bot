@@ -34,6 +34,53 @@ export interface CandleData {
   closes: number[];
 }
 
+// ─── Fibonacci types ─────────────────────────────────────────────────────────
+
+export interface SwingPoint {
+  index: number;
+  price: number;
+  type: "high" | "low";
+}
+
+export interface FibonacciLevels {
+  swingHigh: number;
+  swingLow: number;
+  direction: "up" | "down"; // up = swing low→high (bullish), down = swing high→low (bearish)
+  retracements: {
+    level: number; // 0.236, 0.382, 0.5, 0.618, 0.786
+    price: number;
+  }[];
+  extensions: {
+    level: number; // 1.272, 1.618, 2.0, 2.618
+    price: number;
+  }[];
+}
+
+// ─── SMC (Smart Money Concepts) types ────────────────────────────────────────
+
+export interface FairValueGap {
+  index: number;       // candle index where FVG was detected (middle candle)
+  top: number;         // upper boundary of the gap
+  bottom: number;      // lower boundary of the gap
+  type: "bullish" | "bearish"; // bullish = gap below (support), bearish = gap above (resistance)
+  filled: boolean;     // whether price has returned to fill the gap
+}
+
+export interface OrderBlock {
+  index: number;       // candle index of the order block
+  high: number;
+  low: number;
+  type: "bullish" | "bearish"; // bullish = last bearish candle before BOS up
+  mitigated: boolean;  // whether price has returned and mitigated the OB
+}
+
+export interface StructureBreak {
+  index: number;
+  type: "BOS" | "CHoCH"; // Break of Structure vs Change of Character
+  direction: "bullish" | "bearish";
+  level: number;       // the swing level that was broken
+}
+
 // ─── IndicatorService ────────────────────────────────────────────────────────
 
 @Injectable()
@@ -248,6 +295,310 @@ export class IndicatorService {
     const diMinus = sTr[last] ? (100 * sDmMinus[last]) / sTr[last] : 0;
 
     return { adx: adxArr[adxArr.length - 1], diPlus, diMinus };
+  }
+
+  // ─── Fibonacci ──────────────────────────────────────────────────────────
+
+  /**
+   * Detect swing highs and swing lows from OHLC data.
+   * A swing high has lower highs on both sides; a swing low has higher lows on both sides.
+   * @param lookback - number of candles on each side to confirm swing (default 5)
+   */
+  getSwingPoints(highs: number[], lows: number[], lookback = 5): SwingPoint[] {
+    const points: SwingPoint[] = [];
+    for (let i = lookback; i < highs.length - lookback; i++) {
+      let isSwingHigh = true;
+      let isSwingLow = true;
+      for (let j = 1; j <= lookback; j++) {
+        if (highs[i] <= highs[i - j] || highs[i] <= highs[i + j]) isSwingHigh = false;
+        if (lows[i] >= lows[i - j] || lows[i] >= lows[i + j]) isSwingLow = false;
+      }
+      if (isSwingHigh) points.push({ index: i, price: highs[i], type: "high" });
+      if (isSwingLow) points.push({ index: i, price: lows[i], type: "low" });
+    }
+    return points;
+  }
+
+  /**
+   * Compute Fibonacci retracement and extension levels from the most recent swing high/low pair.
+   * Returns null if insufficient swing points found.
+   */
+  getFibonacciLevels(highs: number[], lows: number[], lookback = 5): FibonacciLevels | null {
+    const swings = this.getSwingPoints(highs, lows, lookback);
+    if (swings.length < 2) return null;
+
+    // Find the most recent significant swing high and swing low
+    const recentHighs = swings.filter(s => s.type === "high").slice(-3);
+    const recentLows = swings.filter(s => s.type === "low").slice(-3);
+    if (recentHighs.length === 0 || recentLows.length === 0) return null;
+
+    const lastHigh = recentHighs[recentHighs.length - 1];
+    const lastLow = recentLows[recentLows.length - 1];
+
+    const swingHigh = lastHigh.price;
+    const swingLow = lastLow.price;
+    const range = swingHigh - swingLow;
+    if (range <= 0) return null;
+
+    // Direction: if swing low came before swing high → uptrend (bullish fib)
+    const direction = lastLow.index < lastHigh.index ? "up" : "down";
+
+    const retracementLevels = [0.236, 0.382, 0.5, 0.618, 0.786];
+    const extensionLevels = [1.272, 1.618, 2.0, 2.618];
+
+    const retracements = retracementLevels.map(level => ({
+      level,
+      price: direction === "up"
+        ? swingHigh - range * level  // retracement from high in uptrend
+        : swingLow + range * level,  // retracement from low in downtrend
+    }));
+
+    const extensions = extensionLevels.map(level => ({
+      level,
+      price: direction === "up"
+        ? swingLow + range * level   // extension from low in uptrend
+        : swingHigh - range * level, // extension from high in downtrend
+    }));
+
+    return { swingHigh, swingLow, direction, retracements, extensions };
+  }
+
+  /**
+   * Find the nearest Fibonacci level to a given price.
+   * Useful for setting TP at extension levels or SL at retracement levels.
+   */
+  getNearestFibLevel(
+    fib: FibonacciLevels,
+    price: number,
+    type: "retracement" | "extension",
+  ): { level: number; price: number; distance: number } | null {
+    const levels = type === "retracement" ? fib.retracements : fib.extensions;
+    if (levels.length === 0) return null;
+
+    let nearest = levels[0];
+    let minDist = Math.abs(price - nearest.price);
+    for (const l of levels) {
+      const dist = Math.abs(price - l.price);
+      if (dist < minDist) {
+        minDist = dist;
+        nearest = l;
+      }
+    }
+    return { level: nearest.level, price: nearest.price, distance: minDist };
+  }
+
+  // ─── SMC: Fair Value Gap detection ─────────────────────────────────────
+
+  /**
+   * Detect Fair Value Gaps (FVGs) in OHLC data.
+   * Bullish FVG: candle[i-1].high < candle[i+1].low (gap below = demand zone)
+   * Bearish FVG: candle[i-1].low > candle[i+1].high (gap above = supply zone)
+   * @param maxAge - only return FVGs within the last N candles (default 50)
+   */
+  detectFVGs(
+    highs: number[],
+    lows: number[],
+    closes: number[],
+    maxAge = 50,
+  ): FairValueGap[] {
+    const fvgs: FairValueGap[] = [];
+    const startIdx = Math.max(1, highs.length - maxAge);
+
+    for (let i = startIdx; i < highs.length - 1; i++) {
+      // Bullish FVG: gap between candle[i-1] high and candle[i+1] low
+      if (lows[i + 1] > highs[i - 1]) {
+        const currentPrice = closes[closes.length - 1];
+        fvgs.push({
+          index: i,
+          top: lows[i + 1],
+          bottom: highs[i - 1],
+          type: "bullish",
+          filled: currentPrice <= lows[i + 1] && currentPrice >= highs[i - 1],
+        });
+      }
+      // Bearish FVG: gap between candle[i-1] low and candle[i+1] high
+      if (highs[i + 1] < lows[i - 1]) {
+        const currentPrice = closes[closes.length - 1];
+        fvgs.push({
+          index: i,
+          top: lows[i - 1],
+          bottom: highs[i + 1],
+          type: "bearish",
+          filled: currentPrice >= highs[i + 1] && currentPrice <= lows[i - 1],
+        });
+      }
+    }
+    return fvgs;
+  }
+
+  /**
+   * Find unfilled FVGs near the current price (potential entry zones).
+   * @param tolerance - % distance from FVG zone to still consider "near" (default 0.5%)
+   */
+  getUnfilledFVGsNearPrice(
+    highs: number[],
+    lows: number[],
+    closes: number[],
+    tolerance = 0.5,
+  ): FairValueGap[] {
+    const fvgs = this.detectFVGs(highs, lows, closes);
+    const currentPrice = closes[closes.length - 1];
+    const tolFactor = tolerance / 100;
+
+    return fvgs.filter(fvg => {
+      if (fvg.filled) return false;
+      const gapMid = (fvg.top + fvg.bottom) / 2;
+      const dist = Math.abs(currentPrice - gapMid) / currentPrice;
+      return dist <= tolFactor;
+    });
+  }
+
+  // ─── SMC: Order Block detection ────────────────────────────────────────
+
+  /**
+   * Detect Order Blocks: the last opposing candle before a strong move (BOS).
+   * Bullish OB: last red candle before a strong bullish move
+   * Bearish OB: last green candle before a strong bearish move
+   * @param minMovePercent - minimum % move after OB to qualify (default 1.5%)
+   * @param maxAge - only look back N candles (default 50)
+   */
+  detectOrderBlocks(
+    opens: number[],
+    highs: number[],
+    lows: number[],
+    closes: number[],
+    minMovePercent = 1.5,
+    maxAge = 50,
+  ): OrderBlock[] {
+    const obs: OrderBlock[] = [];
+    const startIdx = Math.max(1, closes.length - maxAge);
+    const currentPrice = closes[closes.length - 1];
+
+    for (let i = startIdx; i < closes.length - 2; i++) {
+      const isRed = closes[i] < opens[i];
+      const isGreen = closes[i] > opens[i];
+
+      if (isRed) {
+        // Check for strong bullish move after this red candle
+        const moveUp = ((highs[i + 1] - lows[i]) / lows[i]) * 100;
+        if (moveUp >= minMovePercent) {
+          obs.push({
+            index: i,
+            high: highs[i],
+            low: lows[i],
+            type: "bullish",
+            mitigated: currentPrice <= highs[i] && currentPrice >= lows[i],
+          });
+        }
+      }
+
+      if (isGreen) {
+        // Check for strong bearish move after this green candle
+        const moveDown = ((highs[i] - lows[i + 1]) / highs[i]) * 100;
+        if (moveDown >= minMovePercent) {
+          obs.push({
+            index: i,
+            high: highs[i],
+            low: lows[i],
+            type: "bearish",
+            mitigated: currentPrice >= lows[i] && currentPrice <= highs[i],
+          });
+        }
+      }
+    }
+    return obs;
+  }
+
+  // ─── SMC: Break of Structure / Change of Character ─────────────────────
+
+  /**
+   * Detect BOS (Break of Structure) and CHoCH (Change of Character).
+   * BOS: price breaks a swing high/low in the SAME direction as the trend
+   * CHoCH: price breaks a swing high/low in the OPPOSITE direction (trend reversal signal)
+   * @param lookback - swing point lookback (default 5)
+   */
+  detectStructureBreaks(
+    highs: number[],
+    lows: number[],
+    closes: number[],
+    lookback = 5,
+  ): StructureBreak[] {
+    const swings = this.getSwingPoints(highs, lows, lookback);
+    if (swings.length < 3) return [];
+
+    const breaks: StructureBreak[] = [];
+    let prevTrend: "bullish" | "bearish" | null = null;
+
+    // Determine initial trend from first two swing points
+    for (let i = 1; i < swings.length; i++) {
+      const prev = swings[i - 1];
+      const curr = swings[i];
+
+      if (prev.type === "low" && curr.type === "high") {
+        // Upswing — check if any candle after the swing high broke above it
+        const breakIdx = this.findBreakIndex(closes, curr.index, highs.length - 1, curr.price, "above");
+        if (breakIdx !== -1) {
+          const isSameDir = prevTrend === "bullish" || prevTrend === null;
+          breaks.push({
+            index: breakIdx,
+            type: isSameDir ? "BOS" : "CHoCH",
+            direction: "bullish",
+            level: curr.price,
+          });
+          prevTrend = "bullish";
+        }
+      }
+
+      if (prev.type === "high" && curr.type === "low") {
+        // Downswing — check if any candle after the swing low broke below it
+        const breakIdx = this.findBreakIndex(closes, curr.index, lows.length - 1, curr.price, "below");
+        if (breakIdx !== -1) {
+          const isSameDir = prevTrend === "bearish" || prevTrend === null;
+          breaks.push({
+            index: breakIdx,
+            type: isSameDir ? "BOS" : "CHoCH",
+            direction: "bearish",
+            level: curr.price,
+          });
+          prevTrend = "bearish";
+        }
+      }
+    }
+
+    return breaks;
+  }
+
+  /**
+   * Get the most recent structure break within the last N candles.
+   */
+  getRecentStructureBreak(
+    highs: number[],
+    lows: number[],
+    closes: number[],
+    lookback = 5,
+    maxAge = 20,
+  ): StructureBreak | null {
+    const breaks = this.detectStructureBreaks(highs, lows, closes, lookback);
+    if (breaks.length === 0) return null;
+
+    const lastIdx = closes.length - 1;
+    // Only return breaks that happened within maxAge candles
+    const recent = breaks.filter(b => lastIdx - b.index <= maxAge);
+    return recent.length > 0 ? recent[recent.length - 1] : null;
+  }
+
+  private findBreakIndex(
+    closes: number[],
+    fromIdx: number,
+    toIdx: number,
+    level: number,
+    direction: "above" | "below",
+  ): number {
+    for (let i = fromIdx + 1; i <= toIdx; i++) {
+      if (direction === "above" && closes[i] > level) return i;
+      if (direction === "below" && closes[i] < level) return i;
+    }
+    return -1;
   }
 
   // ─── Cross helpers ───────────────────────────────────────────────────────
