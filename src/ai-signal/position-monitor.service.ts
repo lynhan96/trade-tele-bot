@@ -54,6 +54,10 @@ export class PositionMonitorService implements OnModuleInit {
   /** Callback for TP boosted on momentum. */
   private tpBoostedCallback?: (symbol: string, newTp: number, newTpPct: number, direction: string) => Promise<void>;
 
+  /** Debounce timers for SL/TP propagation — prevents rapid tick spam to Binance */
+  private slDebounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private tpDebounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
   setResolveCallback(cb: (info: ResolvedSignalInfo) => Promise<void>): void {
     this.resolveCallback = cb;
   }
@@ -454,25 +458,30 @@ export class PositionMonitorService implements OnModuleInit {
   // ─── Propagate SL/TP moves to real users (with 1 retry) ─────────────────
 
   private propagateSlMove(sigKey: string, symbol: string, newSl: number, direction: string): void {
-    this.userRealTradingService.moveStopLossForRealUsers(symbol, newSl, direction).catch((err) => {
-      this.logger.error(`[PositionMonitor] ${sigKey} moveStopLoss failed, retrying: ${err?.message}`);
-      setTimeout(() => {
-        this.userRealTradingService.moveStopLossForRealUsers(symbol, newSl, direction).catch((err2) => {
-          this.logger.error(`[PositionMonitor] ${sigKey} moveStopLoss retry failed: ${err2?.message}`);
-        });
-      }, 3000);
-    });
+    // Debounce: cancel pending timer and wait 5s after last tick before calling Binance
+    // Prevents duplicate SL orders when price moves tick-by-tick (rapid fire)
+    const existing = this.slDebounceTimers.get(sigKey);
+    if (existing) clearTimeout(existing);
+    const timer = setTimeout(() => {
+      this.slDebounceTimers.delete(sigKey);
+      this.userRealTradingService.moveStopLossForRealUsers(symbol, newSl, direction).catch((err) => {
+        this.logger.error(`[PositionMonitor] ${sigKey} moveStopLoss failed: ${err?.message}`);
+      });
+    }, 5000);
+    this.slDebounceTimers.set(sigKey, timer);
   }
 
   private propagateTpMove(sigKey: string, symbol: string, newTp: number, direction: string): void {
-    this.userRealTradingService.moveTpForRealUsers(symbol, newTp, direction).catch((err) => {
-      this.logger.error(`[PositionMonitor] ${sigKey} moveTp failed, retrying: ${err?.message}`);
-      setTimeout(() => {
-        this.userRealTradingService.moveTpForRealUsers(symbol, newTp, direction).catch((err2) => {
-          this.logger.error(`[PositionMonitor] ${sigKey} moveTp retry failed: ${err2?.message}`);
-        });
-      }, 3000);
-    });
+    // Debounce: cancel pending timer and wait 5s after last tick before calling Binance
+    const existing = this.tpDebounceTimers.get(sigKey);
+    if (existing) clearTimeout(existing);
+    const timer = setTimeout(() => {
+      this.tpDebounceTimers.delete(sigKey);
+      this.userRealTradingService.moveTpForRealUsers(symbol, newTp, direction).catch((err) => {
+        this.logger.error(`[PositionMonitor] ${sigKey} moveTp failed: ${err?.message}`);
+      });
+    }, 5000);
+    this.tpDebounceTimers.set(sigKey, timer);
   }
 
   // ─── Private: fetch open positions ───────────────────────────────────────
