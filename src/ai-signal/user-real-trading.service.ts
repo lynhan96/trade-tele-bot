@@ -1314,8 +1314,9 @@ export class UserRealTradingService implements OnModuleInit {
 
             // Position already closed on Binance — mark trade as closed with PnL
             if (!openSymbols.has(symbol)) {
-              // Calculate PnL using latest price (best approximation of exit price)
-              let exitPrice = this.marketDataService.getLatestPrice(symbol);
+              // Try to get actual fill price from Binance trade history, fallback to WebSocket
+              let exitPrice = await this.binanceService.getLastFillPrice(keys.apiKey, keys.apiSecret, symbol)
+                || this.marketDataService.getLatestPrice(symbol);
               let pnlPct = 0;
               let pnlUsdt = 0;
               if (exitPrice && trade.entryPrice) {

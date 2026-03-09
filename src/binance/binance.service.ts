@@ -419,4 +419,26 @@ export class BinanceService {
       this.logger.warn(`cancelAlgoOrder ${algoId}: ${error.message}`);
     }
   }
+
+  /**
+   * Get the average fill price from the most recent trade for a symbol.
+   * Uses futuresUserTrades to get actual execution prices from Binance.
+   */
+  async getLastFillPrice(
+    apiKey: string,
+    apiSecret: string,
+    symbol: string,
+  ): Promise<number | null> {
+    try {
+      const client = this.createClient(apiKey, apiSecret);
+      const trades = await (client as any).futuresUserTrades({ symbol, limit: 5 });
+      if (!trades || trades.length === 0) return null;
+      // Most recent trade is last in array
+      const last = trades[trades.length - 1];
+      return parseFloat(last.price) || null;
+    } catch (error) {
+      this.logger.warn(`getLastFillPrice ${symbol}: ${error.message}`);
+      return null;
+    }
+  }
 }

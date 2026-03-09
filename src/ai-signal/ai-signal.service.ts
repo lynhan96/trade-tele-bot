@@ -169,15 +169,6 @@ export class AiSignalService implements OnModuleInit {
       this.logger.error(`[AiSignal] onModuleInit error: ${err?.message}`);
     }
 
-    // Generate daily snapshot if missing (delay 30s to let data populate)
-    const today = new Date().toISOString().slice(0, 10);
-    const snap = await this.dailySnapshotModel.findOne({ date: today });
-    if (!snap) {
-      setTimeout(() => this.generateDailySnapshot().catch(() => {}), 30_000);
-      this.logger.log(
-        "[AiSignal] Daily snapshot missing — will generate in 30s",
-      );
-    }
   }
 
   // ─── Cron: refresh shortlist (every 5 minutes) ────────────────────────────
@@ -546,9 +537,8 @@ export class AiSignalService implements OnModuleInit {
     }
   }
 
-  // ─── Cron: daily market snapshot (once per day at 8:00 AM UTC+7) ────────
+  // ─── Daily market snapshot (admin only, no cron, no user broadcast) ─────
 
-  @Cron("0 1 * * *") // 01:00 UTC = 08:00 ICT
   async generateDailySnapshot(forceRegenerate = false) {
     try {
       const today = new Date().toISOString().slice(0, 10);
@@ -691,14 +681,8 @@ export class AiSignalService implements OnModuleInit {
         messageSent: msg,
       });
 
-      // Broadcast to subscribers
-      const subscribers = await this.subscriptionService.findRealModeSubscribers();
-      for (const sub of subscribers) {
-        await this.telegramService.sendTelegramMessage(sub.chatId, msg);
-      }
-
       this.logger.log(
-        `[AiSignal] Daily snapshot saved: ${today} ${sentiment} (${gainers}↑/${losers}↓) → ${subscribers.length} subscribers`,
+        `[AiSignal] Daily snapshot saved: ${today} ${sentiment} (${gainers}↑/${losers}↓)`,
       );
     } catch (err) {
       this.logger.error(`[AiSignal] generateDailySnapshot error: ${err?.message}`);
