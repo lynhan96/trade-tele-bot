@@ -328,6 +328,15 @@ export class AiSignalService implements OnModuleInit {
 
       const globalRegime = await this.aiOptimizerService.assessGlobalRegime();
 
+      // ── Daily signal cap: prevent over-trading (Mar 8 = 28 signals, 11% win rate) ──
+      const MAX_DAILY_SIGNALS = 18;
+      const dailyCountKey = "cache:ai:daily-signal-count";
+      const dailyCount = await this.redisService.get<number>(dailyCountKey) || 0;
+      if (dailyCount >= MAX_DAILY_SIGNALS) {
+        this.logger.debug(`[AiSignal] Daily signal cap reached (${dailyCount}/${MAX_DAILY_SIGNALS}) — skipping scan`);
+        return;
+      }
+
       // ── Regime reversal: close counter-regime positions ──────────────────
       await this.handleRegimeReversal(globalRegime);
 
@@ -763,18 +772,20 @@ export class AiSignalService implements OnModuleInit {
       // We'll apply confidence adjustments after signal direction is known (below)
     }
 
-    // Cap minConfidenceToTrade per regime — in ranging/sideways markets Haiku sets thresholds
-    // too high (55-65) while confidence is low (35-55), blocking all signals needlessly
+    // Confidence floor: DB shows confidence < 65 → win rate < 44%. Enforce minimum 63.
+    const CONFIDENCE_FLOOR = 63;
+    params.minConfidenceToTrade = Math.max(params.minConfidenceToTrade ?? 0, CONFIDENCE_FLOOR);
+    // Cap per regime — prevent AI from setting unrealistically high thresholds
     const regimeThresholdCap: Record<string, number> = {
-      SIDEWAYS: 55,
-      RANGE_BOUND: 58,
-      MIXED: 60,
-      VOLATILE: 62,
-      BTC_CORRELATION: 60,
-      STRONG_BULL: 65,
-      STRONG_BEAR: 65,
+      SIDEWAYS: 68,
+      RANGE_BOUND: 68,
+      MIXED: 68,
+      VOLATILE: 70,
+      BTC_CORRELATION: 68,
+      STRONG_BULL: 72,
+      STRONG_BEAR: 72,
     };
-    const cap = regimeThresholdCap[params.regime] ?? 55;
+    const cap = regimeThresholdCap[params.regime] ?? 68;
     if (params.minConfidenceToTrade > cap) {
       params.minConfidenceToTrade = cap;
     }
@@ -811,6 +822,23 @@ export class AiSignalService implements OnModuleInit {
           `[AiSignal] ${coin.toUpperCase()} confidence ${adj > 0 ? "+" : ""}${adj} from futures data (now ${params.confidence})`,
         );
       }
+    }
+
+    // ── Main confidence gate: block weak signals (after futures adjustment) ──
+    if (params.confidence < params.minConfidenceToTrade) {
+      this.logger.debug(
+        `[AiSignal] ${coin.toUpperCase()} ${signalResult.isLong ? "LONG" : "SHORT"} blocked — confidence ${params.confidence} < min ${params.minConfidenceToTrade} (${params.regime})`,
+      );
+      return;
+    }
+
+    // ── TREND_EMA: worst performer (avg -2.28% SL, 4/6 full SL) — require confidence 70+ ──
+    const strategyName = signalResult.strategy;
+    if (strategyName === "TREND_EMA" && params.confidence < 70) {
+      this.logger.debug(
+        `[AiSignal] ${coin.toUpperCase()} TREND_EMA blocked — confidence ${params.confidence} < 70 (strategy-specific gate)`,
+      );
+      return;
     }
 
     // ── Global regime trend filter (uses indicator-based globalRegime, not AI params.regime) ──
@@ -1038,6 +1066,16 @@ export class AiSignalService implements OnModuleInit {
       if (queuedSignal) {
         await this.notifySignalQueued(queuedSignal, isTestMode);
       }
+    }
+    // Increment daily signal counter (EXECUTED or QUEUED, not SKIPPED)
+    if (queueResult.action === "EXECUTED" || queueResult.action === "QUEUED") {
+      const dailyCountKey = "cache:ai:daily-signal-count";
+      const now = new Date();
+      const midnight = new Date(now);
+      midnight.setUTCDate(midnight.getUTCDate() + 1);
+      midnight.setUTCHours(0, 0, 0, 0);
+      const ttl = Math.ceil((midnight.getTime() - now.getTime()) / 1000);
+      await this.redisService.initAndIncr(dailyCountKey, 0, ttl);
     }
     // SKIPPED — silent
     } finally {

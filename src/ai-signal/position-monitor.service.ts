@@ -307,14 +307,17 @@ export class PositionMonitorService implements OnModuleInit {
 
     const reason = tpHit ? "TAKE_PROFIT" : "STOP_LOSS";
     const emoji = tpHit ? "🎯" : "🛑";
+    // Use SL/TP price as exit when hit — prevents gap/slippage from inflating PnL
+    // (e.g., CHZ gapped from 0.037→0.038 past SL=0.0374, recorded -5.65% instead of -3%)
+    const exitPrice = slHit ? stopLossPrice : (tpHit ? (effectiveTpPrice ?? price) : price);
     this.logger.log(
-      `[PositionMonitor] ${emoji} ${sigKey} price=${price} hit ${reason} (${direction} SL=${stopLossPrice} TP=${takeProfitPrice ?? "none"})`,
+      `[PositionMonitor] ${emoji} ${sigKey} price=${price} exit=${exitPrice} hit ${reason} (${direction} SL=${stopLossPrice} TP=${takeProfitPrice ?? "none"})`,
     );
 
     try {
       const resolved = await this.signalQueueService.resolveActiveSignal(
         sigKey,
-        price,
+        exitPrice,
         reason,
       );
 
@@ -341,8 +344,8 @@ export class PositionMonitorService implements OnModuleInit {
         if (this.resolveCallback) {
           const pnlPercent =
             signal.direction === "LONG"
-              ? ((price - signal.entryPrice) / signal.entryPrice) * 100
-              : ((signal.entryPrice - price) / signal.entryPrice) * 100;
+              ? ((exitPrice - signal.entryPrice) / signal.entryPrice) * 100
+              : ((signal.entryPrice - exitPrice) / signal.entryPrice) * 100;
 
           await this.resolveCallback({
             symbol,

@@ -46,18 +46,14 @@ export class RuleEngineService {
       return null;
     }
 
-    const strategies = params.strategy.includes("|")
-      ? params.strategy.split("|").map((s) => s.trim())
-      : [params.strategy];
-
-    // Single strategy → legacy mode (no confluence needed)
-    if (strategies.length === 1) {
-      const result = await this.evalStrategy(strategies[0], coin, currency, params);
-      if (result) {
-        this.logger.debug(`[RuleEngine] ${coin} ✓ ${strategies[0]} fired (single)`);
-      }
-      return result;
-    }
+    // Always evaluate ALL active strategies for confluence — not just AI-assigned ones.
+    // Individual strategies have their own regime gates (BB_SCALP only in SIDEWAYS/RANGE_BOUND,
+    // EMA_PULLBACK only in STRONG_BEAR/BULL, etc.) which naturally filter invalid combos.
+    // This fixes: 0/58 confluence signals because AI assigned incompatible strategy combos.
+    const strategies = [
+      "RSI_CROSS", "RSI_ZONE", "TREND_EMA", "EMA_PULLBACK",
+      "BB_SCALP", "STOCH_BB_PATTERN", "STOCH_EMA_KDJ", "SMC_FVG",
+    ];
 
     // ── Multi-strategy confluence mode ──
     this.logger.debug(`[RuleEngine] ${coin} confluence check: ${strategies.join(" + ")}`);
