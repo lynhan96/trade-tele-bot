@@ -134,16 +134,6 @@ export class AiSignalService implements OnModuleInit {
       await this.notifySlMovedToEntry(symbol, entryPrice);
     });
 
-    // Register callback for 3% milestone (SL raised to +1.5% profit)
-    this.positionMonitorService.setSl3PctCallback(async (symbol, newSl, direction) => {
-      await this.notifySl3PctMilestone(symbol, newSl, direction);
-    });
-
-    // Register callback for 5% milestone (SL raised to +3% profit)
-    this.positionMonitorService.setSl5PctCallback(async (symbol, newSl, direction) => {
-      await this.notifySl5PctMilestone(symbol, newSl, direction);
-    });
-
     // Register callback for TP boost on momentum
     this.positionMonitorService.setTpBoostedCallback(async (symbol, newTp, newTpPct, direction) => {
       await this.notifyTpBoosted(symbol, newTp, newTpPct, direction);
@@ -1508,40 +1498,6 @@ export class AiSignalService implements OnModuleInit {
       `━━━━━━━━━━━━━━━━━━\n\n` +
       `Profit dat 1.5%, SL da chuyen ve gia entry ${fmtP(entryPrice)}\n` +
       `Bao ve von, khong con rui ro!\n\n` +
-      `_${new Date().toLocaleTimeString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" })}_`;
-
-    const subscribers = await this.subscriptionService.findSignalOnlySubscribers();
-    for (const sub of subscribers) {
-      await this.telegramService.sendTelegramMessage(sub.chatId, text).catch(() => {});
-    }
-  }
-
-  private async notifySl3PctMilestone(symbol: string, newSl: number, direction: string): Promise<void> {
-    const fmtP = this.fmtPrice;
-    const dirLabel = direction === "LONG" ? "LONG" : "SHORT";
-    const text =
-      `📈 *${symbol} ${dirLabel} — Trailing Stop +1.5%*\n` +
-      `━━━━━━━━━━━━━━━━━━\n\n` +
-      `Profit dat 3%! SL da nang len +1.5% loi nhuan\n` +
-      `SL moi: *${fmtP(newSl)}*\n` +
-      `Lenh tiep tuc chay, dam bao loi toi thieu +1.5%\n\n` +
-      `_${new Date().toLocaleTimeString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" })}_`;
-
-    const subscribers = await this.subscriptionService.findSignalOnlySubscribers();
-    for (const sub of subscribers) {
-      await this.telegramService.sendTelegramMessage(sub.chatId, text).catch(() => {});
-    }
-  }
-
-  private async notifySl5PctMilestone(symbol: string, newSl: number, direction: string): Promise<void> {
-    const fmtP = this.fmtPrice;
-    const dirLabel = direction === "LONG" ? "LONG" : "SHORT";
-    const text =
-      `🚀 *${symbol} ${dirLabel} — Trailing Stop +3%*\n` +
-      `━━━━━━━━━━━━━━━━━━\n\n` +
-      `Profit dat 5%! SL da nang len +3% loi nhuan\n` +
-      `SL moi: *${fmtP(newSl)}*\n` +
-      `Lenh tiep tuc chay, dam bao loi toi thieu +3%\n\n` +
       `_${new Date().toLocaleTimeString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" })}_`;
 
     const subscribers = await this.subscriptionService.findSignalOnlySubscribers();

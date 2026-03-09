@@ -51,12 +51,6 @@ export class PositionMonitorService implements OnModuleInit {
   /** Callback for SL-moved-to-entry notification. */
   private slMovedCallback?: (symbol: string, entryPrice: number) => Promise<void>;
 
-  /** Callback for SL raised to +1.5% profit (3% milestone). */
-  private sl3PctCallback?: (symbol: string, newSl: number, direction: string) => Promise<void>;
-
-  /** Callback for SL raised to +3% profit (5% milestone). */
-  private sl5PctCallback?: (symbol: string, newSl: number, direction: string) => Promise<void>;
-
   /** Callback for TP boosted on momentum. */
   private tpBoostedCallback?: (symbol: string, newTp: number, newTpPct: number, direction: string) => Promise<void>;
 
@@ -66,14 +60,6 @@ export class PositionMonitorService implements OnModuleInit {
 
   setSlMovedCallback(cb: (symbol: string, entryPrice: number) => Promise<void>): void {
     this.slMovedCallback = cb;
-  }
-
-  setSl3PctCallback(cb: (symbol: string, newSl: number, direction: string) => Promise<void>): void {
-    this.sl3PctCallback = cb;
-  }
-
-  setSl5PctCallback(cb: (symbol: string, newSl: number, direction: string) => Promise<void>): void {
-    this.sl5PctCallback = cb;
   }
 
   setTpBoostedCallback(cb: (symbol: string, newTp: number, newTpPct: number, direction: string) => Promise<void>): void {

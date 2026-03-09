@@ -487,7 +487,10 @@ export class UserRealTradingService implements OnModuleInit {
         });
 
         const isBreakEven = Math.abs(roundedSlPrice - trade.entryPrice) / trade.entryPrice < 0.001;
-        const label = isBreakEven ? "hoa von (break-even)" : "+2% profit (trailing stop)";
+        const trailLockPct = direction === "LONG"
+          ? ((roundedSlPrice - trade.entryPrice) / trade.entryPrice) * 100
+          : ((trade.entryPrice - roundedSlPrice) / trade.entryPrice) * 100;
+        const label = isBreakEven ? "hoa von (break-even)" : `+${trailLockPct.toFixed(1)}% (trailing stop)`;
         const fmtP = (p: number) =>
           p >= 1000 ? `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :
           p >= 1 ? `$${p.toFixed(2)}` : `$${p.toFixed(4)}`;
@@ -1241,11 +1244,12 @@ export class UserRealTradingService implements OnModuleInit {
   }
 
   /**
-   * Every 3 minutes: scan all OPEN trades and ensure each has a live SL and TP on Binance.
+   * Every 2 minutes: scan all OPEN trades and ensure each has a live SL and TP on Binance.
    * If SL or TP is missing (failed at placement or silently dropped), place it immediately.
    * This protects clients from unprotected open positions.
+   * Note: trailing SL is handled real-time by PositionMonitorService — this is a safety net only.
    */
-  @Cron("*/30 * * * * *")
+  @Cron("0 */2 * * * *")
   async protectOpenTrades(): Promise<void> {
     try {
       const openTrades = await this.userTradeModel.find({ status: "OPEN" }).exec();
@@ -1360,17 +1364,21 @@ export class UserRealTradingService implements OnModuleInit {
             const pp = await getPP(symbol);
             const round = (p: number) => parseFloat(p.toFixed(pp));
 
-            // ── Auto SL to entry at 3% profit ──────────────────────────────
-            // If trade is 3%+ in profit, move SL to entry (break-even) for protection
+            // ── Safety net: if trailing SL should have moved but didn't ─────
+            // Position monitor handles trailing SL in real-time, but if bot restarted
+            // or listener missed, ensure SL is at least at entry when PnL >= 2%
             const currentPrice = this.marketDataService.getLatestPrice(symbol);
-            if (currentPrice && trade.entryPrice) {
+            if (currentPrice && trade.entryPrice && slPrice) {
               const currentPnlPct = direction === "LONG"
                 ? ((currentPrice - trade.entryPrice) / trade.entryPrice) * 100
                 : ((trade.entryPrice - currentPrice) / trade.entryPrice) * 100;
-              if (currentPnlPct >= 3 && slPrice && slPrice !== trade.entryPrice) {
-                // SL should be at entry — price has moved 3%+ in our favor
+              // Only intervene if SL is BELOW entry and PnL >= 2% (trailing should have kicked in)
+              const slBelowEntry = direction === "LONG"
+                ? slPrice < trade.entryPrice * 0.999
+                : slPrice > trade.entryPrice * 1.001;
+              if (currentPnlPct >= 2 && slBelowEntry) {
                 const roundedEntry = round(trade.entryPrice);
-                this.logger.log(`[RealTrading] ${symbol} user ${telegramId}: PnL ${currentPnlPct.toFixed(1)}% >= 3% — moving SL to entry ${roundedEntry}`);
+                this.logger.log(`[RealTrading] ${symbol} user ${telegramId}: PnL ${currentPnlPct.toFixed(1)}% >= 2% but SL ${slPrice} still below entry — safety move to ${roundedEntry}`);
                 try {
                   if (trade.binanceSlAlgoId) {
                     await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, trade.binanceSlAlgoId);
