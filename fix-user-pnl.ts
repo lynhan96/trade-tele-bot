@@ -20,8 +20,8 @@ async function main() {
   console.log(DRY_RUN ? "=== DRY RUN (use --apply to update DB) ===" : "=== APPLYING CHANGES ===");
   console.log("");
 
-  await mongoose.connect(process.env.MONGODB_URI!);
-  const db = mongoose.connection.db;
+  const conn = await mongoose.connect(process.env.MONGODB_URI!);
+  const db = conn.connection.db!;
 
   // Get user API keys
   const userSettings = await db.collection("user_settings").findOne({ telegramId: TELEGRAM_ID });
