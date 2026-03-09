@@ -1338,24 +1338,7 @@ export class AiSignalService implements OnModuleInit {
       30 * 60,
     );
 
-    // Notify subscribers (only once — not every 30s)
-    const fmtP = this.fmtPrice;
-    const time = new Date().toLocaleString("vi-VN", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "2-digit", timeZone: "Asia/Ho_Chi_Minh" });
-
-    const icon = tpHit ? "🎯" : (pnl > 0 ? "🔒" : "🛑");
-    const label = tpHit ? "Take Profit!" : (pnl > 0 ? "Trailing Stop - Co loi!" : "Stop Loss");
-    const text =
-      `${icon} *${signal.symbol} ${signal.direction} — ${label}* 🧪\n` +
-      `━━━━━━━━━━━━━━━━━━\n\n` +
-      `Entry: ${fmtP(signal.entryPrice)}\n` +
-      `Exit: ${fmtP(currentPrice)}\n` +
-      `PnL: *${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}%*\n\n` +
-      `_${time}_`;
-
-    const subscribers = await this.subscriptionService.findSignalOnlySubscribers();
-    for (const sub of subscribers) {
-      await this.telegramService.sendTelegramMessage(sub.chatId, text).catch(() => {});
-    }
+    // TP/SL notifications only for admin (real-mode users get notified via UserRealTradingService)
 
     // Activate queued if any
     const queued = await this.signalQueueService.activateQueuedSignal(sigKey);
@@ -1491,75 +1474,17 @@ export class AiSignalService implements OnModuleInit {
     }
   }
 
-  private async notifySlMovedToEntry(symbol: string, entryPrice: number): Promise<void> {
-    const fmtP = this.fmtPrice;
-    const text =
-      `🛡️ *${symbol} — SL → Break-even*\n` +
-      `━━━━━━━━━━━━━━━━━━\n\n` +
-      `Profit dat 1.5%, SL da chuyen ve gia entry ${fmtP(entryPrice)}\n` +
-      `Bao ve von, khong con rui ro!\n\n` +
-      `_${new Date().toLocaleTimeString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" })}_`;
-
-    const subscribers = await this.subscriptionService.findSignalOnlySubscribers();
-    for (const sub of subscribers) {
-      await this.telegramService.sendTelegramMessage(sub.chatId, text).catch(() => {});
-    }
+  private async notifySlMovedToEntry(_symbol: string, _entryPrice: number): Promise<void> {
+    // No-op: real-mode users get notified via UserRealTradingService
   }
 
-  private async notifyTpBoosted(symbol: string, newTp: number, newTpPct: number, direction: string): Promise<void> {
-    const fmtP = this.fmtPrice;
-    const dirLabel = direction === "LONG" ? "LONG" : "SHORT";
-    const text =
-      `🚀 *${symbol} ${dirLabel} — TP Mo Rong*\n` +
-      `━━━━━━━━━━━━━━━━━━\n\n` +
-      `Volume tang manh! TP mo rong len *+${newTpPct.toFixed(1)}%*\n` +
-      `TP moi: *${fmtP(newTp)}*\n` +
-      `Lenh tiep tuc chay voi muc tieu cao hon\n\n` +
-      `_${new Date().toLocaleTimeString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" })}_`;
-
-    const subscribers = await this.subscriptionService.findSignalOnlySubscribers();
-    for (const sub of subscribers) {
-      await this.telegramService.sendTelegramMessage(sub.chatId, text).catch(() => {});
-    }
+  private async notifyTpBoosted(_symbol: string, _newTp: number, _newTpPct: number, _direction: string): Promise<void> {
+    // No-op: real-mode users get notified via UserRealTradingService
   }
 
   private async notifyPositionClosed(info: ResolvedSignalInfo): Promise<void> {
+    // Real-mode users get notified via UserRealTradingService; non-real users don't need close notifications
     const pnlSign = info.pnlPercent >= 0 ? "+" : "";
-    const fmtP = this.fmtPrice;
-    const time = new Date().toLocaleString("vi-VN", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "2-digit", timeZone: "Asia/Ho_Chi_Minh" });
-
-    let headerIcon: string;
-    let headerLabel: string;
-    if (info.closeReason === "TAKE_PROFIT") {
-      headerIcon = "🎯";
-      headerLabel = "Take Profit!";
-    } else if (info.closeReason === "STOP_LOSS" && info.pnlPercent > 0) {
-      // Trailing stop hit while profitable (5% milestone SL raise)
-      headerIcon = "🔒";
-      headerLabel = "Trailing Stop - Co loi!";
-    } else if (info.closeReason === "STOP_LOSS") {
-      headerIcon = "🛑";
-      headerLabel = "Stop Loss";
-    } else {
-      headerIcon = info.pnlPercent >= 0 ? "🟢" : "🔴";
-      headerLabel = "Da dong";
-    }
-
-    const text =
-      `${headerIcon} *${info.symbol} ${info.direction} — ${headerLabel}*\n` +
-      `━━━━━━━━━━━━━━━━━━\n\n` +
-      `Entry: ${fmtP(info.entryPrice)}\n` +
-      `Exit: ${fmtP(info.exitPrice)}\n` +
-      `PnL: *${pnlSign}${info.pnlPercent.toFixed(2)}%*\n\n` +
-      `_${time}_`;
-
-    const subscribers = await this.subscriptionService.findSignalOnlySubscribers();
-    for (const sub of subscribers) {
-      await this.telegramService
-        .sendTelegramMessage(sub.chatId, text)
-        .catch(() => {});
-    }
-
     this.logger.log(
       `[AiSignal] ${info.symbol} ${info.direction} ${info.closeReason}: ${pnlSign}${info.pnlPercent.toFixed(2)}%`,
     );
