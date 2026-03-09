@@ -23,16 +23,17 @@ async function main() {
   const conn = await mongoose.connect(process.env.MONGODB_URI!);
   const db = conn.connection.db!;
 
-  // Get user API keys
+  // Get user API keys (stored as doc.binance.apiKey / doc.binance.apiSecret)
   const userSettings = await db.collection("user_settings").findOne({ telegramId: TELEGRAM_ID });
-  if (!userSettings?.binanceApiKey || !userSettings?.binanceApiSecret) {
+  const binanceKeys = userSettings?.binance;
+  if (!binanceKeys?.apiKey || !binanceKeys?.apiSecret) {
     console.error("No Binance API keys found for user", TELEGRAM_ID);
     process.exit(1);
   }
 
   const client = Binance({
-    apiKey: userSettings.binanceApiKey,
-    apiSecret: userSettings.binanceApiSecret,
+    apiKey: binanceKeys.apiKey,
+    apiSecret: binanceKeys.apiSecret,
   });
 
   // Get all closed trades
