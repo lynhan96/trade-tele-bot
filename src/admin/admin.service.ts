@@ -405,7 +405,7 @@ export class AdminService {
     isActive?: string;
     realModeEnabled?: string;
     search?: string;
-  }) {
+  }): Promise<{ data: any[]; total: number; page: number; limit: number; totalPages: number }> {
     const page = Math.max(1, query.page || 1);
     const limit = Math.min(100, Math.max(1, query.limit || 20));
     const filter: any = {};
@@ -434,7 +434,32 @@ export class AdminService {
       this.subscriptionModel.countDocuments(filter),
     ]);
 
-    return { data, total, page, limit, totalPages: Math.ceil(total / limit) };
+    // Compute W/L and PnL from actual user_trades (CLOSED) for accuracy
+    const telegramIds = data.map((u) => u.telegramId);
+    const tradeStats = await this.tradeModel.aggregate([
+      { $match: { telegramId: { $in: telegramIds }, status: 'CLOSED', pnlUsdt: { $ne: null } } },
+      {
+        $group: {
+          _id: '$telegramId',
+          totalPnlUsdt: { $sum: '$pnlUsdt' },
+          totalWins: { $sum: { $cond: [{ $gte: ['$pnlUsdt', 0] }, 1, 0] } },
+          totalLosses: { $sum: { $cond: [{ $lt: ['$pnlUsdt', 0] }, 1, 0] } },
+        },
+      },
+    ]);
+
+    const statsMap = new Map(tradeStats.map((s) => [s._id, s]));
+    const enriched = data.map((u) => {
+      const s = statsMap.get(u.telegramId);
+      return {
+        ...u,
+        totalWins: s?.totalWins ?? 0,
+        totalLosses: s?.totalLosses ?? 0,
+        totalPnlUsdt: s ? Math.round(s.totalPnlUsdt * 100) / 100 : 0,
+      };
+    });
+
+    return { data: enriched, total, page, limit, totalPages: Math.ceil(total / limit) };
   }
 
   async getUserById(telegramId: number) {
