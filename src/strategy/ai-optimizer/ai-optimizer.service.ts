@@ -781,10 +781,18 @@ Reply ONLY with valid JSON (no markdown):
       strategies.push("STOCH_BB_PATTERN");
     }
 
-    // ── SMC_FVG: Fair Value Gap + Order Block — works in range/sideways/mixed ──
+    // ── SMC_FVG: Fair Value Gap + Order Block — supplemental strategy only ──
+    // SMC_FVG is added AFTER other strategies as a bonus confluence signal,
+    // but never as the sole strategy. It requires traditional TA to also confirm.
     const smcEnabled = this.configService.get("ENABLE_SMC_FVG", "true") === "true";
     if (smcEnabled && (isRange || isSideways || globalRegime === "MIXED")) {
-      strategies.push("SMC_FVG");
+      // Only add SMC_FVG if at least one other strategy (besides RSI_CROSS) is present,
+      // OR if RSI_CROSS + specific conditions exist (RSI not neutral 40-60)
+      const hasNonRsiCross = strategies.some(s => s !== "RSI_CROSS");
+      const rsiNotNeutral = rsi < 40 || rsi > 60;
+      if (hasNonRsiCross || rsiNotNeutral) {
+        strategies.push("SMC_FVG");
+      }
     }
 
     // Cap at 3 strategies

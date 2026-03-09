@@ -885,13 +885,13 @@ export class RuleEngineService {
     const cfg = params.smcFvg ?? {
       primaryKline: "15m",
       htfKline: "1h",
-      fvgTolerance: 0.5,
-      obMinMove: 1.5,
+      fvgTolerance: 0.3,     // tighter: price must be within 0.3% of FVG zone
+      obMinMove: 2.0,        // stronger OB: require 2% move (was 1.5%)
       rsiPeriod: 14,
-      rsiLongMax: 60,
-      rsiShortMin: 40,
+      rsiLongMax: 55,        // tighter RSI: LONG only below 55 (was 60)
+      rsiShortMin: 45,       // tighter RSI: SHORT only above 45 (was 40)
       requireBos: true,
-      maxFvgAge: 30,
+      maxFvgAge: 20,         // fresher FVGs only: 20 candles (was 30)
     };
 
     const ohlc = await this.indicatorService.getOhlc(coin, cfg.primaryKline);
@@ -921,8 +921,12 @@ export class RuleEngineService {
 
     if (bullishFvg) {
       // Price is near a bullish FVG (demand zone) → potential LONG
-      const bullishOb = orderBlocks.find(ob => ob.type === "bullish" && !ob.mitigated);
-      if (bullishOb || !cfg.requireBos) {
+      // OB must be near the FVG zone (within 2% of FVG bottom) for real confluence
+      const bullishOb = orderBlocks.find(ob =>
+        ob.type === "bullish" && !ob.mitigated &&
+        Math.abs(ob.low - bullishFvg.bottom) / bullishFvg.bottom < 0.02,
+      );
+      if (bullishOb) {
         isLong = true;
         selectedFvg = bullishFvg;
       }
@@ -930,8 +934,12 @@ export class RuleEngineService {
 
     if (bearishFvg && isLong === null) {
       // Price is near a bearish FVG (supply zone) → potential SHORT
-      const bearishOb = orderBlocks.find(ob => ob.type === "bearish" && !ob.mitigated);
-      if (bearishOb || !cfg.requireBos) {
+      // OB must be near the FVG zone (within 2% of FVG top) for real confluence
+      const bearishOb = orderBlocks.find(ob =>
+        ob.type === "bearish" && !ob.mitigated &&
+        Math.abs(ob.high - bearishFvg.top) / bearishFvg.top < 0.02,
+      );
+      if (bearishOb) {
         isLong = false;
         selectedFvg = bearishFvg;
       }
