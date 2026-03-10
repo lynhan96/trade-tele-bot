@@ -117,6 +117,17 @@ export class RuleEngineService {
       this.logger.debug(`[RuleEngine] ${coin} price position: ${pricePos.toFixed(0)}% (${isLong ? "LONG" : "SHORT"} OK)`);
     }
 
+    // ── Candle Momentum Confirmation — require recent candles to confirm direction ──
+    // At least 2 of last 3 candles must align with signal direction
+    // LONG: green candles (close > open), SHORT: red candles (close < open)
+    const momentumOk = await this.checkCandleMomentum(coin, "15m", isLong);
+    if (!momentumOk) {
+      this.logger.log(
+        `[RuleEngine] ${coin} ${isLong ? "LONG" : "SHORT"} blocked: candle momentum doesn't confirm (need 2/3 candles aligned)`,
+      );
+      return null;
+    }
+
     if (winners.length >= 2) {
       // Strong confluence: 2+ strategies agree
       const names = winners.map(w => w.strategy).join("+");
@@ -158,6 +169,26 @@ export class RuleEngineService {
 
     const currentPrice = ohlc.closes[ohlc.closes.length - 1];
     return ((currentPrice - low) / range) * 100;
+  }
+
+  /**
+   * Candle Momentum Confirmation — checks if recent candles confirm signal direction.
+   * LONG: at least 2 of last 3 candles must be green (close > open)
+   * SHORT: at least 2 of last 3 candles must be red (close < open)
+   */
+  private async checkCandleMomentum(coin: string, kline: string, isLong: boolean): Promise<boolean> {
+    const ohlc = await this.indicatorService.getOhlc(coin, kline);
+    if (ohlc.closes.length < 4) return true; // not enough data, skip check
+
+    let aligned = 0;
+    for (let i = 1; i <= 3; i++) {
+      const idx = ohlc.closes.length - 1 - i; // check candles before current (completed candles)
+      const close = ohlc.closes[idx];
+      const open = ohlc.opens[idx];
+      if (isLong && close > open) aligned++;
+      if (!isLong && close < open) aligned++;
+    }
+    return aligned >= 2;
   }
 
   private async evalStrategy(
