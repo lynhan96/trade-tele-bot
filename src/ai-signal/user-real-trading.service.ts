@@ -1597,21 +1597,21 @@ export class UserRealTradingService implements OnModuleInit {
               }
             }
 
-            // ── TP mismatch: auto-sync when expected TP differs from current ──
-            // This ensures changes to TP% propagate to running trades within 2 minutes.
-            const FIXED_TP_PCT = 2.0;
+            // ── SL/TP mismatch: auto-sync when user's custom SL/TP differs from current ──
+            // This ensures changes to customSlPct/customTpPct propagate to running trades within 2 minutes.
             if (trade.entryPrice) {
+              // TP sync: use user's customTpPct if set, otherwise fixed 2%
+              const effectiveTpPct = sub?.customTpPct || 2.0;
               const expectedTpPrice = direction === "LONG"
-                ? trade.entryPrice * (1 + FIXED_TP_PCT / 100)
-                : trade.entryPrice * (1 - FIXED_TP_PCT / 100);
+                ? trade.entryPrice * (1 + effectiveTpPct / 100)
+                : trade.entryPrice * (1 - effectiveTpPct / 100);
               const currentTpPrice = tpPrice || 0;
               const tpDiffPct = currentTpPrice > 0
                 ? Math.abs(currentTpPrice - expectedTpPrice) / expectedTpPrice * 100
-                : 100; // no TP = 100% mismatch
+                : 100;
               if (tpDiffPct > 0.1 && algo?.hasTp) {
-                // TP exists on Binance but wrong price — replace it
                 this.logger.log(
-                  `[RealTrading] ${symbol} user ${telegramId}: TP mismatch (${currentTpPrice} vs ${expectedTpPrice.toFixed(4)}) — syncing`,
+                  `[RealTrading] ${symbol} user ${telegramId}: TP mismatch (${currentTpPrice} vs ${expectedTpPrice.toFixed(4)}, ${effectiveTpPct}%) — syncing`,
                 );
                 try {
                   await this.moveTpForRealUsers(symbol, expectedTpPrice, direction);
@@ -1621,6 +1621,40 @@ export class UserRealTradingService implements OnModuleInit {
                   );
                 } catch (err) {
                   this.logger.warn(`[RealTrading] ${symbol} user ${telegramId}: TP sync failed: ${err?.message}`);
+                }
+              }
+
+              // SL sync: use user's customSlPct if set, otherwise keep current SL
+              if (sub?.customSlPct && slPrice) {
+                const expectedSlPrice = direction === "LONG"
+                  ? trade.entryPrice * (1 - sub.customSlPct / 100)
+                  : trade.entryPrice * (1 + sub.customSlPct / 100);
+                const slDiffPct = Math.abs(slPrice - expectedSlPrice) / expectedSlPrice * 100;
+                // Only sync if SL hasn't been moved to entry (trailing SL) — don't widen SL back
+                const slMovedToEntry = direction === "LONG"
+                  ? slPrice >= trade.entryPrice * 0.999
+                  : slPrice <= trade.entryPrice * 1.001;
+                if (slDiffPct > 0.1 && algo?.hasSl && !slMovedToEntry) {
+                  this.logger.log(
+                    `[RealTrading] ${symbol} user ${telegramId}: SL mismatch (${slPrice} vs ${expectedSlPrice.toFixed(4)}, ${sub.customSlPct}%) — syncing`,
+                  );
+                  try {
+                    const roundedNewSl = round(expectedSlPrice);
+                    if (trade.binanceSlAlgoId) {
+                      await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, trade.binanceSlAlgoId);
+                    }
+                    const slOrder = await this.binanceService.setStopLoss(
+                      keys.apiKey, keys.apiSecret, symbol, roundedNewSl,
+                      direction as "LONG" | "SHORT", trade.quantity,
+                    );
+                    const newSlId = slOrder?.algoId?.toString() ?? slOrder?.orderId?.toString();
+                    await this.userTradeModel.updateOne(
+                      { _id: trade._id },
+                      { $set: { slPrice: roundedNewSl, binanceSlAlgoId: newSlId } },
+                    );
+                  } catch (err) {
+                    this.logger.warn(`[RealTrading] ${symbol} user ${telegramId}: SL sync failed: ${err?.message}`);
+                  }
                 }
               }
             }
