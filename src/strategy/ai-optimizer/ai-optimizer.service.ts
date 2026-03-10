@@ -1032,8 +1032,12 @@ Respond ONLY with JSON: {"decision":"PASS"|"REJECT","reason":"brief 10-word max 
         }
       }
 
-      // ── Fibonacci TP: try 1.618 first (bigger target), fallback to 1.272 ──
-      // Cap 6% matches signal-queue MAX_TP. Prefer 1.618 for better R:R.
+      // ── Fibonacci SL + TP: market-structure aligned with R:R guarantee ──
+      // Strategy:
+      //   1. SL: Fib 0.618 retracement if OB not found (market support/resistance)
+      //   2. TP: find the SMALLEST Fib extension where fibTp >= SL×2 (R:R ≥ 2:1)
+      //      Try in order: 1.272 → 1.618 → 2.0 → 2.618 — pick first that satisfies R:R
+      //   3. Fallback: if no Fib TP qualifies, enforce TP = SL×2 (no Fib structure)
       const fibEnabled = this.configService.get("ENABLE_FIBONACCI", "true") === "true";
       if (fibEnabled && ohlc.closes.length >= 30) {
         const fib = this.indicatorService.getFibonacciLevels(ohlc.highs, ohlc.lows, 5);
@@ -1042,36 +1046,37 @@ Respond ONLY with JSON: {"decision":"PASS"|"REJECT","reason":"brief 10-word max 
           const rangePct = (range / currentPrice) * 100;
 
           if (rangePct > 2) {
-            // Try 1.618 first (better R:R), then 1.272 as fallback
-            const fibTpExtLevels = [1.618, 1.272];
-            for (const level of fibTpExtLevels) {
-              const ext = fib.extensions.find(e => e.level === level);
-              if (ext) {
-                const fibTpPct = Math.abs((ext.price - currentPrice) / currentPrice) * 100;
-                if (fibTpPct >= 2.0 && fibTpPct <= 6.0) {
-                  tpPct = parseFloat(fibTpPct.toFixed(1));
-                  tpSource = `Fib${level}`;
-                  (defaults as any).fibTpUsed = true;
-                  (defaults as any).fibSwingRange = rangePct.toFixed(1);
-                  this.logger.debug(
-                    `[AiOptimizer] ${coin} Fib TP: ${tpPct}% (${level} ext at ${ext.price.toFixed(2)}, swing ${fib.direction})`,
-                  );
-                  break; // use first valid level found
-                }
-              }
-            }
-
-            // Also try Fib 0.618 retracement for SL if OB didn't find anything
+            // Step 1: SL from Fib 0.618 retracement (if OB didn't find one)
             if (slSource === "ATR") {
               const ret618 = fib.retracements.find(r => r.level === 0.618);
               if (ret618) {
                 const fibSlPct = Math.abs((currentPrice - ret618.price) / currentPrice) * 100;
                 if (fibSlPct >= 2.0 && fibSlPct <= 4.0) {
                   slPct = parseFloat(fibSlPct.toFixed(1));
-                  slSource = "Fib";
+                  slSource = "Fib0.618";
                   this.logger.debug(
                     `[AiOptimizer] ${coin} Fib SL: ${slPct}% (0.618 ret at ${ret618.price.toFixed(2)})`,
                   );
+                }
+              }
+            }
+
+            // Step 2: TP — pick smallest extension that achieves R:R ≥ 2:1 vs final slPct
+            const targetTpPct = slPct * 2.0; // minimum TP for R:R 2:1
+            const fibTpExtLevels = [1.272, 1.618, 2.0, 2.618]; // try smallest first
+            for (const level of fibTpExtLevels) {
+              const ext = fib.extensions.find(e => e.level === level);
+              if (ext) {
+                const fibTpPct = Math.abs((ext.price - currentPrice) / currentPrice) * 100;
+                if (fibTpPct >= targetTpPct && fibTpPct <= 6.0) {
+                  tpPct = parseFloat(fibTpPct.toFixed(1));
+                  tpSource = `Fib${level}`;
+                  (defaults as any).fibTpUsed = true;
+                  (defaults as any).fibSwingRange = rangePct.toFixed(1);
+                  this.logger.debug(
+                    `[AiOptimizer] ${coin} Fib TP: ${tpPct}% (${level} ext at ${ext.price.toFixed(2)}, R:R=${(tpPct/slPct).toFixed(1)}, swing ${fib.direction})`,
+                  );
+                  break;
                 }
               }
             }
@@ -1079,11 +1084,11 @@ Respond ONLY with JSON: {"decision":"PASS"|"REJECT","reason":"brief 10-word max 
         }
       }
 
-      // ── Enforce minimum R:R 2:1 — TP must be ≥ 2× SL ──
-      // Ensures profitability at observed 40% win rate (breakeven = 60/40 = 1.5; 2.0 = profit)
+      // ── Enforce minimum R:R 2:1 fallback — fires only when Fib couldn't satisfy R:R ──
+      // (e.g., no Fib levels in range, or all extensions too far/too close)
       const minTp = parseFloat((slPct * 2.0).toFixed(1));
       if (tpPct < minTp) {
-        this.logger.debug(`[AiOptimizer] ${coin} R:R enforced: TP ${tpPct}% → ${minTp}% (SL=${slPct}%)`);
+        this.logger.debug(`[AiOptimizer] ${coin} R:R fallback: TP ${tpPct}% → ${minTp}% (SL=${slPct}%, no Fib ext found)`);
         tpPct = minTp;
         tpSource = tpSource === "ATR" ? "ATR(R:R)" : `${tpSource}(R:R)`;
       }
