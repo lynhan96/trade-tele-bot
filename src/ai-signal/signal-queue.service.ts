@@ -599,7 +599,7 @@ export class SignalQueueService {
     isTestMode = false,
   ): Promise<AiSignalDocument> {
     const symbol = `${coin.toUpperCase()}${currency.toUpperCase()}`;
-    const MIN_SL = 2.5;  // tighter SL — cut losses faster
+    const MIN_SL = 2.0;  // tighter SL — simulation shows SL=2%/TP=2% is optimal (1:1 R:R)
     // Fixed TP=2% for all signals — data shows most signals peak around 2-3%,
     // higher TP targets (3-5%) were rarely reached, causing unnecessary losses.
     const FIXED_TP = 2.0;

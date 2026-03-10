@@ -535,9 +535,9 @@ Reply ONLY with valid JSON (no markdown):
 
     // ── 2. All other coins: fixed SL/TP + ATR floor + algorithmic strategy ──
     let defaults = atrDefaults;
-    // Fixed SL=2.5%, TP=5% baseline (1:2 R:R) — ATR may widen SL for volatile coins
-    if (defaults.stopLossPercent < 2.5) defaults.stopLossPercent = 2.5;
-    if (defaults.takeProfitPercent < 5) defaults.takeProfitPercent = 5;
+    // Fixed SL=2%, TP=2% baseline (1:1 R:R) — simulation shows this is optimal
+    if (defaults.stopLossPercent < 2.0) defaults.stopLossPercent = 2.0;
+    if (defaults.takeProfitPercent < 2.0) defaults.takeProfitPercent = 2.0;
     if (algoStrategy) defaults.strategy = algoStrategy;
     if (forceProfile) defaults = this.applyForcedProfile(defaults, forceProfile);
     const jitter = Math.floor(Math.random() * AI_PARAMS_JITTER);
@@ -986,8 +986,8 @@ Reply ONLY JSON:
       // MEAN_REVERT_RSI removed from defaults (1 win / 22 trades = -21.54% PnL)
       strategy: isTrend ? "EMA_PULLBACK|TREND_EMA|RSI_CROSS" : isSideways ? "BB_SCALP|RSI_CROSS" : "RSI_CROSS|BB_SCALP",
       confidence: isSideways ? 45 : isTrend ? 60 : 55,
-      stopLossPercent: 3.0,
-      takeProfitPercent: 4.0,
+      stopLossPercent: 2.0,
+      takeProfitPercent: 2.0,
       minConfidenceToTrade: isSideways ? 42 : isTrend ? 50 : 45,
       rsiCross: {
         primaryKline: "15m",
@@ -1108,10 +1108,10 @@ Reply ONLY JSON:
 
       const atrPct = this.indicatorService.getAtrPercent(ohlc.highs, ohlc.lows, ohlc.closes, 14);
 
-      // SL = 1.5× ATR, clamped to [3%, min(8%, ATR×2)]
+      // SL = 1.5× ATR, clamped to [2%, min(8%, ATR×2)]
       // Volatile coins (ATR>4%) get wider SL to avoid noise stops
       const maxSl = Math.min(8, Math.max(6, atrPct * 2));
-      const slPct = Math.max(3, Math.min(maxSl, atrPct * 1.5));
+      const slPct = Math.max(2, Math.min(maxSl, atrPct * 1.5));
       defaults.stopLossPercent = parseFloat(slPct.toFixed(1));
       defaults.takeProfitPercent = parseFloat((slPct * 2).toFixed(1));
 
@@ -1163,7 +1163,7 @@ Reply ONLY JSON:
       parsed.confidence = isNaN(num) ? 50 : num;
     }
     const defaults = this.getDefaultParams(parsed.regime || "MIXED");
-    const MIN_SL = 3.0;
+    const MIN_SL = 2.0;
     const stopLossPercent = Math.max(parsed.stopLossPercent ?? defaults.stopLossPercent, MIN_SL);
     const result = {
       ...defaults,
