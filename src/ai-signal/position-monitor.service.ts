@@ -214,7 +214,7 @@ export class PositionMonitorService implements OnModuleInit {
     const peak = (signal as any).peakPnlPct || 0;
 
     if (peak >= TRAIL_TRIGGER && !(signal as any).slMovedToEntry) {
-      // First time reaching 2% → move SL to entry (break-even)
+      // First time reaching 1.5% → move SL to entry (break-even)
       (signal as any).stopLossPrice = entryPrice;
       (signal as any).slMovedToEntry = true;
       await this.signalQueueService.moveStopLossToEntry((signal as any)._id.toString());

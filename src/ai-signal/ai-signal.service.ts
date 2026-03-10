@@ -1057,9 +1057,9 @@ export class AiSignalService implements OnModuleInit {
       ? ((currentPrice - signal.entryPrice) / signal.entryPrice) * 100
       : ((signal.entryPrice - currentPrice) / signal.entryPrice) * 100;
 
-    // ── Trailing SL: after 1.5% profit, trail SL at peak - 1.2% (never lower) ──
+    // ── Trailing SL: after 1.5% profit, trail SL at peak - 0.8% (never lower) ──
     const TRAIL_TRIGGER = 1.5;
-    const TRAIL_DISTANCE = 1.2;
+    const TRAIL_DISTANCE = 0.8;
 
     // Track peak PnL
     const prevPeak = (signal as any).peakPnlPct || 0;
@@ -1074,12 +1074,12 @@ export class AiSignalService implements OnModuleInit {
       (signal as any).stopLossPrice = signal.entryPrice;
       (signal as any).slMovedToEntry = true;
       this.logger.log(
-        `[AiSignal] [TEST] 🛡️ ${signal.symbol} SL moved to entry ${signal.entryPrice} (PnL: ${pnlPct.toFixed(2)}%)`,
+        `[AiSignal] [TEST] 🛡️ ${signal.symbol} SL moved to entry ${signal.entryPrice} at 1.5% profit (PnL: ${pnlPct.toFixed(2)}%)`,
       );
       await this.notifySlMovedToEntry(signal.symbol, signal.entryPrice);
     }
 
-    // Continuous trailing: SL = entry + (peak - 2%), only raise
+    // Continuous trailing: SL = entry + (peak - 0.8%), only raise
     if ((signal as any).slMovedToEntry && peak > TRAIL_TRIGGER) {
       const trailPct = Math.max(0, peak - TRAIL_DISTANCE);
       const trailSl = isLong
