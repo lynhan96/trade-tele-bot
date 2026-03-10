@@ -700,10 +700,10 @@ export class AiOptimizerService {
       // Multi-strategy pipes: primary|fallback1|fallback2
       // MEAN_REVERT_RSI removed from defaults (1 win / 22 trades = -21.54% PnL)
       strategy: isTrend ? "EMA_PULLBACK|TREND_EMA|RSI_CROSS" : isSideways ? "BB_SCALP|RSI_CROSS" : "RSI_CROSS|BB_SCALP",
-      confidence: isSideways ? 45 : isTrend ? 60 : 55,
+      confidence: 65, // base default — overridden by dynamic calculation in getAtrAdjustedDefaults
       stopLossPercent: 2.0,
       takeProfitPercent: 2.0,
-      minConfidenceToTrade: isSideways ? 42 : isTrend ? 50 : 45,
+      minConfidenceToTrade: 50, // floor enforced in ai-signal.service.ts (CONFIDENCE_FLOOR=63)
       rsiCross: {
         primaryKline: "15m",
         rsiPeriod: 14,
@@ -927,8 +927,33 @@ export class AiOptimizerService {
       (defaults as any).slSource = slSource;
       (defaults as any).tpSource = tpSource;
 
+      // ── Dynamic confidence: compute from indicator alignment ──
+      // Base: 60 (above absolute min, below floor in some regimes)
+      let dynConf = 60;
+
+      if (Object.keys(indicators).length > 0) {
+        const rsi = parseFloat(indicators.rsi14_15m) || 50;
+        const rsi4h = indicators.rsi14_4h !== "N/A" ? parseFloat(indicators.rsi14_4h) : 50;
+        const bbWidth = parseFloat(indicators.bbWidthPct) || 3;
+
+        // +5 if RSI not in danger zone (35-65 is comfortable)
+        if (rsi >= 35 && rsi <= 65) dynConf += 5;
+        // +5 if 4h RSI aligns with 15m RSI (same side of 50)
+        if ((rsi > 50 && rsi4h > 50) || (rsi < 50 && rsi4h < 50)) dynConf += 5;
+        // +3 if ATR is moderate (0.5-2% — not too dead, not too wild)
+        if (atrPct >= 0.5 && atrPct <= 2.0) dynConf += 3;
+        // +3 if SMC/Fib levels found (structural SL/TP = higher quality)
+        if (slSource !== "ATR") dynConf += 3;
+        if (tpSource !== "ATR") dynConf += 2;
+        // +2 if BB width is reasonable (not too tight/wide)
+        if (bbWidth >= 1.5 && bbWidth <= 5.0) dynConf += 2;
+      }
+
+      // Cap at 80 — rule engine still applies regime-based caps on top
+      defaults.confidence = Math.min(80, dynConf);
+
       this.logger.debug(
-        `[AiOptimizer] ${coin} SL=${slPct.toFixed(1)}%(${slSource}) TP=${tpPct.toFixed(1)}%(${tpSource}) ATR=${atrPct.toFixed(2)}%`,
+        `[AiOptimizer] ${coin} SL=${slPct.toFixed(1)}%(${slSource}) TP=${tpPct.toFixed(1)}%(${tpSource}) conf=${defaults.confidence} ATR=${atrPct.toFixed(2)}%`,
       );
     } catch {
       // fallback to static defaults
