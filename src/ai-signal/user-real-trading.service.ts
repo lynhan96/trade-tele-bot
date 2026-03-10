@@ -73,6 +73,12 @@ export class UserRealTradingService implements OnModuleInit {
     // Re-open data streams for any users with OPEN trades (bot restart recovery)
     // Delayed to allow UserDataStreamService to initialize first
     setTimeout(() => this.reRegisterOpenTradeStreams().catch(() => {}), 5_000);
+
+    // One-time: sync TP on Binance for all open trades that have stale TP prices
+    // (e.g. after TP% was changed globally). Delayed 10s to let services initialize.
+    setTimeout(() => this.syncTpForOpenTrades().catch((e) =>
+      this.logger.error(`[Startup] syncTpForOpenTrades error: ${e?.message}`),
+    ), 10_000);
   }
 
   /** One-time migration: set cycleResetAt for users with open trades + cycle limits configured. */
@@ -99,6 +105,42 @@ export class UserRealTradingService implements OnModuleInit {
       }
     } catch (err) {
       this.logger.error(`[Migration] migrateToCycleSystem error: ${err?.message}`);
+    }
+  }
+
+  /**
+   * One-time startup: sync TP orders on Binance for open trades where DB TP differs from signal TP.
+   * This handles cases where TP% was changed globally (e.g. from 6% to 2%).
+   */
+  private async syncTpForOpenTrades(): Promise<void> {
+    const openTrades = await this.userTradeModel.find({ status: "OPEN" }).lean();
+    if (openTrades.length === 0) return;
+
+    let synced = 0;
+    for (const trade of openTrades) {
+      try {
+        // Calculate expected TP price based on current fixed TP=2%
+        const FIXED_TP = 2.0;
+        const expectedTpPrice = trade.direction === "LONG"
+          ? trade.entryPrice * (1 + FIXED_TP / 100)
+          : trade.entryPrice * (1 - FIXED_TP / 100);
+
+        // Check if current TP is different (tolerance 0.01%)
+        const currentTp = trade.tpPrice || (trade as any).takeProfitPrice || 0;
+        const diff = Math.abs(currentTp - expectedTpPrice) / expectedTpPrice * 100;
+        if (diff < 0.01) continue; // already in sync
+
+        this.logger.log(
+          `[Startup] Syncing TP for ${trade.symbol} ${trade.direction}: ${currentTp} → ${expectedTpPrice.toFixed(8)}`,
+        );
+        await this.moveTpForRealUsers(trade.symbol, expectedTpPrice, trade.direction);
+        synced++;
+      } catch (err) {
+        this.logger.error(`[Startup] syncTp error for ${trade.symbol}: ${err?.message}`);
+      }
+    }
+    if (synced > 0) {
+      this.logger.log(`[Startup] Synced TP for ${synced} open trade(s)`);
     }
   }
 
