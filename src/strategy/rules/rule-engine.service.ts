@@ -50,8 +50,11 @@ export class RuleEngineService {
     // Individual strategies have their own regime gates (BB_SCALP only in SIDEWAYS/RANGE_BOUND,
     // EMA_PULLBACK only in STRONG_BEAR/BULL, etc.) which naturally filter invalid combos.
     // This fixes: 0/58 confluence signals because AI assigned incompatible strategy combos.
+    // TREND_EMA & EMA_PULLBACK disabled (2026-03-10): worst performers
+    // EMA_PULLBACK: -17.36% total PnL (8W/16L) — shorts bottoms in STRONG_BEAR
+    // TREND_EMA: -9.98% total PnL (4W/5L) — enters after trend move is done
     const strategies = [
-      "RSI_CROSS", "RSI_ZONE", "TREND_EMA", "EMA_PULLBACK",
+      "RSI_CROSS", "RSI_ZONE",
       "BB_SCALP", "STOCH_BB_PATTERN", "STOCH_EMA_KDJ", "SMC_FVG",
     ];
 
@@ -93,6 +96,27 @@ export class RuleEngineService {
     const isLong = longs.length > 0;
     const primary = winners[0].result;
 
+    // ── Price Position Filter — prevent shorting bottoms & longing tops ──
+    // Check where price sits in recent 1h range (20 candles = ~20h)
+    // SHORT blocked if price in bottom 25% (shorting the floor)
+    // LONG blocked if price in top 25% (longing the ceiling)
+    const pricePos = await this.getPricePosition(coin, "1h", 20);
+    if (pricePos !== null) {
+      if (!isLong && pricePos < 25) {
+        this.logger.log(
+          `[RuleEngine] ${coin} SHORT blocked: price at ${pricePos.toFixed(0)}% of range (bottom 25%) — don't short the bottom`,
+        );
+        return null;
+      }
+      if (isLong && pricePos > 75) {
+        this.logger.log(
+          `[RuleEngine] ${coin} LONG blocked: price at ${pricePos.toFixed(0)}% of range (top 25%) — don't long the top`,
+        );
+        return null;
+      }
+      this.logger.debug(`[RuleEngine] ${coin} price position: ${pricePos.toFixed(0)}% (${isLong ? "LONG" : "SHORT"} OK)`);
+    }
+
     if (winners.length >= 2) {
       // Strong confluence: 2+ strategies agree
       const names = winners.map(w => w.strategy).join("+");
@@ -114,6 +138,26 @@ export class RuleEngineService {
       `[RuleEngine] ${coin} △ ${winners[0].strategy} fired alone (1/${strategies.length}) — allowed as single`,
     );
     return primary;
+  }
+
+  /**
+   * Price Position Filter — prevent shorting bottoms and longing tops.
+   * Checks where current price sits in the recent high-low range.
+   * Returns position 0-100 (0 = bottom, 100 = top).
+   */
+  private async getPricePosition(coin: string, kline: string, lookback = 20): Promise<number | null> {
+    const ohlc = await this.indicatorService.getOhlc(coin, kline);
+    if (ohlc.highs.length < lookback) return null;
+
+    const recentHighs = ohlc.highs.slice(-lookback);
+    const recentLows = ohlc.lows.slice(-lookback);
+    const high = Math.max(...recentHighs);
+    const low = Math.min(...recentLows);
+    const range = high - low;
+    if (range <= 0) return null;
+
+    const currentPrice = ohlc.closes[ohlc.closes.length - 1];
+    return ((currentPrice - low) / range) * 100;
   }
 
   private async evalStrategy(
