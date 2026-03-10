@@ -599,12 +599,13 @@ export class SignalQueueService {
     isTestMode = false,
   ): Promise<AiSignalDocument> {
     const symbol = `${coin.toUpperCase()}${currency.toUpperCase()}`;
-    const MIN_SL = 2.0;  // tighter SL — simulation shows SL=2%/TP=2% is optimal (1:1 R:R)
-    // Fixed TP=2% for all signals — data shows most signals peak around 2-3%,
-    // higher TP targets (3-5%) were rarely reached, causing unnecessary losses.
-    const FIXED_TP = 2.0;
+    const MIN_SL = 2.0;
+    const MIN_TP = 1.5;
+    const MAX_TP = 3.0;
+    // Dynamic SL/TP: use ATR-adjusted values from params, with floor/cap
+    // Trailing stop handles upside beyond TP, so TP is just the initial target
     const stopLossPercent = Math.max(params.stopLossPercent, MIN_SL);
-    const takeProfitPercent = FIXED_TP;
+    const takeProfitPercent = Math.min(MAX_TP, Math.max(MIN_TP, params.takeProfitPercent));
     const entryPrice = signalResult.entryPrice;
 
     const stopLossPrice = signalResult.isLong

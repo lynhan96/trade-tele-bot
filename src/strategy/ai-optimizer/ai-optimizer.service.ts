@@ -442,7 +442,7 @@ Reply ONLY with valid JSON (no markdown):
     const minVolumeUsd = Number(parsed.minVolumeUsd);
     const minPriceChangePct = Number(parsed.minPriceChangePct);
     // Clamp: .env is the hard cap — GPT cannot exceed it
-    const configuredMax = parseInt(this.configService.get("AI_MAX_SHORTLIST_SIZE", "50"));
+    const configuredMax = parseInt(this.configService.get("AI_MAX_SHORTLIST_SIZE", "120"));
     const maxShortlistSize = Math.min(Math.max(Number(parsed.maxShortlistSize), 10), configuredMax);
 
     // 4. Store in MongoDB
@@ -508,10 +508,6 @@ Reply ONLY with valid JSON (no markdown):
       if (params.stopLossPercent < slFloor) {
         this.logger.log(`[AiOptimizer] ${symbol}: AI SL ${params.stopLossPercent}% < floor ${slFloor}%, using floor`);
         params.stopLossPercent = slFloor;
-        // Adjust TP proportionally if it's now below 2x SL
-        if (params.takeProfitPercent < slFloor * 2) {
-          params.takeProfitPercent = parseFloat((slFloor * 2).toFixed(1));
-        }
       }
       if (forceProfile) params = this.applyForcedProfile(params, forceProfile);
       const jitter = Math.floor(Math.random() * AI_PARAMS_JITTER);
@@ -553,9 +549,6 @@ Reply ONLY with valid JSON (no markdown):
   private applyForcedProfile(params: AiTunedParams, profile: string): AiTunedParams {
     const result = { ...params };
     result.timeframeProfile = profile as any;
-
-    // Ensure minimum 1:2 R:R — TP must be at least 2x SL
-    result.takeProfitPercent = Math.max(result.stopLossPercent * 2, result.takeProfitPercent);
 
     if (profile === "SWING") {
       // SWING: 4h primary, 1d HTF, wider SL
@@ -833,11 +826,11 @@ STEP 1 — Choose 1-3 strategies (pipe-delimited). Ranked by real performance:
 - MEAN_REVERT_RSI: WORST performer (-21.54% PnL, 1 win / 22 trades). ONLY use in RANGE_BOUND/SIDEWAYS with RSI <35 or >65. NEVER in MIXED/BEAR/VOLATILE.
 - STOCH_BB_PATTERN: Range-bound regime with BBWidth <4%.
 
-STEP 2 — Set SL/TP based on volatility (ATR). MINIMUM SL is 3%:
-- Low ATR (<1%): SL 3.0%, TP 3.0-4.0%
-- Medium ATR (1-2%): SL 3.0-4.0%, TP 3.0-5.0%
-- High ATR (>2%): SL 4.0-6.0%, TP 4.0-5.0%
-- IMPORTANT: TP MUST be 3-5%. System auto-extends TP on strong momentum.
+STEP 2 — Set SL/TP based on volatility (ATR). MINIMUM SL is 2%:
+- Low ATR (<1%): SL 2.0%, TP 1.5-2.0%
+- Medium ATR (1-2%): SL 2.0-3.0%, TP 2.0-3.0%
+- High ATR (>2%): SL 3.0-4.0%, TP 2.5-3.0%
+- IMPORTANT: TP capped at 3%. System has trailing stop that extends gains beyond TP.
 
 STEP 3 — Set confidence based on signal strength:
 - Direction aligned with regime: confidence 65-85
@@ -846,7 +839,7 @@ STEP 3 — Set confidence based on signal strength:
 - If recent trades show many SL hits: raise minConfidenceToTrade to 55-65
 
 Reply ONLY JSON:
-{"regime":"${globalRegime}","strategy":"RSI_CROSS|...","confidence":40-85,"stopLossPercent":3.0-8.0,"takeProfitPercent":3.0-5.0,"minConfidenceToTrade":40}`;
+{"regime":"${globalRegime}","strategy":"RSI_CROSS|...","confidence":40-85,"stopLossPercent":2.0-4.0,"takeProfitPercent":1.5-3.0,"minConfidenceToTrade":40}`;
   }
 
   private async callGpt(
@@ -1108,12 +1101,13 @@ Reply ONLY JSON:
 
       const atrPct = this.indicatorService.getAtrPercent(ohlc.highs, ohlc.lows, ohlc.closes, 14);
 
-      // SL = 1.5× ATR, clamped to [2%, min(8%, ATR×2)]
-      // Volatile coins (ATR>4%) get wider SL to avoid noise stops
-      const maxSl = Math.min(8, Math.max(6, atrPct * 2));
+      // SL = 1.5× ATR, clamped to [2%, min(4%, ATR×2)]
+      const maxSl = Math.min(4, Math.max(3, atrPct * 2));
       const slPct = Math.max(2, Math.min(maxSl, atrPct * 1.5));
+      // TP = 1.0× ATR, clamped to [1.5%, 3%] — trailing stop handles upside beyond TP
+      const tpPct = Math.max(1.5, Math.min(3.0, atrPct * 1.0));
       defaults.stopLossPercent = parseFloat(slPct.toFixed(1));
-      defaults.takeProfitPercent = parseFloat((slPct * 2).toFixed(1));
+      defaults.takeProfitPercent = parseFloat(tpPct.toFixed(1));
 
       // ── Fibonacci-enhanced TP: use Fib extension levels when available ──
       // Toggle: ENABLE_FIBONACCI env var (default: true)
@@ -1133,8 +1127,8 @@ Reply ONLY JSON:
             const ext1272 = fib.extensions.find(e => e.level === 1.272);
             if (ext1272) {
               const fibTpPct = Math.abs((ext1272.price - currentPrice) / currentPrice) * 100;
-              // Only use Fib TP if it's between SL and 2×SL (reasonable R:R)
-              if (fibTpPct >= slPct && fibTpPct <= slPct * 3) {
+              // Only use Fib TP if it's between 1.5% and 3% (dynamic range)
+              if (fibTpPct >= 1.5 && fibTpPct <= 3.0) {
                 defaults.takeProfitPercent = parseFloat(fibTpPct.toFixed(1));
                 (defaults as any).fibTpUsed = true;
                 (defaults as any).fibSwingRange = rangePct.toFixed(1);
@@ -1169,8 +1163,8 @@ Reply ONLY JSON:
       ...defaults,
       ...parsed,
       stopLossPercent,
-      // Fallback: if Haiku didn't return takeProfitPercent, use 2× SL distance
-      takeProfitPercent: parsed.takeProfitPercent ?? stopLossPercent * 2,
+      // Fallback: if GPT didn't return takeProfitPercent, use SL (1:1 R:R, trailing handles upside)
+      takeProfitPercent: Math.min(3.0, Math.max(1.5, parsed.takeProfitPercent ?? stopLossPercent)),
       rsiCross: { ...defaults.rsiCross, ...(parsed.rsiCross || {}) },
       rsiZone: { ...defaults.rsiZone, ...(parsed.rsiZone || {}) },
       trendEma: { ...defaults.trendEma, ...(parsed.trendEma || {}) },

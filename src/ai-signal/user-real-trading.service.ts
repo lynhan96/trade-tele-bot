@@ -107,38 +107,12 @@ export class UserRealTradingService implements OnModuleInit {
 
   /**
    * One-time startup: sync TP orders on Binance for open trades where DB TP differs from signal TP.
-   * This handles cases where TP% was changed globally (e.g. from 6% to 2%).
+   * With dynamic ATR-based TP, each trade keeps its own TP — no forced global override.
    */
   private async syncTpForOpenTrades(): Promise<void> {
-    const openTrades = await this.userTradeModel.find({ status: "OPEN" }).lean();
-    if (openTrades.length === 0) return;
-
-    let synced = 0;
-    for (const trade of openTrades) {
-      try {
-        // Calculate expected TP price based on current fixed TP=2%
-        const FIXED_TP = 2.0;
-        const expectedTpPrice = trade.direction === "LONG"
-          ? trade.entryPrice * (1 + FIXED_TP / 100)
-          : trade.entryPrice * (1 - FIXED_TP / 100);
-
-        // Check if current TP is different (tolerance 0.01%)
-        const currentTp = trade.tpPrice || (trade as any).takeProfitPrice || 0;
-        const diff = Math.abs(currentTp - expectedTpPrice) / expectedTpPrice * 100;
-        if (diff < 0.01) continue; // already in sync
-
-        this.logger.log(
-          `[Startup] Syncing TP for ${trade.symbol} ${trade.direction}: ${currentTp} → ${expectedTpPrice.toFixed(8)}`,
-        );
-        await this.moveTpForRealUsers(trade.symbol, expectedTpPrice, trade.direction);
-        synced++;
-      } catch (err) {
-        this.logger.error(`[Startup] syncTp error for ${trade.symbol}: ${err?.message}`);
-      }
-    }
-    if (synced > 0) {
-      this.logger.log(`[Startup] Synced TP for ${synced} open trade(s)`);
-    }
+    // Dynamic TP: each trade has its own ATR-based TP set at creation.
+    // No forced sync needed — protectOpenTrades handles missing TP/SL orders.
+    this.logger.debug(`[Startup] syncTpForOpenTrades: skipped (dynamic TP mode)`);
   }
 
   /** Set the UserDataStreamService (called by UserDataStreamService.onModuleInit to avoid circular dep). */
