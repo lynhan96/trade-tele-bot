@@ -490,9 +490,17 @@ export class AiSignalService implements OnModuleInit {
           const ageMs = Date.now() - new Date(ageRef).getTime();
           const ageH = ageMs / 3600000;
 
-          // Time-based stop: 8h+ and PnL between -1% and +1% (stagnant signal)
-          // If PnL < -1%, let SL handle it naturally (may recover or hit SL at -2.5%)
-          if (ageH >= 8 && pnlPercent < 1 && pnlPercent > -1) {
+          // Time-based stop: regime-aware — close stagnant signals (PnL between -1% and +1%)
+          // Trending markets should move fast; ranging markets need more time to oscillate.
+          const regime = (signal as any).regime ?? "MIXED";
+          const TIME_STOP_BY_REGIME: Record<string, number> = {
+            STRONG_BULL: 12, STRONG_BEAR: 12,     // trend should move fast
+            RANGE_BOUND: 24, SIDEWAYS: 24,         // mean-reversion takes time
+            VOLATILE: 16, MIXED: 16,               // uncertain — moderate
+            BTC_CORRELATION: 16,
+          };
+          const timeStopH = TIME_STOP_BY_REGIME[regime] ?? 16;
+          if (ageH >= timeStopH && pnlPercent < 1 && pnlPercent > -1) {
             const reason = `Time-stop ${pnlPercent >= 0 ? "+" : ""}${pnlPercent.toFixed(2)}% after ${ageH.toFixed(0)}h`;
             try {
               await this.signalQueueService.closeActiveSignalWithPnl(
