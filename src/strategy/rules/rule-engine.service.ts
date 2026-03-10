@@ -50,11 +50,11 @@ export class RuleEngineService {
     // Individual strategies have their own regime gates (BB_SCALP only in SIDEWAYS/RANGE_BOUND,
     // EMA_PULLBACK only in STRONG_BEAR/BULL, etc.) which naturally filter invalid combos.
     // This fixes: 0/58 confluence signals because AI assigned incompatible strategy combos.
-    // TREND_EMA & EMA_PULLBACK disabled (2026-03-10): worst performers
-    // EMA_PULLBACK: -17.36% total PnL (8W/16L) — shorts bottoms in STRONG_BEAR
-    // TREND_EMA: -9.98% total PnL (4W/5L) — enters after trend move is done
+    // TREND_EMA & EMA_PULLBACK re-enabled (2026-03-10) with improvements:
+    // TREND_EMA: +RSI exhaustion check + trend freshness (max 1.5% from cross)
+    // EMA_PULLBACK: direction from 1h EMA slope (not regime) + 2-candle confirmation + stricter RSI
     const strategies = [
-      "RSI_CROSS", "RSI_ZONE",
+      "RSI_CROSS", "RSI_ZONE", "TREND_EMA", "EMA_PULLBACK",
       "BB_SCALP", "STOCH_BB_PATTERN", "STOCH_EMA_KDJ", "SMC_FVG",
     ];
 
@@ -502,11 +502,31 @@ export class RuleEngineService {
     const entryPrice = closes[closes.length - 1];
     const crossType = isLong ? "crosses above" : "crosses below";
 
+    // ── RSI exhaustion check — don't enter if momentum already exhausted ──
+    const rsi = this.indicatorService.getRsi(closes, 14);
+    if (isLong && rsi.last > 60) {
+      this.logger.debug(`[RuleEngine] ${coin} TREND_EMA LONG blocked: RSI=${rsi.last.toFixed(1)} > 60 (momentum exhausted)`);
+      return null;
+    }
+    if (!isLong && rsi.last < 40) {
+      this.logger.debug(`[RuleEngine] ${coin} TREND_EMA SHORT blocked: RSI=${rsi.last.toFixed(1)} < 40 (oversold, bounce likely)`);
+      return null;
+    }
+
+    // ── Trend freshness — price must not have moved too far from cross point ──
+    // If price already moved >1.5% from EMA cross, the move is done — don't chase
+    const crossPrice = (fastEma.last + slowEma.last) / 2;
+    const moveFromCross = Math.abs(entryPrice - crossPrice) / crossPrice * 100;
+    if (moveFromCross > 1.5) {
+      this.logger.debug(`[RuleEngine] ${coin} TREND_EMA blocked: price ${moveFromCross.toFixed(1)}% from cross (>1.5%, too late)`);
+      return null;
+    }
+
     return {
       isLong,
       entryPrice,
       strategy: "TREND_EMA",
-      reason: `EMA(${cfg.fastPeriod}) ${crossType} EMA(${cfg.slowPeriod}) on ${cfg.primaryKline}`,
+      reason: `EMA(${cfg.fastPeriod}) ${crossType} EMA(${cfg.slowPeriod}), RSI=${rsi.last.toFixed(1)}, dist=${moveFromCross.toFixed(1)}% on ${cfg.primaryKline}`,
     };
   }
 
@@ -843,6 +863,9 @@ export class RuleEngineService {
   }
 
   // ─── EMA_PULLBACK (buy dips to EMA in trending markets) ─────────────────
+  // Improved 2026-03-10: was -17.36% PnL — shorting bottoms in STRONG_BEAR
+  // Fixes: allow all regimes + consecutive bounce confirmation + RSI exhaustion check +
+  // HTF trend direction must align (use 1h EMA slope, not just regime label)
 
   async evalEmaPullback(
     coin: string,
@@ -851,11 +874,6 @@ export class RuleEngineService {
   ): Promise<SignalResult | null> {
     const cfg = params.emaPullback;
     if (!cfg) return null;
-
-    // Only works in trending regimes — buying dips in uptrend, selling rallies in downtrend
-    const isBull = params.regime === "STRONG_BULL";
-    const isBear = params.regime === "STRONG_BEAR";
-    if (!isBull && !isBear) return null;
 
     const ohlc = await this.indicatorService.getOhlc(coin, cfg.primaryKline);
     const { opens, closes } = ohlc;
@@ -866,68 +884,85 @@ export class RuleEngineService {
     const rsi = this.indicatorService.getRsi(closes, cfg.rsiPeriod);
     const currentPrice = closes[closes.length - 1];
     const prevPrice = closes[closes.length - 2];
+    const prev2Price = closes[closes.length - 3];
     const currentOpen = opens[opens.length - 1];
+    const prevOpen = opens[opens.length - 2];
 
-    // LONG: price pulled back to EMA21, bouncing, above EMA50
-    if (isBull) {
-      // Widen touch tolerance to 1% — price within 1% of EMA21 counts as a pullback
+    // ── Determine direction from 1h EMA slope (not regime) ──
+    // Use actual price structure instead of stale regime label
+    const htfCloses = await this.indicatorService.getCloses(coin, cfg.htfKline || "1h");
+    if (htfCloses.length < 50) return null;
+    const htfEma = this.indicatorService.getEma(htfCloses, 21);
+    const htfEmaPrev = htfCloses.length > 21
+      ? this.indicatorService.getEma(htfCloses.slice(0, -1), 21)
+      : null;
+
+    // HTF EMA must have clear slope — flat = no direction
+    if (!htfEmaPrev) return null;
+    const htfSlope = ((htfEma.last - htfEmaPrev.last) / htfEmaPrev.last) * 100;
+    const isUptrend = htfSlope > 0.05;  // 1h EMA rising > 0.05%
+    const isDowntrend = htfSlope < -0.05; // 1h EMA falling > 0.05%
+    if (!isUptrend && !isDowntrend) return null; // flat — skip
+
+    // LONG: uptrend + price pulled back to EMA21, consecutive bounce
+    if (isUptrend) {
       const touchedEma = prevPrice <= ema.last * 1.01 || currentPrice <= ema.last * 1.01;
       const isGreen = currentPrice > currentOpen;
+      const prevIsGreen = prevPrice > prevOpen;
+      const consecutiveBounce = isGreen && prevIsGreen; // 2 green candles = confirmed bounce
       const aboveSupport = currentPrice > emaSupport.last;
-      // Widen RSI range for STRONG_BULL — RSI 35-62 (bull RSI often 50-65)
-      const rsiMax = Math.max(cfg.rsiMax, 62);
-      const rsiInRange = rsi.last >= cfg.rsiMin && rsi.last <= rsiMax;
+      const rsiOk = rsi.last >= 30 && rsi.last <= 55; // not overbought (was <=62, too loose)
 
-      if (!touchedEma || !isGreen || !aboveSupport || !rsiInRange) {
+      if (!touchedEma || !consecutiveBounce || !aboveSupport || !rsiOk) {
         this.logger.debug(
-          `[RuleEngine] ${coin} EMA_PULLBACK LONG miss: touch=${touchedEma} green=${isGreen} support=${aboveSupport} rsi=${rsi.last.toFixed(1)}(${cfg.rsiMin}-${rsiMax})`,
+          `[RuleEngine] ${coin} EMA_PULLBACK LONG miss: touch=${touchedEma} 2green=${consecutiveBounce} support=${aboveSupport} rsi=${rsi.last.toFixed(1)}(30-55)`,
         );
         return null;
       }
 
-      // HTF RSI confirmation — 4h must still be bullish
-      const htfCloses = await this.indicatorService.getCloses(coin, cfg.htfKline);
-      if (htfCloses.length >= 50) {
-        const htfRsi = this.indicatorService.getRsi(htfCloses, cfg.rsiPeriod);
-        if (htfRsi.last < cfg.htfRsiMin) return null;
+      // HTF RSI not overbought
+      const htfRsi = this.indicatorService.getRsi(htfCloses, cfg.rsiPeriod);
+      if (htfRsi.last > 65) {
+        this.logger.debug(`[RuleEngine] ${coin} EMA_PULLBACK LONG blocked: 1h RSI=${htfRsi.last.toFixed(1)} overbought (>65)`);
+        return null;
       }
 
       return {
         isLong: true,
         entryPrice: currentPrice,
         strategy: "EMA_PULLBACK",
-        reason: `Pullback to EMA(${cfg.emaPeriod})=${ema.last.toFixed(2)}, bounce (green), RSI=${rsi.last.toFixed(1)} on ${cfg.primaryKline}`,
+        reason: `Pullback to EMA(${cfg.emaPeriod})=${ema.last.toFixed(2)}, 2-candle bounce, RSI=${rsi.last.toFixed(1)}, htfSlope=+${htfSlope.toFixed(2)}%`,
       };
     }
 
-    // SHORT: price rallied to EMA21, rejecting, below EMA50
-    if (isBear) {
-      // Widen touch tolerance to 1%
+    // SHORT: downtrend + price rallied to EMA21, consecutive rejection
+    if (isDowntrend) {
       const touchedEma = prevPrice >= ema.last * 0.99 || currentPrice >= ema.last * 0.99;
       const isRed = currentPrice < currentOpen;
+      const prevIsRed = prevPrice < prevOpen;
+      const consecutiveReject = isRed && prevIsRed; // 2 red candles = confirmed rejection
       const belowSupport = currentPrice < emaSupport.last;
-      const rsiMin = Math.min(100 - Math.max(cfg.rsiMax, 62), 100 - cfg.rsiMin);
-      const rsiInRange = rsi.last >= rsiMin && rsi.last <= (100 - cfg.rsiMin);
+      const rsiOk = rsi.last >= 45 && rsi.last <= 70; // not oversold (SHORT only when RSI 45-70)
 
-      if (!touchedEma || !isRed || !belowSupport || !rsiInRange) {
+      if (!touchedEma || !consecutiveReject || !belowSupport || !rsiOk) {
         this.logger.debug(
-          `[RuleEngine] ${coin} EMA_PULLBACK SHORT miss: touch=${touchedEma} red=${isRed} support=${belowSupport} rsi=${rsi.last.toFixed(1)}`,
+          `[RuleEngine] ${coin} EMA_PULLBACK SHORT miss: touch=${touchedEma} 2red=${consecutiveReject} support=${belowSupport} rsi=${rsi.last.toFixed(1)}(45-70)`,
         );
         return null;
       }
 
-      // HTF RSI confirmation — 4h must still be bearish
-      const htfCloses = await this.indicatorService.getCloses(coin, cfg.htfKline);
-      if (htfCloses.length >= 50) {
-        const htfRsi = this.indicatorService.getRsi(htfCloses, cfg.rsiPeriod);
-        if (htfRsi.last > (100 - cfg.htfRsiMin)) return null;
+      // HTF RSI not oversold — don't short when already oversold (bounce likely)
+      const htfRsi = this.indicatorService.getRsi(htfCloses, cfg.rsiPeriod);
+      if (htfRsi.last < 35) {
+        this.logger.debug(`[RuleEngine] ${coin} EMA_PULLBACK SHORT blocked: 1h RSI=${htfRsi.last.toFixed(1)} oversold (<35) — bounce likely`);
+        return null;
       }
 
       return {
         isLong: false,
         entryPrice: currentPrice,
         strategy: "EMA_PULLBACK",
-        reason: `Rally to EMA(${cfg.emaPeriod})=${ema.last.toFixed(2)}, rejection (red), RSI=${rsi.last.toFixed(1)} on ${cfg.primaryKline}`,
+        reason: `Rally to EMA(${cfg.emaPeriod})=${ema.last.toFixed(2)}, 2-candle reject, RSI=${rsi.last.toFixed(1)}, htfSlope=${htfSlope.toFixed(2)}%`,
       };
     }
 
