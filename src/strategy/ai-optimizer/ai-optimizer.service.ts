@@ -2,6 +2,7 @@ import { Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { InjectModel } from "@nestjs/mongoose";
 import { Model } from "mongoose";
+import Anthropic from "@anthropic-ai/sdk";
 import { RedisService } from "../../redis/redis.service";
 import { IndicatorService } from "../indicators/indicator.service";
 import { MarketDataService } from "../../market-data/market-data.service";
@@ -25,10 +26,18 @@ const AI_REGIME_TTL = 30 * 60; // 30min cache — balanced between cost and resp
 const AI_MARKET_FILTERS_KEY = "cache:ai:market-filters"; // regime-based coin filter settings
 const AI_MARKET_FILTERS_TTL = 8 * 60 * 60; // 8h — re-evaluated on regime change
 const RECENT_PERF_KEY = "cache:ai:recent-perf"; // recent SL/TP stats for context
+const HAIKU_VALIDATION_CACHE_TTL = 15 * 60; // 15min cache per symbol+direction
+const HAIKU_MODEL = "claude-haiku-4-5-20251001";
+const HAIKU_TIMEOUT_MS = 8000; // 8s timeout — don't block signal pipeline
+const HAIKU_CIRCUIT_BREAKER_KEY = "cache:ai:haiku-circuit-open";
+const HAIKU_CIRCUIT_BREAKER_TTL = 5 * 60; // 5min cooldown after consecutive failures
+const HAIKU_MAX_CONSECUTIVE_FAILURES = 3;
 
 @Injectable()
 export class AiOptimizerService {
   private readonly logger = new Logger(AiOptimizerService.name);
+  private readonly anthropic: Anthropic | null = null;
+  private haikuConsecutiveFailures = 0;
 
   constructor(
     private readonly configService: ConfigService,
@@ -42,7 +51,14 @@ export class AiOptimizerService {
     @InjectModel(AiSignalValidation.name)
     private readonly validationModel: Model<AiSignalValidationDocument>,
   ) {
-    this.logger.log("[AiOptimizer] SMC/Fibonacci + ATR param tuning (no GPT)");
+    const apiKey = this.configService.get<string>("ANTHROPIC_API_KEY");
+    if (apiKey) {
+      this.anthropic = new Anthropic({ apiKey });
+      this.logger.log("[AiOptimizer] Claude Haiku signal validation enabled");
+    } else {
+      this.logger.warn("[AiOptimizer] No ANTHROPIC_API_KEY — AI validation disabled (rule-based only)");
+    }
+    this.logger.log("[AiOptimizer] SMC/Fibonacci + ATR param tuning");
   }
 
   // ─── Flush all coin param caches (e.g. on startup or regime change) ────────
@@ -672,21 +688,155 @@ export class AiOptimizerService {
       // fail-open: approve on error (don't block good signals)
     }
 
-    const approved = rejectedBy.length === 0;
-    const reason = approved
-      ? `Passed all checks: pos=${pricePosition?.toFixed(0)}%, momentum=${candleMomentum}/3, RSI=${rsiValue?.toFixed(0)}`
-      : `Rejected by: ${rejectedBy.join(", ")}`;
+    // Rule-based rejection — fast, free
+    if (rejectedBy.length > 0) {
+      const reason = `Rejected by: ${rejectedBy.join(", ")}`;
+      this.validationModel.create({
+        symbol, direction, strategy, regime, confidence,
+        stopLossPercent, takeProfitPercent,
+        approved: false, reason,
+        model: "rule-engine",
+        pricePosition, candleMomentum, rsiValue, htfRsiValue, rejectedBy,
+      }).catch((e) => this.logger.warn(`[AiOptimizer] Failed to save validation: ${e?.message}`));
+      return { approved: false, reason };
+    }
 
-    // Persist to DB for tracking
+    // Rule checks passed — now ask Claude Haiku for contextual judgment
+    const ruleReason = `Rules passed: pos=${pricePosition?.toFixed(0)}%, momentum=${candleMomentum}/3, RSI=${rsiValue?.toFixed(0)}`;
+    const haikuResult = await this.validateWithHaiku({
+      symbol, direction, strategy, regime, confidence,
+      stopLossPercent, takeProfitPercent,
+      pricePosition, candleMomentum, rsiValue, htfRsiValue,
+    });
+
+    const approved = haikuResult.approved;
+    const reason = haikuResult.approved
+      ? `${ruleReason} | AI: ${haikuResult.reason}`
+      : `AI rejected: ${haikuResult.reason}`;
+
     this.validationModel.create({
       symbol, direction, strategy, regime, confidence,
       stopLossPercent, takeProfitPercent,
       approved, reason,
-      model: "rule-engine",
-      pricePosition, candleMomentum, rsiValue, htfRsiValue, rejectedBy,
+      model: haikuResult.model,
+      pricePosition, candleMomentum, rsiValue, htfRsiValue,
+      rejectedBy: approved ? [] : ["ai_validation"],
     }).catch((e) => this.logger.warn(`[AiOptimizer] Failed to save validation: ${e?.message}`));
 
     return { approved, reason };
+  }
+
+  /**
+   * Claude Haiku contextual validation — reviews signal quality with full market context.
+   * Cached 15min per symbol+direction. Fail-open on error (approve if API fails).
+   */
+  private async validateWithHaiku(ctx: {
+    symbol: string;
+    direction: string;
+    strategy: string;
+    regime: string;
+    confidence: number;
+    stopLossPercent: number;
+    takeProfitPercent: number;
+    pricePosition?: number;
+    candleMomentum?: number;
+    rsiValue?: number;
+    htfRsiValue?: number;
+  }): Promise<{ approved: boolean; reason: string; model: string }> {
+    // No API key → approve (rule-based only)
+    if (!this.anthropic) {
+      return { approved: true, reason: "No AI key — rule-based only", model: "rule-engine" };
+    }
+
+    // Circuit breaker: skip API calls if too many consecutive failures
+    const circuitOpen = await this.redisService.get<boolean>(HAIKU_CIRCUIT_BREAKER_KEY);
+    if (circuitOpen) {
+      return { approved: true, reason: "AI circuit breaker open — rule-based only", model: "circuit-breaker" };
+    }
+
+    // Check cache
+    const cacheKey = `cache:ai:haiku-val:${ctx.symbol}:${ctx.direction}`;
+    const cached = await this.redisService.get<{ approved: boolean; reason: string }>(cacheKey);
+    if (cached) {
+      return { ...cached, model: "haiku-cached" };
+    }
+
+    try {
+      // Get recent performance for context
+      const recentPerf = (await this.redisService.get<any[]>(RECENT_PERF_KEY)) || [];
+      const last10 = recentPerf.slice(-10);
+      const wins = last10.filter((p) => p.pnlPercent > 0).length;
+      const losses = last10.length - wins;
+      const avgPnl = last10.length > 0 ? last10.reduce((s, p) => s + (p.pnlPercent || 0), 0) / last10.length : 0;
+
+      // Get BTC context
+      const btcCtx = await this.redisService.get<{ rsi: number; priceVsEma9: number }>("cache:ai:regime:btc-context");
+
+      const prompt = `You are a crypto futures trading signal validator. Analyze this signal and decide PASS or REJECT.
+
+Signal: ${ctx.symbol} ${ctx.direction} via ${ctx.strategy}
+Regime: ${ctx.regime} | Confidence: ${ctx.confidence}
+SL: ${ctx.stopLossPercent.toFixed(1)}% | TP: ${ctx.takeProfitPercent.toFixed(1)}% | R:R = 1:${(ctx.takeProfitPercent / ctx.stopLossPercent).toFixed(1)}
+Price position in 20h range: ${ctx.pricePosition?.toFixed(0) ?? "N/A"}%
+Candle momentum (15m): ${ctx.candleMomentum ?? "N/A"}/3 aligned
+RSI(15m): ${ctx.rsiValue?.toFixed(0) ?? "N/A"} | RSI(1h): ${ctx.htfRsiValue?.toFixed(0) ?? "N/A"}
+BTC: RSI=${btcCtx?.rsi?.toFixed(0) ?? "N/A"}, vs EMA9=${btcCtx?.priceVsEma9?.toFixed(2) ?? "N/A"}%
+Recent 10 trades: ${wins}W/${losses}L, avg PnL=${avgPnl.toFixed(2)}%
+
+Rules:
+- REJECT if direction conflicts with regime (e.g. LONG in STRONG_BEAR without strong reversal signals)
+- REJECT if RSI diverges from direction (LONG with RSI>60, SHORT with RSI<40)
+- REJECT if price position is unfavorable (LONG above 65%, SHORT below 35%)
+- REJECT if recent performance is very poor (>7 losses in last 10) and signal is marginal
+- REJECT if R:R ratio < 0.8
+- PASS if setup has good confluence: aligned momentum, favorable RSI, good price position, reasonable R:R
+
+Respond ONLY with JSON: {"decision":"PASS"|"REJECT","reason":"brief 10-word max reason"}`;
+
+      // API call with timeout
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), HAIKU_TIMEOUT_MS);
+
+      let response: Anthropic.Message;
+      try {
+        response = await this.anthropic.messages.create(
+          { model: HAIKU_MODEL, max_tokens: 80, messages: [{ role: "user", content: prompt }] },
+          { signal: controller.signal as any },
+        );
+      } finally {
+        clearTimeout(timeout);
+      }
+
+      const text = response.content[0]?.type === "text" ? response.content[0].text : "";
+      const json = JSON.parse(text.replace(/```json\n?|\n?```/g, "").trim());
+      const approved = json.decision === "PASS";
+      const reason = json.reason || (approved ? "AI approved" : "AI rejected");
+
+      // Success — reset failure counter, cache result
+      this.haikuConsecutiveFailures = 0;
+      await this.redisService.set(cacheKey, { approved, reason }, HAIKU_VALIDATION_CACHE_TTL);
+
+      this.logger.log(
+        `[AiOptimizer] Haiku ${approved ? "PASS" : "REJECT"}: ${ctx.symbol} ${ctx.direction} — ${reason}`,
+      );
+
+      return { approved, reason, model: HAIKU_MODEL };
+    } catch (err) {
+      this.haikuConsecutiveFailures++;
+      const isRateLimit = err?.status === 429;
+      const errType = isRateLimit ? "rate-limited" : err?.name === "AbortError" ? "timeout" : "error";
+
+      // Circuit breaker: open after consecutive failures
+      if (this.haikuConsecutiveFailures >= HAIKU_MAX_CONSECUTIVE_FAILURES) {
+        await this.redisService.set(HAIKU_CIRCUIT_BREAKER_KEY, true, HAIKU_CIRCUIT_BREAKER_TTL);
+        this.logger.warn(
+          `[AiOptimizer] Haiku circuit breaker OPEN — ${this.haikuConsecutiveFailures} consecutive failures (${errType}). Cooling down ${HAIKU_CIRCUIT_BREAKER_TTL / 60}min`,
+        );
+      }
+
+      this.logger.warn(`[AiOptimizer] Haiku ${errType}: ${err?.message} — APPROVED (fail-open)`);
+      return { approved: true, reason: `AI ${errType} — fail-open`, model: `haiku-${errType}` };
+    }
   }
 
   // ─── Default params (F8 Config 2 baseline) ───────────────────────────────

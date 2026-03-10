@@ -99,7 +99,7 @@ export class AiSignalService implements OnModuleInit {
         await this.trackSlHitAndMaybeCooldown();
       }
 
-      // Record result for GPT context (recent performance awareness)
+      // Record result for AI context (recent performance awareness)
       await this.aiOptimizerService.recordTradeResult({
         symbol: info.symbol,
         direction: info.direction,
@@ -276,7 +276,7 @@ export class AiSignalService implements OnModuleInit {
           await this.trackSlHitAndMaybeCooldown();
         }
 
-        // Record result for GPT context
+        // Record trade result for AI context
         await this.aiOptimizerService.recordTradeResult({
           symbol: info.symbol,
           direction: info.direction,
@@ -632,7 +632,7 @@ export class AiSignalService implements OnModuleInit {
     }
 
     // ── LONG confidence penalty: only in STRONG_BEAR (historically LONGs lose in bear markets)
-    // In MIXED/RANGE_BOUND/SIDEWAYS: let GPT-4o validation gate decide instead of hardcoded penalty
+    // In MIXED/RANGE_BOUND/SIDEWAYS: let AI validation gate decide instead of hardcoded penalty
     if (signalResult.isLong && globalRegime === "STRONG_BEAR") {
       const penalty = 20;
       params.confidence = Math.max(10, params.confidence - penalty);
@@ -711,7 +711,7 @@ export class AiSignalService implements OnModuleInit {
       this.logger.warn(`[AiSignal] Trend filter error for ${signalKey}: ${err?.message}`);
     }
 
-    // Rule-based validation gate — replaces GPT (was generic, zero value)
+    // Validation gate — rule-based checks + Claude Haiku contextual analysis
     // Uses price position, candle momentum, RSI checks. Fail-open on error.
     const validationCooldownKey = `cache:ai:validation-cooldown:${signalKey}`;
     try {
@@ -1140,7 +1140,7 @@ export class AiSignalService implements OnModuleInit {
       await this.trackSlHitAndMaybeCooldown();
     }
 
-    // Record result for GPT context
+    // Record trade result for AI context
     await this.aiOptimizerService.recordTradeResult({
       symbol: signal.symbol,
       direction: signal.direction,
