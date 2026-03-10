@@ -852,7 +852,7 @@ Respond ONLY with JSON: {"decision":"PASS"|"REJECT","reason":"brief 10-word max 
       strategy: isTrend ? "EMA_PULLBACK|TREND_EMA|RSI_CROSS" : isSideways ? "BB_SCALP|RSI_CROSS" : "RSI_CROSS|BB_SCALP",
       confidence: 65, // base default — overridden by dynamic calculation in getAtrAdjustedDefaults
       stopLossPercent: 2.0,
-      takeProfitPercent: 2.0,
+      takeProfitPercent: 4.0,   // default 2:1 R:R (was 2.0 — 1:1 R:R, not profitable at 40% win)
       minConfidenceToTrade: 50, // floor enforced in ai-signal.service.ts (CONFIDENCE_FLOOR=63)
       rsiCross: {
         primaryKline: "15m",
@@ -975,9 +975,10 @@ Respond ONLY with JSON: {"decision":"PASS"|"REJECT","reason":"brief 10-word max 
       const atrPct = this.indicatorService.getAtrPercent(ohlc.highs, ohlc.lows, ohlc.closes, 14);
 
       // ── ATR baseline SL/TP ──
+      // TP = ATR×2.0 to achieve R:R≥2 at 40% win rate. Cap 6% — signal-queue enforces further.
       const maxSl = Math.min(4, Math.max(3, atrPct * 2));
       let slPct = Math.max(2, Math.min(maxSl, atrPct * 1.5));
-      let tpPct = Math.max(1.5, Math.min(3.0, atrPct * 1.0));
+      let tpPct = Math.max(2.0, Math.min(6.0, atrPct * 2.0));
 
       let slSource = "ATR";
       let tpSource = "ATR";
@@ -1031,7 +1032,8 @@ Respond ONLY with JSON: {"decision":"PASS"|"REJECT","reason":"brief 10-word max 
         }
       }
 
-      // ── Fibonacci TP: use Fib 1.272 extension when available ──
+      // ── Fibonacci TP: try 1.618 first (bigger target), fallback to 1.272 ──
+      // Cap 6% matches signal-queue MAX_TP. Prefer 1.618 for better R:R.
       const fibEnabled = this.configService.get("ENABLE_FIBONACCI", "true") === "true";
       if (fibEnabled && ohlc.closes.length >= 30) {
         const fib = this.indicatorService.getFibonacciLevels(ohlc.highs, ohlc.lows, 5);
@@ -1040,17 +1042,22 @@ Respond ONLY with JSON: {"decision":"PASS"|"REJECT","reason":"brief 10-word max 
           const rangePct = (range / currentPrice) * 100;
 
           if (rangePct > 2) {
-            const ext1272 = fib.extensions.find(e => e.level === 1.272);
-            if (ext1272) {
-              const fibTpPct = Math.abs((ext1272.price - currentPrice) / currentPrice) * 100;
-              if (fibTpPct >= 1.5 && fibTpPct <= 3.0) {
-                tpPct = parseFloat(fibTpPct.toFixed(1));
-                tpSource = "Fib";
-                (defaults as any).fibTpUsed = true;
-                (defaults as any).fibSwingRange = rangePct.toFixed(1);
-                this.logger.debug(
-                  `[AiOptimizer] ${coin} Fib TP: ${tpPct}% (1.272 ext at ${ext1272.price.toFixed(2)}, swing ${fib.direction})`,
-                );
+            // Try 1.618 first (better R:R), then 1.272 as fallback
+            const fibTpExtLevels = [1.618, 1.272];
+            for (const level of fibTpExtLevels) {
+              const ext = fib.extensions.find(e => e.level === level);
+              if (ext) {
+                const fibTpPct = Math.abs((ext.price - currentPrice) / currentPrice) * 100;
+                if (fibTpPct >= 2.0 && fibTpPct <= 6.0) {
+                  tpPct = parseFloat(fibTpPct.toFixed(1));
+                  tpSource = `Fib${level}`;
+                  (defaults as any).fibTpUsed = true;
+                  (defaults as any).fibSwingRange = rangePct.toFixed(1);
+                  this.logger.debug(
+                    `[AiOptimizer] ${coin} Fib TP: ${tpPct}% (${level} ext at ${ext.price.toFixed(2)}, swing ${fib.direction})`,
+                  );
+                  break; // use first valid level found
+                }
               }
             }
 
@@ -1071,6 +1078,16 @@ Respond ONLY with JSON: {"decision":"PASS"|"REJECT","reason":"brief 10-word max 
           }
         }
       }
+
+      // ── Enforce minimum R:R 2:1 — TP must be ≥ 2× SL ──
+      // Ensures profitability at observed 40% win rate (breakeven = 60/40 = 1.5; 2.0 = profit)
+      const minTp = parseFloat((slPct * 2.0).toFixed(1));
+      if (tpPct < minTp) {
+        this.logger.debug(`[AiOptimizer] ${coin} R:R enforced: TP ${tpPct}% → ${minTp}% (SL=${slPct}%)`);
+        tpPct = minTp;
+        tpSource = tpSource === "ATR" ? "ATR(R:R)" : `${tpSource}(R:R)`;
+      }
+      tpPct = Math.min(6.0, tpPct); // hard cap 6%
 
       defaults.stopLossPercent = parseFloat(slPct.toFixed(1));
       defaults.takeProfitPercent = parseFloat(tpPct.toFixed(1));

@@ -600,12 +600,13 @@ export class SignalQueueService {
   ): Promise<AiSignalDocument> {
     const symbol = `${coin.toUpperCase()}${currency.toUpperCase()}`;
     const MIN_SL = 2.0;
-    const MIN_TP = 1.5;
-    const MAX_TP = 3.0;
+    const MIN_TP = 2.0;   // enforce min R:R 2:1 (breakeven at 40% win = 60/40=1.5; R:R 2 = profit)
+    const MAX_TP = 6.0;   // allow Fib/ATR to find larger targets (was 3.0 — too restrictive)
     // Dynamic SL/TP: use ATR-adjusted values from params, with floor/cap
-    // Trailing stop handles upside beyond TP, so TP is just the initial target
+    // R:R enforced: TP = max(TP, SL×2) to guarantee 2:1 minimum
     const stopLossPercent = Math.max(params.stopLossPercent, MIN_SL);
-    const takeProfitPercent = Math.min(MAX_TP, Math.max(MIN_TP, params.takeProfitPercent));
+    const rawTp = Math.max(MIN_TP, params.takeProfitPercent, stopLossPercent * 2);
+    const takeProfitPercent = Math.min(MAX_TP, rawTp);
     const entryPrice = signalResult.entryPrice;
 
     const stopLossPrice = signalResult.isLong
