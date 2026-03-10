@@ -29,10 +29,6 @@ import {
   UserSignalSubscription,
   UserSignalSubscriptionSchema,
 } from "../schemas/user-signal-subscription.schema";
-import {
-  DailyMarketSnapshot,
-  DailyMarketSnapshotSchema,
-} from "../schemas/daily-market-snapshot.schema";
 import { UserTrade, UserTradeSchema } from "../schemas/user-trade.schema";
 import {
   DailyLimitHistory,
@@ -55,10 +51,6 @@ import {
       {
         name: UserSignalSubscription.name,
         schema: UserSignalSubscriptionSchema,
-      },
-      {
-        name: DailyMarketSnapshot.name,
-        schema: DailyMarketSnapshotSchema,
       },
       { name: UserTrade.name, schema: UserTradeSchema },
       { name: DailyLimitHistory.name, schema: DailyLimitHistorySchema },

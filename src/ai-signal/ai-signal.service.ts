@@ -22,10 +22,6 @@ import {
 } from "../schemas/ai-coin-profile.schema";
 import { AiTunedParams } from "../strategy/ai-optimizer/ai-tuned-params.interface";
 import { FuturesAnalyticsService } from "../market-data/futures-analytics.service";
-import {
-  DailyMarketSnapshot,
-  DailyMarketSnapshotDocument,
-} from "../schemas/daily-market-snapshot.schema";
 import { UserRealTradingService } from "./user-real-trading.service";
 import { MarketDataService } from "../market-data/market-data.service";
 
@@ -73,8 +69,6 @@ export class AiSignalService implements OnModuleInit {
     private readonly aiSignalModel: Model<AiSignalDocument>,
     @InjectModel(AiCoinProfile.name)
     private readonly aiCoinProfileModel: Model<AiCoinProfileDocument>,
-    @InjectModel(DailyMarketSnapshot.name)
-    private readonly dailySnapshotModel: Model<DailyMarketSnapshotDocument>,
   ) {
     this.defaultTestMode =
       configService.get("AI_TEST_MODE", "false") === "true";
@@ -169,126 +163,6 @@ export class AiSignalService implements OnModuleInit {
       await this.coinFilterService.scanAndFilter();
     } catch (err) {
       this.logger.error(`[AiSignal] refreshCoinFilter error: ${err?.message}`);
-    }
-  }
-
-  // ─── Cron: money flow monitor (every 5 minutes, offset 2.5 min) ───────────
-
-  @Cron("2-59/5 * * * *")
-  async monitorMoneyFlow() {
-    try {
-      const shortlist = await this.coinFilterService.getShortlist();
-      if (shortlist.length === 0) return;
-
-      const symbols = shortlist.map((s) => s.symbol);
-      const analytics = await this.futuresAnalyticsService.fetchAnalytics(symbols);
-
-      const priceVolData = shortlist.map((s) => ({
-        symbol: s.symbol,
-        lastPrice: s.lastPrice,
-        quoteVolume: s.quoteVolume,
-        priceChangePercent: s.priceChangePercent,
-      }));
-
-      const alerts = await this.futuresAnalyticsService.detectMoneyFlowAlerts(analytics, priceVolData);
-
-      if (alerts.length === 0) {
-        // Clear last fingerprint when no alerts (so next alert batch is "new")
-        await this.redisService.delete("cache:moneyflow:lastfp");
-        return;
-      }
-
-      // Build alert message — group by coin for readability
-      const highAlerts = alerts.filter((a) => a.severity === "HIGH");
-      const medAlerts = alerts.filter((a) => a.severity === "MEDIUM");
-
-      // Only send if there are HIGH alerts, or at least 3 MEDIUM alerts
-      if (highAlerts.length === 0 && medAlerts.length < 3) return;
-
-      // Change detection: only send when alert set actually changed
-      const fingerprint = alerts
-        .map((a) => `${a.symbol}:${a.alertType}:${a.severity}`)
-        .sort()
-        .join("|");
-      const lastFp = await this.redisService.get<string>("cache:moneyflow:lastfp");
-      if (fingerprint === lastFp) return; // same alerts — skip
-      await this.redisService.set("cache:moneyflow:lastfp", fingerprint, 30 * 60); // 30 min TTL
-
-      const fmtVol = (v: number) =>
-        v >= 1e9 ? `$${(v / 1e9).toFixed(1)}B` :
-        v >= 1e6 ? `$${(v / 1e6).toFixed(0)}M` : `$${(v / 1e3).toFixed(0)}K`;
-
-      const fmtPrice = (p: number) =>
-        p >= 1000 ? `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :
-        p >= 1 ? `$${p.toFixed(2)}` :
-        p >= 0.01 ? `$${p.toFixed(4)}` : `$${p.toFixed(6)}`;
-
-      // Group alerts by symbol
-      const coinAlertMap = new Map<string, typeof alerts>();
-      for (const a of alerts) {
-        if (!coinAlertMap.has(a.symbol)) coinAlertMap.set(a.symbol, []);
-        coinAlertMap.get(a.symbol)!.push(a);
-      }
-
-      // Sort: HIGH severity coins first, then by volume
-      const sortedCoins = [...coinAlertMap.entries()].sort((a, b) => {
-        const aHigh = a[1].some((x) => x.severity === "HIGH") ? 1 : 0;
-        const bHigh = b[1].some((x) => x.severity === "HIGH") ? 1 : 0;
-        return bHigh - aHigh;
-      });
-
-      let text = `🚨 *Cảnh Báo Dòng Tiền*\n`;
-      text += `━━━━━━━━━━━━━━━━━━\n\n`;
-
-      for (const [symbol, coinAlerts] of sortedCoins.slice(0, 8)) {
-        const coin = symbol.replace("USDT", "");
-        const entry = shortlist.find((s) => s.symbol === symbol);
-        if (!entry) continue;
-
-        const hasHigh = coinAlerts.some((a) => a.severity === "HIGH");
-        const icon = hasHigh ? "🔴" : "🟡";
-        const changeSign = entry.priceChangePercent >= 0 ? "+" : "";
-        const changeIcon = entry.priceChangePercent > 5 ? "🟢" : entry.priceChangePercent < -5 ? "🔴" : "";
-
-        text += `${icon} *${coin}* ${fmtPrice(entry.lastPrice)} ${changeIcon}${changeSign}${entry.priceChangePercent.toFixed(1)}%\n`;
-        text += `   Vol: ${fmtVol(entry.quoteVolume)}`;
-
-        const fa = analytics.get(symbol);
-        if (fa) {
-          const fundPct = (fa.fundingRate * 100);
-          text += ` | F: ${fundPct >= 0 ? "+" : ""}${fundPct.toFixed(3)}%`;
-          text += ` | L${fa.longPercent.toFixed(0)}/S${fa.shortPercent.toFixed(0)}`;
-        }
-        text += `\n`;
-
-        // Show alert details as tags
-        const tags: string[] = [];
-        for (const a of coinAlerts) {
-          if (a.alertType === "VOLUME_SPIKE") tags.push("💰 Volume bất thường");
-          if (a.alertType === "FUNDING_EXTREME" && a.data.fundingRate > 0) tags.push("⚠️ Long trả phí cao");
-          if (a.alertType === "FUNDING_EXTREME" && a.data.fundingRate < 0) tags.push("⚠️ Short trả phí cao");
-          if (a.alertType === "OI_SURGE") tags.push(`📈 OI tăng ${a.data.oiChange.toFixed(0)}%`);
-          if (a.alertType === "OI_DROP") tags.push(`📉 OI giảm ${Math.abs(a.data.oiChange).toFixed(0)}%`);
-          if (a.alertType === "LONG_SHORT_EXTREME" && a.data.lsRatio > 1) tags.push("⚡ Rủi ro Long Squeeze");
-          if (a.alertType === "LONG_SHORT_EXTREME" && a.data.lsRatio < 1) tags.push("⚡ Rủi ro Short Squeeze");
-        }
-        text += `   ${tags.join(" • ")}\n\n`;
-      }
-
-      text += `━━━━━━━━━━━━━━━━━━\n`;
-      text += `_${new Date().toLocaleTimeString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" })} • Binance Futures_`;
-
-      // Broadcast to subscribers who have money flow enabled
-      const subscribers = await this.subscriptionService.findMoneyFlowSubscribers();
-      for (const sub of subscribers) {
-        await this.telegramService.sendTelegramMessage(sub.chatId, text);
-      }
-
-      this.logger.log(
-        `[AiSignal] Money flow alert sent: ${highAlerts.length} HIGH, ${medAlerts.length} MEDIUM to ${subscribers.length} subscribers`,
-      );
-    } catch (err) {
-      this.logger.warn(`[AiSignal] monitorMoneyFlow error: ${err?.message}`);
     }
   }
 
@@ -559,158 +433,6 @@ export class AiSignalService implements OnModuleInit {
       this.logger.error(
         `[AiSignal] cleanupExpiredSignals error: ${err?.message}`,
       );
-    }
-  }
-
-  // ─── Daily market snapshot (admin only, no cron, no user broadcast) ─────
-
-  async generateDailySnapshot(forceRegenerate = false) {
-    try {
-      const today = new Date().toISOString().slice(0, 10);
-
-      // Skip if already generated today (unless forced)
-      const existing = await this.dailySnapshotModel.findOne({ date: today });
-      if (existing && !forceRegenerate) return;
-      if (existing && forceRegenerate) {
-        await this.dailySnapshotModel.deleteOne({ _id: existing._id });
-        this.logger.log(`[AiSignal] Deleted old snapshot for ${today} — regenerating`);
-      }
-
-      const shortlist = await this.coinFilterService.getShortlist();
-      if (shortlist.length === 0) return;
-
-      const symbols = shortlist.map((s) => s.symbol);
-      const analytics = await this.futuresAnalyticsService.fetchAnalytics(symbols);
-
-      // Build coin data with cached params
-      const coinData = await Promise.all(
-        shortlist.map(async (s) => {
-          const coin = s.symbol.replace("USDT", "").toLowerCase();
-          const cached = await this.redisService.get<AiTunedParams>(`cache:ai:params:${s.symbol}`);
-          return {
-            symbol: s.symbol,
-            lastPrice: s.lastPrice,
-            priceChangePercent: s.priceChangePercent,
-            quoteVolume: s.quoteVolume,
-            confidence: cached?.confidence || 35,
-            regime: cached?.regime || "MIXED",
-            strategy: cached?.strategy || "RSI_CROSS",
-          };
-        }),
-      );
-
-      const totalVolume = coinData.reduce((sum, c) => sum + c.quoteVolume, 0);
-      const avgChange = coinData.length > 0
-        ? coinData.reduce((sum, c) => sum + c.priceChangePercent, 0) / coinData.length
-        : 0;
-      const gainers = coinData.filter((c) => c.priceChangePercent > 0).length;
-      const losers = coinData.filter((c) => c.priceChangePercent < 0).length;
-      const globalRegime = await this.redisService.get<string>("cache:ai:regime") || "MIXED";
-
-      // Determine sentiment
-      let sentiment: string;
-      if (avgChange > 3 && gainers > losers * 2) sentiment = "BULLISH";
-      else if (avgChange < -3 && losers > gainers * 2) sentiment = "BEARISH";
-      else if (Math.abs(avgChange) < 1) sentiment = "NEUTRAL";
-      else sentiment = "MIXED";
-
-      const topCoins = [...coinData].sort((a, b) => b.quoteVolume - a.quoteVolume).slice(0, 10);
-      const topGainers = [...coinData].sort((a, b) => b.priceChangePercent - a.priceChangePercent).slice(0, 5);
-      const topLosers = [...coinData].sort((a, b) => a.priceChangePercent - b.priceChangePercent).slice(0, 5);
-
-      // Futures data
-      const futuresData: any[] = [];
-      for (const c of topCoins) {
-        const fa = analytics.get(c.symbol);
-        if (fa) futuresData.push({
-          symbol: c.symbol,
-          fundingRate: fa.fundingRate,
-          openInterest: fa.openInterest,
-          longPercent: fa.longPercent,
-          shortPercent: fa.shortPercent,
-          takerBuyRatio: fa.takerBuyRatio,
-        });
-      }
-
-      // Warnings
-      const warnings: string[] = [];
-      for (const [sym, fa] of analytics) {
-        if (Math.abs(fa.fundingRate) > 0.001) {
-          warnings.push(`${sym.replace("USDT", "")} funding ${fa.fundingRate > 0 ? "cao" : "âm"} (${(fa.fundingRate * 100).toFixed(3)}%)`);
-        }
-        if (fa.longShortRatio > 2.5) {
-          warnings.push(`${sym.replace("USDT", "")} quá nhiều Long (L/S ${fa.longShortRatio.toFixed(1)})`);
-        }
-      }
-
-      // Build message
-      const fmtVol = (v: number) =>
-        v >= 1e9 ? `$${(v / 1e9).toFixed(1)}B` :
-        v >= 1e6 ? `$${(v / 1e6).toFixed(0)}M` : `$${(v / 1e3).toFixed(0)}K`;
-      const fmtPrice = (p: number) =>
-        p >= 1000 ? `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :
-        p >= 1 ? `$${p.toFixed(2)}` :
-        p >= 0.01 ? `$${p.toFixed(4)}` : `$${p.toFixed(6)}`;
-
-      const sentimentEmoji = sentiment === "BULLISH" ? "🟢" : sentiment === "BEARISH" ? "🔴" : sentiment === "NEUTRAL" ? "⚪" : "🟡";
-
-      let msg = `📊 *Báo Cáo Thị Trường Hàng Ngày*\n`;
-      msg += `━━━━━━━━━━━━━━━━━━\n\n`;
-      msg += `${sentimentEmoji} Xu hướng: *${sentiment}* | Regime: *${globalRegime}*\n`;
-      msg += `📈 Tăng: *${gainers}* | 📉 Giảm: *${losers}* | TB: *${avgChange >= 0 ? "+" : ""}${avgChange.toFixed(1)}%*\n`;
-      msg += `💰 Tổng Vol: *${fmtVol(totalVolume)}* (${coinData.length} coins)\n\n`;
-
-      msg += `🚀 *Top tăng:*\n`;
-      for (const c of topGainers.slice(0, 3)) {
-        msg += `  🟢 ${c.symbol.replace("USDT", "")} +${c.priceChangePercent.toFixed(1)}% (${fmtPrice(c.lastPrice)})\n`;
-      }
-      msg += `\n📉 *Top giảm:*\n`;
-      for (const c of topLosers.slice(0, 3)) {
-        msg += `  🔴 ${c.symbol.replace("USDT", "")} ${c.priceChangePercent.toFixed(1)}% (${fmtPrice(c.lastPrice)})\n`;
-      }
-
-      // High confidence coins
-      const highConf = [...coinData].filter((c) => c.confidence >= 65).sort((a, b) => b.confidence - a.confidence).slice(0, 3);
-      if (highConf.length > 0) {
-        msg += `\n🎯 *Confidence cao:*\n`;
-        for (const c of highConf) {
-          msg += `  • ${c.symbol.replace("USDT", "")} — ${c.confidence}% (${c.strategy})\n`;
-        }
-      }
-
-      if (warnings.length > 0) {
-        msg += `\n⚠️ *Cảnh báo:*\n`;
-        for (const w of warnings.slice(0, 4)) {
-          msg += `  • ${w}\n`;
-        }
-      }
-
-      msg += `\n━━━━━━━━━━━━━━━━━━\n`;
-      msg += `_${today} • Binance Futures_`;
-
-      // Save to MongoDB
-      await this.dailySnapshotModel.create({
-        date: today,
-        sentiment,
-        globalRegime,
-        totalVolume,
-        avgChange,
-        gainers,
-        losers,
-        coinCount: coinData.length,
-        topCoins,
-        futuresData,
-        topGainers: topGainers.slice(0, 5),
-        topLosers: topLosers.slice(0, 5),
-        warnings,
-        messageSent: msg,
-      });
-
-      this.logger.log(
-        `[AiSignal] Daily snapshot saved: ${today} ${sentiment} (${gainers}↑/${losers}↓)`,
-      );
-    } catch (err) {
-      this.logger.error(`[AiSignal] generateDailySnapshot error: ${err?.message}`);
     }
   }
 
@@ -1743,9 +1465,6 @@ export class AiSignalService implements OnModuleInit {
   }
 
   async generateMarketOverview(): Promise<string> {
-    // Fire-and-forget: save daily snapshot if today's is missing
-    this.generateDailySnapshot().catch(() => {});
-
     const coinData = await this.getAllCoinParams();
 
     // Fetch futures analytics (funding, OI, L/S) for top coins

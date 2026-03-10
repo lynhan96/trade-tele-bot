@@ -13,7 +13,7 @@ import { UserTrade, UserTradeSchema } from "../schemas/user-trade.schema";
 import { AiCoinProfile, AiCoinProfileSchema } from "../schemas/ai-coin-profile.schema";
 import { AiMarketConfig, AiMarketConfigSchema } from "../schemas/ai-market-config.schema";
 import { AiRegimeHistory, AiRegimeHistorySchema } from "../schemas/ai-regime-history.schema";
-import { DailyMarketSnapshot, DailyMarketSnapshotSchema } from "../schemas/daily-market-snapshot.schema";
+
 import { UserSettings, UserSettingsSchema } from "../schemas/user-settings.schema";
 import { AdminAccount, AdminAccountSchema } from "../schemas/admin-account.schema";
 import { AiSignalValidation, AiSignalValidationSchema } from "../schemas/ai-signal-validation.schema";
@@ -28,7 +28,7 @@ import { DailyLimitHistory, DailyLimitHistorySchema } from "../schemas/daily-lim
       { name: AiCoinProfile.name, schema: AiCoinProfileSchema },
       { name: AiMarketConfig.name, schema: AiMarketConfigSchema },
       { name: AiRegimeHistory.name, schema: AiRegimeHistorySchema },
-      { name: DailyMarketSnapshot.name, schema: DailyMarketSnapshotSchema },
+
       { name: UserSettings.name, schema: UserSettingsSchema },
       { name: AdminAccount.name, schema: AdminAccountSchema },
       { name: AiSignalValidation.name, schema: AiSignalValidationSchema },

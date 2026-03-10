@@ -94,51 +94,6 @@ export class AiCommandService implements OnModuleInit {
     });
 
 
-    // /ai moneyflow on|off — toggle money flow alerts (also handles /ai_moneyflow)
-    this.telegramService.registerBotCommand(/^\/ai[_ ]moneyflow(?:\s+(on|off))?$/i, async (msg) => {
-      const chatId = msg.chat.id;
-      const telegramId = msg.from?.id;
-      if (!telegramId) return;
-
-      const match = msg.text?.match(/^\/ai[_ ]moneyflow(?:\s+(on|off))?$/i);
-      const toggle = match?.[1]?.toLowerCase();
-
-      try {
-        const sub = await this.subscriptionService.getSubscription(telegramId);
-        if (!sub) {
-          await this.telegramService.sendTelegramMessage(
-            chatId,
-            `ℹ️ Dung /ai on de bat bot giao dich.`,
-          );
-          return;
-        }
-
-        if (!toggle) {
-          // Show current status
-          const enabled = sub.moneyFlowEnabled !== false;
-          await this.telegramService.sendTelegramMessage(
-            chatId,
-            `🚨 *Cảnh Báo Dòng Tiền*\n\n` +
-            `Trạng thái: ${enabled ? "✅ Đang bật" : "❌ Đang tắt"}\n\n` +
-            `Dùng /ai moneyflow on để bật\n` +
-            `Dùng /ai moneyflow off để tắt`,
-          );
-          return;
-        }
-
-        const enabled = toggle === "on";
-        await this.subscriptionService.toggleMoneyFlow(telegramId, enabled);
-        await this.telegramService.sendTelegramMessage(
-          chatId,
-          enabled
-            ? `✅ *Đã bật cảnh báo dòng tiền.*\n\nBạn sẽ nhận thông báo khi có biến động lớn.`
-            : `✅ *Đã tắt cảnh báo dòng tiền.*\n\nBạn sẽ không nhận thông báo dòng tiền nữa.\nDùng /ai moneyflow on để bật lại.`,
-        );
-      } catch (err) {
-        await this.telegramService.sendTelegramMessage(chatId, `❌ Lỗi: ${err?.message}`);
-      }
-    });
-
     // /ai settings — show user's current settings (also handles /ai_settings)
     this.telegramService.registerBotCommand(/^\/ai[_ ]settings$/, async (msg) => {
       const chatId = msg.chat.id;
@@ -158,7 +113,6 @@ export class AiCommandService implements OnModuleInit {
           return;
         }
 
-        const moneyFlow = sub.moneyFlowEnabled !== false;
         const pushEnabled = sub.signalsPushEnabled === true;
         const subscribedAt = sub.subscribedAt
           ? new Date(sub.subscribedAt).toLocaleDateString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" })
@@ -189,7 +143,6 @@ export class AiCommandService implements OnModuleInit {
           `📊 Leverage: *${leverageLabel}*\n` +
           `📈 Max vi the: *${sub.maxOpenPositions ?? 10} lenh*\n` +
           (openTrades.length > 0 ? `📊 Lenh mo: *${openTrades.length}*\n` : "") +
-          `🚨 Canh bao dong tien: ${moneyFlow ? "✅ Bat" : "❌ Tat"}\n` +
           `📡 Auto push: ${pushEnabled ? "✅ Bat (10 phut)" : "❌ Tat"}\n\n` +
           `*Cycle Limit:*\n` +
           `🎯 Muc tieu: ${sub.realModeDailyTargetPct ? `*+${sub.realModeDailyTargetPct}%*` : "_Chua dat_"}${sub.cyclePaused ? " ⏸️ PAUSED" : ""}\n` +
@@ -212,29 +165,6 @@ export class AiCommandService implements OnModuleInit {
         );
       } catch (err) {
         await this.telegramService.sendTelegramMessage(chatId, `❌ Lỗi: ${err?.message}`);
-      }
-    });
-
-    // /ai snapshot — admin: generate/regenerate daily snapshot (also handles /ai_snapshot)
-    this.telegramService.registerBotCommand(/^\/ai[_ ]snapshot/, async (msg) => {
-      const chatId = msg.chat.id;
-      if (!this.isAdmin(msg.from?.id)) return;
-
-      try {
-        await this.telegramService.sendTelegramMessage(
-          chatId,
-          "🔄 _Đang tạo daily snapshot..._",
-        );
-        await this.aiSignalService.generateDailySnapshot(true);
-        await this.telegramService.sendTelegramMessage(
-          chatId,
-          "✅ *Daily snapshot đã được tạo/cập nhật thành công!*",
-        );
-      } catch (err) {
-        await this.telegramService.sendTelegramMessage(
-          chatId,
-          `❌ Lỗi tạo snapshot: ${err?.message}`,
-        );
       }
     });
 

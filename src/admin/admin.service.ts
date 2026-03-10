@@ -8,7 +8,6 @@ import { UserTrade, UserTradeDocument } from '../schemas/user-trade.schema';
 import { AiCoinProfile, AiCoinProfileDocument } from '../schemas/ai-coin-profile.schema';
 import { AiMarketConfig, AiMarketConfigDocument } from '../schemas/ai-market-config.schema';
 import { AiRegimeHistory, AiRegimeHistoryDocument } from '../schemas/ai-regime-history.schema';
-import { DailyMarketSnapshot, DailyMarketSnapshotDocument } from '../schemas/daily-market-snapshot.schema';
 import { UserSettings, UserSettingsDocument } from '../schemas/user-settings.schema';
 import { AiSignalValidation, AiSignalValidationDocument } from '../schemas/ai-signal-validation.schema';
 import { DailyLimitHistory, DailyLimitHistoryDocument } from '../schemas/daily-limit-history.schema';
@@ -31,7 +30,6 @@ export class AdminService {
     @InjectModel(AiCoinProfile.name) private coinProfileModel: Model<AiCoinProfileDocument>,
     @InjectModel(AiMarketConfig.name) private marketConfigModel: Model<AiMarketConfigDocument>,
     @InjectModel(AiRegimeHistory.name) private regimeHistoryModel: Model<AiRegimeHistoryDocument>,
-    @InjectModel(DailyMarketSnapshot.name) private snapshotModel: Model<DailyMarketSnapshotDocument>,
     @InjectModel(UserSettings.name) private userSettingsModel: Model<UserSettingsDocument>,
     @InjectModel(AiSignalValidation.name) private validationModel: Model<AiSignalValidationDocument>,
     @InjectModel(DailyLimitHistory.name) private dailyLimitHistoryModel: Model<DailyLimitHistoryDocument>,
@@ -683,23 +681,6 @@ export class AdminService {
         .limit(limit)
         .lean(),
       this.regimeHistoryModel.countDocuments(filter),
-    ]);
-
-    return { data, total, page, limit, totalPages: Math.ceil(total / limit) };
-  }
-
-  async getSnapshots(query: { page?: number; limit?: number }) {
-    const page = Math.max(1, query.page || 1);
-    const limit = Math.min(100, Math.max(1, query.limit || 20));
-
-    const [data, total] = await Promise.all([
-      this.snapshotModel
-        .find()
-        .sort({ date: -1 })
-        .skip((page - 1) * limit)
-        .limit(limit)
-        .lean(),
-      this.snapshotModel.countDocuments(),
     ]);
 
     return { data, total, page, limit, totalPages: Math.ceil(total / limit) };

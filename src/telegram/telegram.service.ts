@@ -84,7 +84,6 @@ export class TelegramBotService implements OnModuleInit {
         { command: "ai_maxpos", description: "Toi da vi the cung luc" },
         { command: "ai_balance", description: "Balance mac dinh (USDT/lenh)" },
         { command: "ai_push", description: "Auto push tin hieu moi 10 phut" },
-        { command: "ai_moneyflow", description: "Bat/tat canh bao dong tien" },
         // My account
         { command: "ai_my", description: "Dashboard (so du, PnL, all-time)" },
         { command: "ai_account", description: "Vi the mo & PnL" },
@@ -97,7 +96,6 @@ export class TelegramBotService implements OnModuleInit {
         { command: "ai_status", description: "Trang thai he thong (admin)" },
         { command: "ai_stats", description: "Thong ke hieu suat (admin)" },
         { command: "ai_params", description: "Xem tham so AI cua coin (admin)" },
-        { command: "ai_snapshot", description: "Tao/cap nhat daily snapshot (admin)" },
         { command: "ai_override", description: "Override chien luoc (admin)" },
         { command: "ai_test", description: "Bat/tat che do test (admin)" },
         { command: "ai_pause", description: "Tam dung tin hieu (admin)" },

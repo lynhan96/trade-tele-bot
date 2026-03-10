@@ -183,12 +183,6 @@ export class AdminController {
   }
 
   @UseGuards(AdminGuard)
-  @Get("snapshots")
-  getSnapshots(@Query() query: Record<string, string>) {
-    return this.adminService.getSnapshots(query);
-  }
-
-  @UseGuards(AdminGuard)
   @Get("validations")
   getValidations(@Query() query: Record<string, string>) {
     return this.adminService.getValidations(query);

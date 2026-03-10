@@ -22,9 +22,6 @@ export class UserSignalSubscription {
   @Prop({ required: true, default: true })
   isActive: boolean; // false = unsubscribed
 
-  @Prop({ required: true, default: true })
-  moneyFlowEnabled: boolean; // false = opted out of money flow alerts
-
   @Prop({ required: true, default: false })
   signalsPushEnabled: boolean; // true = receive signals update every 10 min
 
