@@ -1482,15 +1482,16 @@ export class UserRealTradingService implements OnModuleInit {
             const pp = await getPP(symbol);
             const round = (p: number) => parseFloat(p.toFixed(pp));
 
-            // ── Time-based stop for real trades: 8h+ stagnant → close ─────
+            // ── Time-based stop for real trades: 24h+ stagnant → close ─────
+            // Must match ai-signal.service.ts time-stop. Only close if truly flat (±0.5%).
             const tradeAgeMs = Date.now() - new Date((trade as any).createdAt).getTime();
             const tradeAgeH = tradeAgeMs / 3600000;
             const currentPrice = this.marketDataService.getLatestPrice(symbol);
-            if (currentPrice && trade.entryPrice && tradeAgeH >= 8) {
+            if (currentPrice && trade.entryPrice && tradeAgeH >= 24) {
               const currentPnl = direction === "LONG"
                 ? ((currentPrice - trade.entryPrice) / trade.entryPrice) * 100
                 : ((trade.entryPrice - currentPrice) / trade.entryPrice) * 100;
-              if (currentPnl < 1 && currentPnl > -1) {
+              if (currentPnl < 0.5 && currentPnl > -0.5) {
                 const reason = `Time-stop ${currentPnl >= 0 ? "+" : ""}${currentPnl.toFixed(2)}% after ${tradeAgeH.toFixed(0)}h`;
                 this.logger.log(`[RealTrading] ${symbol} user ${telegramId}: ${reason}`);
                 await this.closeRealPosition(telegramId, chatId, symbol, reason).catch(() => {});
