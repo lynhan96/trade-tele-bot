@@ -600,17 +600,11 @@ export class SignalQueueService {
   ): Promise<AiSignalDocument> {
     const symbol = `${coin.toUpperCase()}${currency.toUpperCase()}`;
     const MIN_SL = 2.5;  // tighter SL — cut losses faster
-    // Regime-based TP floor: ranging markets need quick exits; trending markets can run further.
-    // Data shows signals peak at 2–3% avg — 5% TP was unreachable for most signals.
-    const MIN_TP_BY_REGIME: Record<string, number> = {
-      STRONG_BULL: 4.0, STRONG_BEAR: 4.0,  // trend can sustain 4%
-      RANGE_BOUND: 3.0, SIDEWAYS: 3.0,     // mean-reversion: take profits quickly
-      VOLATILE: 4.0,                         // wider swings, target more
-      MIXED: 3.5, BTC_CORRELATION: 3.5,    // uncertain — moderate target
-    };
-    const MIN_TP = MIN_TP_BY_REGIME[regime] ?? 3.5;
+    // Fixed TP=2% for all signals — data shows most signals peak around 2-3%,
+    // higher TP targets (3-5%) were rarely reached, causing unnecessary losses.
+    const FIXED_TP = 2.0;
     const stopLossPercent = Math.max(params.stopLossPercent, MIN_SL);
-    const takeProfitPercent = Math.max(params.takeProfitPercent ?? stopLossPercent * 1.5, MIN_TP);
+    const takeProfitPercent = FIXED_TP;
     const entryPrice = signalResult.entryPrice;
 
     const stopLossPrice = signalResult.isLong
