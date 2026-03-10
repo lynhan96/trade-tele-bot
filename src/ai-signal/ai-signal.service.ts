@@ -711,13 +711,13 @@ export class AiSignalService implements OnModuleInit {
       this.logger.warn(`[AiSignal] Trend filter error for ${signalKey}: ${err?.message}`);
     }
 
-    // AI validation gate — lightweight GPT check to filter low-quality signals
+    // Rule-based validation gate — replaces GPT (was generic, zero value)
+    // Uses price position, candle momentum, RSI checks. Fail-open on error.
     const validationCooldownKey = `cache:ai:validation-cooldown:${signalKey}`;
     try {
-      // Check cooldown — skip validation (and signal) if recently rejected
       const cooldown = await this.redisService.get<boolean>(validationCooldownKey);
       if (cooldown) {
-        return; // silently skip — coin is on cooldown from recent rejection
+        return; // on cooldown from recent rejection
       }
 
       const validation = await this.aiOptimizerService.validateSignal({
@@ -731,17 +731,16 @@ export class AiSignalService implements OnModuleInit {
         takeProfitPercent: params.takeProfitPercent,
       });
       if (!validation.approved) {
-        // Set 30-minute cooldown for this coin
-        await this.redisService.set(validationCooldownKey, true, 30 * 60);
+        await this.redisService.set(validationCooldownKey, true, 15 * 60); // 15min cooldown (was 30min)
         this.logger.log(
-          `[AiSignal] ${signalKey} REJECTED by AI gate (30min cooldown): ${validation.reason}`,
+          `[AiSignal] ${signalKey} REJECTED by rule validation (15min cooldown): ${validation.reason}`,
         );
         return;
       }
+      this.logger.debug(`[AiSignal] ${signalKey} APPROVED: ${validation.reason}`);
     } catch (err) {
-      // On error, block signal (fail-closed — all signals must be validated)
-      this.logger.warn(`[AiSignal] AI validation gate error for ${signalKey}: ${err?.message} — BLOCKED`);
-      return;
+      // Fail-open: approve on error — don't block good signals
+      this.logger.warn(`[AiSignal] Validation error for ${signalKey}: ${err?.message} — APPROVED (fail-open)`);
     }
 
     // ── Daily signal cap: atomic check+increment to prevent over-trading ──

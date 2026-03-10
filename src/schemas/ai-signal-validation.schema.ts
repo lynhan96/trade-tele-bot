@@ -32,8 +32,23 @@ export class AiSignalValidation {
   @Prop()
   reason?: string;
 
-  @Prop({ default: "gpt-4o-mini" })
+  @Prop({ default: "rule-engine" })
   model: string;
+
+  @Prop()
+  pricePosition?: number; // 0-100, where price sits in recent range
+
+  @Prop()
+  candleMomentum?: number; // aligned candles out of 3
+
+  @Prop()
+  rsiValue?: number;
+
+  @Prop()
+  htfRsiValue?: number;
+
+  @Prop([String])
+  rejectedBy?: string[]; // which filters rejected: ["price_position", "candle_momentum", etc.]
 }
 
 export const AiSignalValidationSchema =

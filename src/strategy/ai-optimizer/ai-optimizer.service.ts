@@ -877,6 +877,11 @@ Reply ONLY JSON:
    * Ask AI whether a signal should be taken. Returns true (take) or false (skip).
    * Uses GPT-4o-mini with minimal tokens. Falls back to true if AI unavailable.
    */
+  /**
+   * Rule-based signal validation — replaces GPT validation (was generic, zero value).
+   * Uses actual market data: price position in range, candle momentum, RSI checks.
+   * Results saved to ai_signal_validations for tracking.
+   */
   async validateSignal(signal: {
     symbol: string;
     direction: string;
@@ -887,84 +892,86 @@ Reply ONLY JSON:
     takeProfitPercent: number;
     indicators: Record<string, any>;
   }): Promise<{ approved: boolean; reason?: string }> {
-    if (!this.openai) {
-      this.logger.warn(`[AiOptimizer] Validation BLOCKED (no OpenAI key)`);
-      return { approved: false, reason: "No OpenAI key — cannot validate" };
-    }
-    // Validation has its own dedicated rate limit so regime/tuning calls can't starve it
-    if (!(await this.checkRateLimit(GPT_VALIDATION_RATE_KEY, 100))) {
-      this.logger.warn(`[AiOptimizer] Validation BLOCKED (rate limit hit)`);
-      return { approved: false, reason: "Validation rate limit — try again later" };
-    }
-
-    const [perfContext, btcContext] = await Promise.all([
-      this.getRecentPerfContext(),
-      this.getBtcMarketContext(),
-    ]);
-    const { symbol, direction, strategy, regime, confidence, stopLossPercent, takeProfitPercent, indicators } = signal;
-
-    const prompt = `Bạn là bộ lọc tín hiệu giao dịch crypto. Duyệt tín hiệu — CHỈ từ chối khi có rủi ro RÕ RÀNG.
-
-Tín hiệu: ${symbol} ${direction} — chiến lược ${strategy}
-Regime: ${regime}, Confidence: ${confidence}%
-SL: ${stopLossPercent}%, TP: ${takeProfitPercent}%
-RSI(15m): ${indicators.rsi14_15m || "N/A"}, RSI(4h): ${indicators.rsi14_4h || "N/A"}
-ATR: ${indicators.atrPct_15m || "N/A"}%, BB Width: ${indicators.bbWidthPct || "N/A"}%
-Price vs EMA9: ${indicators.priceVsEma9_pct || "N/A"}%, vs EMA200: ${indicators.priceVsEma200_pct || "N/A"}%
-${indicators.fibTpUsed ? `Fibonacci TP: ${takeProfitPercent}% (dựa trên Fib 1.272 extension, swing range ${indicators.fibSwingRange || "N/A"}%)` : ""}
-${strategy.includes("SMC_FVG") ? `SMC: FVG zone + Order Block confluence, BOS/CHoCH xác nhận trên HTF` : ""}
-${indicators.bosChochContext ? `Cấu trúc thị trường: ${indicators.bosChochContext}` : ""}
-${btcContext}
-${perfContext}
-
-CHIẾN LƯỢC ĐẶC BIỆT:
-- SMC_FVG: Vào lệnh tại Fair Value Gap gần Order Block, cần BOS/CHoCH xác nhận trên 1h. Tín hiệu mạnh khi FVG chưa lấp + OB gần.
-- Fibonacci TP: TP động dựa trên Fib 1.272 extension thay vì TP cố định. Chỉ khi swing range > 2%.
-- BOS/CHoCH: Break of Structure xác nhận xu hướng, Change of Character cảnh báo đảo chiều.
-
-QUY TẮC QUAN TRỌNG — TUÂN THỦ CHÍNH XÁC, KHÔNG TỰ ĐẶT NGƯỠNG MỚI:
-1. DUYỆT (approved=true) nếu confidence >= 45% VÀ không có lý do từ chối rõ ràng
-2. Dữ liệu "N/A" KHÔNG phải lý do từ chối — hệ thống đã kiểm tra trước khi gửi tín hiệu
-3. Hiệu suất gần đây chỉ là THAM KHẢO — KHÔNG từ chối chỉ vì lệnh gần đây thua lỗ
-4. KHÔNG tự đặt ngưỡng confidence cao hơn 45% (không dùng 60%, 70% hay bất kỳ số nào khác)
-
-CHỈ từ chối khi:
-- Confidence < 45% (ĐÚNG 45%, không cao hơn)
-- RSI ngược hướng rõ ràng (LONG + RSI>75, SHORT + RSI<25)
-- BTC đi ngược hướng tín hiệu MỘT CÁCH RÕ RÀNG (>3% ngược hướng trong 24h)
-- Risk/reward quá kém (SL > TP * 1.5)
-- SMC_FVG: FVG đã bị lấp hoàn toàn hoặc không có OB hỗ trợ
-
-Reply ONLY JSON: {"approved":true/false,"reason":"lý do ngắn gọn bằng tiếng Việt"}`;
+    const { symbol, direction, strategy, regime, confidence, stopLossPercent, takeProfitPercent } = signal;
+    const isLong = direction === "LONG";
+    const rejectedBy: string[] = [];
+    let pricePosition: number | undefined;
+    let candleMomentum: number | undefined;
+    let rsiValue: number | undefined;
+    let htfRsiValue: number | undefined;
 
     try {
-      const response = await this.openai.chat.completions.create({
-        model: GPT_MODEL_PREMIUM, // 4o for better signal filtering
-        max_tokens: 150,
-        messages: [{ role: "user", content: prompt }],
-        response_format: { type: "json_object" },
-      });
-      await this.incrementRateLimit(GPT_VALIDATION_RATE_KEY);
+      // 1. Price Position — don't short bottoms, don't long tops (1h, 20 candles)
+      const ohlc1h = await this.indicatorService.getOhlc(symbol.replace("USDT", ""), "1h");
+      if (ohlc1h.highs.length >= 20) {
+        const highs = ohlc1h.highs.slice(-20);
+        const lows = ohlc1h.lows.slice(-20);
+        const high = Math.max(...highs);
+        const low = Math.min(...lows);
+        const range = high - low;
+        if (range > 0) {
+          const price = ohlc1h.closes[ohlc1h.closes.length - 1];
+          pricePosition = ((price - low) / range) * 100;
+          if (!isLong && pricePosition < 25) rejectedBy.push("price_position_bottom");
+          if (isLong && pricePosition > 75) rejectedBy.push("price_position_top");
+        }
+      }
 
-      const text = response.choices[0]?.message?.content?.trim() || "";
-      const parsed = JSON.parse(text);
-      const reason = parsed.reason || (parsed.approved ? "Tín hiệu đạt tiêu chí, không có rủi ro rõ ràng." : "Không rõ lý do");
-      const result = { approved: !!parsed.approved, reason };
+      // 2. Candle Momentum — 2/3 recent 15m candles must align
+      const ohlc15m = await this.indicatorService.getOhlc(symbol.replace("USDT", ""), "15m");
+      if (ohlc15m.closes.length >= 4) {
+        let aligned = 0;
+        for (let i = 1; i <= 3; i++) {
+          const idx = ohlc15m.closes.length - 1 - i;
+          const c = ohlc15m.closes[idx];
+          const o = ohlc15m.opens[idx];
+          if (isLong && c > o) aligned++;
+          if (!isLong && c < o) aligned++;
+        }
+        candleMomentum = aligned;
+        if (aligned < 2) rejectedBy.push("candle_momentum");
+      }
 
-      // Persist validation to DB for admin review
-      this.validationModel.create({
-        symbol, direction, strategy, regime, confidence,
-        stopLossPercent, takeProfitPercent,
-        approved: result.approved,
-        reason: result.reason,
-        model: GPT_MODEL_PREMIUM,
-      }).catch((e) => this.logger.warn(`[AiOptimizer] Failed to save validation: ${e?.message}`));
+      // 3. RSI check — don't LONG if overbought, don't SHORT if oversold
+      if (ohlc15m.closes.length >= 20) {
+        const rsi = this.indicatorService.getRsi(ohlc15m.closes, 14);
+        rsiValue = rsi.last;
+        if (isLong && rsi.last > 65) rejectedBy.push("rsi_overbought");
+        if (!isLong && rsi.last < 35) rejectedBy.push("rsi_oversold");
+      }
 
-      return result;
+      // 4. HTF RSI — 1h trend must not be exhausted
+      const closes1h = ohlc1h.closes;
+      if (closes1h.length >= 20) {
+        const htfRsi = this.indicatorService.getRsi(closes1h, 14);
+        htfRsiValue = htfRsi.last;
+        if (isLong && htfRsi.last > 70) rejectedBy.push("htf_rsi_overbought");
+        if (!isLong && htfRsi.last < 30) rejectedBy.push("htf_rsi_oversold");
+      }
+
+      // 5. Risk/reward check
+      if (stopLossPercent > takeProfitPercent * 2) rejectedBy.push("bad_risk_reward");
+
     } catch (err) {
-      this.logger.warn(`[AiOptimizer] Signal validation failed: ${err?.message}`);
-      return { approved: false, reason: `Validation error: ${err?.message}` };
+      this.logger.warn(`[AiOptimizer] Rule validation error: ${err?.message}`);
+      // fail-open: approve on error (don't block good signals)
     }
+
+    const approved = rejectedBy.length === 0;
+    const reason = approved
+      ? `Passed all checks: pos=${pricePosition?.toFixed(0)}%, momentum=${candleMomentum}/3, RSI=${rsiValue?.toFixed(0)}`
+      : `Rejected by: ${rejectedBy.join(", ")}`;
+
+    // Persist to DB for tracking
+    this.validationModel.create({
+      symbol, direction, strategy, regime, confidence,
+      stopLossPercent, takeProfitPercent,
+      approved, reason,
+      model: "rule-engine",
+      pricePosition, candleMomentum, rsiValue, htfRsiValue, rejectedBy,
+    }).catch((e) => this.logger.warn(`[AiOptimizer] Failed to save validation: ${e?.message}`));
+
+    return { approved, reason };
   }
 
   // ─── Default params (F8 Config 2 baseline) ───────────────────────────────
