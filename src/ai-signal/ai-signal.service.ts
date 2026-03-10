@@ -457,6 +457,15 @@ export class AiSignalService implements OnModuleInit {
     if (this.processingCoins.has(lockKey)) return;
     this.processingCoins.add(lockKey);
 
+    // Symbol-level lock for dual coins: prevent INTRADAY+SWING racing each other
+    // One profile must finish before the other starts checking otherActive
+    if (isDual) {
+      while (this.processingCoins.has(`${symbol}:__DUAL_LOCK__`)) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      this.processingCoins.add(`${symbol}:__DUAL_LOCK__`);
+    }
+
     try {
     // For dual coins, check active signal using profile-aware key
     const signalKey = isDual && forceProfile ? `${symbol}:${forceProfile}` : symbol;
@@ -811,6 +820,7 @@ export class AiSignalService implements OnModuleInit {
     // EXECUTED/QUEUED — daily count already incremented above
     } finally {
       this.processingCoins.delete(lockKey);
+      if (isDual) this.processingCoins.delete(`${symbol}:__DUAL_LOCK__`);
     }
   }
 
