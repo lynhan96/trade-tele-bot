@@ -2,7 +2,6 @@ import { Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { InjectModel } from "@nestjs/mongoose";
 import { Model } from "mongoose";
-import OpenAI from "openai";
 import { RedisService } from "../../redis/redis.service";
 import { IndicatorService } from "../indicators/indicator.service";
 import { MarketDataService } from "../../market-data/market-data.service";
@@ -23,26 +22,13 @@ import { AiTunedParams } from "./ai-tuned-params.interface";
 const AI_PARAMS_TTL = 6 * 60 * 60; // 6h cache — params don't change fast, save API cost
 const AI_PARAMS_JITTER = 60 * 60; // ±30 min random offset to stagger expiry
 const AI_REGIME_TTL = 30 * 60; // 30min cache — balanced between cost and responsiveness
-const AI_MARKET_FILTERS_KEY = "cache:ai:market-filters"; // AI-decided coin filter settings
+const AI_MARKET_FILTERS_KEY = "cache:ai:market-filters"; // regime-based coin filter settings
 const AI_MARKET_FILTERS_TTL = 8 * 60 * 60; // 8h — re-evaluated on regime change
-const RATE_WINDOW = 60 * 60; // 1h window
-
-const GPT_MODEL = "gpt-4o-mini"; // regular coin tuning (cheap, high volume)
-const GPT_MODEL_PREMIUM = "gpt-4o"; // premium coins + validation + regime (better reasoning)
-const GPT_RATE_KEY = "cache:ai:rate:gpt"; // hourly budget for GPT
-const GPT_PREMIUM_RATE_KEY = "cache:ai:rate:gpt4o"; // hourly budget for GPT-4o
-const GPT_VALIDATION_RATE_KEY = "cache:ai:rate:validation"; // dedicated budget for validation gate
-const RECENT_PERF_KEY = "cache:ai:recent-perf"; // recent SL/TP stats for GPT context
-
-/** Top coins get GPT-4o for better SL/TP tuning accuracy. */
-const PREMIUM_COINS = new Set(["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"]);
+const RECENT_PERF_KEY = "cache:ai:recent-perf"; // recent SL/TP stats for context
 
 @Injectable()
 export class AiOptimizerService {
   private readonly logger = new Logger(AiOptimizerService.name);
-  private openai: OpenAI | null = null;
-  private readonly maxGptPerHour: number;
-  private readonly maxGpt4oPerHour: number;
 
   constructor(
     private readonly configService: ConfigService,
@@ -56,16 +42,7 @@ export class AiOptimizerService {
     @InjectModel(AiSignalValidation.name)
     private readonly validationModel: Model<AiSignalValidationDocument>,
   ) {
-    this.maxGptPerHour = parseInt(configService.get("AI_MAX_GPT_PER_HOUR", "200"));
-    this.maxGpt4oPerHour = parseInt(configService.get("AI_MAX_GPT4O_PER_HOUR", "200"));
-
-    const openaiKey = configService.get<string>("OPENAI_API_KEY");
-    if (openaiKey) {
-      this.openai = new OpenAI({ apiKey: openaiKey });
-      this.logger.log("[AiOptimizer] GPT-4o AI tuning enabled");
-    } else {
-      this.logger.warn("[AiOptimizer] OPENAI_API_KEY not set, using static defaults");
-    }
+    this.logger.log("[AiOptimizer] SMC/Fibonacci + ATR param tuning (no GPT)");
   }
 
   // ─── Flush all coin param caches (e.g. on startup or regime change) ────────
@@ -273,25 +250,12 @@ export class AiOptimizerService {
 
       // Tune market filter settings when regime changes or cached filters expired
       if (prevRegime !== regime || !(await this.redisService.get(AI_MARKET_FILTERS_KEY))) {
-        this.tuneMarketFilters(regime, { rsi15m: rsi, atr15m, bbWidth }).catch((e) =>
+        this.tuneMarketFilters(regime).catch((e) =>
           this.logger.warn(`[AiOptimizer] Filter tuning failed: ${e?.message}`),
         );
       }
 
-      // ── AI regime refinement: GPT-4o-mini reviews algo decision ──────────
-      // Use AI to validate/override the algorithmic regime with broader context
-      const aiRegime = await this.aiRefineRegime(regime, confidence, {
-        rsi, rsi4h, atr15m, atr4h, bbWidth, priceVsEma9, priceVsEma200,
-      }).catch(() => null);
-
-      if (aiRegime && aiRegime !== regime) {
-        this.logger.log(
-          `[AiOptimizer] AI regime override: ${regime} → ${aiRegime} (algo confidence: ${confidence}%)`,
-        );
-        regime = aiRegime;
-      }
-
-      await this.saveRegimeHistory("global", regime, confidence, null, aiRegime ? "gpt-regime" : "algo", null);
+      await this.saveRegimeHistory("global", regime, confidence, null, "algo", null);
 
       this.logger.log(
         `[AiOptimizer] Global regime: ${regime} (confidence: ${confidence}%, BTC RSI=${rsi.toFixed(0)} ATR=${atr15m}% BB=${bbWidth}%)`,
@@ -303,172 +267,41 @@ export class AiOptimizerService {
     }
   }
 
-  /**
-   * AI regime refinement: ask GPT to validate/override the algorithmic regime.
-   * Returns null if AI is unavailable or agrees with algo.
-   */
-  private async aiRefineRegime(
-    algoRegime: string,
-    algoConfidence: number,
-    indicators: Record<string, number>,
-  ): Promise<string | null> {
-    if (!this.openai) return null;
-    if (!(await this.checkRateLimit(GPT_RATE_KEY, this.maxGptPerHour))) return null;
+  // ─── Regime-based coin filter settings (fixed defaults, no GPT) ─────────
 
-    const perfContext = await this.getRecentPerfContext();
-
-    const prompt = `You are a crypto market regime classifier. Based on BTC indicators, decide the current market regime.
-
-Algorithm says: ${algoRegime} (confidence: ${algoConfidence}%)
-
-BTC indicators:
-- RSI(15m): ${indicators.rsi.toFixed(1)}, RSI(4h): ${indicators.rsi4h.toFixed(1)}
-- ATR(15m): ${indicators.atr15m.toFixed(2)}%, ATR(4h): ${indicators.atr4h.toFixed(2)}%
-- BB Width: ${indicators.bbWidth.toFixed(2)}%
-- Price vs EMA9: ${indicators.priceVsEma9.toFixed(2)}%, vs EMA200: ${indicators.priceVsEma200.toFixed(2)}%
-${perfContext}
-
-Regimes (pick one):
-- STRONG_BULL: clear uptrend, RSI >55 both TFs, price above EMAs
-- STRONG_BEAR: clear downtrend, RSI <45 both TFs, price below EMAs
-- VOLATILE: high ATR (>2%), wide BB, rapid moves — dangerous for both directions
-- RANGE_BOUND: tight BB (<3%), RSI 40-60, low ATR — mean reversion works
-- SIDEWAYS: moderate BB (3-4.5%), RSI 40-60 — unclear direction
-- MIXED: none of the above clearly applies
-
-Rules:
-- If algo regime seems correct, reply with SAME regime
-- Only override if indicators clearly contradict algo decision
-- When in doubt, default to MIXED (safest)
-- Consider BOTH timeframes (15m for current, 4h for trend)
-
-Reply ONLY JSON: {"regime":"REGIME_NAME","reason":"brief reason"}`;
-
-    try {
-      const response = await this.openai.chat.completions.create({
-        model: GPT_MODEL, // mini is sufficient for regime classification
-        max_tokens: 100,
-        messages: [{ role: "user", content: prompt }],
-        response_format: { type: "json_object" },
-      });
-      await this.incrementRateLimit(GPT_RATE_KEY);
-
-      const text = response.choices[0]?.message?.content?.trim() || "";
-      const parsed = JSON.parse(text);
-      const aiRegime = parsed.regime?.toUpperCase();
-
-      const validRegimes = ["STRONG_BULL", "STRONG_BEAR", "VOLATILE", "RANGE_BOUND", "SIDEWAYS", "MIXED"];
-      if (!validRegimes.includes(aiRegime)) return null;
-
-      if (parsed.reason) {
-        this.logger.log(`[AiOptimizer] AI regime reason: ${parsed.reason}`);
-      }
-
-      return aiRegime === algoRegime ? null : aiRegime;
-    } catch (err) {
-      this.logger.warn(`[AiOptimizer] AI regime refinement failed: ${err?.message}`);
-      return null;
-    }
-  }
-
-  // ─── AI-decided coin filter settings (saved to MongoDB + Redis) ─────────
-
-  async tuneMarketFilters(
-    regime: string,
-    indicators: { rsi15m: number; atr15m: number; bbWidth: number },
-  ): Promise<void> {
-    if (!this.openai) return;
-
-    // 1. Fetch last 5 decisions as conversation history
-    const history = await this.marketConfigModel
-      .find()
-      .sort({ assessedAt: -1 })
-      .limit(5)
-      .lean();
-
-    // 2. Format history as conversation context
-    const historyText =
-      history.length > 0
-        ? history
-            .reverse()
-            .map(
-              (h) =>
-                `[${h.assessedAt.toISOString().slice(0, 16)}] Regime=${h.regime} → ` +
-                `minVol=$${(h.minVolumeUsd / 1e6).toFixed(0)}M, ` +
-                `minChange=${h.minPriceChangePct}%, maxCoins=${h.maxShortlistSize}` +
-                (h.reasoning ? ` — "${h.reasoning}"` : ""),
-            )
-            .join("\n")
-        : "No previous decisions.";
-
-    // 3. Call GPT
-    const prompt = `You decide optimal crypto coin filter settings for trading signals.
-
-Current market: regime=${regime}, BTC RSI(15m)=${indicators.rsi15m.toFixed(1)}, ATR(15m)=${indicators.atr15m.toFixed(2)}%, BB Width=${indicators.bbWidth.toFixed(2)}%
-
-Past decisions (conversation history):
-${historyText}
-
-Constraints:
-- minVolumeUsd: 3000000 to 100000000
-- minPriceChangePct: 0.1 to 3.0
-- maxShortlistSize: 10 to 100
-
-Guidelines:
-- VOLATILE: more coins moving → widen filter, increase shortlist
-- STRONG_BULL/STRONG_BEAR: normal volume, moderate shortlist
-- SIDEWAYS/RANGE_BOUND: lower thresholds to catch subtle moves
-- MIXED: balanced defaults
-
-Reply ONLY with valid JSON (no markdown):
-{"minVolumeUsd":10000000,"minPriceChangePct":0.3,"maxShortlistSize":50,"reasoning":"brief reason"}`;
-
-    const resp = await this.openai.chat.completions.create({
-      model: GPT_MODEL,
-      max_tokens: 200,
-      messages: [{ role: "user", content: prompt }],
-      response_format: { type: "json_object" },
-    });
-    const text = resp.choices[0]?.message?.content?.trim() || "";
-    const model = GPT_MODEL;
-    const tokensIn = resp.usage?.prompt_tokens || 0;
-    const tokensOut = resp.usage?.completion_tokens || 0;
-
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error("No JSON in filter response");
-
-    const parsed = JSON.parse(jsonMatch[0]);
-
-    const minVolumeUsd = Number(parsed.minVolumeUsd);
-    const minPriceChangePct = Number(parsed.minPriceChangePct);
-    // Clamp: .env is the hard cap — GPT cannot exceed it
+  async tuneMarketFilters(regime: string): Promise<void> {
     const configuredMax = parseInt(this.configService.get("AI_MAX_SHORTLIST_SIZE", "120"));
-    const maxShortlistSize = Math.min(Math.max(Number(parsed.maxShortlistSize), 10), configuredMax);
 
-    // 4. Store in MongoDB
+    // Fixed regime-based filter defaults — deterministic, free, no API calls
+    const filterMap: Record<string, { minVolumeUsd: number; minPriceChangePct: number; maxShortlistSize: number }> = {
+      VOLATILE:     { minVolumeUsd: 5_000_000,  minPriceChangePct: 0.5,  maxShortlistSize: Math.min(100, configuredMax) },
+      STRONG_BULL:  { minVolumeUsd: 10_000_000, minPriceChangePct: 0.3,  maxShortlistSize: Math.min(80, configuredMax) },
+      STRONG_BEAR:  { minVolumeUsd: 10_000_000, minPriceChangePct: 0.3,  maxShortlistSize: Math.min(80, configuredMax) },
+      RANGE_BOUND:  { minVolumeUsd: 8_000_000,  minPriceChangePct: 0.2,  maxShortlistSize: Math.min(60, configuredMax) },
+      SIDEWAYS:     { minVolumeUsd: 8_000_000,  minPriceChangePct: 0.2,  maxShortlistSize: Math.min(60, configuredMax) },
+      MIXED:        { minVolumeUsd: 10_000_000, minPriceChangePct: 0.3,  maxShortlistSize: Math.min(80, configuredMax) },
+    };
+
+    const filters = filterMap[regime] || filterMap.MIXED;
+
+    // Store in MongoDB for tracking
     await this.marketConfigModel.create({
       assessedAt: new Date(),
       regime,
-      minVolumeUsd,
-      minPriceChangePct,
-      maxShortlistSize,
-      reasoning: parsed.reasoning,
-      model,
-      tokensIn,
-      tokensOut,
+      ...filters,
+      reasoning: `Fixed regime-based defaults for ${regime}`,
+      model: "algo",
+      tokensIn: 0,
+      tokensOut: 0,
     });
 
-    // 5. Cache in Redis (8h)
-    await this.redisService.set(
-      AI_MARKET_FILTERS_KEY,
-      { minVolumeUsd, minPriceChangePct, maxShortlistSize },
-      AI_MARKET_FILTERS_TTL,
-    );
+    // Cache in Redis (8h)
+    await this.redisService.set(AI_MARKET_FILTERS_KEY, filters, AI_MARKET_FILTERS_TTL);
 
     this.logger.log(
-      `[AiOptimizer] Market filters tuned for ${regime}: ` +
-        `vol=$${(minVolumeUsd / 1e6).toFixed(0)}M, ` +
-        `change=${minPriceChangePct}%, coins=${maxShortlistSize} — ${parsed.reasoning}`,
+      `[AiOptimizer] Market filters for ${regime}: ` +
+        `vol=$${(filters.minVolumeUsd / 1e6).toFixed(0)}M, ` +
+        `change=${filters.minPriceChangePct}%, coins=${filters.maxShortlistSize}`,
     );
   }
 
@@ -488,57 +321,17 @@ Reply ONLY with valid JSON (no markdown):
     const cached = await this.redisService.get<AiTunedParams>(cacheKey);
     if (cached) return cached;
 
-    // Pre-compute indicators once
-    const indicators = this.openai ? await this.preComputeIndicators(coin) : {};
-
-    // Compute ATR-adjusted SL floor — AI SL must not be lower than this
-    const atrDefaults = await this.getAtrAdjustedDefaults(coin, globalRegime);
-    const slFloor = atrDefaults.stopLossPercent;
-
-    // Algorithmic strategy as fallback (only used when AI doesn't return strategy)
-    const algoStrategy = Object.keys(indicators).length > 0
-      ? this.selectStrategiesForCoin(globalRegime, indicators)
-      : null;
-
-    // Helper: enforce SL floor, apply profile override, cache result, save history, log
-    const saveAndReturn = async (params: AiTunedParams, model: string, tag = ""): Promise<AiTunedParams> => {
-      // Only use algorithmic strategy as fallback if AI didn't provide one
-      if (!params.strategy && algoStrategy) params.strategy = algoStrategy;
-      // Enforce SL floor: AI SL must not be lower than ATR-adjusted default
-      if (params.stopLossPercent < slFloor) {
-        this.logger.log(`[AiOptimizer] ${symbol}: AI SL ${params.stopLossPercent}% < floor ${slFloor}%, using floor`);
-        params.stopLossPercent = slFloor;
-      }
-      if (forceProfile) params = this.applyForcedProfile(params, forceProfile);
-      const jitter = Math.floor(Math.random() * AI_PARAMS_JITTER);
-      await this.redisService.set(cacheKey, params, AI_PARAMS_TTL + jitter);
-      await this.saveRegimeHistory(symbol, params.regime, params.confidence, params, model, null);
-      this.logger.log(`[AiOptimizer] ${symbol}${forceProfile ? `:${forceProfile}` : ""}${tag}: regime=${params.regime} strategy=${params.strategy} confidence=${params.confidence}%`);
-      return params;
-    };
-
-    // ── 1. GPT-4o for premium coins only (BTC, ETH, SOL, BNB, XRP) ────────
-    if (this.openai && PREMIUM_COINS.has(symbol) &&
-        (await this.checkRateLimit(GPT_PREMIUM_RATE_KEY, this.maxGpt4oPerHour))) {
-      try {
-        const params = await this.callGpt(symbol, globalRegime, indicators, GPT_MODEL_PREMIUM);
-        await this.incrementRateLimit(GPT_PREMIUM_RATE_KEY);
-        return saveAndReturn(params, GPT_MODEL_PREMIUM, " [4o]");
-      } catch (err) {
-        this.logger.warn(`[AiOptimizer] GPT-4o call failed for ${symbol}: ${err?.message}`);
-      }
-    }
-
-    // ── 2. All other coins: fixed SL/TP + ATR floor + algorithmic strategy ──
-    let defaults = atrDefaults;
-    // Fixed SL=2%, TP=2% baseline (1:1 R:R) — simulation shows this is optimal
+    // All coins: SMC/Fibonacci + ATR-based SL/TP + algorithmic strategy
+    let defaults = await this.getAtrAdjustedDefaults(coin, globalRegime);
     if (defaults.stopLossPercent < 2.0) defaults.stopLossPercent = 2.0;
-    if (defaults.takeProfitPercent < 2.0) defaults.takeProfitPercent = 2.0;
-    if (algoStrategy) defaults.strategy = algoStrategy;
     if (forceProfile) defaults = this.applyForcedProfile(defaults, forceProfile);
     const jitter = Math.floor(Math.random() * AI_PARAMS_JITTER);
     await this.redisService.set(cacheKey, defaults, AI_PARAMS_TTL + jitter);
-    this.logger.debug(`[AiOptimizer] ${symbol}${forceProfile ? `:${forceProfile}` : ""} SL=${defaults.stopLossPercent}% TP=${defaults.takeProfitPercent}% (static)`);
+    this.logger.debug(
+      `[AiOptimizer] ${symbol}${forceProfile ? `:${forceProfile}` : ""} ` +
+      `SL=${defaults.stopLossPercent}% TP=${defaults.takeProfitPercent}% ` +
+      `strategy=${defaults.strategy} (SMC/Fib+ATR)`,
+    );
     return defaults;
   }
 
@@ -792,77 +585,6 @@ Reply ONLY with valid JSON (no markdown):
     return strategies.slice(0, 3).join("|");
   }
 
-  private async buildTuningPrompt(
-    symbol: string,
-    globalRegime: string,
-    indicators: Record<string, any>,
-  ): Promise<string> {
-    const atr = parseFloat(indicators.atrPct_15m) || 1;
-    const rsi = parseFloat(indicators.rsi14_15m) || 50;
-    const rsi4h = indicators.rsi14_4h !== "N/A" ? parseFloat(indicators.rsi14_4h) : 50;
-    const bbWidth = parseFloat(indicators.bbWidthPct) || 3;
-    const priceVsEma200 = indicators.priceVsEma200_pct !== "N/A" ? indicators.priceVsEma200_pct : "N/A";
-    const priceVsEma9 = indicators.priceVsEma9_pct || "0";
-    const priceVsEma21_4h = indicators.priceVsEma21_4h_pct !== "N/A" ? indicators.priceVsEma21_4h_pct : "N/A";
-    const perfContext = await this.getRecentPerfContext();
-
-    return `Trading signal optimizer for ${symbol}. Regime: ${globalRegime}.
-Key data: RSI(15m)=${rsi.toFixed(1)}, RSI(4h)=${rsi4h.toFixed(1)}, ATR(15m)=${atr.toFixed(2)}%, BBWidth=${bbWidth.toFixed(2)}%, priceVsEMA9=${priceVsEma9}%, priceVsEMA200=${priceVsEma200}%, priceVsEMA21_4h=${priceVsEma21_4h}%.${perfContext}
-
-DIRECTION GUIDELINES:
-- Choose direction based on CURRENT market conditions, not historical bias
-- STRONG_BEAR regime: prefer SHORT
-- STRONG_BULL regime: prefer LONG
-- MIXED/RANGE_BOUND/SIDEWAYS: either direction OK, follow indicators
-- Always check if BTC trend aligns with signal direction
-
-STEP 1 — Choose 1-3 strategies (pipe-delimited). Ranked by real performance:
-- BB_SCALP: BEST performer. SHORT: +30.87%, 0 SL. Use in SIDEWAYS/RANGE_BOUND (BBWidth<3%).
-- EMA_PULLBACK: SHORT in STRONG_BEAR: +2.44%. Only when trending AND price near EMA21 (within 2%).
-- RSI_CROSS: Solid all-rounder. Always include as fallback.
-- TREND_EMA: Trending regime with price near EMA9 (within 3%).
-- RSI_ZONE: Volatile regime with RSI at extremes (<30 or >70).
-- SMC_FVG: Smart Money Concepts — enters at Fair Value Gap + Order Block confluence with BOS/CHoCH confirmation on HTF. Use in RANGE_BOUND/SIDEWAYS/MIXED regimes.
-- MEAN_REVERT_RSI: WORST performer (-21.54% PnL, 1 win / 22 trades). ONLY use in RANGE_BOUND/SIDEWAYS with RSI <35 or >65. NEVER in MIXED/BEAR/VOLATILE.
-- STOCH_BB_PATTERN: Range-bound regime with BBWidth <4%.
-
-STEP 2 — Set SL/TP based on volatility (ATR). MINIMUM SL is 2%:
-- Low ATR (<1%): SL 2.0%, TP 1.5-2.0%
-- Medium ATR (1-2%): SL 2.0-3.0%, TP 2.0-3.0%
-- High ATR (>2%): SL 3.0-4.0%, TP 2.5-3.0%
-- IMPORTANT: TP capped at 3%. System has trailing stop that extends gains beyond TP.
-
-STEP 3 — Set confidence based on signal strength:
-- Direction aligned with regime: confidence 65-85
-- Direction neutral (MIXED/RANGE): confidence 55-70
-- Direction against regime: confidence 45-55 (higher bar)
-- If recent trades show many SL hits: raise minConfidenceToTrade to 55-65
-
-Reply ONLY JSON:
-{"regime":"${globalRegime}","strategy":"RSI_CROSS|...","confidence":40-85,"stopLossPercent":2.0-4.0,"takeProfitPercent":1.5-3.0,"minConfidenceToTrade":40}`;
-  }
-
-  private async callGpt(
-    symbol: string,
-    globalRegime: string,
-    indicators: Record<string, any>,
-    model: string = GPT_MODEL,
-  ): Promise<AiTunedParams> {
-    const prompt = await this.buildTuningPrompt(symbol, globalRegime, indicators);
-
-    const response = await this.openai!.chat.completions.create({
-      model,
-      max_tokens: 400,
-      messages: [{ role: "user", content: prompt }],
-      response_format: { type: "json_object" },
-    });
-
-    const text = response.choices[0].message.content || "";
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error("No JSON in GPT response");
-
-    return this.mergeWithDefaults(JSON.parse(jsonMatch[0]));
-  }
 
   // ─── AI signal validation gate ────────────────────────────────────────────
 
@@ -1081,8 +803,8 @@ Reply ONLY JSON:
   }
 
   /**
-   * When Haiku is rate-limited, compute ATR-adjusted SL instead of flat 2%.
-   * Volatile coins (ALICE, DOGE) get wider stops; stable coins (BTC) get tighter.
+   * Compute SL/TP using SMC (Order Blocks) + Fibonacci + ATR.
+   * Priority: OB for SL, Fib extension for TP, ATR as fallback for both.
    */
   private async getAtrAdjustedDefaults(
     coin: string,
@@ -1090,7 +812,7 @@ Reply ONLY JSON:
   ): Promise<AiTunedParams> {
     const defaults = this.getDefaultParams(regime);
     try {
-      // Use per-coin indicators for strategy selection + ATR-adjusted SL
+      // Use per-coin indicators for strategy selection
       const indicators = await this.preComputeIndicators(coin);
       if (Object.keys(indicators).length > 0) {
         defaults.strategy = this.selectStrategiesForCoin(regime, indicators);
@@ -1099,99 +821,121 @@ Reply ONLY JSON:
       const ohlc = await this.indicatorService.getOhlc(coin, "15m");
       if (ohlc.closes.length < 20) return defaults;
 
+      const currentPrice = ohlc.closes[ohlc.closes.length - 1];
       const atrPct = this.indicatorService.getAtrPercent(ohlc.highs, ohlc.lows, ohlc.closes, 14);
 
-      // SL = 1.5× ATR, clamped to [2%, min(4%, ATR×2)]
+      // ── ATR baseline SL/TP ──
       const maxSl = Math.min(4, Math.max(3, atrPct * 2));
-      const slPct = Math.max(2, Math.min(maxSl, atrPct * 1.5));
-      // TP = 1.0× ATR, clamped to [1.5%, 3%] — trailing stop handles upside beyond TP
-      const tpPct = Math.max(1.5, Math.min(3.0, atrPct * 1.0));
-      defaults.stopLossPercent = parseFloat(slPct.toFixed(1));
-      defaults.takeProfitPercent = parseFloat(tpPct.toFixed(1));
+      let slPct = Math.max(2, Math.min(maxSl, atrPct * 1.5));
+      let tpPct = Math.max(1.5, Math.min(3.0, atrPct * 1.0));
 
-      // ── Fibonacci-enhanced TP: use Fib extension levels when available ──
-      // Toggle: ENABLE_FIBONACCI env var (default: true)
+      let slSource = "ATR";
+      let tpSource = "ATR";
+
+      // ── SMC Order Block SL: place SL behind nearest OB ──
+      if (ohlc.closes.length >= 30) {
+        try {
+          const obs = this.indicatorService.detectOrderBlocks(
+            ohlc.opens, ohlc.highs, ohlc.lows, ohlc.closes, 1.5, 50,
+          );
+
+          if (obs.length > 0) {
+            // For SL, find the nearest non-mitigated OB
+            // Bullish OB (demand zone) → SL for LONG below it
+            // Bearish OB (supply zone) → SL for SHORT above it
+            // Since we don't know direction yet, compute both and use the tighter one
+            const bullishObs = obs.filter(ob => ob.type === "bullish" && !ob.mitigated && ob.low < currentPrice);
+            const bearishObs = obs.filter(ob => ob.type === "bearish" && !ob.mitigated && ob.high > currentPrice);
+
+            // Find nearest bullish OB below price (for LONG SL)
+            const nearestBullishOb = bullishObs.length > 0
+              ? bullishObs.reduce((best, ob) => ob.low > best.low ? ob : best)
+              : null;
+
+            // Find nearest bearish OB above price (for SHORT SL)
+            const nearestBearishOb = bearishObs.length > 0
+              ? bearishObs.reduce((best, ob) => ob.high < best.high ? ob : best)
+              : null;
+
+            // Use the OB that gives a SL within our [2%, 4%] range
+            let obSlPct: number | null = null;
+            if (nearestBullishOb) {
+              const dist = ((currentPrice - nearestBullishOb.low) / currentPrice) * 100;
+              if (dist >= 2.0 && dist <= 4.0) obSlPct = dist;
+            }
+            if (nearestBearishOb && !obSlPct) {
+              const dist = ((nearestBearishOb.high - currentPrice) / currentPrice) * 100;
+              if (dist >= 2.0 && dist <= 4.0) obSlPct = dist;
+            }
+
+            if (obSlPct) {
+              slPct = parseFloat(obSlPct.toFixed(1));
+              slSource = "OB";
+              this.logger.debug(
+                `[AiOptimizer] ${coin} OB SL: ${slPct}% (Order Block at ${nearestBullishOb?.low?.toFixed(2) || nearestBearishOb?.high?.toFixed(2)})`,
+              );
+            }
+          }
+        } catch (err) {
+          this.logger.debug(`[AiOptimizer] ${coin} OB detection failed: ${err?.message}`);
+        }
+      }
+
+      // ── Fibonacci TP: use Fib 1.272 extension when available ──
       const fibEnabled = this.configService.get("ENABLE_FIBONACCI", "true") === "true";
       if (fibEnabled && ohlc.closes.length >= 30) {
         const fib = this.indicatorService.getFibonacciLevels(ohlc.highs, ohlc.lows, 5);
         if (fib) {
-          const currentPrice = ohlc.closes[ohlc.closes.length - 1];
           const range = fib.swingHigh - fib.swingLow;
           const rangePct = (range / currentPrice) * 100;
 
-          // Only use Fib TP if swing range is meaningful (>2%)
           if (rangePct > 2) {
-            // For LONG: TP at nearest extension above entry (1.272 or 1.618)
-            // For SHORT: TP at nearest retracement below entry (0.618 or 0.786)
-            // Use the 1.272 extension as conservative TP target
             const ext1272 = fib.extensions.find(e => e.level === 1.272);
             if (ext1272) {
               const fibTpPct = Math.abs((ext1272.price - currentPrice) / currentPrice) * 100;
-              // Only use Fib TP if it's between 1.5% and 3% (dynamic range)
               if (fibTpPct >= 1.5 && fibTpPct <= 3.0) {
-                defaults.takeProfitPercent = parseFloat(fibTpPct.toFixed(1));
+                tpPct = parseFloat(fibTpPct.toFixed(1));
+                tpSource = "Fib";
                 (defaults as any).fibTpUsed = true;
                 (defaults as any).fibSwingRange = rangePct.toFixed(1);
                 this.logger.debug(
-                  `[AiOptimizer] ${coin} Fib TP: ${fibTpPct.toFixed(1)}% (1.272 ext at ${ext1272.price.toFixed(2)}, swing ${fib.direction})`,
+                  `[AiOptimizer] ${coin} Fib TP: ${tpPct}% (1.272 ext at ${ext1272.price.toFixed(2)}, swing ${fib.direction})`,
                 );
+              }
+            }
+
+            // Also try Fib 0.618 retracement for SL if OB didn't find anything
+            if (slSource === "ATR") {
+              const ret618 = fib.retracements.find(r => r.level === 0.618);
+              if (ret618) {
+                const fibSlPct = Math.abs((currentPrice - ret618.price) / currentPrice) * 100;
+                if (fibSlPct >= 2.0 && fibSlPct <= 4.0) {
+                  slPct = parseFloat(fibSlPct.toFixed(1));
+                  slSource = "Fib";
+                  this.logger.debug(
+                    `[AiOptimizer] ${coin} Fib SL: ${slPct}% (0.618 ret at ${ret618.price.toFixed(2)})`,
+                  );
+                }
               }
             }
           }
         }
       }
+
+      defaults.stopLossPercent = parseFloat(slPct.toFixed(1));
+      defaults.takeProfitPercent = parseFloat(tpPct.toFixed(1));
+      (defaults as any).slSource = slSource;
+      (defaults as any).tpSource = tpSource;
+
+      this.logger.debug(
+        `[AiOptimizer] ${coin} SL=${slPct.toFixed(1)}%(${slSource}) TP=${tpPct.toFixed(1)}%(${tpSource}) ATR=${atrPct.toFixed(2)}%`,
+      );
     } catch {
       // fallback to static defaults
     }
     return defaults;
   }
 
-  private mergeWithDefaults(parsed: Partial<AiTunedParams>): AiTunedParams {
-    // GPT sometimes pipes the regime field too — take only the first value
-    if (parsed.regime && String(parsed.regime).includes("|")) {
-      parsed.regime = String(parsed.regime).split("|")[0].trim() as any;
-    }
-    // GPT sometimes returns confidence as range string "55-70" — take the first number
-    if (parsed.confidence != null && typeof parsed.confidence !== "number") {
-      const num = parseInt(String(parsed.confidence), 10);
-      parsed.confidence = isNaN(num) ? 50 : num;
-    }
-    const defaults = this.getDefaultParams(parsed.regime || "MIXED");
-    const MIN_SL = 2.0;
-    const stopLossPercent = Math.max(parsed.stopLossPercent ?? defaults.stopLossPercent, MIN_SL);
-    const result = {
-      ...defaults,
-      ...parsed,
-      stopLossPercent,
-      // Fallback: if GPT didn't return takeProfitPercent, use SL (1:1 R:R, trailing handles upside)
-      takeProfitPercent: Math.min(3.0, Math.max(1.5, parsed.takeProfitPercent ?? stopLossPercent)),
-      rsiCross: { ...defaults.rsiCross, ...(parsed.rsiCross || {}) },
-      rsiZone: { ...defaults.rsiZone, ...(parsed.rsiZone || {}) },
-      trendEma: { ...defaults.trendEma, ...(parsed.trendEma || {}) },
-      meanRevertRsi: {
-        ...defaults.meanRevertRsi,
-        ...(parsed.meanRevertRsi || {}),
-      },
-      stochBbPattern: {
-        ...defaults.stochBbPattern,
-        ...(parsed.stochBbPattern || {}),
-      },
-      stochEmaKdj: { ...defaults.stochEmaKdj, ...(parsed.stochEmaKdj || {}) },
-      emaPullback: { ...defaults.emaPullback, ...(parsed.emaPullback || {}) },
-      smcFvg: { ...defaults.smcFvg, ...(parsed.smcFvg || {}) },
-    };
-
-    // Cap HTF kline to max 4h — GPT sometimes sets "1d" which is too slow for intraday signals
-    const ALLOWED_HTF = ["5m", "15m", "1h", "4h"];
-    if (result.rsiCross?.htfKline && !ALLOWED_HTF.includes(result.rsiCross.htfKline)) {
-      result.rsiCross.htfKline = "4h";
-    }
-    if (result.rsiZone?.htfKline && !ALLOWED_HTF.includes(result.rsiZone.htfKline)) {
-      result.rsiZone.htfKline = "4h";
-    }
-
-    return result;
-  }
 
   // ─── Recent performance tracking (for GPT context) ─────────────────────
 
@@ -1216,59 +960,6 @@ Reply ONLY JSON:
     await this.redisService.set(RECENT_PERF_KEY, trimmed, 4 * 60 * 60);
   }
 
-  private async getBtcMarketContext(): Promise<string> {
-    try {
-      const [ohlc15m, ohlc4h, ohlc1d] = await Promise.all([
-        this.indicatorService.getOhlc("BTCUSDT", "15m"),
-        this.indicatorService.getOhlc("BTCUSDT", "4h"),
-        this.indicatorService.getOhlc("BTCUSDT", "1d"),
-      ]);
-
-      const closes15m = ohlc15m.closes;
-      const closes4h = ohlc4h.closes;
-      const closes1d = ohlc1d.closes;
-      if (closes15m.length < 50) return "";
-
-      const btcPrice = closes15m[closes15m.length - 1];
-      const rsi15m = this.indicatorService.getRsi(closes15m, 14);
-      const rsi4h = closes4h.length >= 20 ? this.indicatorService.getRsi(closes4h, 14) : null;
-      const ema200 = closes15m.length >= 200 ? this.indicatorService.getEma(closes15m, 200) : null;
-      const priceVsEma200 = ema200 ? ((btcPrice - ema200.last) / ema200.last * 100).toFixed(2) : "N/A";
-
-      // 24h change
-      const price24hAgo = closes15m.length >= 96 ? closes15m[closes15m.length - 96] : closes15m[0];
-      const change24h = ((btcPrice - price24hAgo) / price24hAgo * 100).toFixed(2);
-
-      // 7d change from daily candles
-      const price7dAgo = closes1d.length >= 7 ? closes1d[closes1d.length - 7] : closes1d[0];
-      const change7d = ((btcPrice - price7dAgo) / price7dAgo * 100).toFixed(2);
-
-      return `
-BTC MARKET CONTEXT:
-- BTC Price: $${btcPrice.toLocaleString()} | 24h: ${change24h}% | 7d: ${change7d}%
-- BTC RSI(15m): ${Number(rsi15m).toFixed(1)} | RSI(4h): ${rsi4h ? Number(rsi4h).toFixed(1) : "N/A"}
-- BTC vs EMA200: ${priceVsEma200}%`;
-    } catch (err) {
-      this.logger.debug(`[AiOptimizer] getBtcMarketContext failed: ${err?.message}`);
-      return "";
-    }
-  }
-
-  private async getRecentPerfContext(): Promise<string> {
-    const perf = (await this.redisService.get<any[]>(RECENT_PERF_KEY)) || [];
-    if (perf.length === 0) return "";
-
-    const wins = perf.filter((p) => p.pnlPercent > 0).length;
-    const losses = perf.length - wins;
-    const longLosses = perf.filter((p) => p.direction === "LONG" && p.pnlPercent <= 0).length;
-    const shortLosses = perf.filter((p) => p.direction === "SHORT" && p.pnlPercent <= 0).length;
-    const recentSLs = perf.slice(-5).filter((p) => p.closeReason === "STOP_LOSS").length;
-
-    let context = `\nRecent performance (last ${perf.length} trades): ${wins}W/${losses}L.`;
-    if (recentSLs >= 4) context += ` Note: ${recentSLs}/5 recent SLs — consider wider SL.`;
-    context += ` (Chỉ tham khảo — KHÔNG từ chối chỉ vì hiệu suất gần đây.)`;
-    return context;
-  }
 
   // ─── Risk advice for signal notifications (algorithmic, no AI call) ─────
 
@@ -1548,20 +1239,6 @@ BTC MARKET CONTEXT:
     }
   }
 
-  // ─── Rate limiting ────────────────────────────────────────────────────────
-
-  private async checkRateLimit(
-    key: string,
-    maxPerHour: number,
-  ): Promise<boolean> {
-    const count = (await this.redisService.get<number>(key)) || 0;
-    return count < maxPerHour;
-  }
-
-  private async incrementRateLimit(key: string): Promise<void> {
-    const count = (await this.redisService.get<number>(key)) || 0;
-    await this.redisService.set(key, count + 1, RATE_WINDOW);
-  }
 
   // ─── Persist regime history to MongoDB ───────────────────────────────────
 
