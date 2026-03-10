@@ -182,14 +182,16 @@ export class RuleEngineService {
       const isBull = params.regime === "STRONG_BULL";
       const isBear = params.regime === "STRONG_BEAR";
       const isMixed = params.regime === "MIXED" || params.regime === "VOLATILE" || params.regime === "BTC_CORRELATION";
+      // Symmetric thresholds: equal opportunity for LONG and SHORT
+      // In uptrend within RANGE_BOUND, RSI naturally sits 50-65 — old thresholds blocked all LONGs
       const threshold = isRanging
-        ? isLong ? 55 : 45   // ranging: wider band — LONG OK up to 55, SHORT OK down to 45
+        ? isLong ? 60 : 50   // ranging: LONG OK up to 60, SHORT needs RSI > 50 (was 55/45 — too asymmetric)
         : isBull
-          ? isLong ? 60 : 40  // bull: LONG OK up to 60, SHORT needs extreme RSI < 40
+          ? isLong ? 65 : 40  // bull: LONG OK up to 65, SHORT needs extreme RSI < 40
           : isBear
-            ? isLong ? 40 : 60  // bear: LONG needs RSI < 40, SHORT OK up to 60
+            ? isLong ? 40 : 65  // bear: LONG needs RSI < 40, SHORT OK up to 65
             : isMixed
-              ? isLong ? 55 : 45  // mixed/volatile: LONG < 55, SHORT > 45
+              ? isLong ? 60 : 50  // mixed/volatile: LONG < 60, SHORT > 50 (was 55/45)
               : cfg.rsiThreshold;  // fallback (50)
 
       if (isLong && rsi.last >= threshold) {
@@ -203,12 +205,12 @@ export class RuleEngineService {
     }
 
     // Overbought/oversold absolute protection — never enter at extremes
-    if (isLong && rsi.last > 65) {
-      this.logger.debug(`[RuleEngine] ${coin} RSI_CROSS LONG blocked: RSI=${rsi.last.toFixed(1)} overbought (>65)`);
+    if (isLong && rsi.last > 70) {
+      this.logger.debug(`[RuleEngine] ${coin} RSI_CROSS LONG blocked: RSI=${rsi.last.toFixed(1)} overbought (>70)`);
       return null;
     }
-    if (!isLong && rsi.last < 35) {
-      this.logger.debug(`[RuleEngine] ${coin} RSI_CROSS SHORT blocked: RSI=${rsi.last.toFixed(1)} oversold (<35)`);
+    if (!isLong && rsi.last < 30) {
+      this.logger.debug(`[RuleEngine] ${coin} RSI_CROSS SHORT blocked: RSI=${rsi.last.toFixed(1)} oversold (<30)`);
       return null;
     }
 
@@ -224,9 +226,24 @@ export class RuleEngineService {
 
         const isRangingRegime = params.regime === "RANGE_BOUND" || params.regime === "SIDEWAYS" || params.regime === "MIXED";
 
-        // In trending regimes, HTF direction must align
-        // In ranging regimes, skip direction check — let price action decide
-        if (!isRangingRegime) {
+        // In trending regimes, HTF direction must align (hard block)
+        // In ranging regimes, HTF direction is a soft filter — block counter-trend
+        // signals to prevent systematic SHORT bias in uptrending markets
+        if (isRangingRegime) {
+          // Soft filter: block counter-trend signals when HTF has clear direction
+          // This prevents shorting in uptrends and longing in downtrends within ranges
+          const htfSpread = Math.abs(htfRsi.last - htfRsiEma.last);
+          if (htfSpread > 5) { // only block when HTF has clear momentum (>5 RSI spread)
+            if (isLong && !htfIsBullish) {
+              this.logger.debug(`[RuleEngine] ${coin} RSI_CROSS LONG blocked: HTF(${cfg.htfKline}) RSI=${htfRsi.last.toFixed(1)} bearish (spread=${htfSpread.toFixed(1)})`);
+              return null;
+            }
+            if (!isLong && htfIsBullish) {
+              this.logger.debug(`[RuleEngine] ${coin} RSI_CROSS SHORT blocked: HTF(${cfg.htfKline}) RSI=${htfRsi.last.toFixed(1)} bullish in range (spread=${htfSpread.toFixed(1)})`);
+              return null;
+            }
+          }
+        } else {
           if (isLong && !htfIsBullish) {
             this.logger.debug(`[RuleEngine] ${coin} RSI_CROSS LONG blocked: HTF(${cfg.htfKline}) RSI=${htfRsi.last.toFixed(1)} bearish (< EMA ${htfRsiEma.last.toFixed(1)})`);
             return null;
@@ -897,10 +914,10 @@ export class RuleEngineService {
     const bouncingUp = lastClose > prevClose && lastClose > prev2Close;
     const rsiTurningUp = rsi > rsiPrev;
     if (prevAtLowerBand && bouncingUp && rsi < cfg.rsiLongMax && rsiTurningUp) {
-      // Extra LONG filter: require RSI to be deeply oversold (< 35 instead of < 45)
-      // DATA: BB_SCALP LONGs at RSI 40-45 mostly fail, only deep oversold has chance
-      if (rsi >= 35) {
-        this.logger.debug(`[RuleEngine] ${coin} BB_SCALP LONG blocked: RSI=${rsi.toFixed(1)} not deeply oversold (<35)`);
+      // LONG filter: require RSI to show oversold condition (< 45)
+      // Relaxed from <35 which was too restrictive — almost never fired LONG
+      if (rsi >= 45) {
+        this.logger.debug(`[RuleEngine] ${coin} BB_SCALP LONG blocked: RSI=${rsi.toFixed(1)} not oversold (<45)`);
         return null;
       }
 
