@@ -74,11 +74,8 @@ export class UserRealTradingService implements OnModuleInit {
     // Delayed to allow UserDataStreamService to initialize first
     setTimeout(() => this.reRegisterOpenTradeStreams().catch(() => {}), 5_000);
 
-    // One-time: sync TP on Binance for all open trades that have stale TP prices
-    // (e.g. after TP% was changed globally). Delayed 10s to let services initialize.
-    setTimeout(() => this.syncTpForOpenTrades().catch((e) =>
-      this.logger.error(`[Startup] syncTpForOpenTrades error: ${e?.message}`),
-    ), 10_000);
+    // TP sync for open trades is handled by protectOpenTrades (every 2 min)
+    // — no need for separate startup sync.
   }
 
   /** One-time migration: set cycleResetAt for users with open trades + cycle limits configured. */
@@ -1596,6 +1593,34 @@ export class UserRealTradingService implements OnModuleInit {
                   await this.telegramService.sendTelegramMessage(chatId,
                     `🚨 *CANH BAO: ${symbol} Khong Co SL!*\n\nKhong the tu dong dat SL tai ${fmtP(slPrice)}.\n*Hay dong lenh hoac dat SL thu cong tren Binance ngay!*\nLoi: ${errMsg}`
                   ).catch(() => {});
+                }
+              }
+            }
+
+            // ── TP mismatch: auto-sync when expected TP differs from current ──
+            // This ensures changes to TP% propagate to running trades within 2 minutes.
+            const FIXED_TP_PCT = 2.0;
+            if (trade.entryPrice) {
+              const expectedTpPrice = direction === "LONG"
+                ? trade.entryPrice * (1 + FIXED_TP_PCT / 100)
+                : trade.entryPrice * (1 - FIXED_TP_PCT / 100);
+              const currentTpPrice = tpPrice || 0;
+              const tpDiffPct = currentTpPrice > 0
+                ? Math.abs(currentTpPrice - expectedTpPrice) / expectedTpPrice * 100
+                : 100; // no TP = 100% mismatch
+              if (tpDiffPct > 0.1 && algo?.hasTp) {
+                // TP exists on Binance but wrong price — replace it
+                this.logger.log(
+                  `[RealTrading] ${symbol} user ${telegramId}: TP mismatch (${currentTpPrice} vs ${expectedTpPrice.toFixed(4)}) — syncing`,
+                );
+                try {
+                  await this.moveTpForRealUsers(symbol, expectedTpPrice, direction);
+                  await this.userTradeModel.updateOne(
+                    { _id: trade._id },
+                    { $set: { tpPrice: parseFloat(expectedTpPrice.toFixed(8)) } },
+                  );
+                } catch (err) {
+                  this.logger.warn(`[RealTrading] ${symbol} user ${telegramId}: TP sync failed: ${err?.message}`);
                 }
               }
             }
