@@ -364,17 +364,17 @@ export class AiSignalService implements OnModuleInit {
           const ageMs = Date.now() - new Date(ageRef).getTime();
           const ageH = ageMs / 3600000;
 
-          // Time-based stop: regime-aware — close stagnant signals (PnL between -1% and +1%)
-          // Trending markets should move fast; ranging markets need more time to oscillate.
+          // Time-based stop: regime-aware — close truly stagnant signals (PnL near zero)
+          // Only close if PnL is flat (-0.5% to +0.5%) — give directional moves more time.
           const regime = (signal as any).regime ?? "MIXED";
           const TIME_STOP_BY_REGIME: Record<string, number> = {
-            STRONG_BULL: 12, STRONG_BEAR: 12,     // trend should move fast
-            RANGE_BOUND: 24, SIDEWAYS: 24,         // mean-reversion takes time
-            VOLATILE: 16, MIXED: 16,               // uncertain — moderate
-            BTC_CORRELATION: 16,
+            STRONG_BULL: 18, STRONG_BEAR: 18,     // trend should move — but give more time
+            RANGE_BOUND: 36, SIDEWAYS: 36,         // mean-reversion needs time to oscillate
+            VOLATILE: 24, MIXED: 24,               // uncertain — moderate
+            BTC_CORRELATION: 24,
           };
-          const timeStopH = TIME_STOP_BY_REGIME[regime] ?? 16;
-          if (ageH >= timeStopH && pnlPercent < 1 && pnlPercent > -1) {
+          const timeStopH = TIME_STOP_BY_REGIME[regime] ?? 24;
+          if (ageH >= timeStopH && pnlPercent < 0.5 && pnlPercent > -0.5) {
             const reason = `Time-stop ${pnlPercent >= 0 ? "+" : ""}${pnlPercent.toFixed(2)}% after ${ageH.toFixed(0)}h`;
             try {
               await this.signalQueueService.closeActiveSignalWithPnl(
@@ -395,9 +395,10 @@ export class AiSignalService implements OnModuleInit {
             continue;
           }
 
-          // 48h+ and profitable >= 1% → close with descriptive reason
+          // 48h+ and profitable >= 2% → close with descriptive reason
           // SKIP if already close to TP (≥70% of the way) — let price action finish it
-          if (ageH >= 48 && pnlPercent >= 1) {
+          // Raised from 1% to 2%: don't close small profits prematurely, let them ride to TP
+          if (ageH >= 48 && pnlPercent >= 2) {
             const tpPct = (signal as any).takeProfitPercent ?? 5;
             if (pnlPercent >= tpPct * 0.7) {
               this.logger.debug(
@@ -940,8 +941,9 @@ export class AiSignalService implements OnModuleInit {
           ? ((currentPrice - signal.entryPrice) / signal.entryPrice) * 100
           : ((signal.entryPrice - currentPrice) / signal.entryPrice) * 100;
 
-        // Close if losing or small profit (< +1.5%) — positions with good profit can ride
-        if (pnlPct < 1.5) {
+        // Only close positions that are actually losing (< -0.5%)
+        // Positions near breakeven or profitable should keep running with their SL/TP
+        if (pnlPct < -0.5) {
           const reason = `REGIME_REVERSAL (${pending.from}→${currentRegime})`;
           this.logger.log(
             `[AiSignal] ⚡ Closing ${signal.symbol} ${signal.direction} — PnL: ${pnlPct.toFixed(2)}% — ${reason}`,
@@ -982,8 +984,8 @@ export class AiSignalService implements OnModuleInit {
           `⚡ *Đảo Chiều Regime (xác nhận 15 phút)*\n` +
           `━━━━━━━━━━━━━━━━━━\n\n` +
           `${pending.from} → *${currentRegime}*\n\n` +
-          `Đã đóng *${closedCount}* lệnh ${closeDirection} đang lỗ/hòa vốn.\n` +
-          `Lệnh đang có lời (+1.5%+) hoặc đã khóa SL vẫn giữ.\n\n` +
+          `Đã đóng *${closedCount}* lệnh ${closeDirection} đang lỗ (< -0.5%).\n` +
+          `Lệnh hòa vốn/có lời vẫn giữ với SL/TP riêng.\n\n` +
           `_Bot sẽ tìm tín hiệu mới theo regime mới._`;
 
         for (const sub of subscribers) {

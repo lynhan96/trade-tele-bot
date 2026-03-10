@@ -1003,42 +1003,7 @@ export class UserRealTradingService implements OnModuleInit {
     let closed = 0;
     for (const trade of openTrades) {
       try {
-        // Cancel existing SL algo order
-        if (trade.binanceSlAlgoId) {
-          await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, trade.binanceSlAlgoId).catch(() => {});
-        }
-        // Cancel existing TP algo order
-        if (trade.binanceTpAlgoId) {
-          await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, trade.binanceTpAlgoId).catch(() => {});
-        }
-
-        // Place reduce-only market order to close
-        const closeOrder = await this.binanceService.closePosition(
-          keys.apiKey, keys.apiSecret, trade.symbol, trade.quantity, trade.direction,
-        );
-        const exitPrice = parseFloat(closeOrder.avgPrice) || (await this.marketDataService.getPrice(trade.symbol)) || trade.entryPrice;
-
-        const rawPnlPct = trade.direction === "LONG"
-          ? ((exitPrice - trade.entryPrice) / trade.entryPrice) * 100
-          : ((trade.entryPrice - exitPrice) / trade.entryPrice) * 100;
-        const pnlPct = rawPnlPct - BINANCE_FEE_PCT;
-        const pnlUsdt = (pnlPct / 100) * trade.notionalUsdt;
-
-        await this.userTradeModel.findByIdAndUpdate((trade as any)._id, {
-          status: "CLOSED",
-          closeReason: reason,
-          exitPrice,
-          pnlPercent: pnlPct,
-          pnlUsdt,
-          closedAt: new Date(),
-        });
-
-        await this.subscriptionService.incrementTradePnl(telegramId, pnlUsdt);
-
-        this.logger.log(
-          `[RealTrading] closeAllRealPositions: closed ${trade.symbol} ${trade.direction} @ ${exitPrice} for user ${telegramId} (${reason})`,
-        );
-        closed++;
+        closed += await this.closeSinglePosition(keys, trade, reason, telegramId);
       } catch (err) {
         this.logger.error(
           `[RealTrading] closeAllRealPositions error ${trade.symbol} for user ${telegramId}: ${err?.message}`,
@@ -1046,6 +1011,92 @@ export class UserRealTradingService implements OnModuleInit {
       }
     }
     return closed;
+  }
+
+  /**
+   * Close only losing positions (PnL < threshold).
+   * Profitable positions keep running with their SL/TP intact.
+   * Returns count of closed positions.
+   */
+  async closeLosingPositions(telegramId: number, chatId: number, reason: string, pnlThreshold = 0): Promise<number> {
+    const openTrades = await this.userTradeModel.find({ telegramId, status: "OPEN" }).lean();
+    if (openTrades.length === 0) return 0;
+
+    const keys = await this.userSettingsService.getApiKeys(telegramId, "binance");
+    if (!keys?.apiKey) return 0;
+
+    // Calculate current PnL for each trade and sort worst first
+    const tradesWithPnl: { trade: any; currentPnlPct: number }[] = [];
+    for (const trade of openTrades) {
+      const currentPrice = await this.marketDataService.getPrice(trade.symbol).catch(() => 0);
+      if (!currentPrice) continue;
+      const rawPnlPct = trade.direction === "LONG"
+        ? ((currentPrice - trade.entryPrice) / trade.entryPrice) * 100
+        : ((trade.entryPrice - currentPrice) / trade.entryPrice) * 100;
+      tradesWithPnl.push({ trade, currentPnlPct: rawPnlPct - BINANCE_FEE_PCT });
+    }
+
+    // Sort worst-performing first
+    tradesWithPnl.sort((a, b) => a.currentPnlPct - b.currentPnlPct);
+
+    let closed = 0;
+    for (const { trade, currentPnlPct } of tradesWithPnl) {
+      // Only close positions below threshold (default: losing positions only)
+      if (currentPnlPct >= pnlThreshold) {
+        this.logger.log(
+          `[RealTrading] closeLosingPositions: KEEPING ${trade.symbol} (PnL: ${currentPnlPct.toFixed(2)}% >= ${pnlThreshold}%) for user ${telegramId}`,
+        );
+        continue;
+      }
+
+      try {
+        closed += await this.closeSinglePosition(keys, trade, reason, telegramId);
+      } catch (err) {
+        this.logger.error(
+          `[RealTrading] closeLosingPositions error ${trade.symbol} for user ${telegramId}: ${err?.message}`,
+        );
+      }
+    }
+    return closed;
+  }
+
+  private async closeSinglePosition(keys: any, trade: any, reason: string, telegramId: number): Promise<number> {
+    // Cancel existing SL algo order
+    if (trade.binanceSlAlgoId) {
+      await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, trade.binanceSlAlgoId).catch(() => {});
+    }
+    // Cancel existing TP algo order
+    if (trade.binanceTpAlgoId) {
+      await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, trade.binanceTpAlgoId).catch(() => {});
+    }
+
+    // Place reduce-only market order to close
+    const closeOrder = await this.binanceService.closePosition(
+      keys.apiKey, keys.apiSecret, trade.symbol, trade.quantity, trade.direction,
+    );
+    const exitPrice = parseFloat(closeOrder.avgPrice) || (await this.marketDataService.getPrice(trade.symbol)) || trade.entryPrice;
+
+    const rawPnlPct = trade.direction === "LONG"
+      ? ((exitPrice - trade.entryPrice) / trade.entryPrice) * 100
+      : ((trade.entryPrice - exitPrice) / trade.entryPrice) * 100;
+    const pnlPct = rawPnlPct - BINANCE_FEE_PCT;
+    const pnlUsdt = (pnlPct / 100) * trade.notionalUsdt;
+
+    await this.userTradeModel.findByIdAndUpdate((trade as any)._id, {
+      status: "CLOSED",
+      closeReason: reason,
+      exitPrice,
+      pnlPercent: pnlPct,
+      pnlUsdt,
+      closedAt: new Date(),
+    });
+
+    await this.subscriptionService.incrementTradePnl(telegramId, pnlUsdt);
+
+    this.logger.log(
+      `[RealTrading] closeSinglePosition: closed ${trade.symbol} ${trade.direction} @ ${exitPrice} pnl=${pnlPct.toFixed(2)}% for user ${telegramId} (${reason})`,
+    );
+    return 1;
   }
 
   // ─── Cycle P&L limit crons ───────────────────────────────────────────────
@@ -1084,8 +1135,9 @@ export class UserRealTradingService implements OnModuleInit {
           }
 
           // ── SL check (always active) ──
+          // Close only losing positions — keep profitable ones running with their own SL/TP
           if (slLimit != null && pnlPct <= -slLimit) {
-            const closedCount = await this.closeAllRealPositions(user.telegramId, user.chatId, "CYCLE_STOP_LOSS");
+            const closedCount = await this.closeLosingPositions(user.telegramId, user.chatId, "CYCLE_STOP_LOSS", 0.5);
             await this.dailyLimitHistoryModel.create({
               telegramId: user.telegramId, username: user.username,
               type: "CYCLE_STOP_LOSS", pnlUsdt: stats.totalPnlUsdt, pnlPct,
@@ -1095,13 +1147,15 @@ export class UserRealTradingService implements OnModuleInit {
             await this.subscriptionService.setRealModeDailyDisabled(user.telegramId, new Date());
             await this.subscriptionService.setCycleResetAt(user.telegramId, null);
 
+            const remainingOpen = (await this.userTradeModel.countDocuments({ telegramId: user.telegramId, status: "OPEN" }));
             const sign = stats.totalPnlUsdt >= 0 ? "+" : "";
             const msg =
               `🛑 *Cycle SL: Dung Lo*\n` +
               `━━━━━━━━━━━━━━━━━━\n\n` +
               `Cycle PnL: *${sign}${stats.totalPnlUsdt.toFixed(2)} USDT* (*${sign}${pnlPct.toFixed(2)}%*)\n` +
               `Gioi han: *-${slLimit}%*\n` +
-              (closedCount > 0 ? `Da dong: *${closedCount} lenh*\n` : ``) +
+              (closedCount > 0 ? `Da dong: *${closedCount} lenh lo*\n` : ``) +
+              (remainingOpen > 0 ? `Giu lai: *${remainingOpen} lenh dang lai* (tiep tuc TP/SL rieng)\n` : ``) +
               `\nReal mode da *TAT*. Se tu dong BAT lai vao ngay mai 00:01 UTC.`;
             await this.telegramService.sendTelegramMessage(user.chatId, msg).catch(() => {});
             this.logger.log(`[RealTrading] Cycle SL for user ${user.telegramId}: ${pnlPct.toFixed(2)}%`);
