@@ -9,18 +9,13 @@
     "start": "nest start",
     "start:dev": "nest start --watch 2>&1 | tee /tmp/bot.log",
     "start:debug": "nest start --debug --watch",
-    "start:prod": "node dist/main",
-    "test:safety": "npx ts-node run-simulator.ts",
-    "test:complete": "npx ts-node run-complete-simulator.ts",
-    "test:skills": "npx ts-node run-skills-simulator.ts",
-    "test:all": "npx ts-node run-all-simulators.ts"
+    "start:prod": "node dist/main"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.36.3",
     "@nestjs/common": "^10.3.0",
     "@nestjs/config": "^3.1.1",
     "@nestjs/core": "^10.3.0",
-    "@nestjs/microservices": "^10.3.0",
     "@nestjs/mongoose": "^10.0.6",
     "@nestjs/platform-express": "^10.3.0",
     "@nestjs/platform-socket.io": "^11.1.16",
@@ -33,7 +28,6 @@
     "jsonwebtoken": "^9.0.3",
     "mongoose": "^8.9.5",
     "node-telegram-bot-api": "^0.65.1",
-    "openai": "^6.25.0",
     "redis": "^4.6.12",
     "reflect-metadata": "^0.2.1",
     "rxjs": "^7.8.1",

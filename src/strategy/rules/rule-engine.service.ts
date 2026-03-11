@@ -204,8 +204,6 @@ export class RuleEngineService {
         return this.evalRsiZone(coin, currency, params);
       case "TREND_EMA":
         return this.evalTrendEma(coin, currency, params);
-      case "MEAN_REVERT_RSI":
-        return this.evalMeanRevertRsi(coin, currency, params);
       case "STOCH_BB_PATTERN":
         return this.evalStochBbPattern(coin, currency, params);
       case "STOCH_EMA_KDJ":
@@ -545,94 +543,6 @@ export class RuleEngineService {
       entryPrice,
       strategy: "TREND_EMA",
       reason: `EMA(${cfg.fastPeriod}) ${crossType} EMA(${cfg.slowPeriod}), RSI=${rsi.last.toFixed(1)}, dist=${moveFromCross.toFixed(1)}% on ${cfg.primaryKline}`,
-    };
-  }
-
-  // ─── MEAN_REVERT_RSI (ported from F2) ────────────────────────────────────
-  // DATA: 22 trades, 1 win, 12 SL = -21.54% PnL. MIXED: 0/7 wins. Catches falling knives.
-
-  async evalMeanRevertRsi(
-    coin: string,
-    currency: string,
-    params: AiTunedParams,
-  ): Promise<SignalResult | null> {
-    const cfg = params.meanRevertRsi;
-    if (!cfg) return null;
-
-    // Block in MIXED regime — 100% loss rate (7/7 SL) from database
-    if (params.regime === "MIXED") {
-      this.logger.debug(`[RuleEngine] ${coin} MEAN_REVERT blocked: MIXED regime (100% loss rate)`);
-      return null;
-    }
-    // Block in STRONG_BEAR/VOLATILE — catches falling knives
-    if (params.regime === "STRONG_BEAR" || params.regime === "VOLATILE") {
-      this.logger.debug(`[RuleEngine] ${coin} MEAN_REVERT blocked: ${params.regime} regime`);
-      return null;
-    }
-
-    const ohlc = await this.indicatorService.getOhlc(coin, cfg.primaryKline);
-    const closes = ohlc.closes;
-    if (closes.length < cfg.emaPeriod + 20) return null;
-
-    const rsi = this.indicatorService.getRsi(closes, cfg.rsiPeriod);
-    const ema200 = this.indicatorService.getEma(closes, cfg.emaPeriod);
-    const currentPrice = closes[closes.length - 1];
-
-    // Skip degenerate RSI (freshly seeded coins with too few candles)
-    if (rsi.last >= 99.9 || rsi.last <= 0.1) return null;
-
-    // Price must be within priceRange% of the EMA
-    const distPct = (Math.abs(currentPrice - ema200.last) / ema200.last) * 100;
-    if (distPct > cfg.priceRange) {
-      this.logger.debug(
-        `[RuleEngine] ${coin} MEAN_REVERT miss: price ${distPct.toFixed(1)}% from EMA200 > ${cfg.priceRange}%`,
-      );
-      return null;
-    }
-
-    const isLong = rsi.last < cfg.longRsi && currentPrice > ema200.last;
-    const isShort = rsi.last > cfg.shortRsi && currentPrice < ema200.last;
-
-    if (!isLong && !isShort) {
-      this.logger.debug(
-        `[RuleEngine] ${coin} MEAN_REVERT miss: RSI=${rsi.last.toFixed(1)} not extreme (L<${cfg.longRsi} S>${cfg.shortRsi})`,
-      );
-      return null;
-    }
-
-    // RSI recovery confirmation: RSI must be turning (not still dropping/rising)
-    if (isLong && rsi.last < rsi.secondLast) {
-      this.logger.debug(`[RuleEngine] ${coin} MEAN_REVERT LONG blocked: RSI still dropping ${rsi.secondLast.toFixed(1)}→${rsi.last.toFixed(1)}`);
-      return null;
-    }
-    if (isShort && rsi.last > rsi.secondLast) {
-      this.logger.debug(`[RuleEngine] ${coin} MEAN_REVERT SHORT blocked: RSI still rising ${rsi.secondLast.toFixed(1)}→${rsi.last.toFixed(1)}`);
-      return null;
-    }
-
-    // ADX filter: block in trending markets (ADX > 30 = strong trend, mean reversion fails)
-    const { adx } = this.indicatorService.getAdx(ohlc.highs, ohlc.lows, closes, 14);
-    if (adx > 30) {
-      this.logger.debug(`[RuleEngine] ${coin} MEAN_REVERT blocked: ADX=${adx.toFixed(1)} > 30 (trending)`);
-      return null;
-    }
-
-    // Candle confirmation: require bounce candle (green for LONG, red for SHORT)
-    const lastOpen = ohlc.opens[ohlc.opens.length - 1];
-    if (isLong && currentPrice < lastOpen) {
-      this.logger.debug(`[RuleEngine] ${coin} MEAN_REVERT LONG blocked: red candle (no bounce)`);
-      return null;
-    }
-    if (isShort && currentPrice > lastOpen) {
-      this.logger.debug(`[RuleEngine] ${coin} MEAN_REVERT SHORT blocked: green candle (no rejection)`);
-      return null;
-    }
-
-    return {
-      isLong,
-      entryPrice: currentPrice,
-      strategy: "MEAN_REVERT_RSI",
-      reason: `Price within ${cfg.priceRange}% of EMA(${cfg.emaPeriod}), RSI=${rsi.last.toFixed(1)} turning (ADX=${adx.toFixed(0)}) (${isLong ? "oversold" : "overbought"})`,
     };
   }
 

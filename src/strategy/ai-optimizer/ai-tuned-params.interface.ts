@@ -73,16 +73,6 @@ export interface AiTunedParams {
     adxMin?: number; // minimum ADX to allow entry (default 20); 0 = disabled
   };
 
-  /** MEAN_REVERT_RSI specific params */
-  meanRevertRsi?: {
-    primaryKline: string;
-    rsiPeriod: number;
-    emaPeriod: number; // EMA to measure "mean" (default 200)
-    priceRange: number; // price must be within X% of EMA
-    longRsi: number; // LONG when RSI < longRsi
-    shortRsi: number; // SHORT when RSI > shortRsi
-  };
-
   /** STOCH_BB_PATTERN specific params */
   stochBbPattern?: {
     primaryKline: string;

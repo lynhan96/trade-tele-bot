@@ -677,7 +677,7 @@ export class AiCommandService implements OnModuleInit {
 
         const symbol = match?.[1]?.toUpperCase();
         const strategy = match?.[2]?.toUpperCase();
-        const validStrategies = ["RSI_CROSS", "RSI_ZONE", "TREND_EMA", "MEAN_REVERT_RSI", "STOCH_BB_PATTERN", "STOCH_EMA_KDJ"];
+        const validStrategies = ["RSI_CROSS", "RSI_ZONE", "TREND_EMA", "STOCH_BB_PATTERN", "STOCH_EMA_KDJ", "EMA_PULLBACK", "BB_SCALP", "SMC_FVG"];
 
         if (!symbol || !strategy || !validStrategies.includes(strategy)) {
           await this.telegramService.sendTelegramMessage(

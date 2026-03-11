@@ -568,11 +568,6 @@ export class AiOptimizerService {
       strategies.push("TREND_EMA");
     }
 
-    // ── MEAN_REVERT_RSI disabled — 22 trades, 1 win (4.5%), -21.54% PnL
-    // if ((isRange || isSideways) && (rsi < 35 || rsi > 65)) {
-    //   strategies.push("MEAN_REVERT_RSI");
-    // }
-
     // ── Volatile with RSI at extremes → zone trading ───────────────────
     if (isVolatile && (rsi < 30 || rsi > 70)) {
       strategies.push("RSI_ZONE");
@@ -838,7 +833,6 @@ Respond ONLY with JSON: {"decision":"PASS"|"REJECT","reason":"brief 10-word max 
       timeframeProfile: "INTRADAY",
       regime: regime as any,
       // Multi-strategy pipes: primary|fallback1|fallback2
-      // MEAN_REVERT_RSI removed from defaults (1 win / 22 trades = -21.54% PnL)
       strategy: isTrend ? "EMA_PULLBACK|TREND_EMA|RSI_CROSS" : isSideways ? "BB_SCALP|RSI_CROSS" : "RSI_CROSS|BB_SCALP",
       confidence: 65, // base default — overridden by dynamic calculation in getAtrAdjustedDefaults
       stopLossPercent: 2.0,
@@ -875,14 +869,6 @@ Respond ONLY with JSON: {"decision":"PASS"|"REJECT","reason":"brief 10-word max 
         trendEmaPeriod: 200,
         trendRange: 5,
         adxMin: 20,
-      },
-      meanRevertRsi: {
-        primaryKline: "15m",
-        rsiPeriod: 14,
-        emaPeriod: 200,
-        priceRange: 3, // was 0.5% — far too tight, almost never triggers
-        longRsi: 35, // was 30 — slightly less extreme for more signals
-        shortRsi: 65, // was 70 — slightly less extreme for more signals
       },
       stochBbPattern: {
         primaryKline: "15m",
@@ -1391,7 +1377,7 @@ Respond ONLY with JSON: {"decision":"PASS"|"REJECT","reason":"brief 10-word max 
         forecasts.push(`\n🎯 *Co hoi:*`);
         for (const c of highConf) {
           const coin = c.symbol.replace("USDT", "");
-          const strat = c.strategy.replace("MEAN_REVERT_RSI", "Mean Revert").replace("RSI_CROSS", "RSI Cross").replace("RSI_ZONE", "RSI Zone").replace("TREND_EMA", "Trend EMA");
+          const strat = c.strategy.replace("RSI_CROSS", "RSI Cross").replace("RSI_ZONE", "RSI Zone").replace("TREND_EMA", "Trend EMA");
           forecasts.push(`   • ${coin} — ${c.confidence}% (${strat})`);
         }
       }
