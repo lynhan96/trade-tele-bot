@@ -290,12 +290,12 @@ export class AiOptimizerService {
 
     // Fixed regime-based filter defaults — deterministic, free, no API calls
     const filterMap: Record<string, { minVolumeUsd: number; minPriceChangePct: number; maxShortlistSize: number }> = {
-      VOLATILE:     { minVolumeUsd: 5_000_000,  minPriceChangePct: 0.5,  maxShortlistSize: Math.min(100, configuredMax) },
-      STRONG_BULL:  { minVolumeUsd: 10_000_000, minPriceChangePct: 0.3,  maxShortlistSize: Math.min(80, configuredMax) },
-      STRONG_BEAR:  { minVolumeUsd: 10_000_000, minPriceChangePct: 0.3,  maxShortlistSize: Math.min(80, configuredMax) },
-      RANGE_BOUND:  { minVolumeUsd: 8_000_000,  minPriceChangePct: 0.2,  maxShortlistSize: Math.min(60, configuredMax) },
-      SIDEWAYS:     { minVolumeUsd: 8_000_000,  minPriceChangePct: 0.2,  maxShortlistSize: Math.min(60, configuredMax) },
-      MIXED:        { minVolumeUsd: 10_000_000, minPriceChangePct: 0.3,  maxShortlistSize: Math.min(80, configuredMax) },
+      VOLATILE:     { minVolumeUsd: 5_000_000,  minPriceChangePct: 0.5,  maxShortlistSize: Math.min(150, configuredMax) },
+      STRONG_BULL:  { minVolumeUsd: 7_000_000,  minPriceChangePct: 0.2,  maxShortlistSize: Math.min(120, configuredMax) },
+      STRONG_BEAR:  { minVolumeUsd: 7_000_000,  minPriceChangePct: 0.2,  maxShortlistSize: Math.min(120, configuredMax) },
+      RANGE_BOUND:  { minVolumeUsd: 5_000_000,  minPriceChangePct: 0.1,  maxShortlistSize: Math.min(100, configuredMax) },
+      SIDEWAYS:     { minVolumeUsd: 5_000_000,  minPriceChangePct: 0.1,  maxShortlistSize: Math.min(100, configuredMax) },
+      MIXED:        { minVolumeUsd: 7_000_000,  minPriceChangePct: 0.2,  maxShortlistSize: Math.min(120, configuredMax) },
     };
 
     const filters = filterMap[regime] || filterMap.MIXED;

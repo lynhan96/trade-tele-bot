@@ -35,7 +35,7 @@ const MAX_SL_BEFORE_COOLDOWN = 3; // trigger cooldown after 3 SL hits in 1 hour
 const AI_LAST_REGIME_KEY = "cache:ai:last-regime-for-reversal"; // track regime for reversal detection
 const AI_PENDING_REVERSAL_KEY = "cache:ai:pending-regime-reversal"; // 15-min cooldown before acting
 const REGIME_REVERSAL_COOLDOWN_SEC = 15 * 60; // 15 minutes confirmation window
-const MAX_ACTIVE_SIGNALS = 15; // Cap concurrent positions to reduce correlated risk
+const MAX_ACTIVE_SIGNALS = 25; // Cap concurrent positions to reduce correlated risk
 
 /** Coins that run BOTH INTRADAY (15m) and SWING (4h) strategies simultaneously.
  * Top 5 by market cap — 15m catches more frequent signals than 4h alone. */
@@ -496,12 +496,11 @@ export class AiSignalService implements OnModuleInit {
       // We'll apply confidence adjustments after signal direction is known (below)
     }
 
-    // Confidence floor: DB shows confidence < 65 → win rate < 44%. Enforce minimum 63.
-    const CONFIDENCE_FLOOR = 63;
-    // RANGE_BOUND/SIDEWAYS: raise floor to 67 — ranging markets are harder to trade,
-    // lower-confidence signals are more likely to be whipsaws
+    // Confidence floor: lowered to 60 for data gathering (was 63)
+    const CONFIDENCE_FLOOR = 60;
+    // RANGE_BOUND/SIDEWAYS: slight raise to filter obvious whipsaws
     const isRanging = params.regime === "RANGE_BOUND" || params.regime === "SIDEWAYS";
-    const effectiveFloor = isRanging ? 67 : CONFIDENCE_FLOOR;
+    const effectiveFloor = isRanging ? 63 : CONFIDENCE_FLOOR;
     params.minConfidenceToTrade = Math.max(params.minConfidenceToTrade ?? 0, effectiveFloor);
     // Cap per regime — prevent AI from setting unrealistically high thresholds
     const regimeThresholdCap: Record<string, number> = {
@@ -748,7 +747,7 @@ export class AiSignalService implements OnModuleInit {
     }
 
     // ── Daily signal cap: atomic check+increment to prevent over-trading ──
-    const MAX_DAILY_SIGNALS = 18;
+    const MAX_DAILY_SIGNALS = 35;
     const dailyCountKey = "cache:ai:daily-signal-count";
     const now = new Date();
     const midnight = new Date(now);
