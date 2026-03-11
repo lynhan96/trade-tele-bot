@@ -262,7 +262,10 @@ export class UserRealTradingService implements OnModuleInit {
       }
 
       const leverage = await this.resolveLeverage(sub, params, keys.apiKey, keys.apiSecret, symbol);
-      const vol = this.getVolForSymbol(symbol, sub.coinVolumes, sub.tradingBalance);
+      const fullVol = this.getVolForSymbol(symbol, sub.coinVolumes, sub.tradingBalance);
+      // DCA: base order = dcaBaseOrderPct% of full volume (rest reserved for safety orders)
+      const isDca = sub.dcaEnabled === true;
+      const vol = isDca ? fullVol * ((sub.dcaBaseOrderPct ?? 40) / 100) : fullVol;
       const rawQty = vol / currentPrice;
       const quantity = parseFloat(rawQty.toFixed(quantityPrecision));
       if (quantity <= 0) {
@@ -285,11 +288,25 @@ export class UserRealTradingService implements OnModuleInit {
       // GTE_GTC algo orders require an open position to exist
       await new Promise((r) => setTimeout(r, 1500));
 
-      // SL and TP always from bot signal logic (AI-computed + trailing stop)
+      // SL and TP — DCA users get SL from avg entry (initially = fill price)
       const roundPrice = (p: number) => parseFloat(p.toFixed(pricePrecision));
 
-      const effectiveSl = stopLossPrice;
-      const effectiveTp = takeProfitPrice;
+      let effectiveSl = stopLossPrice;
+      let effectiveTp = takeProfitPrice;
+      if (isDca) {
+        // DCA: initial SL at dcaSlFromAvgPct from fill price (tighter than signal SL)
+        const dcaSlPct = sub.dcaSlFromAvgPct ?? 1.5;
+        effectiveSl = direction === "LONG"
+          ? fillPrice * (1 - dcaSlPct / 100)
+          : fillPrice * (1 + dcaSlPct / 100);
+        // DCA: TP from fill price (same % as signal, but from actual entry)
+        if (takeProfitPrice && entryPrice) {
+          const tpPct = Math.abs(takeProfitPrice - entryPrice) / entryPrice * 100;
+          effectiveTp = direction === "LONG"
+            ? fillPrice * (1 + tpPct / 100)
+            : fillPrice * (1 - tpPct / 100);
+        }
+      }
       let roundedSl = roundPrice(effectiveSl);
       let roundedTp = effectiveTp ? roundPrice(effectiveTp) : undefined;
 
@@ -378,6 +395,13 @@ export class UserRealTradingService implements OnModuleInit {
         status: "OPEN",
         openedAt: new Date(),
         aiSignalId: (signal as any)._id?.toString(),
+        // DCA fields
+        ...(isDca ? {
+          dcaLevel: 0,
+          avgEntryPrice: fillPrice,
+          originalEntryPrice: fillPrice,
+          dcaOrders: [],
+        } : {}),
       });
 
       this.logger.log(
@@ -406,7 +430,8 @@ export class UserRealTradingService implements OnModuleInit {
         `Gia vao: *${fmtP(fillPrice)}*\n` +
         `Stop Loss: *${fmtP(roundedSl)}* (${actualSlPct.toFixed(1)}%)${binanceSlAlgoId ? "" : " ⚠️"}\n` +
         (roundedTp ? `Take Profit: *${fmtP(roundedTp)}* (${actualTpPct.toFixed(1)}%)${binanceTpAlgoId ? "" : " ⚠️"}\n` : "") +
-        `Volume: *${vol.toLocaleString()} USDT*`;
+        `Volume: *${vol.toLocaleString()} USDT*` +
+        (isDca ? `\n🔄 DCA: Base ${sub.dcaBaseOrderPct ?? 40}% | Max ${sub.dcaMaxOrders ?? 2} SO` : ``);
       await this.telegramService.sendTelegramMessage(chatId, msg).catch(() => {});
 
       // Register data stream to monitor fills/closings
@@ -446,6 +471,12 @@ export class UserRealTradingService implements OnModuleInit {
 
     for (const trade of openTrades) {
       try {
+        // Skip DCA trades — their SL is managed by DCA system (based on avg entry)
+        if (trade.dcaLevel != null && trade.dcaLevel >= 0 && trade.avgEntryPrice) {
+          this.logger.debug(`[RealTrading] ${symbol}: skip SL move for DCA trade user ${trade.telegramId} (DCA manages SL)`);
+          continue;
+        }
+
         const keys = await this.userSettingsService.getApiKeys(trade.telegramId, "binance");
         if (!keys?.apiKey) continue;
 
@@ -1578,6 +1609,220 @@ export class UserRealTradingService implements OnModuleInit {
       }
     } catch (err) {
       this.logger.error(`[RealTrading] protectOpenTrades outer error: ${err?.message}`);
+    }
+  }
+
+  // ─── DCA Grid Recovery ──────────────────────────────────────────────────
+
+  /**
+   * DCA Safety Order deviation thresholds from original entry.
+   * SO1 at -1.2%, SO2 at -2.0% price drop from original entry.
+   */
+  private readonly DCA_SO_DEVIATIONS = [1.2, 2.0];
+
+  /**
+   * DCA Safety Order size as fraction of remaining volume.
+   * With base=40%, remaining=60%: SO1=30% (half), SO2=30% (rest).
+   */
+  private readonly DCA_SO_SIZE_SPLIT = [0.5, 1.0]; // fraction of remaining volume
+
+  /**
+   * Every 30 seconds: check DCA-enabled open trades for safety order triggers.
+   * If price dropped to SO deviation level → place additional market order → recalculate avg entry → update SL/TP.
+   */
+  @Cron("*/30 * * * * *")
+  async checkDcaOrders(): Promise<void> {
+    try {
+      const dcaTrades = await this.userTradeModel.find({
+        status: "OPEN",
+        dcaLevel: { $exists: true, $gte: 0 },
+      }).lean();
+      if (dcaTrades.length === 0) return;
+
+      for (const trade of dcaTrades) {
+        try {
+          const maxLevel = trade.dcaLevel ?? 0;
+          if (maxLevel >= this.DCA_SO_DEVIATIONS.length) continue; // all SOs filled
+
+          const sub = await this.subscriptionService.getSubscription(trade.telegramId);
+          if (!sub || !sub.dcaEnabled) continue;
+          const dcaMax = sub.dcaMaxOrders ?? 2;
+          if (maxLevel >= dcaMax) continue;
+
+          const currentPrice = this.marketDataService.getLatestPrice(trade.symbol);
+          if (!currentPrice) continue;
+
+          const origEntry = trade.originalEntryPrice ?? trade.entryPrice;
+          const nextLevel = maxLevel + 1;
+          const deviationPct = this.DCA_SO_DEVIATIONS[maxLevel]; // 0-indexed: level 0 → first SO deviation
+
+          // Check if price dropped enough for next SO
+          const priceDrop = trade.direction === "LONG"
+            ? ((origEntry - currentPrice) / origEntry) * 100
+            : ((currentPrice - origEntry) / origEntry) * 100;
+
+          if (priceDrop < deviationPct) continue; // not yet at SO level
+
+          await this.placeDcaSafetyOrder(trade as any, sub, nextLevel, currentPrice);
+        } catch (err) {
+          this.logger.error(`[DCA] Error checking ${trade.symbol} user ${trade.telegramId}: ${err?.message}`);
+        }
+      }
+    } catch (err) {
+      this.logger.error(`[DCA] checkDcaOrders outer error: ${err?.message}`);
+    }
+  }
+
+  /**
+   * Place a DCA safety order: additional market order to average down entry.
+   * Updates avg entry, recalculates SL/TP based on new avg, updates Binance algo orders.
+   */
+  private async placeDcaSafetyOrder(
+    trade: UserTradeDocument,
+    sub: any,
+    level: number,
+    currentPrice: number,
+  ): Promise<void> {
+    const { telegramId, chatId, symbol, direction } = trade;
+    const tradeId = (trade as any)._id;
+
+    // Prevent duplicate SO placement
+    const lockKey = `cache:dca-lock:${telegramId}:${symbol}:${level}`;
+    const acquired = await this.redisService.setNX(lockKey, "1", 60);
+    if (!acquired) return;
+
+    const keys = await this.userSettingsService.getApiKeys(telegramId, "binance");
+    if (!keys?.apiKey) return;
+
+    try {
+      // Calculate SO volume: remaining volume × split fraction
+      const fullVol = this.getVolForSymbol(symbol, sub.coinVolumes, sub.tradingBalance);
+      const baseOrderPct = sub.dcaBaseOrderPct ?? 40;
+      const remainingVol = fullVol * ((100 - baseOrderPct) / 100);
+      const splitIdx = Math.min(level - 1, this.DCA_SO_SIZE_SPLIT.length - 1);
+      const soVol = remainingVol * this.DCA_SO_SIZE_SPLIT[splitIdx];
+
+      const [qtyPrec, pricePrec] = await Promise.all([
+        this.getQuantityPrecision(symbol),
+        this.getPricePrecision(symbol),
+      ]);
+      const roundPrice = (p: number) => parseFloat(p.toFixed(pricePrec));
+
+      const soQty = parseFloat((soVol / currentPrice).toFixed(qtyPrec));
+      if (soQty <= 0) return;
+
+      // Place additional market order (same direction)
+      const order = await this.binanceService.openPosition(keys.apiKey, keys.apiSecret, {
+        symbol,
+        side: direction as "LONG" | "SHORT",
+        quantity: soQty,
+        leverage: trade.leverage,
+      });
+      const soFillPrice = parseFloat(order.avgPrice) || currentPrice;
+
+      // Calculate new weighted average entry
+      const prevQty = trade.quantity;
+      const prevAvg = trade.avgEntryPrice ?? trade.entryPrice;
+      const newTotalQty = prevQty + soQty;
+      const newAvgEntry = (prevAvg * prevQty + soFillPrice * soQty) / newTotalQty;
+
+      // Recalculate SL from new avg entry
+      const dcaSlPct = sub.dcaSlFromAvgPct ?? 1.5;
+      const newSlPrice = direction === "LONG"
+        ? newAvgEntry * (1 - dcaSlPct / 100)
+        : newAvgEntry * (1 + dcaSlPct / 100);
+
+      // Recalculate TP from new avg entry (same % distance as original signal TP)
+      const origEntry = trade.originalEntryPrice ?? trade.entryPrice;
+      let newTpPrice = trade.tpPrice;
+      if (trade.tpPrice && origEntry) {
+        const tpPct = Math.abs(trade.tpPrice - origEntry) / origEntry * 100;
+        newTpPrice = direction === "LONG"
+          ? newAvgEntry * (1 + tpPct / 100)
+          : newAvgEntry * (1 - tpPct / 100);
+      }
+
+      // Wait for Binance to process
+      await new Promise((r) => setTimeout(r, 1500));
+
+      // Cancel old SL/TP and place new ones with updated prices and quantity
+      const roundedSl = roundPrice(newSlPrice);
+      const roundedTp = newTpPrice ? roundPrice(newTpPrice) : undefined;
+
+      // Cancel old SL
+      if (trade.binanceSlAlgoId) {
+        await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, trade.binanceSlAlgoId).catch(() => {});
+      }
+      // Cancel old TP
+      if (trade.binanceTpAlgoId) {
+        await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, trade.binanceTpAlgoId).catch(() => {});
+      }
+
+      // Place new SL for total quantity
+      let newSlAlgoId: string | undefined;
+      try {
+        const slOrder = await this.binanceService.setStopLoss(
+          keys.apiKey, keys.apiSecret, symbol, roundedSl,
+          direction as "LONG" | "SHORT", newTotalQty,
+        );
+        newSlAlgoId = slOrder?.algoId?.toString() ?? slOrder?.orderId?.toString();
+      } catch (err) {
+        this.logger.error(`[DCA] ${symbol} SO${level} SL failed for user ${telegramId}: ${err?.message}`);
+      }
+
+      // Place new TP for total quantity
+      let newTpAlgoId: string | undefined;
+      if (roundedTp) {
+        try {
+          const tpOrder = await this.binanceService.setTakeProfitAtPrice(
+            keys.apiKey, keys.apiSecret, symbol, roundedTp,
+            direction as "LONG" | "SHORT", newTotalQty,
+          );
+          newTpAlgoId = tpOrder?.algoId?.toString() ?? tpOrder?.orderId?.toString();
+        } catch (err) {
+          this.logger.error(`[DCA] ${symbol} SO${level} TP failed for user ${telegramId}: ${err?.message}`);
+        }
+      }
+
+      // Update trade record
+      const dcaOrder = { level, price: soFillPrice, quantity: soQty, filledAt: new Date() };
+      await this.userTradeModel.findByIdAndUpdate(tradeId, {
+        $set: {
+          dcaLevel: level,
+          avgEntryPrice: newAvgEntry,
+          entryPrice: newAvgEntry, // update main entry for PnL calculations
+          quantity: newTotalQty,
+          notionalUsdt: newTotalQty * newAvgEntry,
+          slPrice: roundedSl,
+          tpPrice: roundedTp,
+          binanceSlAlgoId: newSlAlgoId,
+          binanceTpAlgoId: newTpAlgoId,
+        },
+        $push: { dcaOrders: dcaOrder },
+      });
+
+      // Notify user
+      const fmtP = (p: number) =>
+        p >= 1000 ? `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :
+        p >= 1 ? `$${p.toFixed(2)}` : `$${p.toFixed(4)}`;
+      const actualSlPct = Math.abs(newAvgEntry - roundedSl) / newAvgEntry * 100;
+      const msg =
+        `🔄 *DCA Safety Order ${level}*\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `${symbol} ${direction}\n` +
+        `SO${level}: *×${soQty}* @ ${fmtP(soFillPrice)}\n` +
+        `Avg Entry: *${fmtP(newAvgEntry)}* (was ${fmtP(prevAvg)})\n` +
+        `Total Qty: *×${newTotalQty.toFixed(qtyPrec)}*\n` +
+        `New SL: *${fmtP(roundedSl)}* (${actualSlPct.toFixed(1)}% from avg)\n` +
+        (roundedTp ? `New TP: *${fmtP(roundedTp)}*\n` : ``) +
+        `SO Vol: *${soVol.toFixed(0)} USDT*`;
+      await this.telegramService.sendTelegramMessage(chatId, msg).catch(() => {});
+
+      this.logger.log(
+        `[DCA] ${symbol} SO${level} placed for user ${telegramId}: ×${soQty} @ ${soFillPrice}, avg=${newAvgEntry.toFixed(4)}, SL=${roundedSl}`,
+      );
+    } catch (err) {
+      this.logger.error(`[DCA] ${symbol} SO${level} failed for user ${telegramId}: ${err?.message}`);
     }
   }
 

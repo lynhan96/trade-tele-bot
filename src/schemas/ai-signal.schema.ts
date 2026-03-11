@@ -121,6 +121,16 @@ export class AiSignal {
 
   @Prop({ type: Object, default: {} })
   indicatorSnapshot: Record<string, any>; // RSI, BB width, etc. at signal time
+
+  // ─── DCA Grid Recovery (signal-level simulation) ────────────────────────
+  @Prop({ default: 0 })
+  dcaLevel?: number; // 0=base only, 1=SO1 simulated, 2=SO2 simulated
+
+  @Prop()
+  originalEntryPrice?: number; // first entry price (before DCA avg)
+
+  @Prop()
+  originalStopLossPrice?: number; // original SL before DCA adjustment
 }
 
 export const AiSignalSchema = SchemaFactory.createForClass(AiSignal);

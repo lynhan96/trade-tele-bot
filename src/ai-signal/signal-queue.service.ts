@@ -273,6 +273,44 @@ export class SignalQueueService {
     );
   }
 
+  // ─── DCA Grid Recovery (signal-level) ─────────────────────────────────────
+
+  /**
+   * Persist DCA state after a simulated safety order fill on a signal.
+   * Called by PositionMonitorService when price hits SO level.
+   */
+  async updateSignalDca(
+    signalId: string,
+    newAvgEntry: number,
+    newSl: number,
+    newTp: number,
+    newLevel: number,
+    originalEntry: number,
+  ): Promise<void> {
+    const signal = await this.aiSignalModel.findById(signalId);
+    if (!signal) return;
+
+    const update: Record<string, any> = {
+      entryPrice: newAvgEntry,
+      stopLossPrice: newSl,
+      takeProfitPrice: newTp,
+      dcaLevel: newLevel,
+      slMovedToEntry: false,
+      peakPnlPct: 0,
+    };
+
+    // Preserve original entry/SL only on first DCA fill
+    if (!signal.originalEntryPrice) {
+      update.originalEntryPrice = originalEntry;
+      update.originalStopLossPrice = signal.stopLossPrice;
+    }
+
+    await this.aiSignalModel.findByIdAndUpdate(signalId, update);
+    this.logger.log(
+      `[SignalQueue] ${signal.symbol} DCA SO${newLevel} → avgEntry=${newAvgEntry.toFixed(4)}, SL=${newSl.toFixed(4)}, TP=${newTp.toFixed(4)}`,
+    );
+  }
+
   // ─── Helpers ──────────────────────────────────────────────────────────────
 
   /** Get the profile-aware signal key from a document. */

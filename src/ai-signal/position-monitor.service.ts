@@ -196,11 +196,84 @@ export class PositionMonitorService implements OnModuleInit {
     const { symbol, direction, entryPrice, takeProfitPrice } = signal;
     const sigKey = this.getSignalKey(signal);
 
+    // ─── DCA Grid Simulation (signal level) ────────────────────────────────
+    // Simulates DCA safety orders at signal level so test mode stats reflect DCA.
+    // Config mirrors user-real-trading: SO1 at -1.2%, SO2 at -2.0% from original entry.
+    // Base=40%, SO1=30%, SO2=30% → weighted avg entry updated in-place.
+    const DCA_SO_DEVIATIONS = [1.2, 2.0];
+    const DCA_SO_WEIGHTS = [
+      { basePct: 40, soPct: 30 }, // SO1: base 40% + SO 30%
+      { basePct: 70, soPct: 30 }, // SO2: prev 70% + SO 30%
+    ];
+    const DCA_SL_FROM_AVG = 1.5; // % SL from avg entry
+
+    const dcaLevel = (signal as any).dcaLevel ?? 0;
+    const origEntry = (signal as any).originalEntryPrice ?? entryPrice;
+
+    if (dcaLevel < DCA_SO_DEVIATIONS.length) {
+      const nextDeviation = DCA_SO_DEVIATIONS[dcaLevel];
+      const priceDrop = direction === "LONG"
+        ? ((origEntry - price) / origEntry) * 100
+        : ((price - origEntry) / origEntry) * 100;
+
+      if (priceDrop >= nextDeviation) {
+        // Simulate DCA fill at current price
+        const newLevel = dcaLevel + 1;
+        const prevWeight = DCA_SO_WEIGHTS[dcaLevel].basePct;
+        const soWeight = DCA_SO_WEIGHTS[dcaLevel].soPct;
+        const newAvgEntry = (entryPrice * prevWeight + price * soWeight) / (prevWeight + soWeight);
+
+        // Update SL from new avg entry
+        const newSl = direction === "LONG"
+          ? newAvgEntry * (1 - DCA_SL_FROM_AVG / 100)
+          : newAvgEntry * (1 + DCA_SL_FROM_AVG / 100);
+
+        // Update TP from new avg (preserve original TP % distance)
+        const origTpPct = takeProfitPrice && origEntry
+          ? Math.abs(takeProfitPrice - origEntry) / origEntry * 100
+          : 0;
+        const newTp = origTpPct > 0
+          ? (direction === "LONG" ? newAvgEntry * (1 + origTpPct / 100) : newAvgEntry * (1 - origTpPct / 100))
+          : takeProfitPrice;
+
+        // Persist to signal
+        if (!(signal as any).originalEntryPrice) {
+          (signal as any).originalEntryPrice = entryPrice;
+          (signal as any).originalStopLossPrice = (signal as any).stopLossPrice;
+        }
+        (signal as any).entryPrice = newAvgEntry;
+        (signal as any).stopLossPrice = newSl;
+        if (newTp) (signal as any).takeProfitPrice = newTp;
+        (signal as any).dcaLevel = newLevel;
+
+        // Reset trailing state since entry changed
+        (signal as any).slMovedToEntry = false;
+        (signal as any).peakPnlPct = 0;
+
+        // Persist DCA state to DB
+        await this.signalQueueService.updateSignalDca(
+          (signal as any)._id.toString(),
+          newAvgEntry, newSl, newTp, newLevel, entryPrice,
+        );
+
+        this.logger.log(
+          `[PositionMonitor] 🔄 ${sigKey} DCA SO${newLevel}: avg=${newAvgEntry.toFixed(4)} SL=${newSl.toFixed(4)} (was entry=${entryPrice.toFixed(4)})`,
+        );
+
+        // Propagate new SL to real users (non-DCA users get updated SL too)
+        // DCA real users are skipped by moveStopLossForRealUsers (handled independently)
+        this.propagateSlMove(sigKey, symbol, newSl, direction);
+        if (newTp) this.propagateTpMove(sigKey, symbol, newTp, direction);
+      }
+    }
+
     // ─── Auto risk management ─────────────────────────────────────────────
+    // Use current signal entryPrice (may be DCA-adjusted avg)
+    const currentEntry = (signal as any).entryPrice ?? entryPrice;
     const pnlPct =
       direction === "LONG"
-        ? ((price - entryPrice) / entryPrice) * 100
-        : ((entryPrice - price) / entryPrice) * 100;
+        ? ((price - currentEntry) / currentEntry) * 100
+        : ((currentEntry - price) / currentEntry) * 100;
 
     // ── Trailing SL: after 1.5% profit, trail SL at peak - 0.8% (never lower) ──
     const TRAIL_TRIGGER = 1.5;   // activate trailing at 1.5% profit
@@ -215,28 +288,28 @@ export class PositionMonitorService implements OnModuleInit {
 
     if (peak >= TRAIL_TRIGGER && !(signal as any).slMovedToEntry) {
       // First time reaching 1.5% → move SL to entry (break-even)
-      (signal as any).stopLossPrice = entryPrice;
+      (signal as any).stopLossPrice = currentEntry;
       (signal as any).slMovedToEntry = true;
       await this.signalQueueService.moveStopLossToEntry((signal as any)._id.toString());
       this.logger.log(
-        `[PositionMonitor] 🛡️ ${sigKey} SL moved to entry ${entryPrice} (PnL: ${pnlPct.toFixed(2)}%)`,
+        `[PositionMonitor] 🛡️ ${sigKey} SL moved to entry ${currentEntry} (PnL: ${pnlPct.toFixed(2)}%)`,
       );
       if (this.slMovedCallback) {
-        await this.slMovedCallback(symbol, entryPrice).catch((e) =>
+        await this.slMovedCallback(symbol, currentEntry).catch((e) =>
           this.logger.warn(`[PositionMonitor] slMovedCallback error ${sigKey}: ${e?.message}`),
         );
       }
-      this.propagateSlMove(sigKey, symbol, entryPrice, direction);
+      this.propagateSlMove(sigKey, symbol, currentEntry, direction);
     }
 
     // Continuous trailing: SL = entry + (peak - TRAIL_DISTANCE)%, only raise
     if ((signal as any).slMovedToEntry && peak > TRAIL_TRIGGER) {
       const trailPct = Math.max(0, peak - TRAIL_DISTANCE); // lock-in % (never below 0 = entry)
       const trailSl = direction === "LONG"
-        ? entryPrice * (1 + trailPct / 100)
-        : entryPrice * (1 - trailPct / 100);
+        ? currentEntry * (1 + trailPct / 100)
+        : currentEntry * (1 - trailPct / 100);
 
-      const currentSl = (signal as any).stopLossPrice || entryPrice;
+      const currentSl = (signal as any).stopLossPrice || currentEntry;
       // Only raise SL, never lower
       const shouldRaise = direction === "LONG" ? trailSl > currentSl : trailSl < currentSl;
 
@@ -260,11 +333,11 @@ export class PositionMonitorService implements OnModuleInit {
         const hasMomentum = await this.marketDataService.hasVolumeMomentum(symbol);
         if (hasMomentum) {
           // Extend TP by 2% from current position, cap at 6%
-          const currentTpPct = Math.abs(takeProfitPrice - entryPrice) / entryPrice * 100;
+          const currentTpPct = Math.abs(takeProfitPrice - currentEntry) / currentEntry * 100;
           const boostedTpPct = Math.min(6, Math.max(currentTpPct, pnlPct + 2.0));
           const newTpPrice = direction === "LONG"
-            ? entryPrice * (1 + boostedTpPct / 100)
-            : entryPrice * (1 - boostedTpPct / 100);
+            ? currentEntry * (1 + boostedTpPct / 100)
+            : currentEntry * (1 - boostedTpPct / 100);
           (signal as any).takeProfitPrice = newTpPrice;
           await this.signalQueueService.extendTakeProfit(
             (signal as any)._id.toString(), newTpPrice, boostedTpPct,

@@ -27,6 +27,11 @@ export interface SubscriberInfo {
   cyclePeakPct?: number;               // highest PnL% in current cycle (for trailing floor)
   cyclePaused?: boolean;               // true = stop opening new trades (target hit)
   cycleTargetMode?: string;            // "TRAILING" | "CLOSE_ALL"
+  // DCA Grid Recovery
+  dcaEnabled?: boolean;                // true = split orders into base + safety orders
+  dcaMaxOrders?: number;               // max safety orders per position (default: 2)
+  dcaBaseOrderPct?: number;            // base order = this % of volume (default: 40%)
+  dcaSlFromAvgPct?: number;            // SL distance from avg entry (default: 1.5%)
 }
 
 @Injectable()
@@ -109,6 +114,10 @@ export class UserSignalSubscriptionService {
       realModeDailyDisabledAt: d.realModeDailyDisabledAt,
       cyclePaused: d.cyclePaused,
       maxOpenPositions: d.maxOpenPositions,
+      dcaEnabled: d.dcaEnabled,
+      dcaMaxOrders: d.dcaMaxOrders ?? 2,
+      dcaBaseOrderPct: d.dcaBaseOrderPct ?? 40,
+      dcaSlFromAvgPct: d.dcaSlFromAvgPct ?? 1.5,
     }));
   }
 

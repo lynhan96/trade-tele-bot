@@ -71,6 +71,24 @@ export class UserTrade {
 
   @Prop()
   aiSignalId?: string; // ref to AiSignal._id
+
+  // ─── DCA Grid Recovery ──────────────────────────────────────────────────
+  @Prop({ default: 0 })
+  dcaLevel?: number; // 0=base only, 1=SO1 filled, 2=SO2 filled
+
+  @Prop()
+  avgEntryPrice?: number; // weighted average entry (updated after each DCA fill)
+
+  @Prop()
+  originalEntryPrice?: number; // first fill price (before DCA)
+
+  @Prop({ type: Array, default: [] })
+  dcaOrders?: Array<{
+    level: number; // 1, 2, ...
+    price: number; // fill price
+    quantity: number;
+    filledAt: Date;
+  }>;
 }
 
 export const UserTradeSchema = SchemaFactory.createForClass(UserTrade);
