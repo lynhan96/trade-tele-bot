@@ -622,15 +622,32 @@ export class AiSignalService implements OnModuleInit {
       }
     }
 
-    // ── MIXED regime: block SHORT when BTC RSI is bullish (>65) ────────────
-    // BTC RSI > 65 = bullish momentum. Shorting alts when BTC is pumping = high risk of losses.
-    if (globalRegime === "MIXED" && !signalResult.isLong) {
-      const btcCtx = await this.redisService.get<{ rsi: number; priceVsEma9: number }>("cache:ai:regime:btc-context");
-      if (btcCtx && btcCtx.rsi > 65) {
-        this.logger.log(
-          `[AiSignal] ${signalKey} SHORT blocked — MIXED + BTC RSI overbought (${btcCtx.rsi.toFixed(0)})`,
-        );
-        return;
+    // ── BTC direction filter for MIXED / RANGE_BOUND / SIDEWAYS ───────────
+    // Follow the market: block counter-trend signals based on BTC momentum.
+    // Prevents LONG SL's when market is bleeding, and SHORT SL's when market is pumping.
+    const neutralRegimes = ["MIXED", "RANGE_BOUND", "SIDEWAYS"];
+    if (neutralRegimes.includes(globalRegime)) {
+      const btcCtx = await this.redisService.get<{
+        rsi: number; rsi4h: number; priceVsEma9: number; priceVsEma200: number;
+      }>("cache:ai:regime:btc-context");
+      if (btcCtx) {
+        // BTC bearish bias: RSI < 42 AND price below EMA9 → block LONG
+        const isBtcBearish = btcCtx.rsi < 42 && btcCtx.priceVsEma9 < -0.2;
+        // BTC bullish bias: RSI > 58 AND price above EMA9 → block SHORT
+        const isBtcBullish = btcCtx.rsi > 58 && btcCtx.priceVsEma9 > 0.2;
+
+        if (isBtcBearish && signalResult.isLong) {
+          this.logger.log(
+            `[AiSignal] ${signalKey} LONG blocked — ${globalRegime} + BTC bearish (RSI=${btcCtx.rsi.toFixed(0)}, vsEMA9=${btcCtx.priceVsEma9.toFixed(2)}%)`,
+          );
+          return;
+        }
+        if (isBtcBullish && !signalResult.isLong) {
+          this.logger.log(
+            `[AiSignal] ${signalKey} SHORT blocked — ${globalRegime} + BTC bullish (RSI=${btcCtx.rsi.toFixed(0)}, vsEMA9=${btcCtx.priceVsEma9.toFixed(2)}%)`,
+          );
+          return;
+        }
       }
     }
 
