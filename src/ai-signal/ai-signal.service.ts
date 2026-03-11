@@ -622,29 +622,47 @@ export class AiSignalService implements OnModuleInit {
       }
     }
 
-    // ── BTC direction filter for MIXED / RANGE_BOUND / SIDEWAYS ───────────
-    // Follow the market: block counter-trend signals based on BTC momentum.
-    // Prevents LONG SL's when market is bleeding, and SHORT SL's when market is pumping.
+    // ── BTC multi-timeframe direction filter (MIXED / RANGE_BOUND / SIDEWAYS) ──
+    // Uses scoring system: each bearish/bullish signal adds points.
+    // Score >= 3 = strong directional bias → block counter-trend.
+    // This prevents LONGs when market is bleeding and SHORTs when market is pumping.
     const neutralRegimes = ["MIXED", "RANGE_BOUND", "SIDEWAYS"];
     if (neutralRegimes.includes(globalRegime)) {
       const btcCtx = await this.redisService.get<{
         rsi: number; rsi4h: number; priceVsEma9: number; priceVsEma200: number;
       }>("cache:ai:regime:btc-context");
       if (btcCtx) {
-        // BTC bearish bias: RSI < 42 AND price below EMA9 → block LONG
-        const isBtcBearish = btcCtx.rsi < 42 && btcCtx.priceVsEma9 < -0.2;
-        // BTC bullish bias: RSI > 58 AND price above EMA9 → block SHORT
-        const isBtcBullish = btcCtx.rsi > 58 && btcCtx.priceVsEma9 > 0.2;
+        let bearScore = 0;
+        let bullScore = 0;
 
-        if (isBtcBearish && signalResult.isLong) {
+        // Factor 1: RSI 15m (short-term momentum)
+        if (btcCtx.rsi < 40) bearScore += 2;
+        else if (btcCtx.rsi < 45) bearScore += 1;
+        else if (btcCtx.rsi > 60) bullScore += 2;
+        else if (btcCtx.rsi > 55) bullScore += 1;
+
+        // Factor 2: RSI 4h (medium-term trend)
+        if (btcCtx.rsi4h < 45) bearScore += 1;
+        else if (btcCtx.rsi4h > 55) bullScore += 1;
+
+        // Factor 3: Price vs EMA9 (immediate trend)
+        if (btcCtx.priceVsEma9 < -0.3) bearScore += 1;
+        else if (btcCtx.priceVsEma9 > 0.3) bullScore += 1;
+
+        // Factor 4: Price vs EMA200 (macro trend)
+        if (btcCtx.priceVsEma200 < -1) bearScore += 1;
+        else if (btcCtx.priceVsEma200 > 1) bullScore += 1;
+
+        // Score >= 3 = strong directional consensus → block counter-trend
+        if (bearScore >= 3 && signalResult.isLong) {
           this.logger.log(
-            `[AiSignal] ${signalKey} LONG blocked — ${globalRegime} + BTC bearish (RSI=${btcCtx.rsi.toFixed(0)}, vsEMA9=${btcCtx.priceVsEma9.toFixed(2)}%)`,
+            `[AiSignal] ${signalKey} LONG blocked — ${globalRegime} + BTC bearish consensus (score=${bearScore}, RSI=${btcCtx.rsi.toFixed(0)}, RSI4h=${btcCtx.rsi4h.toFixed(0)}, vsEMA9=${btcCtx.priceVsEma9.toFixed(2)}%, vsEMA200=${btcCtx.priceVsEma200.toFixed(2)}%)`,
           );
           return;
         }
-        if (isBtcBullish && !signalResult.isLong) {
+        if (bullScore >= 3 && !signalResult.isLong) {
           this.logger.log(
-            `[AiSignal] ${signalKey} SHORT blocked — ${globalRegime} + BTC bullish (RSI=${btcCtx.rsi.toFixed(0)}, vsEMA9=${btcCtx.priceVsEma9.toFixed(2)}%)`,
+            `[AiSignal] ${signalKey} SHORT blocked — ${globalRegime} + BTC bullish consensus (score=${bullScore}, RSI=${btcCtx.rsi.toFixed(0)}, RSI4h=${btcCtx.rsi4h.toFixed(0)}, vsEMA9=${btcCtx.priceVsEma9.toFixed(2)}%, vsEMA200=${btcCtx.priceVsEma200.toFixed(2)}%)`,
           );
           return;
         }
@@ -700,6 +718,39 @@ export class AiSignalService implements OnModuleInit {
         );
         return;
       }
+    }
+
+    // ── Active position imbalance: follow the crowd ─────────────────────────
+    // If 75%+ of active signals are in one direction, the market has spoken.
+    // Block the minority direction to avoid fighting the trend.
+    try {
+      const activeSignals = await this.aiSignalModel.find(
+        { status: "ACTIVE" },
+        { direction: 1 },
+      ).lean();
+      if (activeSignals.length >= 4) {
+        const activeLongs = activeSignals.filter((s) => s.direction === "LONG").length;
+        const activeShorts = activeSignals.length - activeLongs;
+        const longRatio = activeLongs / activeSignals.length;
+        const shortRatio = activeShorts / activeSignals.length;
+
+        // 75%+ SHORT active → market bearish → block LONG
+        if (shortRatio >= 0.75 && signalResult.isLong) {
+          this.logger.log(
+            `[AiSignal] ${coin.toUpperCase()} LONG blocked — ${activeShorts}/${activeSignals.length} active are SHORT (${(shortRatio * 100).toFixed(0)}%), follow bearish trend`,
+          );
+          return;
+        }
+        // 75%+ LONG active → market bullish → block SHORT
+        if (longRatio >= 0.75 && !signalResult.isLong) {
+          this.logger.log(
+            `[AiSignal] ${coin.toUpperCase()} SHORT blocked — ${activeLongs}/${activeSignals.length} active are LONG (${(longRatio * 100).toFixed(0)}%), follow bullish trend`,
+          );
+          return;
+        }
+      }
+    } catch (err) {
+      this.logger.debug(`[AiSignal] Active position imbalance check failed: ${err?.message}`);
     }
 
     // ── Per-coin 4h EMA trend alignment ─────────────────────────────────────
