@@ -721,10 +721,8 @@ export class SignalQueueService {
       params.rsiZone?.primaryKline ||
       (profile === "SWING" ? "4h" : "15m");
 
-    // Simulated volume for test mode: $1000 balance × 10x leverage
-    const SIM_BALANCE = 1000;
-    const SIM_LEVERAGE = 10;
-    const simNotional = isTestMode ? SIM_BALANCE * SIM_LEVERAGE : undefined;
+    // Simulated volume for test mode: $1000 notional per trade
+    const simNotional = isTestMode ? 1000 : undefined;
     const simQuantity = isTestMode ? simNotional / entryPrice : undefined;
 
     const doc = await this.aiSignalModel.create({

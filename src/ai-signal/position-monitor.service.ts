@@ -216,10 +216,8 @@ export class PositionMonitorService implements OnModuleInit {
       const origEntry = entryPrice;
       const grids: any[] = [];
 
-      // Simulated volume: $1000 balance × 10x leverage = $10,000 notional total
-      const SIM_BALANCE = 1000;
-      const SIM_LEVERAGE = 10;
-      const simNotional = SIM_BALANCE * SIM_LEVERAGE;
+      // Simulated volume: $1000 notional per trade
+      const simNotional = 1000;
       const simGridNotional = simNotional / GRID_LEVEL_COUNT; // per grid
       const simQuantity = simNotional / origEntry;
 
@@ -296,7 +294,7 @@ export class PositionMonitorService implements OnModuleInit {
             ? price * (1 + GRID_TP_PCT / 100)
             : price * (1 - GRID_TP_PCT / 100);
           // Simulated volume for this grid level
-          const simTotalNotional = (signal as any).simNotional || 10000;
+          const simTotalNotional = (signal as any).simNotional || 1000;
           const gridNotional = simTotalNotional / GRID_LEVEL_COUNT;
           grid.simNotional = gridNotional;
           grid.simQuantity = gridNotional / price;

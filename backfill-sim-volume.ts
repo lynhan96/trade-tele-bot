@@ -14,9 +14,7 @@ dotenv.config();
 
 import mongoose from "mongoose";
 
-const SIM_BALANCE = 1000;
-const SIM_LEVERAGE = 10;
-const SIM_NOTIONAL = SIM_BALANCE * SIM_LEVERAGE; // $10,000
+const SIM_NOTIONAL = 1000; // $1000 per trade
 
 async function main() {
   const uri = process.env.MONGODB_URI;
@@ -31,9 +29,9 @@ async function main() {
   const db = mongoose.connection.db;
   const signals = db.collection("ai_signals");
 
-  // 1. Backfill ALL test signals that don't have simNotional
+  // 1. Fix ALL test signals — set simNotional to $1000 (was incorrectly $10,000)
   const testSignals = await signals
-    .find({ isTestMode: true, $or: [{ simNotional: null }, { simNotional: { $exists: false } }] })
+    .find({ isTestMode: true })
     .toArray();
 
   console.log(`Found ${testSignals.length} test signals without simNotional`);
@@ -74,17 +72,10 @@ async function main() {
 
   console.log(`Updated ${updated} test signals with simulated volume`);
 
-  // 2. Also backfill completed signals (test mode) that have pnlPercent but no pnlUsdt
-  const completedNoUsdt = await signals
-    .find({
-      isTestMode: true,
-      status: "COMPLETED",
-      pnlPercent: { $ne: null },
-      $or: [{ pnlUsdt: null }, { pnlUsdt: { $exists: false } }],
-    })
-    .toArray();
+  // 2. Already handled above — skip
+  const completedNoUsdt: any[] = [];
 
-  console.log(`Found ${completedNoUsdt.length} completed test signals without pnlUsdt`);
+  console.log(`Skipping step 2 (already handled in step 1)`);
 
   let updatedPnl = 0;
   for (const sig of completedNoUsdt) {

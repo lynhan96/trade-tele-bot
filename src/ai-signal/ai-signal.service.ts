@@ -1107,10 +1107,8 @@ export class AiSignalService implements OnModuleInit {
     const fmtP = this.fmtPrice;
     const time = new Date().toLocaleString("vi-VN", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "2-digit", timeZone: "Asia/Ho_Chi_Minh" });
 
-    // Simulated volume: $1000 balance × 10x leverage
-    const SIM_BALANCE = 1000;
-    const SIM_LEVERAGE = 10;
-    const simNotional = SIM_BALANCE * SIM_LEVERAGE;
+    // Simulated volume: $1000 notional per trade
+    const simNotional = 1000;
     const simQuantity = simNotional / signal.entryPrice;
 
     const text =
@@ -1120,8 +1118,7 @@ export class AiSignalService implements OnModuleInit {
       `Entry: ${fmtP(signal.entryPrice)}\n` +
       `TP: ${fmtP(signal.takeProfitPrice)}\n` +
       `SL: ${fmtP(signal.stopLossPrice)}\n\n` +
-      `Vol: *$${simNotional.toLocaleString()}* | Qty: *${simQuantity.toFixed(4)}*\n` +
-      `Balance: *$${SIM_BALANCE}* | Lev: *${SIM_LEVERAGE}x*\n\n` +
+      `Vol: *$${simNotional.toLocaleString()}* | Qty: *${simQuantity.toFixed(4)}*\n\n` +
       `${this.getProfileTag(signal)}\n` +
       `_${time} • Test mode_`;
 
@@ -1220,7 +1217,7 @@ export class AiSignalService implements OnModuleInit {
     const sigKey = this.getSignalKey(signal);
 
     // Simulated USDT PnL
-    const simNotional = (signal as any).simNotional || 10000; // $1000 × 10x
+    const simNotional = (signal as any).simNotional || 1000;
     const simPnlUsdt = (pnl / 100) * simNotional;
 
     // Mark COMPLETED directly in MongoDB (don't rely on Redis key existing)
