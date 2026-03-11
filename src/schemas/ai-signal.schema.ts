@@ -147,6 +147,16 @@ export class AiSignal {
 
   @Prop({ default: 0 })
   gridClosedCount?: number; // how many grids have been TP/SL-closed
+
+  // ─── Simulated volume (test mode) ──────────────────────────────────────
+  @Prop()
+  simNotional?: number; // simulated notional USDT (e.g. $1000 balance × 10x leverage)
+
+  @Prop()
+  simQuantity?: number; // simulated quantity (simNotional / entryPrice)
+
+  @Prop()
+  pnlUsdt?: number; // simulated PnL in USDT (pnlPercent × simNotional / 100)
 }
 
 export const AiSignalSchema = SchemaFactory.createForClass(AiSignal);

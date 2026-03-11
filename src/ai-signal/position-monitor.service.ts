@@ -14,6 +14,8 @@ export interface ResolvedSignalInfo {
   entryPrice: number;
   exitPrice: number;
   pnlPercent: number;
+  pnlUsdt?: number; // simulated USDT PnL (test mode grid)
+  simNotional?: number; // simulated notional volume
   closeReason: string;
   queuedSignalActivated: boolean;
 }
@@ -213,6 +215,14 @@ export class PositionMonitorService implements OnModuleInit {
     if (!isGridSignal) {
       const origEntry = entryPrice;
       const grids: any[] = [];
+
+      // Simulated volume: $1000 balance × 10x leverage = $10,000 notional total
+      const SIM_BALANCE = 1000;
+      const SIM_LEVERAGE = 10;
+      const simNotional = SIM_BALANCE * SIM_LEVERAGE;
+      const simGridNotional = simNotional / GRID_LEVEL_COUNT; // per grid
+      const simQuantity = simNotional / origEntry;
+
       for (let i = 0; i < GRID_LEVEL_COUNT; i++) {
         const dev = i * GRID_DEVIATION_STEP;
         if (i === 0) {
@@ -224,6 +234,7 @@ export class PositionMonitorService implements OnModuleInit {
             level: 0, deviationPct: 0, fillPrice: origEntry,
             tpPrice: tp, volumePct: GRID_VOLUME_PCT,
             status: "FILLED", filledAt: new Date(),
+            simNotional: simGridNotional, simQuantity: simGridNotional / origEntry,
           });
         } else {
           grids.push({
@@ -243,6 +254,8 @@ export class PositionMonitorService implements OnModuleInit {
       (signal as any).gridFilledCount = 1;
       (signal as any).gridClosedCount = 0;
       (signal as any).stopLossPrice = globalSl;
+      (signal as any).simNotional = simNotional;
+      (signal as any).simQuantity = simQuantity;
 
       await this.signalQueueService.updateSignalGrid(
         (signal as any)._id.toString(), grids, 1, 0,
@@ -250,8 +263,12 @@ export class PositionMonitorService implements OnModuleInit {
       await this.signalQueueService.initGridSignal(
         (signal as any)._id.toString(), origEntry, globalSl,
       );
+      // Persist simulated volume
+      await this.signalQueueService.updateSimVolume(
+        (signal as any)._id.toString(), simNotional, simQuantity,
+      );
       this.logger.log(
-        `[PositionMonitor] Grid init ${sigKey}: ${GRID_LEVEL_COUNT} levels, SL=${globalSl.toFixed(4)}`,
+        `[PositionMonitor] Grid init ${sigKey}: ${GRID_LEVEL_COUNT} levels, SL=${globalSl.toFixed(4)}, Vol=$${simNotional.toFixed(0)}, Qty=${simQuantity.toFixed(4)}`,
       );
     }
 
@@ -278,10 +295,15 @@ export class PositionMonitorService implements OnModuleInit {
           grid.tpPrice = direction === "LONG"
             ? price * (1 + GRID_TP_PCT / 100)
             : price * (1 - GRID_TP_PCT / 100);
+          // Simulated volume for this grid level
+          const simTotalNotional = (signal as any).simNotional || 10000;
+          const gridNotional = simTotalNotional / GRID_LEVEL_COUNT;
+          grid.simNotional = gridNotional;
+          grid.simQuantity = gridNotional / price;
           filledCount++;
           gridChanged = true;
           this.logger.log(
-            `[PositionMonitor] Grid ${sigKey} L${grid.level} FILLED at ${price.toFixed(4)}, TP=${grid.tpPrice.toFixed(4)}`,
+            `[PositionMonitor] Grid ${sigKey} L${grid.level} FILLED at ${price.toFixed(4)}, TP=${grid.tpPrice.toFixed(4)}, Qty=${grid.simQuantity.toFixed(4)}`,
           );
         }
       }
@@ -296,10 +318,11 @@ export class PositionMonitorService implements OnModuleInit {
           grid.pnlPct = direction === "LONG"
             ? ((grid.tpPrice - grid.fillPrice) / grid.fillPrice) * 100
             : ((grid.fillPrice - grid.tpPrice) / grid.fillPrice) * 100;
+          grid.pnlUsdt = (grid.pnlPct / 100) * (grid.simNotional || 0);
           closedCount++;
           gridChanged = true;
           this.logger.log(
-            `[PositionMonitor] Grid ${sigKey} L${grid.level} TP_CLOSED +${grid.pnlPct.toFixed(2)}%`,
+            `[PositionMonitor] Grid ${sigKey} L${grid.level} TP_CLOSED +${grid.pnlPct.toFixed(2)}% (+${grid.pnlUsdt?.toFixed(2)} USDT)`,
           );
         }
       }
@@ -314,12 +337,14 @@ export class PositionMonitorService implements OnModuleInit {
             grid.pnlPct = direction === "LONG"
               ? ((globalSl - grid.fillPrice) / grid.fillPrice) * 100
               : ((grid.fillPrice - globalSl) / grid.fillPrice) * 100;
+            grid.pnlUsdt = (grid.pnlPct / 100) * (grid.simNotional || 0);
             closedCount++;
             gridChanged = true;
           }
           if (grid.status === "PENDING") {
             grid.status = "SL_CLOSED"; // never filled, no loss
             grid.pnlPct = 0;
+            grid.pnlUsdt = 0;
             closedCount++;
             gridChanged = true;
           }
@@ -340,6 +365,8 @@ export class PositionMonitorService implements OnModuleInit {
         const blendedPnl = totalVolPct > 0
           ? closedGrids.reduce((s, g) => s + (g.pnlPct ?? 0) * g.volumePct, 0) / totalVolPct
           : 0;
+        // Calculate total simulated USDT PnL
+        const totalPnlUsdt = closedGrids.reduce((s, g) => s + (g.pnlUsdt ?? 0), 0);
 
         // Check if all grids resolved
         const allResolved = grids.every(
@@ -358,11 +385,18 @@ export class PositionMonitorService implements OnModuleInit {
           );
 
           if (resolved) {
+            // Persist simulated USDT PnL
+            if (totalPnlUsdt !== 0) {
+              await this.signalQueueService.updateSimPnlUsdt(
+                (signal as any)._id.toString(), totalPnlUsdt,
+              );
+            }
             this.unregisterListener(signal);
             this.resolvingSymbols.add(sigKey);
             const emoji = closeReason === "TAKE_PROFIT" ? "🎯" : "🛑";
+            const usdSign = totalPnlUsdt >= 0 ? "+" : "";
             this.logger.log(
-              `[PositionMonitor] ${emoji} Grid ${sigKey} ALL RESOLVED: ${closeReason} PnL=${blendedPnl.toFixed(2)}%`,
+              `[PositionMonitor] ${emoji} Grid ${sigKey} ALL RESOLVED: ${closeReason} PnL=${blendedPnl.toFixed(2)}% (${usdSign}${totalPnlUsdt.toFixed(2)} USDT)`,
             );
             // Fire resolve callback for notifications + queued signal promotion
             if (this.resolveCallback) {
@@ -370,6 +404,8 @@ export class PositionMonitorService implements OnModuleInit {
                 symbol, signalKey: sigKey, direction,
                 entryPrice: (signal as any).originalEntryPrice ?? entryPrice,
                 exitPrice, pnlPercent: blendedPnl,
+                pnlUsdt: totalPnlUsdt,
+                simNotional: (signal as any).simNotional,
                 closeReason, queuedSignalActivated: false,
               }).catch((e) =>
                 this.logger.warn(`[PositionMonitor] resolveCallback error: ${e?.message}`),

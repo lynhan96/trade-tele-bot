@@ -74,7 +74,7 @@ export class AdminService {
       this.signalModel.countDocuments({ createdAt: { $gte: todayStart } }),
       this.signalModel.countDocuments({ direction: 'LONG' }),
       this.signalModel.countDocuments({ direction: 'SHORT' }),
-      this.signalModel.find({ status: 'COMPLETED', pnlPercent: { $exists: true } }).select('pnlPercent').lean(),
+      this.signalModel.find({ status: 'COMPLETED', pnlPercent: { $exists: true } }).select('pnlPercent pnlUsdt').lean(),
       this.signalModel.aggregate([
         {
           $group: {
@@ -121,6 +121,7 @@ export class AdminService {
       completedSignalDocs.length > 0
         ? completedSignalDocs.reduce((sum, s) => sum + s.pnlPercent, 0)
         : 0;
+    const totalPnlUsdt = completedSignalDocs.reduce((sum, s) => sum + ((s as any).pnlUsdt ?? 0), 0);
 
     const signalsByStrategy: Record<string, { count: number; wins: number; losses: number; totalPnl: number }> = {};
     for (const s of strategyAgg) {
@@ -153,6 +154,7 @@ export class AdminService {
       winRate: Math.round(winRate * 100) / 100,
       avgPnl: Math.round(avgPnl * 100) / 100,
       totalPnl: Math.round(totalPnl * 100) / 100,
+      totalPnlUsdt: Math.round(totalPnlUsdt * 100) / 100,
       totalUsers,
       activeUsers,
       realModeUsers,
@@ -221,6 +223,7 @@ export class AdminService {
     let wins: number | undefined;
     let losses: number | undefined;
     let totalPnl: number | undefined;
+    let totalPnlUsdt: number | undefined;
     let winPnl: number | undefined;
     let lossPnl: number | undefined;
     if (filter.status === "COMPLETED") {
@@ -232,6 +235,7 @@ export class AdminService {
             wins: { $sum: { $cond: [{ $gt: ["$pnlPercent", 0] }, 1, 0] } },
             losses: { $sum: { $cond: [{ $lte: ["$pnlPercent", 0] }, 1, 0] } },
             totalPnl: { $sum: "$pnlPercent" },
+            totalPnlUsdt: { $sum: { $ifNull: ["$pnlUsdt", 0] } },
             winPnl: { $sum: { $cond: [{ $gt: ["$pnlPercent", 0] }, "$pnlPercent", 0] } },
             lossPnl: { $sum: { $cond: [{ $lte: ["$pnlPercent", 0] }, "$pnlPercent", 0] } },
           },
@@ -240,11 +244,12 @@ export class AdminService {
       wins = agg[0]?.wins ?? 0;
       losses = agg[0]?.losses ?? 0;
       totalPnl = agg[0]?.totalPnl ?? 0;
+      totalPnlUsdt = Math.round((agg[0]?.totalPnlUsdt ?? 0) * 100) / 100;
       winPnl = agg[0]?.winPnl ?? 0;
       lossPnl = agg[0]?.lossPnl ?? 0;
     }
 
-    return { data, total, page, limit, totalPages: Math.ceil(total / limit), wins, losses, totalPnl, winPnl, lossPnl };
+    return { data, total, page, limit, totalPages: Math.ceil(total / limit), wins, losses, totalPnl, totalPnlUsdt, winPnl, lossPnl };
   }
 
   async getSignalStats(query: { status?: string; direction?: string }) {

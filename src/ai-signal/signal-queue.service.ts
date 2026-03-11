@@ -345,6 +345,26 @@ export class SignalQueueService {
     );
   }
 
+  /** Persist simulated volume (test mode). */
+  async updateSimVolume(
+    signalId: string,
+    simNotional: number,
+    simQuantity: number,
+  ): Promise<void> {
+    await this.aiSignalModel.findByIdAndUpdate(signalId, {
+      simNotional,
+      simQuantity,
+    });
+  }
+
+  /** Persist simulated USDT PnL (test mode). */
+  async updateSimPnlUsdt(
+    signalId: string,
+    pnlUsdt: number,
+  ): Promise<void> {
+    await this.aiSignalModel.findByIdAndUpdate(signalId, { pnlUsdt });
+  }
+
   // ─── Helpers ──────────────────────────────────────────────────────────────
 
   /** Get the profile-aware signal key from a document. */
@@ -701,6 +721,12 @@ export class SignalQueueService {
       params.rsiZone?.primaryKline ||
       (profile === "SWING" ? "4h" : "15m");
 
+    // Simulated volume for test mode: $1000 balance × 10x leverage
+    const SIM_BALANCE = 1000;
+    const SIM_LEVERAGE = 10;
+    const simNotional = isTestMode ? SIM_BALANCE * SIM_LEVERAGE : undefined;
+    const simQuantity = isTestMode ? simNotional / entryPrice : undefined;
+
     const doc = await this.aiSignalModel.create({
       symbol,
       coin: coin.toLowerCase(),
@@ -724,6 +750,7 @@ export class SignalQueueService {
       primaryKline,
       timeframeProfile: profile,
       indicatorSnapshot: { reason: signalResult.reason },
+      ...(isTestMode ? { simNotional, simQuantity } : {}),
     });
 
     return doc;

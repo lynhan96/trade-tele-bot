@@ -1107,6 +1107,12 @@ export class AiSignalService implements OnModuleInit {
     const fmtP = this.fmtPrice;
     const time = new Date().toLocaleString("vi-VN", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "2-digit", timeZone: "Asia/Ho_Chi_Minh" });
 
+    // Simulated volume: $1000 balance × 10x leverage
+    const SIM_BALANCE = 1000;
+    const SIM_LEVERAGE = 10;
+    const simNotional = SIM_BALANCE * SIM_LEVERAGE;
+    const simQuantity = simNotional / signal.entryPrice;
+
     const text =
       `${dirEmoji} *AI Signal — ${signal.symbol}* 🧪\n` +
       `━━━━━━━━━━━━━━━━━━\n\n` +
@@ -1114,6 +1120,8 @@ export class AiSignalService implements OnModuleInit {
       `Entry: ${fmtP(signal.entryPrice)}\n` +
       `TP: ${fmtP(signal.takeProfitPrice)}\n` +
       `SL: ${fmtP(signal.stopLossPrice)}\n\n` +
+      `Vol: *$${simNotional.toLocaleString()}* | Qty: *${simQuantity.toFixed(4)}*\n` +
+      `Balance: *$${SIM_BALANCE}* | Lev: *${SIM_LEVERAGE}x*\n\n` +
       `${this.getProfileTag(signal)}\n` +
       `_${time} • Test mode_`;
 
@@ -1135,6 +1143,9 @@ export class AiSignalService implements OnModuleInit {
    * In test mode, periodically check if current price would have hit TP or SL.
    */
   private async checkTestModeSignal(signal: AiSignalDocument): Promise<void> {
+    // Grid signals are fully managed by position-monitor's handlePriceTick — skip here
+    if ((signal as any).gridLevels?.length > 0) return;
+
     const currentPrice = await this.marketDataService.getPrice(signal.symbol);
     if (!currentPrice || currentPrice <= 0) return;
 
@@ -1208,12 +1219,17 @@ export class AiSignalService implements OnModuleInit {
     // Use profile-aware signal key for dual-timeframe coins
     const sigKey = this.getSignalKey(signal);
 
+    // Simulated USDT PnL
+    const simNotional = (signal as any).simNotional || 10000; // $1000 × 10x
+    const simPnlUsdt = (pnl / 100) * simNotional;
+
     // Mark COMPLETED directly in MongoDB (don't rely on Redis key existing)
     await this.aiSignalModel.findByIdAndUpdate(signal._id, {
       status: "COMPLETED",
       closeReason: reason,
       exitPrice: currentPrice,
       pnlPercent: pnl,
+      pnlUsdt: simPnlUsdt,
       positionClosedAt: new Date(),
     });
     // Also clean Redis active key if it exists
@@ -1244,7 +1260,26 @@ export class AiSignalService implements OnModuleInit {
       30 * 60,
     );
 
-    // TP/SL notifications only for admin (real-mode users get notified via UserRealTradingService)
+    // Send test mode close notification to subscribers
+    {
+      const emoji = pnl >= 0 ? "🟢" : "🔴";
+      const dirEmoji = signal.direction === "LONG" ? "📈" : "📉";
+      const pnlSign = pnl >= 0 ? "+" : "";
+      const usdSign = simPnlUsdt >= 0 ? "+" : "";
+      const fmtP = this.fmtPrice;
+      const text =
+        `${emoji} *${signal.symbol} ${signal.direction} da dong* 🧪\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `${dirEmoji} ${fmtP(signal.entryPrice)} → ${fmtP(currentPrice)}\n` +
+        `PnL: *${pnlSign}${pnl.toFixed(2)}% (${usdSign}${simPnlUsdt.toFixed(2)} USDT)*\n` +
+        `Vol: *$${simNotional.toLocaleString()}*\n\n` +
+        `_${reason} • Test mode_`;
+
+      const subscribers = await this.subscriptionService.findSignalOnlySubscribers();
+      for (const sub of subscribers) {
+        await this.telegramService.sendTelegramMessage(sub.chatId, text).catch(() => {});
+      }
+    }
 
     // Activate queued if any
     let queued = await this.signalQueueService.activateQueuedSignal(sigKey);
@@ -1397,11 +1432,31 @@ export class AiSignalService implements OnModuleInit {
   }
 
   private async notifyPositionClosed(info: ResolvedSignalInfo): Promise<void> {
-    // Real-mode users get notified via UserRealTradingService; non-real users don't need close notifications
     const pnlSign = info.pnlPercent >= 0 ? "+" : "";
     this.logger.log(
       `[AiSignal] ${info.symbol} ${info.direction} ${info.closeReason}: ${pnlSign}${info.pnlPercent.toFixed(2)}%`,
     );
+
+    // Send close notification to subscribers for test mode signals (with simulated USDT PnL)
+    if (info.simNotional && info.pnlUsdt !== undefined) {
+      const emoji = info.pnlPercent >= 0 ? "🟢" : "🔴";
+      const dirEmoji = info.direction === "LONG" ? "📈" : "📉";
+      const usdSign = info.pnlUsdt >= 0 ? "+" : "";
+      const fmtP = this.fmtPrice;
+
+      const text =
+        `${emoji} *${info.symbol} ${info.direction} da dong* 🧪\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `${dirEmoji} ${fmtP(info.entryPrice)} → ${fmtP(info.exitPrice)}\n` +
+        `PnL: *${pnlSign}${info.pnlPercent.toFixed(2)}% (${usdSign}${info.pnlUsdt.toFixed(2)} USDT)*\n` +
+        `Vol: *$${info.simNotional.toLocaleString()}*\n\n` +
+        `_${info.closeReason} • Test mode_`;
+
+      const subscribers = await this.subscriptionService.findSignalOnlySubscribers();
+      for (const sub of subscribers) {
+        await this.telegramService.sendTelegramMessage(sub.chatId, text).catch(() => {});
+      }
+    }
   }
 
   private async notifyAdminOnly(text: string): Promise<void> {
