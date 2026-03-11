@@ -33,6 +33,8 @@ const ORDER_LOCK_KEY = (telegramId: number, symbol: string, direction: string) =
 const POS_SLOT_KEY = (telegramId: number) => `cache:pos-slots:${telegramId}`;
 /** Redis key for temporarily blacklisting closed/errored symbols (1h TTL). */
 const CLOSED_SYMBOL_KEY = (symbol: string) => `cache:closed-symbol:${symbol}`;
+/** Redis key for 1h cooldown after all positions close via TP (prevent over-trading on new cycle). */
+const TP_CYCLE_COOLDOWN_KEY = (telegramId: number) => `cache:tp-cycle-cooldown:${telegramId}`;
 
 /** Binance Futures taker fee: 0.04% per side × 2 (open + close) = 0.08% total. */
 const BINANCE_FEE_PCT = 0.08;
@@ -176,6 +178,13 @@ export class UserRealTradingService implements OnModuleInit {
       // Skip users whose cycle is paused (target hit — let existing positions ride)
       if (sub.cyclePaused) {
         this.logger.debug(`[RealTrading] ${symbol}: user ${sub.telegramId} cycle paused, skipping new trade`);
+        continue;
+      }
+
+      // Skip if in post-TP cooldown (1h calm-down after all positions closed via TP)
+      const tpCooldown = await this.redisService.get(TP_CYCLE_COOLDOWN_KEY(sub.telegramId));
+      if (tpCooldown) {
+        this.logger.debug(`[RealTrading] ${symbol}: user ${sub.telegramId} in post-TP cooldown, skipping new trade`);
         continue;
       }
 
@@ -629,6 +638,16 @@ export class UserRealTradingService implements OnModuleInit {
 
     // Accumulate cumulative PnL on user subscription
     await this.subscriptionService.incrementTradePnl(trade.telegramId, pnlUsdt);
+
+    // Post-TP cooldown: if all positions closed via TP, wait 1h before new cycle
+    if (reason === "TAKE_PROFIT") {
+      const remaining = await this.userTradeModel.countDocuments({ telegramId, status: "OPEN" });
+      if (remaining === 0) {
+        const cooldownSecs = 60 * 60; // 1 hour
+        await this.redisService.set(TP_CYCLE_COOLDOWN_KEY(telegramId), { startedAt: new Date().toISOString() }, cooldownSecs);
+        this.logger.log(`[RealTrading] User ${telegramId} — all positions closed via TP. 1h cooldown started.`);
+      }
+    }
 
     const sign = pnlPct >= 0 ? "+" : "";
     const emoji = pnlPct >= 0 ? "✅" : "❌";

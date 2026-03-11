@@ -398,6 +398,16 @@ export class RuleEngineService {
 
     const isLong = isLongZone;
 
+    // Regime gate: don't short into a strong bull trend, don't long into a strong bear trend
+    if (isLong && params.regime === "STRONG_BEAR") {
+      this.logger.debug(`[RuleEngine] ${coin} RSI_ZONE LONG blocked: STRONG_BEAR regime`);
+      return null;
+    }
+    if (!isLong && params.regime === "STRONG_BULL") {
+      this.logger.debug(`[RuleEngine] ${coin} RSI_ZONE SHORT blocked: STRONG_BULL regime`);
+      return null;
+    }
+
     // Initial candle direction gate
     if (cfg.enableInitialCandle) {
       const ohlc = await this.indicatorService.getOhlc(coin, cfg.primaryKline);
@@ -858,6 +868,18 @@ export class RuleEngineService {
         await this.redisService.set(stateKey, patternState, PATTERN_STATE_TTL);
         return null;
       }
+    }
+
+    // Regime gate: don't short into strong bull, don't long into strong bear
+    if (patternState.isLong && params.regime === "STRONG_BEAR") {
+      this.logger.debug(`[RuleEngine] ${coin} STOCH_EMA_KDJ LONG blocked: STRONG_BEAR regime`);
+      await this.redisService.delete(stateKey);
+      return null;
+    }
+    if (!patternState.isLong && params.regime === "STRONG_BULL") {
+      this.logger.debug(`[RuleEngine] ${coin} STOCH_EMA_KDJ SHORT blocked: STRONG_BULL regime`);
+      await this.redisService.delete(stateKey);
+      return null;
     }
 
     await this.redisService.delete(stateKey);
