@@ -498,11 +498,15 @@ export class AiSignalService implements OnModuleInit {
 
     // Confidence floor: DB shows confidence < 65 → win rate < 44%. Enforce minimum 63.
     const CONFIDENCE_FLOOR = 63;
-    params.minConfidenceToTrade = Math.max(params.minConfidenceToTrade ?? 0, CONFIDENCE_FLOOR);
+    // RANGE_BOUND/SIDEWAYS: raise floor to 67 — ranging markets are harder to trade,
+    // lower-confidence signals are more likely to be whipsaws
+    const isRanging = params.regime === "RANGE_BOUND" || params.regime === "SIDEWAYS";
+    const effectiveFloor = isRanging ? 67 : CONFIDENCE_FLOOR;
+    params.minConfidenceToTrade = Math.max(params.minConfidenceToTrade ?? 0, effectiveFloor);
     // Cap per regime — prevent AI from setting unrealistically high thresholds
     const regimeThresholdCap: Record<string, number> = {
-      SIDEWAYS: 68,
-      RANGE_BOUND: 68,
+      SIDEWAYS: 70,
+      RANGE_BOUND: 70,
       MIXED: 68,
       VOLATILE: 70,
       BTC_CORRELATION: 68,

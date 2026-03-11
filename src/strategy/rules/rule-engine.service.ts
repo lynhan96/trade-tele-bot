@@ -258,9 +258,10 @@ export class RuleEngineService {
       const isBear = params.regime === "STRONG_BEAR";
       const isMixed = params.regime === "MIXED" || params.regime === "VOLATILE" || params.regime === "BTC_CORRELATION";
       // Symmetric thresholds: equal opportunity for LONG and SHORT
-      // In uptrend within RANGE_BOUND, RSI naturally sits 50-65 — old thresholds blocked all LONGs
+      // RANGE_BOUND: only extreme RSI bounces (oversold for LONG, overbought for SHORT)
+      // RSI cross at 50 in a range = whipsaw, not a real signal
       const threshold = isRanging
-        ? isLong ? 60 : 50   // ranging: LONG OK up to 60, SHORT needs RSI > 50 (was 55/45 — too asymmetric)
+        ? isLong ? 40 : 60   // ranging: LONG only if RSI<40 (bouncing from oversold), SHORT only if RSI>60 (selling overbought)
         : isBull
           ? isLong ? 65 : 40  // bull: LONG OK up to 65, SHORT needs extreme RSI < 40
           : isBear
@@ -445,6 +446,13 @@ export class RuleEngineService {
   ): Promise<SignalResult | null> {
     const cfg = params.trendEma;
     if (!cfg) return null;
+
+    // TREND_EMA is a trend-following strategy — EMA crosses in ranging markets are whipsaws
+    const isRanging = params.regime === "RANGE_BOUND" || params.regime === "SIDEWAYS";
+    if (isRanging) {
+      this.logger.debug(`[RuleEngine] ${coin} TREND_EMA blocked: ranging regime (${params.regime})`);
+      return null;
+    }
 
     const closes = await this.indicatorService.getCloses(coin, cfg.primaryKline);
     if (closes.length < Math.max(cfg.slowPeriod, 50) + 5) return null;
@@ -874,6 +882,13 @@ export class RuleEngineService {
   ): Promise<SignalResult | null> {
     const cfg = params.emaPullback;
     if (!cfg) return null;
+
+    // EMA_PULLBACK buys dips to EMA in trending markets — invalid in ranging markets
+    const isRanging = params.regime === "RANGE_BOUND" || params.regime === "SIDEWAYS";
+    if (isRanging) {
+      this.logger.debug(`[RuleEngine] ${coin} EMA_PULLBACK blocked: ranging regime (${params.regime})`);
+      return null;
+    }
 
     const ohlc = await this.indicatorService.getOhlc(coin, cfg.primaryKline);
     const { opens, closes } = ohlc;
