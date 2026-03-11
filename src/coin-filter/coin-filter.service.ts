@@ -19,6 +19,12 @@ const SHORTLIST_CACHE_KEY = "cache:filter:shortlist";
 const SHORTLIST_TTL = 360; // 6 minutes
 const AI_MARKET_FILTERS_KEY = "cache:ai:market-filters";
 
+// Commodities & TradFi — not crypto, different market dynamics, skip from scan
+const COMMODITY_BLACKLIST = new Set([
+  "XAUUSDT", "XAGUSDT", "PAXGUSDT",   // gold, silver
+  "TSLAUSDT", "MSTRUSDT",              // stocks
+]);
+
 @Injectable()
 export class CoinFilterService {
   private readonly logger = new Logger(CoinFilterService.name);
@@ -145,6 +151,7 @@ export class CoinFilterService {
       (t) =>
         t.symbol.endsWith("USDT") &&
         !t.symbol.includes("_") && // exclude delivery contracts
+        !COMMODITY_BLACKLIST.has(t.symbol) && // exclude commodities/TradFi
         parseFloat(t.quoteVolume) >= minVolumeUsd,
     );
 
