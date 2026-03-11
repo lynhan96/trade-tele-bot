@@ -26,6 +26,7 @@
     "run-all-simulators.ts",
     "analyze-signals.ts",
     "fix-user-pnl.ts",
+    "backfill-sim-volume.ts",
     "dist",
     "node_modules"
   ]
