@@ -27,8 +27,8 @@ const TRADFI_BLACKLIST = new Set(["XAUUSDT", "XAGUSDT", "MSTRUSDT"]);
 const QTY_PRECISION_KEY = (symbol: string) => `cache:binance:qty-precision:${symbol}`;
 /** Redis key for caching symbol price precision (tick size decimals). */
 const PRICE_PRECISION_KEY = (symbol: string) => `cache:binance:price-precision:${symbol}`;
-/** Redis lock to prevent duplicate order placement (30s TTL). */
-const ORDER_LOCK_KEY = (telegramId: number, symbol: string) => `cache:order-lock:${telegramId}:${symbol}`;
+/** Redis lock to prevent duplicate order placement (30s TTL). Keyed by direction to allow LONG+SHORT on same symbol. */
+const ORDER_LOCK_KEY = (telegramId: number, symbol: string, direction: string) => `cache:order-lock:${telegramId}:${symbol}:${direction}`;
 /** Redis counter for atomic position slot reservation. */
 const POS_SLOT_KEY = (telegramId: number) => `cache:pos-slots:${telegramId}`;
 /** Redis key for temporarily blacklisting closed/errored symbols (1h TTL). */
@@ -170,7 +170,7 @@ export class UserRealTradingService implements OnModuleInit {
       return;
     }
 
-    // Filter out subscribers who already have an open trade on this symbol
+    // Filter out subscribers who already have an open trade on this symbol + direction
     const eligibleSubs: typeof subscribers = [];
     for (const sub of subscribers) {
       // Skip users whose cycle is paused (target hit — let existing positions ride)
@@ -179,9 +179,10 @@ export class UserRealTradingService implements OnModuleInit {
         continue;
       }
 
-      const existing = await this.userTradeModel.findOne({ telegramId: sub.telegramId, symbol, status: "OPEN" }).lean();
+      // Block same symbol + same direction (Binance one-way mode: can't have 2 independent positions same side)
+      const existing = await this.userTradeModel.findOne({ telegramId: sub.telegramId, symbol, direction, status: "OPEN" }).lean();
       if (existing) {
-        this.logger.debug(`[RealTrading] ${symbol}: user ${sub.telegramId} already has open position, skipping`);
+        this.logger.debug(`[RealTrading] ${symbol}: user ${sub.telegramId} already has OPEN ${direction} position, skipping`);
         continue;
       }
 
@@ -226,12 +227,12 @@ export class UserRealTradingService implements OnModuleInit {
     const { symbol, direction, entryPrice, stopLossPrice, takeProfitPrice } = signal;
     const slotKey = POS_SLOT_KEY(telegramId);
 
-    const lockKey = ORDER_LOCK_KEY(telegramId, symbol);
+    const lockKey = ORDER_LOCK_KEY(telegramId, symbol, direction);
     try {
-      // Redis lock to prevent duplicate orders when INTRADAY + SWING fire simultaneously
+      // Redis lock to prevent duplicate orders when INTRADAY + SWING fire simultaneously (same symbol+direction)
       const acquired = await this.redisService.setNX(lockKey, "1", 30);
       if (!acquired) {
-        this.logger.debug(`[RealTrading] ${symbol}: user ${telegramId} order lock active, skipping duplicate`);
+        this.logger.debug(`[RealTrading] ${symbol}: user ${telegramId} order lock active (${direction}), skipping duplicate`);
         await this.redisService.decr(slotKey); // release reserved slot
         return;
       }
@@ -243,23 +244,10 @@ export class UserRealTradingService implements OnModuleInit {
         return;
       }
 
-      // Double-check: no existing Binance position on this symbol (race condition guard)
-      try {
-        const positions = await this.binanceService.getOpenPositions(keys.apiKey, keys.apiSecret);
-        const existing = positions.find(p => p.symbol === symbol && p.quantity !== 0);
-        if (existing) {
-          this.logger.debug(`[RealTrading] ${symbol}: user ${telegramId} already has Binance position (qty=${existing.quantity}), skipping`);
-          await this.redisService.decr(slotKey);
-          return;
-        }
-      } catch (err) {
-        this.logger.warn(`[RealTrading] ${symbol}: failed to check positions for user ${telegramId}: ${err?.message}`);
-      }
-
-      // Final DB-level dedup: ensure no existing OPEN trade for this symbol BEFORE placing any order
-      const existingTrade = await this.userTradeModel.findOne({ telegramId, symbol, status: "OPEN" });
+      // Final DB-level dedup: ensure no existing OPEN trade for same symbol+direction before placing
+      const existingTrade = await this.userTradeModel.findOne({ telegramId, symbol, direction, status: "OPEN" });
       if (existingTrade) {
-        this.logger.warn(`[RealTrading] ${symbol}: user ${telegramId} already has OPEN trade in DB, skipping`);
+        this.logger.warn(`[RealTrading] ${symbol}: user ${telegramId} already has OPEN ${direction} trade in DB, skipping`);
         await this.redisService.decr(slotKey);
         return;
       }
@@ -288,23 +276,11 @@ export class UserRealTradingService implements OnModuleInit {
       // GTE_GTC algo orders require an open position to exist
       await new Promise((r) => setTimeout(r, 1500));
 
-      // Custom TP/SL: if user has set custom %, always use their exact value
+      // SL and TP always from bot signal logic (AI-computed + trailing stop)
       const roundPrice = (p: number) => parseFloat(p.toFixed(pricePrecision));
 
-      let effectiveSl = stopLossPrice;
-      let effectiveTp = takeProfitPrice;
-      if (sub.customSlPct) {
-        effectiveSl = direction === "LONG"
-          ? fillPrice * (1 - sub.customSlPct / 100)
-          : fillPrice * (1 + sub.customSlPct / 100);
-        this.logger.debug(`[RealTrading] ${symbol} SL: using user config ${sub.customSlPct}%`);
-      }
-      if (sub.customTpPct) {
-        effectiveTp = direction === "LONG"
-          ? fillPrice * (1 + sub.customTpPct / 100)
-          : fillPrice * (1 - sub.customTpPct / 100);
-        this.logger.debug(`[RealTrading] ${symbol} TP: using user config ${sub.customTpPct}%`);
-      }
+      const effectiveSl = stopLossPrice;
+      const effectiveTp = takeProfitPrice;
       let roundedSl = roundPrice(effectiveSl);
       let roundedTp = effectiveTp ? roundPrice(effectiveTp) : undefined;
 
@@ -1389,23 +1365,7 @@ export class UserRealTradingService implements OnModuleInit {
           }
           const openSymbols = new Set(binancePositions.map((p) => p.symbol));
 
-          // Dedup: only process one OPEN trade per symbol (close duplicates silently)
-          const seenSymbols = new Set<string>();
-          const dedupedTrades: typeof trades = [];
           for (const trade of trades) {
-            if (seenSymbols.has(trade.symbol)) {
-              this.logger.warn(`[RealTrading] ${trade.symbol} user ${telegramId}: closing duplicate OPEN trade record`);
-              await this.userTradeModel.updateOne(
-                { _id: (trade as any)._id },
-                { $set: { status: "CLOSED", closeReason: "DUPLICATE", closedAt: new Date() } },
-              );
-              continue;
-            }
-            seenSymbols.add(trade.symbol);
-            dedupedTrades.push(trade);
-          }
-
-          for (const trade of dedupedTrades) {
             const { symbol, direction, slPrice, tpPrice, chatId } = trade;
 
             // Position already closed on Binance — mark trade as closed with PnL
@@ -1508,14 +1468,7 @@ export class UserRealTradingService implements OnModuleInit {
             }
 
             // ── SL missing ──────────────────────────────────────────────────
-            // If slPrice not in trade record, compute from user's customSlPct
-            let effectiveSlPrice = slPrice;
-            if (!effectiveSlPrice && sub?.customSlPct && trade.entryPrice) {
-              effectiveSlPrice = direction === "LONG"
-                ? trade.entryPrice * (1 - sub.customSlPct / 100)
-                : trade.entryPrice * (1 + sub.customSlPct / 100);
-              await this.userTradeModel.updateOne({ _id: trade._id }, { $set: { slPrice: effectiveSlPrice } });
-            }
+            const effectiveSlPrice = slPrice;
             if (!algo?.hasSl && effectiveSlPrice) {
               this.logger.warn(`[RealTrading] ${symbol} user ${telegramId}: SL missing — placing at $${effectiveSlPrice}`);
               try {
@@ -1572,78 +1525,8 @@ export class UserRealTradingService implements OnModuleInit {
               }
             }
 
-            // ── SL/TP mismatch: auto-sync when user's custom SL/TP differs from current ──
-            // This ensures changes to customSlPct/customTpPct propagate to running trades within 2 minutes.
-            if (trade.entryPrice) {
-              // TP sync: use user's customTpPct if set, otherwise fixed 2%
-              const effectiveTpPct = sub?.customTpPct || 2.0;
-              const expectedTpPrice = direction === "LONG"
-                ? trade.entryPrice * (1 + effectiveTpPct / 100)
-                : trade.entryPrice * (1 - effectiveTpPct / 100);
-              const currentTpPrice = tpPrice || 0;
-              const tpDiffPct = currentTpPrice > 0
-                ? Math.abs(currentTpPrice - expectedTpPrice) / expectedTpPrice * 100
-                : 100;
-              if (tpDiffPct > 0.1 && algo?.hasTp) {
-                this.logger.log(
-                  `[RealTrading] ${symbol} user ${telegramId}: TP mismatch (${currentTpPrice} vs ${expectedTpPrice.toFixed(4)}, ${effectiveTpPct}%) — syncing`,
-                );
-                try {
-                  await this.moveTpForRealUsers(symbol, expectedTpPrice, direction);
-                  await this.userTradeModel.updateOne(
-                    { _id: trade._id },
-                    { $set: { tpPrice: parseFloat(expectedTpPrice.toFixed(8)) } },
-                  );
-                } catch (err) {
-                  this.logger.warn(`[RealTrading] ${symbol} user ${telegramId}: TP sync failed: ${err?.message}`);
-                }
-              }
-
-              // SL sync: use user's customSlPct if set, otherwise keep current SL
-              if (sub?.customSlPct && slPrice) {
-                const expectedSlPrice = direction === "LONG"
-                  ? trade.entryPrice * (1 - sub.customSlPct / 100)
-                  : trade.entryPrice * (1 + sub.customSlPct / 100);
-                const slDiffPct = Math.abs(slPrice - expectedSlPrice) / expectedSlPrice * 100;
-                // Only sync if SL hasn't been moved to entry (trailing SL) — don't widen SL back
-                const slMovedToEntry = direction === "LONG"
-                  ? slPrice >= trade.entryPrice * 0.999
-                  : slPrice <= trade.entryPrice * 1.001;
-                if (slDiffPct > 0.1 && algo?.hasSl && !slMovedToEntry) {
-                  this.logger.log(
-                    `[RealTrading] ${symbol} user ${telegramId}: SL mismatch (${slPrice} vs ${expectedSlPrice.toFixed(4)}, ${sub.customSlPct}%) — syncing`,
-                  );
-                  try {
-                    const roundedNewSl = round(expectedSlPrice);
-                    if (trade.binanceSlAlgoId) {
-                      await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, trade.binanceSlAlgoId);
-                    }
-                    const slOrder = await this.binanceService.setStopLoss(
-                      keys.apiKey, keys.apiSecret, symbol, roundedNewSl,
-                      direction as "LONG" | "SHORT", trade.quantity,
-                    );
-                    const newSlId = slOrder?.algoId?.toString() ?? slOrder?.orderId?.toString();
-                    await this.userTradeModel.updateOne(
-                      { _id: trade._id },
-                      { $set: { slPrice: roundedNewSl, binanceSlAlgoId: newSlId } },
-                    );
-                  } catch (err) {
-                    this.logger.warn(`[RealTrading] ${symbol} user ${telegramId}: SL sync failed: ${err?.message}`);
-                  }
-                }
-              }
-            }
-
             // ── TP missing ──────────────────────────────────────────────────
-            // If tpPrice not in trade record, compute from user's customTpPct
-            let effectiveTpPrice = tpPrice;
-            if (!effectiveTpPrice && sub?.customTpPct && trade.entryPrice) {
-              effectiveTpPrice = direction === "LONG"
-                ? trade.entryPrice * (1 + sub.customTpPct / 100)
-                : trade.entryPrice * (1 - sub.customTpPct / 100);
-              // Save computed TP back to trade record
-              await this.userTradeModel.updateOne({ _id: trade._id }, { $set: { tpPrice: effectiveTpPrice } });
-            }
+            const effectiveTpPrice = tpPrice;
             if (effectiveTpPrice && !algo?.hasTp) {
               this.logger.warn(`[RealTrading] ${symbol} user ${telegramId}: TP missing — placing at $${effectiveTpPrice}`);
               try {
