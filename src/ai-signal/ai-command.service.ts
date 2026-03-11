@@ -963,6 +963,124 @@ export class AiCommandService implements OnModuleInit {
       }
     });
 
+    // /ai grid [on|off|set <param> <value>] — Grid Recovery mode
+    this.telegramService.registerBotCommand(
+      /^\/ai[_ ]grid(?:\s+(.+))?$/i,
+      async (msg, match) => {
+        const chatId = msg.chat.id;
+        const telegramId = msg.from?.id;
+        if (!telegramId) return;
+
+        try {
+          const sub = await this.subscriptionService.getSubscription(telegramId);
+          if (!sub) {
+            await this.telegramService.sendTelegramMessage(chatId, `ℹ️ Dung /ai on de bat bot truoc.`);
+            return;
+          }
+
+          const arg = match?.[1]?.trim()?.toLowerCase() ?? "";
+
+          // /ai grid — show current config
+          if (!arg) {
+            const enabled = sub.gridEnabled ? "✅ BAT" : "❌ TAT";
+            const levels = sub.gridLevelCount ?? 5;
+            const step = sub.gridDeviationStep ?? 0.5;
+            const tp = sub.gridTpPct ?? 0.3;
+            const sl = sub.gridGlobalSlPct ?? 3.5;
+            const msg =
+              `🔲 *Grid Recovery: ${enabled}*\n` +
+              `━━━━━━━━━━━━━━━━━━\n\n` +
+              `So levels: *${levels}* (gom base)\n` +
+              `Khoang cach: *${step}%* giua moi level\n` +
+              `TP / level: *+${tp}%*\n` +
+              `Global SL: *-${sl}%* tu entry goc\n\n` +
+              `_Khi bat, moi lenh se chia thanh ${levels} phan.\n` +
+              `Level 0 vao tai entry, L1-L${levels - 1} vao khi gia giam ${step}%/${(step * 2).toFixed(1)}%/...\n` +
+              `Moi level chot lai +${tp}% rieng. SL chung -${sl}% tu entry goc._\n\n` +
+              `*Lenh:*\n` +
+              `/ai grid on — bat grid\n` +
+              `/ai grid off — tat, chay TP/SL binh thuong\n` +
+              `/ai grid set levels 3 — so levels (2-6)\n` +
+              `/ai grid set step 0.8 — khoang cach %\n` +
+              `/ai grid set tp 0.5 — TP % moi level\n` +
+              `/ai grid set sl 4.0 — global SL %`;
+            await this.telegramService.sendTelegramMessage(chatId, msg);
+            return;
+          }
+
+          // /ai grid on
+          if (arg === "on") {
+            await this.subscriptionService.setGridEnabled(telegramId, true);
+            const levels = sub.gridLevelCount ?? 5;
+            const step = sub.gridDeviationStep ?? 0.5;
+            const tp = sub.gridTpPct ?? 0.3;
+            const sl = sub.gridGlobalSlPct ?? 3.5;
+            await this.telegramService.sendTelegramMessage(chatId,
+              `✅ *Grid Recovery: BAT*\n\n` +
+              `${levels} levels, ${step}% step, +${tp}% TP/level, -${sl}% SL\n\n` +
+              `_Lenh moi se chia thanh ${levels} phan, moi phan chot lai rieng._`);
+            return;
+          }
+
+          // /ai grid off
+          if (arg === "off") {
+            await this.subscriptionService.setGridEnabled(telegramId, false);
+            await this.telegramService.sendTelegramMessage(chatId,
+              `❌ *Grid Recovery: TAT*\n\n_Lenh moi se chay TP/SL binh thuong (1 lenh duy nhat)._`);
+            return;
+          }
+
+          // /ai grid set <param> <value>
+          const setMatch = arg.match(/^set\s+(\w+)\s+([\d.]+)$/);
+          if (setMatch) {
+            const param = setMatch[1];
+            const val = parseFloat(setMatch[2]);
+
+            if (param === "levels") {
+              const n = Math.round(val);
+              if (n < 2 || n > 6) {
+                await this.telegramService.sendTelegramMessage(chatId, `❌ Levels phai tu 2-6. VD: /ai grid set levels 4`);
+                return;
+              }
+              await this.subscriptionService.setGridParam(telegramId, "gridLevelCount", n);
+              await this.telegramService.sendTelegramMessage(chatId, `✅ Grid levels: *${n}*`);
+            } else if (param === "step") {
+              if (val < 0.1 || val > 3) {
+                await this.telegramService.sendTelegramMessage(chatId, `❌ Step phai tu 0.1-3.0%. VD: /ai grid set step 0.5`);
+                return;
+              }
+              await this.subscriptionService.setGridParam(telegramId, "gridDeviationStep", val);
+              await this.telegramService.sendTelegramMessage(chatId, `✅ Grid step: *${val}%*`);
+            } else if (param === "tp") {
+              if (val < 0.1 || val > 2) {
+                await this.telegramService.sendTelegramMessage(chatId, `❌ TP phai tu 0.1-2.0%. VD: /ai grid set tp 0.3`);
+                return;
+              }
+              await this.subscriptionService.setGridParam(telegramId, "gridTpPct", val);
+              await this.telegramService.sendTelegramMessage(chatId, `✅ Grid TP / level: *+${val}%*`);
+            } else if (param === "sl") {
+              if (val < 1 || val > 10) {
+                await this.telegramService.sendTelegramMessage(chatId, `❌ SL phai tu 1-10%. VD: /ai grid set sl 3.5`);
+                return;
+              }
+              await this.subscriptionService.setGridParam(telegramId, "gridGlobalSlPct", val);
+              await this.telegramService.sendTelegramMessage(chatId, `✅ Grid global SL: *-${val}%*`);
+            } else {
+              await this.telegramService.sendTelegramMessage(chatId,
+                `❌ Tham so khong hop le: *${param}*\n\nDung: levels, step, tp, sl\nVD: /ai grid set levels 4`);
+            }
+            return;
+          }
+
+          // Unknown sub-command
+          await this.telegramService.sendTelegramMessage(chatId,
+            `❌ Lenh khong hop le.\n\nDung: /ai grid — xem config\n/ai grid on/off — bat/tat\n/ai grid set <param> <value>`);
+        } catch (err) {
+          await this.telegramService.sendTelegramMessage(chatId, `❌ Loi: ${err?.message}`);
+        }
+      },
+    );
+
     // /ai close [all|SYMBOL] — close REAL Binance positions (user-facing)
     this.telegramService.registerBotCommand(
       /^\/ai[_ ]close(?:\s+(\S+))?$/i,

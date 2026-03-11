@@ -416,4 +416,24 @@ export class UserSignalSubscriptionService {
       { $set: { cyclePaused: paused } },
     );
   }
+
+  /** Enable or disable grid recovery mode. */
+  async setGridEnabled(telegramId: number, enabled: boolean): Promise<boolean> {
+    const result = await this.subscriptionModel.findOneAndUpdate(
+      { telegramId, isActive: true },
+      { $set: { gridEnabled: enabled } },
+    );
+    return !!result;
+  }
+
+  /** Set a single grid recovery parameter (gridLevelCount, gridDeviationStep, gridTpPct, gridGlobalSlPct). */
+  async setGridParam(telegramId: number, param: string, value: number): Promise<boolean> {
+    const allowed = ["gridLevelCount", "gridDeviationStep", "gridTpPct", "gridGlobalSlPct"];
+    if (!allowed.includes(param)) return false;
+    const result = await this.subscriptionModel.findOneAndUpdate(
+      { telegramId, isActive: true },
+      { $set: { [param]: value } },
+    );
+    return !!result;
+  }
 }
