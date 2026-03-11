@@ -668,19 +668,36 @@ export class AiSignalService implements OnModuleInit {
       }
     }
 
-    // ── Recent SL direction bias: block direction that keeps losing ─────────
-    // If 3+ of last 5 SLs are in one direction, block that direction temporarily
+    // ── Market momentum filter: block direction that keeps losing ───────────
+    // Analyzes ALL recent trades (not just SLs) to detect directional bias.
+    // If one direction has net negative PnL while the other is positive → block the loser.
+    // More sensitive than old "3/5 SLs" check which rarely triggered.
     const recentPerf = await this.redisService.get<any[]>("cache:ai:recent-perf") || [];
-    const recentSLs = recentPerf.filter((p) => p.closeReason === "STOP_LOSS").slice(-5);
-    if (recentSLs.length >= 3) {
-      const longSLs = recentSLs.filter((p) => p.direction === "LONG").length;
-      const shortSLs = recentSLs.filter((p) => p.direction === "SHORT").length;
-      if (longSLs >= 3 && signalResult.isLong) {
-        this.logger.log(`[AiSignal] ${coin.toUpperCase()} LONG blocked — ${longSLs}/${recentSLs.length} recent SLs are LONGs`);
+    if (recentPerf.length >= 3) {
+      const longTrades = recentPerf.filter((p) => p.direction === "LONG");
+      const shortTrades = recentPerf.filter((p) => p.direction === "SHORT");
+
+      const longPnl = longTrades.length > 0
+        ? longTrades.reduce((s, p) => s + (p.pnlPercent || 0), 0) / longTrades.length
+        : 0;
+      const shortPnl = shortTrades.length > 0
+        ? shortTrades.reduce((s, p) => s + (p.pnlPercent || 0), 0) / shortTrades.length
+        : 0;
+      const longSLs = longTrades.filter((p) => p.closeReason === "STOP_LOSS" && (p.pnlPercent || 0) < 0).length;
+      const shortSLs = shortTrades.filter((p) => p.closeReason === "STOP_LOSS" && (p.pnlPercent || 0) < 0).length;
+
+      // Block LONG if: avg LONG PnL < -1% AND at least 2 LONG SLs (confirmed losing streak)
+      if (signalResult.isLong && longPnl < -1 && longSLs >= 2) {
+        this.logger.log(
+          `[AiSignal] ${coin.toUpperCase()} LONG blocked — market momentum anti-LONG (avgPnl=${longPnl.toFixed(1)}%, ${longSLs} SLs from ${longTrades.length} trades)`,
+        );
         return;
       }
-      if (shortSLs >= 3 && !signalResult.isLong) {
-        this.logger.log(`[AiSignal] ${coin.toUpperCase()} SHORT blocked — ${shortSLs}/${recentSLs.length} recent SLs are SHORTs`);
+      // Block SHORT if: avg SHORT PnL < -1% AND at least 2 SHORT SLs
+      if (!signalResult.isLong && shortPnl < -1 && shortSLs >= 2) {
+        this.logger.log(
+          `[AiSignal] ${coin.toUpperCase()} SHORT blocked — market momentum anti-SHORT (avgPnl=${shortPnl.toFixed(1)}%, ${shortSLs} SLs from ${shortTrades.length} trades)`,
+        );
         return;
       }
     }

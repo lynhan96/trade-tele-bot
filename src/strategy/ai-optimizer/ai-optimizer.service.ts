@@ -1128,9 +1128,9 @@ Respond ONLY with JSON: {"decision":"PASS"|"REJECT","reason":"brief 10-word max 
       ...result,
       time: new Date().toISOString().slice(11, 16),
     });
-    // Keep last 20 results, 4h TTL
-    const trimmed = perf.slice(-20);
-    await this.redisService.set(RECENT_PERF_KEY, trimmed, 4 * 60 * 60);
+    // Keep last 30 results, 12h TTL — enough data for momentum filter to detect direction bias
+    const trimmed = perf.slice(-30);
+    await this.redisService.set(RECENT_PERF_KEY, trimmed, 12 * 60 * 60);
   }
 
 
