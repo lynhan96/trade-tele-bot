@@ -27,11 +27,12 @@ export interface SubscriberInfo {
   cyclePeakPct?: number;               // highest PnL% in current cycle (for trailing floor)
   cyclePaused?: boolean;               // true = stop opening new trades (target hit)
   cycleTargetMode?: string;            // "TRAILING" | "CLOSE_ALL"
-  // DCA Grid Recovery
-  dcaEnabled?: boolean;                // true = split orders into base + safety orders
-  dcaMaxOrders?: number;               // max safety orders per position (default: 2)
-  dcaBaseOrderPct?: number;            // base order = this % of volume (default: 40%)
-  dcaSlFromAvgPct?: number;            // SL distance from avg entry (default: 1.5%)
+  // Grid Recovery
+  gridEnabled?: boolean;               // true = split orders into grid levels with individual TP
+  gridLevelCount?: number;             // total levels including base (2-6, default: 5)
+  gridDeviationStep?: number;          // step between grid levels in % (default: 0.5%)
+  gridTpPct?: number;                  // individual TP per grid level in % (default: 0.3%)
+  gridGlobalSlPct?: number;            // global SL from original entry in % (default: 3.5%)
 }
 
 @Injectable()
@@ -114,10 +115,11 @@ export class UserSignalSubscriptionService {
       realModeDailyDisabledAt: d.realModeDailyDisabledAt,
       cyclePaused: d.cyclePaused,
       maxOpenPositions: d.maxOpenPositions,
-      dcaEnabled: d.dcaEnabled,
-      dcaMaxOrders: d.dcaMaxOrders ?? 2,
-      dcaBaseOrderPct: d.dcaBaseOrderPct ?? 40,
-      dcaSlFromAvgPct: d.dcaSlFromAvgPct ?? 1.5,
+      gridEnabled: d.gridEnabled,
+      gridLevelCount: d.gridLevelCount ?? 5,
+      gridDeviationStep: d.gridDeviationStep ?? 0.5,
+      gridTpPct: d.gridTpPct ?? 0.3,
+      gridGlobalSlPct: d.gridGlobalSlPct ?? 3.5,
     }));
   }
 

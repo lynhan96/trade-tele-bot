@@ -508,11 +508,12 @@ export class AdminService {
       realModeLeverage?: number | null;
       coinVolumes?: Record<string, number> | null;
       cycleTargetMode?: string;
-      // DCA Grid Recovery
-      dcaEnabled?: boolean;
-      dcaMaxOrders?: number | null;
-      dcaBaseOrderPct?: number | null;
-      dcaSlFromAvgPct?: number | null;
+      // Grid Recovery
+      gridEnabled?: boolean;
+      gridLevelCount?: number | null;
+      gridDeviationStep?: number | null;
+      gridTpPct?: number | null;
+      gridGlobalSlPct?: number | null;
     },
   ) {
     const $set: any = {};

@@ -72,23 +72,33 @@ export class UserTrade {
   @Prop()
   aiSignalId?: string; // ref to AiSignal._id
 
-  // ─── DCA Grid Recovery ──────────────────────────────────────────────────
-  @Prop({ default: 0 })
-  dcaLevel?: number; // 0=base only, 1=SO1 filled, 2=SO2 filled
-
-  @Prop()
-  avgEntryPrice?: number; // weighted average entry (updated after each DCA fill)
-
-  @Prop()
-  originalEntryPrice?: number; // first fill price (before DCA)
-
+  // ─── Grid Recovery ─────────────────────────────────────────────────────
   @Prop({ type: Array, default: [] })
-  dcaOrders?: Array<{
-    level: number; // 1, 2, ...
-    price: number; // fill price
-    quantity: number;
-    filledAt: Date;
+  gridLevels?: Array<{
+    level: number; // 0=base, 1-4=grid levels
+    deviationPct: number; // % from original entry
+    fillPrice: number;
+    quantity: number; // base asset qty for this grid
+    tpPrice: number; // individual TP price
+    binanceTpAlgoId?: string; // algo TP order for this grid
+    volumePct: number;
+    status: string; // "PENDING" | "FILLED" | "TP_CLOSED" | "SL_CLOSED"
+    filledAt?: Date;
+    closedAt?: Date;
+    pnlPct?: number;
   }>;
+
+  @Prop()
+  originalEntryPrice?: number; // base grid fill price
+
+  @Prop()
+  gridGlobalSlPrice?: number; // global SL price
+
+  @Prop({ default: 0 })
+  gridFilledCount?: number;
+
+  @Prop({ default: 0 })
+  gridClosedCount?: number;
 }
 
 export const UserTradeSchema = SchemaFactory.createForClass(UserTrade);

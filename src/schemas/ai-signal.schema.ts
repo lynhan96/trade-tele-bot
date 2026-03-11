@@ -122,15 +122,31 @@ export class AiSignal {
   @Prop({ type: Object, default: {} })
   indicatorSnapshot: Record<string, any>; // RSI, BB width, etc. at signal time
 
-  // ─── DCA Grid Recovery (signal-level simulation) ────────────────────────
+  // ─── Grid Recovery (signal-level simulation) ─────────────────────────────
+  @Prop({ type: Array, default: [] })
+  gridLevels?: Array<{
+    level: number; // 0=base, 1-4=grid levels
+    deviationPct: number; // % from original entry (0, -0.5, -1.0, ...)
+    fillPrice: number; // price at which this grid was filled
+    tpPrice: number; // individual TP = fillPrice ± gridTpPct%
+    volumePct: number; // % of total volume (e.g. 20)
+    status: string; // "PENDING" | "FILLED" | "TP_CLOSED" | "SL_CLOSED"
+    filledAt?: Date;
+    closedAt?: Date;
+    pnlPct?: number; // realized PnL for this grid level
+  }>;
+
+  @Prop()
+  originalEntryPrice?: number; // base grid fill price
+
+  @Prop()
+  gridGlobalSlPrice?: number; // global SL price (-3.5% from original entry)
+
   @Prop({ default: 0 })
-  dcaLevel?: number; // 0=base only, 1=SO1 simulated, 2=SO2 simulated
+  gridFilledCount?: number; // how many grids have been filled
 
-  @Prop()
-  originalEntryPrice?: number; // first entry price (before DCA avg)
-
-  @Prop()
-  originalStopLossPrice?: number; // original SL before DCA adjustment
+  @Prop({ default: 0 })
+  gridClosedCount?: number; // how many grids have been TP/SL-closed
 }
 
 export const AiSignalSchema = SchemaFactory.createForClass(AiSignal);

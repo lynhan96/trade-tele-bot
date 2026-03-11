@@ -76,18 +76,21 @@ export class UserSignalSubscription {
   @Prop({ default: 10 })
   maxOpenPositions?: number; // max concurrent real positions per user (default: 10)
 
-  // ─── DCA Grid Recovery ──────────────────────────────────────────────────
+  // ─── Grid Recovery ─────────────────────────────────────────────────────
   @Prop({ default: false })
-  dcaEnabled?: boolean; // true = split orders into base + safety orders for DCA
+  gridEnabled?: boolean; // true = split orders into grid levels with individual TP
 
-  @Prop({ default: 2 })
-  dcaMaxOrders?: number; // max safety orders per position (default: 2)
+  @Prop({ default: 5 })
+  gridLevelCount?: number; // total levels including base (2-6, default: 5)
 
-  @Prop({ default: 40 })
-  dcaBaseOrderPct?: number; // base order = this % of volume (default: 40%)
+  @Prop({ default: 0.5 })
+  gridDeviationStep?: number; // step between grid levels in % (default: 0.5%)
 
-  @Prop({ default: 1.5 })
-  dcaSlFromAvgPct?: number; // SL distance from avg entry (default: 1.5%)
+  @Prop({ default: 0.3 })
+  gridTpPct?: number; // individual TP per grid level in % (default: 0.3%)
+
+  @Prop({ default: 3.5 })
+  gridGlobalSlPct?: number; // global SL from original entry in % (default: 3.5%)
 
   @Prop({ default: 0 })
   totalPnlUsdt?: number; // cumulative realized PnL in USDT

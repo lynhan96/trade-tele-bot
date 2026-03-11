@@ -263,9 +263,10 @@ export class UserRealTradingService implements OnModuleInit {
 
       const leverage = await this.resolveLeverage(sub, params, keys.apiKey, keys.apiSecret, symbol);
       const fullVol = this.getVolForSymbol(symbol, sub.coinVolumes, sub.tradingBalance);
-      // DCA: base order = dcaBaseOrderPct% of full volume (rest reserved for safety orders)
-      const isDca = sub.dcaEnabled === true;
-      const vol = isDca ? fullVol * ((sub.dcaBaseOrderPct ?? 40) / 100) : fullVol;
+      // Grid: base order = 1/gridLevelCount of full volume (rest reserved for grid levels)
+      const isGrid = sub.gridEnabled === true;
+      const gridLevelCount = sub.gridLevelCount ?? 5;
+      const vol = isGrid ? fullVol / gridLevelCount : fullVol;
       const rawQty = vol / currentPrice;
       const quantity = parseFloat(rawQty.toFixed(quantityPrecision));
       if (quantity <= 0) {
@@ -288,24 +289,23 @@ export class UserRealTradingService implements OnModuleInit {
       // GTE_GTC algo orders require an open position to exist
       await new Promise((r) => setTimeout(r, 1500));
 
-      // SL and TP — DCA users get SL from avg entry (initially = fill price)
+      // SL and TP — Grid users get global SL from original entry, no signal TP (grid has individual TP per level)
       const roundPrice = (p: number) => parseFloat(p.toFixed(pricePrecision));
 
       let effectiveSl = stopLossPrice;
       let effectiveTp = takeProfitPrice;
-      if (isDca) {
-        // DCA: initial SL at dcaSlFromAvgPct from fill price (tighter than signal SL)
-        const dcaSlPct = sub.dcaSlFromAvgPct ?? 1.5;
+      if (isGrid) {
+        // Grid: global SL at gridGlobalSlPct from fill price (wider than signal SL to allow recovery)
+        const gridGlobalSlPct = sub.gridGlobalSlPct ?? 3.5;
         effectiveSl = direction === "LONG"
-          ? fillPrice * (1 - dcaSlPct / 100)
-          : fillPrice * (1 + dcaSlPct / 100);
-        // DCA: TP from fill price (same % as signal, but from actual entry)
-        if (takeProfitPrice && entryPrice) {
-          const tpPct = Math.abs(takeProfitPrice - entryPrice) / entryPrice * 100;
-          effectiveTp = direction === "LONG"
-            ? fillPrice * (1 + tpPct / 100)
-            : fillPrice * (1 - tpPct / 100);
-        }
+          ? fillPrice * (1 - gridGlobalSlPct / 100)
+          : fillPrice * (1 + gridGlobalSlPct / 100);
+        // Grid: no global TP — each grid level has individual TP via partial close
+        // Base grid TP = fillPrice ± gridTpPct
+        const gridTpPct = sub.gridTpPct ?? 0.3;
+        effectiveTp = direction === "LONG"
+          ? fillPrice * (1 + gridTpPct / 100)
+          : fillPrice * (1 - gridTpPct / 100);
       }
       let roundedSl = roundPrice(effectiveSl);
       let roundedTp = effectiveTp ? roundPrice(effectiveTp) : undefined;
@@ -395,14 +395,23 @@ export class UserRealTradingService implements OnModuleInit {
         status: "OPEN",
         openedAt: new Date(),
         aiSignalId: (signal as any)._id?.toString(),
-        // DCA fields
-        ...(isDca ? {
-          dcaLevel: 0,
-          avgEntryPrice: fillPrice,
+        // Grid Recovery fields
+        ...(isGrid ? {
           originalEntryPrice: fillPrice,
-          dcaOrders: [],
+          gridGlobalSlPrice: effectiveSl,
+          gridFilledCount: 1,
+          gridClosedCount: 0,
+          gridLevels: this.buildGridLevels(fillPrice, direction, sub),
         } : {}),
       });
+
+      // Grid: set base grid quantity to the placed quantity
+      if (isGrid && trade.gridLevels?.length > 0) {
+        trade.gridLevels[0].quantity = quantity;
+        await this.userTradeModel.findByIdAndUpdate((trade as any)._id, {
+          'gridLevels.0.quantity': quantity,
+        });
+      }
 
       this.logger.log(
         `[RealTrading] ${symbol} REAL order placed for user ${telegramId}: ${direction} ×${quantity} @ $${fillPrice} (×${leverage} lev)`,
@@ -431,7 +440,7 @@ export class UserRealTradingService implements OnModuleInit {
         `Stop Loss: *${fmtP(roundedSl)}* (${actualSlPct.toFixed(1)}%)${binanceSlAlgoId ? "" : " ⚠️"}\n` +
         (roundedTp ? `Take Profit: *${fmtP(roundedTp)}* (${actualTpPct.toFixed(1)}%)${binanceTpAlgoId ? "" : " ⚠️"}\n` : "") +
         `Volume: *${vol.toLocaleString()} USDT*` +
-        (isDca ? `\n🔄 DCA: Base ${sub.dcaBaseOrderPct ?? 40}% | Max ${sub.dcaMaxOrders ?? 2} SO` : ``);
+        (isGrid ? `\n🔲 Grid: ${gridLevelCount} levels | Step ${sub.gridDeviationStep ?? 0.5}% | TP ${sub.gridTpPct ?? 0.3}%` : ``);
       await this.telegramService.sendTelegramMessage(chatId, msg).catch(() => {});
 
       // Register data stream to monitor fills/closings
@@ -471,9 +480,9 @@ export class UserRealTradingService implements OnModuleInit {
 
     for (const trade of openTrades) {
       try {
-        // Skip DCA trades — their SL is managed by DCA system (based on avg entry)
-        if (trade.dcaLevel != null && trade.dcaLevel >= 0 && trade.avgEntryPrice) {
-          this.logger.debug(`[RealTrading] ${symbol}: skip SL move for DCA trade user ${trade.telegramId} (DCA manages SL)`);
+        // Skip grid trades — their SL is managed by grid system (global SL from original entry)
+        if (trade.gridLevels?.length > 0) {
+          this.logger.debug(`[RealTrading] ${symbol}: skip SL move for grid trade user ${trade.telegramId} (grid manages SL)`);
           continue;
         }
 
@@ -1612,82 +1621,140 @@ export class UserRealTradingService implements OnModuleInit {
     }
   }
 
-  // ─── DCA Grid Recovery ──────────────────────────────────────────────────
+  // ─── Grid Recovery ─────────────────────────────────────────────────────
 
   /**
-   * DCA Safety Order deviation thresholds from original entry.
-   * SO1 at -1.2%, SO2 at -2.0% price drop from original entry.
+   * Build grid levels array for a new trade.
+   * Level 0 = base (FILLED at entry), levels 1-N = PENDING at deviation steps.
    */
-  private readonly DCA_SO_DEVIATIONS = [1.2, 2.0];
+  private buildGridLevels(
+    fillPrice: number,
+    direction: string,
+    sub: SubscriberInfo,
+  ): Array<any> {
+    const levelCount = sub.gridLevelCount ?? 5;
+    const devStep = sub.gridDeviationStep ?? 0.5;
+    const gridTpPct = sub.gridTpPct ?? 0.3;
+    const volumePct = 100 / levelCount;
+    const grids: any[] = [];
+
+    for (let i = 0; i < levelCount; i++) {
+      const dev = i * devStep; // 0, 0.5, 1.0, 1.5, 2.0
+      if (i === 0) {
+        const tp = direction === "LONG"
+          ? fillPrice * (1 + gridTpPct / 100)
+          : fillPrice * (1 - gridTpPct / 100);
+        grids.push({
+          level: 0, deviationPct: 0, fillPrice, quantity: 0, // quantity set after placement
+          tpPrice: tp, volumePct, status: "FILLED", filledAt: new Date(),
+        });
+      } else {
+        grids.push({
+          level: i, deviationPct: dev, fillPrice: 0, quantity: 0,
+          tpPrice: 0, volumePct, status: "PENDING",
+        });
+      }
+    }
+    return grids;
+  }
 
   /**
-   * DCA Safety Order size as fraction of remaining volume.
-   * With base=40%, remaining=60%: SO1=30% (half), SO2=30% (rest).
-   */
-  private readonly DCA_SO_SIZE_SPLIT = [0.5, 1.0]; // fraction of remaining volume
-
-  /**
-   * Every 30 seconds: check DCA-enabled open trades for safety order triggers.
-   * If price dropped to SO deviation level → place additional market order → recalculate avg entry → update SL/TP.
+   * Every 30 seconds: check grid-enabled open trades for:
+   * 1. PENDING grid fills (price dropped to trigger level → place additional market order)
+   * 2. FILLED grid TP hits (price bounced to TP → partial close via reduce-only order)
    */
   @Cron("*/30 * * * * *")
-  async checkDcaOrders(): Promise<void> {
+  async checkGridOrders(): Promise<void> {
     try {
-      const dcaTrades = await this.userTradeModel.find({
+      const gridTrades = await this.userTradeModel.find({
         status: "OPEN",
-        dcaLevel: { $exists: true, $gte: 0 },
+        gridLevels: { $exists: true, $ne: [] },
       }).lean();
-      if (dcaTrades.length === 0) return;
+      if (gridTrades.length === 0) return;
 
-      for (const trade of dcaTrades) {
+      for (const trade of gridTrades) {
         try {
-          const maxLevel = trade.dcaLevel ?? 0;
-          if (maxLevel >= this.DCA_SO_DEVIATIONS.length) continue; // all SOs filled
-
-          const sub = await this.subscriptionService.getSubscription(trade.telegramId);
-          if (!sub || !sub.dcaEnabled) continue;
-          const dcaMax = sub.dcaMaxOrders ?? 2;
-          if (maxLevel >= dcaMax) continue;
-
           const currentPrice = this.marketDataService.getLatestPrice(trade.symbol);
           if (!currentPrice) continue;
 
           const origEntry = trade.originalEntryPrice ?? trade.entryPrice;
-          const nextLevel = maxLevel + 1;
-          const deviationPct = this.DCA_SO_DEVIATIONS[maxLevel]; // 0-indexed: level 0 → first SO deviation
+          const grids: any[] = trade.gridLevels ?? [];
+          const { direction, symbol, telegramId } = trade;
+          let gridChanged = false;
 
-          // Check if price dropped enough for next SO
-          const priceDrop = trade.direction === "LONG"
-            ? ((origEntry - currentPrice) / origEntry) * 100
-            : ((currentPrice - origEntry) / origEntry) * 100;
+          // Check PENDING grids for fill triggers
+          for (const grid of grids) {
+            if (grid.status !== "PENDING") continue;
+            const triggerPrice = direction === "LONG"
+              ? origEntry * (1 - grid.deviationPct / 100)
+              : origEntry * (1 + grid.deviationPct / 100);
+            const triggered = direction === "LONG" ? currentPrice <= triggerPrice : currentPrice >= triggerPrice;
+            if (triggered) {
+              await this.placeGridOrder(trade as any, grid, currentPrice);
+              gridChanged = true;
+            }
+          }
 
-          if (priceDrop < deviationPct) continue; // not yet at SO level
+          // Check FILLED grids for individual TP hits
+          for (const grid of grids) {
+            if (grid.status !== "FILLED" || !grid.tpPrice || !grid.quantity) continue;
+            const tpHit = direction === "LONG" ? currentPrice >= grid.tpPrice : currentPrice <= grid.tpPrice;
+            if (tpHit) {
+              await this.closeGridTp(trade as any, grid, currentPrice);
+              gridChanged = true;
+            }
+          }
 
-          await this.placeDcaSafetyOrder(trade as any, sub, nextLevel, currentPrice);
+          // Persist grid state if changed
+          if (gridChanged) {
+            const filledCount = grids.filter(g => g.status === "FILLED" || g.status === "TP_CLOSED").length;
+            const closedCount = grids.filter(g => g.status === "TP_CLOSED" || g.status === "SL_CLOSED").length;
+            await this.userTradeModel.findByIdAndUpdate((trade as any)._id, {
+              gridLevels: grids,
+              gridFilledCount: filledCount,
+              gridClosedCount: closedCount,
+            });
+
+            // Check if all grids are closed → close trade
+            const allClosed = grids.every(g => g.status === "TP_CLOSED" || g.status === "SL_CLOSED");
+            if (allClosed) {
+              const blendedPnl = grids.reduce((sum, g) => sum + (g.pnlPct ?? 0) * (g.volumePct / 100), 0);
+              await this.userTradeModel.findByIdAndUpdate((trade as any)._id, {
+                status: "CLOSED",
+                closeReason: "GRID_COMPLETE",
+                pnlPercent: blendedPnl - BINANCE_FEE_PCT,
+                pnlUsdt: ((blendedPnl - BINANCE_FEE_PCT) / 100) * trade.notionalUsdt,
+                closedAt: new Date(),
+              });
+              await this.subscriptionService.incrementTradePnl(
+                telegramId, ((blendedPnl - BINANCE_FEE_PCT) / 100) * trade.notionalUsdt,
+              );
+              this.logger.log(`[Grid] ${symbol} user ${telegramId}: all grids closed, blended PnL ${blendedPnl.toFixed(2)}%`);
+            }
+          }
         } catch (err) {
-          this.logger.error(`[DCA] Error checking ${trade.symbol} user ${trade.telegramId}: ${err?.message}`);
+          this.logger.error(`[Grid] Error checking ${trade.symbol} user ${trade.telegramId}: ${err?.message}`);
         }
       }
     } catch (err) {
-      this.logger.error(`[DCA] checkDcaOrders outer error: ${err?.message}`);
+      this.logger.error(`[Grid] checkGridOrders outer error: ${err?.message}`);
     }
   }
 
   /**
-   * Place a DCA safety order: additional market order to average down entry.
-   * Updates avg entry, recalculates SL/TP based on new avg, updates Binance algo orders.
+   * Place a grid level order: additional market order at the grid trigger price.
+   * Each grid gets its own quantity (equal split of total volume).
    */
-  private async placeDcaSafetyOrder(
+  private async placeGridOrder(
     trade: UserTradeDocument,
-    sub: any,
-    level: number,
+    grid: any,
     currentPrice: number,
   ): Promise<void> {
     const { telegramId, chatId, symbol, direction } = trade;
-    const tradeId = (trade as any)._id;
+    const level = grid.level;
 
-    // Prevent duplicate SO placement
-    const lockKey = `cache:dca-lock:${telegramId}:${symbol}:${level}`;
+    // Prevent duplicate grid placement
+    const lockKey = `cache:grid-lock:${telegramId}:${symbol}:${level}`;
     const acquired = await this.redisService.setNX(lockKey, "1", 60);
     if (!acquired) return;
 
@@ -1695,134 +1762,156 @@ export class UserRealTradingService implements OnModuleInit {
     if (!keys?.apiKey) return;
 
     try {
-      // Calculate SO volume: remaining volume × split fraction
-      const fullVol = this.getVolForSymbol(symbol, sub.coinVolumes, sub.tradingBalance);
-      const baseOrderPct = sub.dcaBaseOrderPct ?? 40;
-      const remainingVol = fullVol * ((100 - baseOrderPct) / 100);
-      const splitIdx = Math.min(level - 1, this.DCA_SO_SIZE_SPLIT.length - 1);
-      const soVol = remainingVol * this.DCA_SO_SIZE_SPLIT[splitIdx];
+      const sub = await this.subscriptionService.getSubscription(telegramId);
+      if (!sub || !sub.gridEnabled) return;
+
+      const fullVol = this.getVolForSymbol(symbol, sub.coinVolumes as any, sub.tradingBalance);
+      const levelCount = sub.gridLevelCount ?? 5;
+      const gridVol = fullVol / levelCount;
+      const gridTpPct = sub.gridTpPct ?? 0.3;
 
       const [qtyPrec, pricePrec] = await Promise.all([
         this.getQuantityPrecision(symbol),
         this.getPricePrecision(symbol),
       ]);
-      const roundPrice = (p: number) => parseFloat(p.toFixed(pricePrec));
 
-      const soQty = parseFloat((soVol / currentPrice).toFixed(qtyPrec));
-      if (soQty <= 0) return;
+      const gridQty = parseFloat((gridVol / currentPrice).toFixed(qtyPrec));
+      if (gridQty <= 0) return;
 
-      // Place additional market order (same direction)
+      // Place additional market order (same direction — adds to existing position)
       const order = await this.binanceService.openPosition(keys.apiKey, keys.apiSecret, {
         symbol,
         side: direction as "LONG" | "SHORT",
-        quantity: soQty,
+        quantity: gridQty,
         leverage: trade.leverage,
       });
-      const soFillPrice = parseFloat(order.avgPrice) || currentPrice;
+      const gridFillPrice = parseFloat(order.avgPrice) || currentPrice;
 
-      // Calculate new weighted average entry
-      const prevQty = trade.quantity;
-      const prevAvg = trade.avgEntryPrice ?? trade.entryPrice;
-      const newTotalQty = prevQty + soQty;
-      const newAvgEntry = (prevAvg * prevQty + soFillPrice * soQty) / newTotalQty;
+      // Update grid level
+      grid.status = "FILLED";
+      grid.fillPrice = gridFillPrice;
+      grid.quantity = gridQty;
+      grid.filledAt = new Date();
+      grid.tpPrice = direction === "LONG"
+        ? gridFillPrice * (1 + gridTpPct / 100)
+        : gridFillPrice * (1 - gridTpPct / 100);
 
-      // Recalculate SL from new avg entry
-      const dcaSlPct = sub.dcaSlFromAvgPct ?? 1.5;
-      const newSlPrice = direction === "LONG"
-        ? newAvgEntry * (1 - dcaSlPct / 100)
-        : newAvgEntry * (1 + dcaSlPct / 100);
+      // Update total quantity on trade
+      const newTotalQty = trade.quantity + gridQty;
+      await this.userTradeModel.findByIdAndUpdate((trade as any)._id, {
+        quantity: newTotalQty,
+        notionalUsdt: newTotalQty * trade.entryPrice,
+      });
 
-      // Recalculate TP from new avg entry (same % distance as original signal TP)
-      const origEntry = trade.originalEntryPrice ?? trade.entryPrice;
-      let newTpPrice = trade.tpPrice;
-      if (trade.tpPrice && origEntry) {
-        const tpPct = Math.abs(trade.tpPrice - origEntry) / origEntry * 100;
-        newTpPrice = direction === "LONG"
-          ? newAvgEntry * (1 + tpPct / 100)
-          : newAvgEntry * (1 - tpPct / 100);
-      }
-
-      // Wait for Binance to process
+      // Update SL for new total quantity (cancel old, place new with same global SL price)
       await new Promise((r) => setTimeout(r, 1500));
-
-      // Cancel old SL/TP and place new ones with updated prices and quantity
-      const roundedSl = roundPrice(newSlPrice);
-      const roundedTp = newTpPrice ? roundPrice(newTpPrice) : undefined;
-
-      // Cancel old SL
       if (trade.binanceSlAlgoId) {
         await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, trade.binanceSlAlgoId).catch(() => {});
       }
-      // Cancel old TP
-      if (trade.binanceTpAlgoId) {
-        await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, trade.binanceTpAlgoId).catch(() => {});
-      }
-
-      // Place new SL for total quantity
-      let newSlAlgoId: string | undefined;
+      const roundedSl = parseFloat((trade.gridGlobalSlPrice ?? trade.slPrice).toFixed(pricePrec));
       try {
         const slOrder = await this.binanceService.setStopLoss(
           keys.apiKey, keys.apiSecret, symbol, roundedSl,
           direction as "LONG" | "SHORT", newTotalQty,
         );
-        newSlAlgoId = slOrder?.algoId?.toString() ?? slOrder?.orderId?.toString();
+        const newSlId = slOrder?.algoId?.toString() ?? slOrder?.orderId?.toString();
+        await this.userTradeModel.findByIdAndUpdate((trade as any)._id, { binanceSlAlgoId: newSlId });
       } catch (err) {
-        this.logger.error(`[DCA] ${symbol} SO${level} SL failed for user ${telegramId}: ${err?.message}`);
+        this.logger.error(`[Grid] ${symbol} L${level} SL update failed for user ${telegramId}: ${err?.message}`);
       }
-
-      // Place new TP for total quantity
-      let newTpAlgoId: string | undefined;
-      if (roundedTp) {
-        try {
-          const tpOrder = await this.binanceService.setTakeProfitAtPrice(
-            keys.apiKey, keys.apiSecret, symbol, roundedTp,
-            direction as "LONG" | "SHORT", newTotalQty,
-          );
-          newTpAlgoId = tpOrder?.algoId?.toString() ?? tpOrder?.orderId?.toString();
-        } catch (err) {
-          this.logger.error(`[DCA] ${symbol} SO${level} TP failed for user ${telegramId}: ${err?.message}`);
-        }
-      }
-
-      // Update trade record
-      const dcaOrder = { level, price: soFillPrice, quantity: soQty, filledAt: new Date() };
-      await this.userTradeModel.findByIdAndUpdate(tradeId, {
-        $set: {
-          dcaLevel: level,
-          avgEntryPrice: newAvgEntry,
-          entryPrice: newAvgEntry, // update main entry for PnL calculations
-          quantity: newTotalQty,
-          notionalUsdt: newTotalQty * newAvgEntry,
-          slPrice: roundedSl,
-          tpPrice: roundedTp,
-          binanceSlAlgoId: newSlAlgoId,
-          binanceTpAlgoId: newTpAlgoId,
-        },
-        $push: { dcaOrders: dcaOrder },
-      });
 
       // Notify user
       const fmtP = (p: number) =>
         p >= 1000 ? `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :
         p >= 1 ? `$${p.toFixed(2)}` : `$${p.toFixed(4)}`;
-      const actualSlPct = Math.abs(newAvgEntry - roundedSl) / newAvgEntry * 100;
       const msg =
-        `🔄 *DCA Safety Order ${level}*\n` +
+        `🔲 *Grid Level ${level} Filled*\n` +
         `━━━━━━━━━━━━━━━━━━\n\n` +
         `${symbol} ${direction}\n` +
-        `SO${level}: *×${soQty}* @ ${fmtP(soFillPrice)}\n` +
-        `Avg Entry: *${fmtP(newAvgEntry)}* (was ${fmtP(prevAvg)})\n` +
-        `Total Qty: *×${newTotalQty.toFixed(qtyPrec)}*\n` +
-        `New SL: *${fmtP(roundedSl)}* (${actualSlPct.toFixed(1)}% from avg)\n` +
-        (roundedTp ? `New TP: *${fmtP(roundedTp)}*\n` : ``) +
-        `SO Vol: *${soVol.toFixed(0)} USDT*`;
+        `L${level}: *×${gridQty}* @ ${fmtP(gridFillPrice)}\n` +
+        `TP: *${fmtP(grid.tpPrice)}* (+${gridTpPct}%)\n` +
+        `Total Qty: *×${newTotalQty.toFixed(qtyPrec)}*`;
       await this.telegramService.sendTelegramMessage(chatId, msg).catch(() => {});
 
       this.logger.log(
-        `[DCA] ${symbol} SO${level} placed for user ${telegramId}: ×${soQty} @ ${soFillPrice}, avg=${newAvgEntry.toFixed(4)}, SL=${roundedSl}`,
+        `[Grid] ${symbol} L${level} filled for user ${telegramId}: ×${gridQty} @ ${gridFillPrice}`,
       );
     } catch (err) {
-      this.logger.error(`[DCA] ${symbol} SO${level} failed for user ${telegramId}: ${err?.message}`);
+      this.logger.error(`[Grid] ${symbol} L${level} failed for user ${telegramId}: ${err?.message}`);
+    }
+  }
+
+  /**
+   * Close a single grid level via partial close (reduce-only market order).
+   * Each grid takes its individual profit independently.
+   */
+  private async closeGridTp(
+    trade: UserTradeDocument,
+    grid: any,
+    currentPrice: number,
+  ): Promise<void> {
+    const { telegramId, chatId, symbol, direction } = trade;
+    const level = grid.level;
+
+    const keys = await this.userSettingsService.getApiKeys(telegramId, "binance");
+    if (!keys?.apiKey) return;
+
+    try {
+      const qtyPrec = await this.getQuantityPrecision(symbol);
+      const closeQty = parseFloat(grid.quantity.toFixed(qtyPrec));
+      if (closeQty <= 0) return;
+
+      // Place reduce-only market order to partially close position
+      await this.binanceService.closePosition(
+        keys.apiKey, keys.apiSecret, symbol, closeQty, direction,
+      );
+
+      // Update grid level
+      grid.status = "TP_CLOSED";
+      grid.closedAt = new Date();
+      grid.pnlPct = direction === "LONG"
+        ? ((grid.tpPrice - grid.fillPrice) / grid.fillPrice) * 100
+        : ((grid.fillPrice - grid.tpPrice) / grid.fillPrice) * 100;
+
+      // Update remaining quantity on trade
+      const newTotalQty = Math.max(0, trade.quantity - closeQty);
+      await this.userTradeModel.findByIdAndUpdate((trade as any)._id, {
+        quantity: newTotalQty,
+      });
+
+      // Update SL quantity if positions remain
+      if (newTotalQty > 0 && trade.binanceSlAlgoId) {
+        try {
+          await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, trade.binanceSlAlgoId).catch(() => {});
+          const pricePrec = await this.getPricePrecision(symbol);
+          const roundedSl = parseFloat((trade.gridGlobalSlPrice ?? trade.slPrice).toFixed(pricePrec));
+          const slOrder = await this.binanceService.setStopLoss(
+            keys.apiKey, keys.apiSecret, symbol, roundedSl,
+            direction as "LONG" | "SHORT", newTotalQty,
+          );
+          const newSlId = slOrder?.algoId?.toString() ?? slOrder?.orderId?.toString();
+          await this.userTradeModel.findByIdAndUpdate((trade as any)._id, { binanceSlAlgoId: newSlId });
+        } catch (err) {
+          this.logger.warn(`[Grid] ${symbol} L${level} SL update after TP failed: ${err?.message}`);
+        }
+      }
+
+      // Notify user
+      const fmtP = (p: number) =>
+        p >= 1000 ? `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :
+        p >= 1 ? `$${p.toFixed(2)}` : `$${p.toFixed(4)}`;
+      const msg =
+        `✅ *Grid L${level} TP Hit*\n\n` +
+        `${symbol} ${direction}\n` +
+        `Entry: ${fmtP(grid.fillPrice)} → TP: ${fmtP(grid.tpPrice)}\n` +
+        `PnL: *+${grid.pnlPct.toFixed(2)}%*`;
+      await this.telegramService.sendTelegramMessage(chatId, msg).catch(() => {});
+
+      this.logger.log(
+        `[Grid] ${symbol} L${level} TP closed for user ${telegramId}: +${grid.pnlPct.toFixed(2)}%`,
+      );
+    } catch (err) {
+      this.logger.error(`[Grid] ${symbol} L${level} TP close failed for user ${telegramId}: ${err?.message}`);
     }
   }
 

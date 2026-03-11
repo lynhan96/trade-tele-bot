@@ -196,80 +196,201 @@ export class PositionMonitorService implements OnModuleInit {
     const { symbol, direction, entryPrice, takeProfitPrice } = signal;
     const sigKey = this.getSignalKey(signal);
 
-    // ─── DCA Grid Simulation (signal level) ────────────────────────────────
-    // Simulates DCA safety orders at signal level so test mode stats reflect DCA.
-    // Config mirrors user-real-trading: SO1 at -1.2%, SO2 at -2.0% from original entry.
-    // Base=40%, SO1=30%, SO2=30% → weighted avg entry updated in-place.
-    const DCA_SO_DEVIATIONS = [1.2, 2.0];
-    const DCA_SO_WEIGHTS = [
-      { basePct: 40, soPct: 30 }, // SO1: base 40% + SO 30%
-      { basePct: 70, soPct: 30 }, // SO2: prev 70% + SO 30%
-    ];
-    const DCA_SL_FROM_AVG = 1.5; // % SL from avg entry
+    // ─── Grid Recovery Simulation (signal level) ───────────────────────────
+    // Simulates grid recovery at signal level for test mode stats.
+    // 5 grids (base + 4), each 20% volume. Each grid has individual TP (+0.3%).
+    // Global SL at -3.5% from original entry. Partial closes per grid.
+    const GRID_DEVIATION_STEP = 0.5; // % step between grids
+    const GRID_LEVEL_COUNT = 5;      // base + 4 grids
+    const GRID_TP_PCT = 0.3;         // each grid's TP: +0.3% from fill
+    const GRID_GLOBAL_SL_PCT = 3.5;  // global SL: -3.5% from original entry
+    const GRID_VOLUME_PCT = 100 / GRID_LEVEL_COUNT; // 20% each
 
-    const dcaLevel = (signal as any).dcaLevel ?? 0;
-    const origEntry = (signal as any).originalEntryPrice ?? entryPrice;
+    const gridLevels: any[] = (signal as any).gridLevels ?? [];
+    const isGridSignal = gridLevels.length > 0;
 
-    if (dcaLevel < DCA_SO_DEVIATIONS.length) {
-      const nextDeviation = DCA_SO_DEVIATIONS[dcaLevel];
-      const priceDrop = direction === "LONG"
-        ? ((origEntry - price) / origEntry) * 100
-        : ((price - origEntry) / origEntry) * 100;
-
-      if (priceDrop >= nextDeviation) {
-        // Simulate DCA fill at current price
-        const newLevel = dcaLevel + 1;
-        const prevWeight = DCA_SO_WEIGHTS[dcaLevel].basePct;
-        const soWeight = DCA_SO_WEIGHTS[dcaLevel].soPct;
-        const newAvgEntry = (entryPrice * prevWeight + price * soWeight) / (prevWeight + soWeight);
-
-        // Update SL from new avg entry
-        const newSl = direction === "LONG"
-          ? newAvgEntry * (1 - DCA_SL_FROM_AVG / 100)
-          : newAvgEntry * (1 + DCA_SL_FROM_AVG / 100);
-
-        // Update TP from new avg (preserve original TP % distance)
-        const origTpPct = takeProfitPrice && origEntry
-          ? Math.abs(takeProfitPrice - origEntry) / origEntry * 100
-          : 0;
-        const newTp = origTpPct > 0
-          ? (direction === "LONG" ? newAvgEntry * (1 + origTpPct / 100) : newAvgEntry * (1 - origTpPct / 100))
-          : takeProfitPrice;
-
-        // Persist to signal
-        if (!(signal as any).originalEntryPrice) {
-          (signal as any).originalEntryPrice = entryPrice;
-          (signal as any).originalStopLossPrice = (signal as any).stopLossPrice;
+    // Initialize grid on first tick (base grid = level 0)
+    if (!isGridSignal) {
+      const origEntry = entryPrice;
+      const grids: any[] = [];
+      for (let i = 0; i < GRID_LEVEL_COUNT; i++) {
+        const dev = i * GRID_DEVIATION_STEP;
+        if (i === 0) {
+          // Base grid: already filled at entry price
+          const tp = direction === "LONG"
+            ? origEntry * (1 + GRID_TP_PCT / 100)
+            : origEntry * (1 - GRID_TP_PCT / 100);
+          grids.push({
+            level: 0, deviationPct: 0, fillPrice: origEntry,
+            tpPrice: tp, volumePct: GRID_VOLUME_PCT,
+            status: "FILLED", filledAt: new Date(),
+          });
+        } else {
+          grids.push({
+            level: i, deviationPct: dev, fillPrice: 0,
+            tpPrice: 0, volumePct: GRID_VOLUME_PCT,
+            status: "PENDING",
+          });
         }
-        (signal as any).entryPrice = newAvgEntry;
-        (signal as any).stopLossPrice = newSl;
-        if (newTp) (signal as any).takeProfitPrice = newTp;
-        (signal as any).dcaLevel = newLevel;
-
-        // Reset trailing state since entry changed
-        (signal as any).slMovedToEntry = false;
-        (signal as any).peakPnlPct = 0;
-
-        // Persist DCA state to DB
-        await this.signalQueueService.updateSignalDca(
-          (signal as any)._id.toString(),
-          newAvgEntry, newSl, newTp, newLevel, entryPrice,
-        );
-
-        this.logger.log(
-          `[PositionMonitor] 🔄 ${sigKey} DCA SO${newLevel}: avg=${newAvgEntry.toFixed(4)} SL=${newSl.toFixed(4)} (was entry=${entryPrice.toFixed(4)})`,
-        );
-
-        // Propagate new SL to real users (non-DCA users get updated SL too)
-        // DCA real users are skipped by moveStopLossForRealUsers (handled independently)
-        this.propagateSlMove(sigKey, symbol, newSl, direction);
-        if (newTp) this.propagateTpMove(sigKey, symbol, newTp, direction);
       }
+      const globalSl = direction === "LONG"
+        ? origEntry * (1 - GRID_GLOBAL_SL_PCT / 100)
+        : origEntry * (1 + GRID_GLOBAL_SL_PCT / 100);
+
+      (signal as any).gridLevels = grids;
+      (signal as any).originalEntryPrice = origEntry;
+      (signal as any).gridGlobalSlPrice = globalSl;
+      (signal as any).gridFilledCount = 1;
+      (signal as any).gridClosedCount = 0;
+      (signal as any).stopLossPrice = globalSl;
+
+      await this.signalQueueService.updateSignalGrid(
+        (signal as any)._id.toString(), grids, 1, 0,
+      );
+      await this.signalQueueService.initGridSignal(
+        (signal as any)._id.toString(), origEntry, globalSl,
+      );
+      this.logger.log(
+        `[PositionMonitor] Grid init ${sigKey}: ${GRID_LEVEL_COUNT} levels, SL=${globalSl.toFixed(4)}`,
+      );
     }
 
-    // ─── Auto risk management ─────────────────────────────────────────────
-    // Use current signal entryPrice (may be DCA-adjusted avg)
-    const currentEntry = (signal as any).entryPrice ?? entryPrice;
+    // Process grid events
+    if ((signal as any).gridLevels?.length > 0) {
+      const grids: any[] = (signal as any).gridLevels;
+      const origEntry = (signal as any).originalEntryPrice ?? entryPrice;
+      const globalSl = (signal as any).gridGlobalSlPrice;
+      let gridChanged = false;
+      let filledCount = (signal as any).gridFilledCount ?? 1;
+      let closedCount = (signal as any).gridClosedCount ?? 0;
+
+      // Check PENDING grids: price dropped enough → simulate fill
+      for (const grid of grids) {
+        if (grid.status !== "PENDING") continue;
+        const triggerPrice = direction === "LONG"
+          ? origEntry * (1 - grid.deviationPct / 100)
+          : origEntry * (1 + grid.deviationPct / 100);
+        const triggered = direction === "LONG" ? price <= triggerPrice : price >= triggerPrice;
+        if (triggered) {
+          grid.status = "FILLED";
+          grid.fillPrice = price;
+          grid.filledAt = new Date();
+          grid.tpPrice = direction === "LONG"
+            ? price * (1 + GRID_TP_PCT / 100)
+            : price * (1 - GRID_TP_PCT / 100);
+          filledCount++;
+          gridChanged = true;
+          this.logger.log(
+            `[PositionMonitor] Grid ${sigKey} L${grid.level} FILLED at ${price.toFixed(4)}, TP=${grid.tpPrice.toFixed(4)}`,
+          );
+        }
+      }
+
+      // Check FILLED grids: price hit individual TP → partial close
+      for (const grid of grids) {
+        if (grid.status !== "FILLED") continue;
+        const tpHit = direction === "LONG" ? price >= grid.tpPrice : price <= grid.tpPrice;
+        if (tpHit) {
+          grid.status = "TP_CLOSED";
+          grid.closedAt = new Date();
+          grid.pnlPct = direction === "LONG"
+            ? ((grid.tpPrice - grid.fillPrice) / grid.fillPrice) * 100
+            : ((grid.fillPrice - grid.tpPrice) / grid.fillPrice) * 100;
+          closedCount++;
+          gridChanged = true;
+          this.logger.log(
+            `[PositionMonitor] Grid ${sigKey} L${grid.level} TP_CLOSED +${grid.pnlPct.toFixed(2)}%`,
+          );
+        }
+      }
+
+      // Check global SL hit on remaining FILLED grids
+      const slHitGlobal = direction === "LONG" ? price <= globalSl : price >= globalSl;
+      if (slHitGlobal) {
+        for (const grid of grids) {
+          if (grid.status === "FILLED") {
+            grid.status = "SL_CLOSED";
+            grid.closedAt = new Date();
+            grid.pnlPct = direction === "LONG"
+              ? ((globalSl - grid.fillPrice) / grid.fillPrice) * 100
+              : ((grid.fillPrice - globalSl) / grid.fillPrice) * 100;
+            closedCount++;
+            gridChanged = true;
+          }
+          if (grid.status === "PENDING") {
+            grid.status = "SL_CLOSED"; // never filled, no loss
+            grid.pnlPct = 0;
+            closedCount++;
+            gridChanged = true;
+          }
+        }
+      }
+
+      // Persist if changed
+      if (gridChanged) {
+        (signal as any).gridLevels = grids;
+        (signal as any).gridFilledCount = filledCount;
+        (signal as any).gridClosedCount = closedCount;
+
+        // Calculate blended PnL (weighted by volumePct, only include filled+closed)
+        const closedGrids = grids.filter(
+          (g) => g.status === "TP_CLOSED" || g.status === "SL_CLOSED",
+        );
+        const totalVolPct = closedGrids.reduce((s, g) => s + (g.pnlPct != null ? g.volumePct : 0), 0);
+        const blendedPnl = totalVolPct > 0
+          ? closedGrids.reduce((s, g) => s + (g.pnlPct ?? 0) * g.volumePct, 0) / totalVolPct
+          : 0;
+
+        // Check if all grids resolved
+        const allResolved = grids.every(
+          (g) => g.status === "TP_CLOSED" || g.status === "SL_CLOSED",
+        );
+
+        if (allResolved) {
+          const closeReason = grids.some((g) => g.status === "SL_CLOSED")
+            ? "STOP_LOSS" : "TAKE_PROFIT";
+          const exitPrice = slHitGlobal ? globalSl : price;
+
+          // Resolve via signal queue (marks COMPLETED)
+          const resolved = await this.signalQueueService.resolveGridSignal(
+            (signal as any)._id.toString(), grids, closedCount,
+            blendedPnl, exitPrice, closeReason,
+          );
+
+          if (resolved) {
+            this.unregisterListener(signal);
+            this.resolvingSymbols.add(sigKey);
+            const emoji = closeReason === "TAKE_PROFIT" ? "🎯" : "🛑";
+            this.logger.log(
+              `[PositionMonitor] ${emoji} Grid ${sigKey} ALL RESOLVED: ${closeReason} PnL=${blendedPnl.toFixed(2)}%`,
+            );
+            // Fire resolve callback for notifications + queued signal promotion
+            if (this.resolveCallback) {
+              await this.resolveCallback({
+                symbol, signalKey: sigKey, direction,
+                entryPrice: (signal as any).originalEntryPrice ?? entryPrice,
+                exitPrice, pnlPercent: blendedPnl,
+                closeReason, queuedSignalActivated: false,
+              }).catch((e) =>
+                this.logger.warn(`[PositionMonitor] resolveCallback error: ${e?.message}`),
+              );
+            }
+            this.resolvingSymbols.delete(sigKey);
+          }
+          return; // signal fully resolved
+        } else {
+          // Partial update — some grids closed but signal stays ACTIVE
+          await this.signalQueueService.updateSignalGrid(
+            (signal as any)._id.toString(), grids, filledCount, closedCount,
+          );
+        }
+      }
+
+      return; // Grid signals skip trailing stop and legacy TP/SL check
+    }
+
+    // ─── Auto risk management (non-grid signals only) ─────────────────────
+    const currentEntry = entryPrice;
     const pnlPct =
       direction === "LONG"
         ? ((price - currentEntry) / currentEntry) * 100
@@ -359,7 +480,7 @@ export class PositionMonitorService implements OnModuleInit {
       }
     }
 
-    // ─── Original TP/SL check ─────────────────────────────────────────────
+    // ─── Original TP/SL check (non-grid signals) ──────────────────────────
     // Re-read takeProfitPrice in case it was boosted above
     const effectiveTpPrice = (signal as any).takeProfitPrice ?? takeProfitPrice;
     const stopLossPrice = (signal as any).stopLossPrice;

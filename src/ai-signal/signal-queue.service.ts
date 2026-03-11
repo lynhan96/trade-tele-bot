@@ -273,41 +273,75 @@ export class SignalQueueService {
     );
   }
 
-  // ─── DCA Grid Recovery (signal-level) ─────────────────────────────────────
+  // ─── Grid Recovery (signal-level) ─────────────────────────────────────────
 
   /**
-   * Persist DCA state after a simulated safety order fill on a signal.
-   * Called by PositionMonitorService when price hits SO level.
+   * Persist grid state after a grid fill or grid TP close.
+   * Called by PositionMonitorService on each grid event.
    */
-  async updateSignalDca(
+  async updateSignalGrid(
     signalId: string,
-    newAvgEntry: number,
-    newSl: number,
-    newTp: number,
-    newLevel: number,
-    originalEntry: number,
+    gridLevels: any[],
+    gridFilledCount: number,
+    gridClosedCount: number,
   ): Promise<void> {
-    const signal = await this.aiSignalModel.findById(signalId);
-    if (!signal) return;
+    await this.aiSignalModel.findByIdAndUpdate(signalId, {
+      gridLevels,
+      gridFilledCount,
+      gridClosedCount,
+    });
+  }
 
-    const update: Record<string, any> = {
-      entryPrice: newAvgEntry,
-      stopLossPrice: newSl,
-      takeProfitPrice: newTp,
-      dcaLevel: newLevel,
-      slMovedToEntry: false,
-      peakPnlPct: 0,
-    };
-
-    // Preserve original entry/SL only on first DCA fill
-    if (!signal.originalEntryPrice) {
-      update.originalEntryPrice = originalEntry;
-      update.originalStopLossPrice = signal.stopLossPrice;
+  /**
+   * Resolve grid signal — mark COMPLETED when all grids are closed.
+   * Returns true if signal was fully resolved.
+   */
+  async resolveGridSignal(
+    signalId: string,
+    gridLevels: any[],
+    gridClosedCount: number,
+    blendedPnlPct: number,
+    exitPrice: number,
+    closeReason: string,
+  ): Promise<boolean> {
+    const allClosed = gridLevels.every(
+      (g) => g.status === "TP_CLOSED" || g.status === "SL_CLOSED",
+    );
+    if (allClosed) {
+      await this.aiSignalModel.findByIdAndUpdate(signalId, {
+        gridLevels,
+        gridClosedCount,
+        pnlPercent: blendedPnlPct,
+        exitPrice,
+        status: "COMPLETED",
+        closeReason,
+        positionClosedAt: new Date(),
+      });
+      return true;
     }
+    await this.aiSignalModel.findByIdAndUpdate(signalId, {
+      gridLevels,
+      gridClosedCount,
+    });
+    return false;
+  }
 
-    await this.aiSignalModel.findByIdAndUpdate(signalId, update);
+  /**
+   * Initialize grid signal: persist originalEntryPrice, gridGlobalSlPrice, and update stopLossPrice.
+   * Called once when grid is first initialized on a signal.
+   */
+  async initGridSignal(
+    signalId: string,
+    originalEntryPrice: number,
+    gridGlobalSlPrice: number,
+  ): Promise<void> {
+    await this.aiSignalModel.findByIdAndUpdate(signalId, {
+      originalEntryPrice,
+      gridGlobalSlPrice,
+      stopLossPrice: gridGlobalSlPrice,
+    });
     this.logger.log(
-      `[SignalQueue] ${signal.symbol} DCA SO${newLevel} → avgEntry=${newAvgEntry.toFixed(4)}, SL=${newSl.toFixed(4)}, TP=${newTp.toFixed(4)}`,
+      `[SignalQueue] Grid init: signal ${signalId} origEntry=${originalEntryPrice.toFixed(4)} globalSL=${gridGlobalSlPrice.toFixed(4)}`,
     );
   }
 
