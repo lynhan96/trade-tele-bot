@@ -701,29 +701,19 @@ export class AiOptimizerService {
       return { approved: false, reason };
     }
 
-    // Rule checks passed — now ask Claude Haiku for contextual judgment
-    const ruleReason = `Rules passed: pos=${pricePosition?.toFixed(0)}%, momentum=${candleMomentum}/3, RSI=${rsiValue?.toFixed(0)}`;
-    const haikuResult = await this.validateWithHaiku({
-      symbol, direction, strategy, regime, confidence,
-      stopLossPercent, takeProfitPercent,
-      pricePosition, candleMomentum, rsiValue, htfRsiValue,
-    });
-
-    const approved = haikuResult.approved;
-    const reason = haikuResult.approved
-      ? `${ruleReason} | AI: ${haikuResult.reason}`
-      : `AI rejected: ${haikuResult.reason}`;
+    // Rule checks passed — approve (AI validation removed)
+    const reason = `Rules passed: pos=${pricePosition?.toFixed(0)}%, momentum=${candleMomentum}/3, RSI=${rsiValue?.toFixed(0)}`;
 
     this.validationModel.create({
       symbol, direction, strategy, regime, confidence,
       stopLossPercent, takeProfitPercent,
-      approved, reason,
-      model: haikuResult.model,
+      approved: true, reason,
+      model: "rule-engine",
       pricePosition, candleMomentum, rsiValue, htfRsiValue,
-      rejectedBy: approved ? [] : ["ai_validation"],
+      rejectedBy: [],
     }).catch((e) => this.logger.warn(`[AiOptimizer] Failed to save validation: ${e?.message}`));
 
-    return { approved, reason };
+    return { approved: true, reason };
   }
 
   /**
