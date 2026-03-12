@@ -262,7 +262,8 @@ export class UserRealTradingService implements OnModuleInit {
       }
 
       const leverage = await this.resolveLeverage(sub, params, keys.apiKey, keys.apiSecret, symbol);
-      const fullVol = this.getVolForSymbol(symbol, sub.coinVolumes, sub.tradingBalance);
+      const maxPos = sub.maxOpenPositions ?? 10;
+      const fullVol = this.getVolForUser(sub.tradingBalance, maxPos);
       // Grid: base order = 1/gridLevelCount of full volume (rest reserved for grid levels)
       const isGrid = sub.gridEnabled === true;
       const gridLevelCount = sub.gridLevelCount ?? 5;
@@ -871,6 +872,16 @@ export class UserRealTradingService implements OnModuleInit {
     const allTime = { wins: agg.wins, losses: agg.total - agg.wins, total: agg.total, pnlUsdt: agg.pnlUsdt ?? 0 };
 
     return { openTrades, closedToday, totalPnlUsdt, totalNotionalUsdt, dailyPnlPct, allTime };
+  }
+
+  /**
+   * Reset cycle for a user: clear MongoDB cycle fields + Redis TP cooldown.
+   * Called when user re-enables real mode (/ai on).
+   */
+  async resetCycleForUser(telegramId: number): Promise<void> {
+    await this.subscriptionService.setCycleResetAt(telegramId, null);
+    await this.redisService.delete(TP_CYCLE_COOLDOWN_KEY(telegramId));
+    this.logger.log(`[RealTrading] User ${telegramId} — cycle reset on /ai on`);
   }
 
   /**
@@ -1801,7 +1812,8 @@ export class UserRealTradingService implements OnModuleInit {
       const sub = await this.subscriptionService.getSubscription(telegramId);
       if (!sub || !sub.gridEnabled) return;
 
-      const fullVol = this.getVolForSymbol(symbol, sub.coinVolumes as any, sub.tradingBalance);
+      const maxPos = sub.maxOpenPositions ?? 10;
+      const fullVol = this.getVolForUser(sub.tradingBalance, maxPos);
       const levelCount = sub.gridLevelCount ?? 5;
       const dcaWeights = this.getDcaWeights(levelCount);
       const gridVol = fullVol * (dcaWeights[grid.level] / 100);
@@ -1948,13 +1960,14 @@ export class UserRealTradingService implements OnModuleInit {
     return (params as any).leverage ?? 10;
   }
 
-  private getVolForSymbol(
-    symbol: string,
-    coinVolumes?: Record<string, number>,
-    tradingBalance?: number,
-  ): number {
-    const base = symbol.replace(/USDT$/, "");
-    return coinVolumes?.[base] ?? coinVolumes?.[symbol] ?? tradingBalance ?? 1000;
+  /**
+   * Volume per trade = tradingBalance / maxOpenPositions.
+   * tradingBalance is the total balance the user inputs.
+   */
+  private getVolForUser(tradingBalance?: number, maxOpenPositions?: number): number {
+    const balance = tradingBalance ?? 1000;
+    const maxPos = maxOpenPositions ?? 10;
+    return balance / maxPos;
   }
 
   /** Fetch exchangeInfo once and cache both qty precision and price decimal places (from tickSize). */

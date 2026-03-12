@@ -764,6 +764,8 @@ export class AiCommandService implements OnModuleInit {
           await this.subscriptionService.subscribe(telegramId, chatId, msg.from?.username);
         }
         await this.subscriptionService.setRealMode(telegramId, true);
+        // Reset cycle so user starts fresh (clear cycleResetAt, cyclePeakPct, cyclePaused + TP cooldown)
+        await this.userRealTradingService.resetCycleForUser(telegramId);
         // Clear daily-disabled flag so the user gets a fresh daily counter
         await this.subscriptionService.setRealModeDailyDisabled(telegramId, null).catch(() => {});
         await this.telegramService.sendTelegramMessage(
