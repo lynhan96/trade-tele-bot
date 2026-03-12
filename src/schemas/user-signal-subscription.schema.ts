@@ -78,7 +78,7 @@ export class UserSignalSubscription {
 
   // ─── Grid Recovery ─────────────────────────────────────────────────────
   @Prop({ default: false })
-  gridEnabled?: boolean; // true = split orders into grid levels with individual TP
+  gridEnabled?: boolean; // true = DCA grid recovery (all grids close together via signal TP/SL)
 
   @Prop({ default: 5 })
   gridLevelCount?: number; // total levels including base (2-6, default: 5)
@@ -87,10 +87,10 @@ export class UserSignalSubscription {
   gridDeviationStep?: number; // step between grid levels in % (default: 0.5%)
 
   @Prop({ default: 0.3 })
-  gridTpPct?: number; // individual TP per grid level in % (default: 0.3%)
+  gridTpPct?: number; // DEPRECATED: was per-grid TP, now unused (all grids use signal TP)
 
   @Prop({ default: 3.5 })
-  gridGlobalSlPct?: number; // global SL from original entry in % (default: 3.5%)
+  gridGlobalSlPct?: number; // DEPRECATED: was fixed global SL, now uses signal's own SL%
 
   @Prop({ default: 0 })
   totalPnlUsdt?: number; // cumulative realized PnL in USDT

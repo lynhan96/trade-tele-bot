@@ -129,7 +129,7 @@ export class AiSignal {
     deviationPct: number; // % from original entry (dynamic: SL% / (count+1))
     fillPrice: number; // price at which this grid was filled
     exitPrice?: number; // price at which this grid was closed (TP/SL)
-    volumePct: number; // % of total volume (DCA: 10,15,20,25,30)
+    volumePct: number; // % of total volume (DCA: 40,6,12,18,24)
     status: string; // "PENDING" | "FILLED" | "TP_CLOSED" | "SL_CLOSED" | "CANCELLED"
     filledAt?: Date;
     closedAt?: Date;
