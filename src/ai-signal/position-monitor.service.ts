@@ -303,8 +303,28 @@ export class PositionMonitorService implements OnModuleInit {
             : origEntry;
           (signal as any).gridAvgEntry = avgEntry;
 
+          // Recalculate SL and TP from avgEntry using original % distances
+          // Keeps risk profile consistent as more grids fill and avgEntry shifts
+          if (!(signal as any).slMovedToEntry) {
+            const slPct = signal.stopLossPercent;
+            if (slPct > 0) {
+              const newSl = direction === "LONG"
+                ? avgEntry * (1 - slPct / 100)
+                : avgEntry * (1 + slPct / 100);
+              (signal as any).stopLossPrice = newSl;
+              (signal as any).gridGlobalSlPrice = newSl;
+            }
+          }
+          const tpPct = (signal as any).takeProfitPercent;
+          if (tpPct > 0 && !(signal as any).tpBoosted) {
+            const newTp = direction === "LONG"
+              ? avgEntry * (1 + tpPct / 100)
+              : avgEntry * (1 - tpPct / 100);
+            (signal as any).takeProfitPrice = newTp;
+          }
+
           this.logger.log(
-            `[PositionMonitor] Grid ${sigKey} L${grid.level} FILLED at ${price.toFixed(4)}, avgEntry=${avgEntry.toFixed(4)}, filled=${filledCount}/${GRID_LEVEL_COUNT}`,
+            `[PositionMonitor] Grid ${sigKey} L${grid.level} FILLED at ${price.toFixed(4)}, avgEntry=${avgEntry.toFixed(4)}, SL=${(signal as any).stopLossPrice?.toFixed(4)}, TP=${(signal as any).takeProfitPrice?.toFixed(4)}, filled=${filledCount}/${GRID_LEVEL_COUNT}`,
           );
         }
       }
@@ -396,6 +416,8 @@ export class PositionMonitorService implements OnModuleInit {
         (signal as any).gridClosedCount = closedCount;
         await this.signalQueueService.updateSignalGrid(
           (signal as any)._id.toString(), grids, filledCount, closedCount, avgEntry,
+          (signal as any).stopLossPrice,
+          (signal as any).takeProfitPrice,
         );
       }
 

@@ -285,11 +285,20 @@ export class SignalQueueService {
     gridFilledCount: number,
     gridClosedCount: number,
     gridAvgEntry?: number,
+    stopLossPrice?: number,
+    takeProfitPrice?: number,
   ): Promise<void> {
     const update: any = { gridLevels, gridFilledCount, gridClosedCount };
     if (gridAvgEntry != null) {
       update.gridAvgEntry = gridAvgEntry;
       update.entryPrice = gridAvgEntry; // sync entryPrice to avg for display
+    }
+    if (stopLossPrice != null) {
+      update.stopLossPrice = stopLossPrice;
+      update.gridGlobalSlPrice = stopLossPrice;
+    }
+    if (takeProfitPrice != null) {
+      update.takeProfitPrice = takeProfitPrice;
     }
     await this.aiSignalModel.findByIdAndUpdate(signalId, update);
   }
