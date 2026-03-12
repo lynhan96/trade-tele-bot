@@ -262,8 +262,7 @@ export class UserRealTradingService implements OnModuleInit {
       }
 
       const leverage = await this.resolveLeverage(sub, params, keys.apiKey, keys.apiSecret, symbol);
-      const maxPos = sub.maxOpenPositions ?? 10;
-      const fullVol = this.getVolForUser(sub.tradingBalance, maxPos);
+      const fullVol = this.getVolForUser(sub.tradingBalance);
       // Grid: base order = 1/gridLevelCount of full volume (rest reserved for grid levels)
       const isGrid = sub.gridEnabled === true;
       const gridLevelCount = sub.gridLevelCount ?? 5;
@@ -1813,8 +1812,7 @@ export class UserRealTradingService implements OnModuleInit {
       const sub = await this.subscriptionService.getSubscription(telegramId);
       if (!sub || !sub.gridEnabled) return;
 
-      const maxPos = sub.maxOpenPositions ?? 10;
-      const fullVol = this.getVolForUser(sub.tradingBalance, maxPos);
+      const fullVol = this.getVolForUser(sub.tradingBalance);
       const levelCount = sub.gridLevelCount ?? 5;
       const dcaWeights = this.getDcaWeights(levelCount);
       const gridVol = fullVol * (dcaWeights[grid.level] / 100);
@@ -1965,10 +1963,9 @@ export class UserRealTradingService implements OnModuleInit {
    * Volume per trade = tradingBalance / maxOpenPositions.
    * tradingBalance is the total balance the user inputs.
    */
-  private getVolForUser(tradingBalance?: number, maxOpenPositions?: number): number {
-    const balance = tradingBalance ?? 1000;
-    const maxPos = maxOpenPositions ?? 10;
-    return balance / maxPos;
+  private getVolForUser(tradingBalance?: number): number {
+    // tradingBalance = total USDT per trade (set by user). Grid DCA weights handle per-level split.
+    return tradingBalance ?? 1000;
   }
 
   /** Fetch exchangeInfo once and cache both qty precision and price decimal places (from tickSize). */
