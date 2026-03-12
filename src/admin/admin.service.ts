@@ -101,6 +101,7 @@ export class AdminService {
           $group: {
             _id: '$dateStr',
             totalPnl: { $sum: '$pnlPercent' },
+            totalPnlUsdt: { $sum: { $ifNull: ['$pnlUsdt', 0] } },
             count: { $sum: 1 },
             wins: { $sum: { $cond: [{ $gt: ['$pnlPercent', 0] }, 1, 0] } },
             losses: { $sum: { $cond: [{ $lte: ['$pnlPercent', 0] }, 1, 0] } },
@@ -141,6 +142,7 @@ export class AdminService {
     const pnlByDay = pnlByDayAgg.map((d) => ({
       date: d._id,
       totalPnl: d.totalPnl,
+      totalPnlUsdt: d.totalPnlUsdt ?? 0,
       count: d.count,
       wins: d.wins,
       losses: d.losses,
