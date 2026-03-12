@@ -536,6 +536,7 @@ export class AdminService {
     if (dto.realModeEnabled === true) {
       $set.cycleResetAt = new Date();
       $set.cyclePeakPct = 0;
+      $set.cycleFloorPct = 0;
       $set.cyclePaused = false;
     }
 
