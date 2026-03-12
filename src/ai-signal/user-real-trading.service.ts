@@ -1746,24 +1746,15 @@ export class UserRealTradingService implements OnModuleInit {
               ? filledGrids.reduce((s, g) => s + g.fillPrice * (g.quantity || 0), 0) / totalQty
               : origEntry;
 
-            // Recalculate SL/TP from new avgEntry using original % distances
-            // Only if trailing stop hasn't already moved SL to break-even (match test mode)
+            // SL stays at original entry's SL — do NOT move SL when DCA fills.
+            // Moving SL from avgEntry pushes it further against us, increasing max loss.
+            // Only TP recalculates from avgEntry (so profit target reflects average cost).
             const origEntryRef = trade.originalEntryPrice ?? trade.entryPrice;
-            const slTpUpdate: Record<string, any> = {};
-
-            if (!(trade as any).slMovedToEntry) {
-              const origSlPct = Math.abs(((trade as any).gridGlobalSlPrice ?? trade.slPrice) - origEntryRef) / origEntryRef * 100;
-              const newSlPrice = direction === "LONG"
-                ? avgEntry * (1 - origSlPct / 100)
-                : avgEntry * (1 + origSlPct / 100);
-              slTpUpdate.slPrice = newSlPrice;
-              slTpUpdate.gridGlobalSlPrice = newSlPrice;
-            }
-
+            const tpUpdate: Record<string, any> = {};
             if (!(trade as any).tpBoosted && trade.tpPrice) {
               const origTpPct = Math.abs((trade.tpPrice - origEntryRef) / origEntryRef) * 100;
               if (origTpPct > 0) {
-                slTpUpdate.tpPrice = direction === "LONG"
+                tpUpdate.tpPrice = direction === "LONG"
                   ? avgEntry * (1 + origTpPct / 100)
                   : avgEntry * (1 - origTpPct / 100);
               }
@@ -1774,7 +1765,7 @@ export class UserRealTradingService implements OnModuleInit {
               gridFilledCount: filledCount,
               gridAvgEntry: avgEntry,
               entryPrice: avgEntry, // sync for display
-              ...slTpUpdate,
+              ...tpUpdate,
             });
           }
         } catch (err) {
@@ -1846,20 +1837,15 @@ export class UserRealTradingService implements OnModuleInit {
         ? (filledGrids.reduce((s: number, g: any) => s + g.fillPrice * (g.quantity || 0), 0) + gridFillPrice * gridQty) / totalQty
         : trade.entryPrice;
 
-      // Recalculate SL/TP from new avgEntry (match test mode logic)
-      // Only if trailing stop hasn't already moved SL / TP boost hasn't fired
+      // SL stays at original price — do NOT move SL when DCA fills.
+      // Moving SL from avgEntry pushes it further against us, increasing max loss.
+      // Only update SL order on Binance for new total quantity (same price).
+      // Only TP recalculates from avgEntry (profit target reflects average cost).
       const origEntryRef = trade.originalEntryPrice ?? trade.entryPrice;
-      const slTpUpdate: Record<string, any> = {};
-      let newSlPrice = trade.slPrice; // default: keep current SL
-
-      if (!(trade as any).slMovedToEntry) {
-        const origSlPct = Math.abs((trade.gridGlobalSlPrice ?? trade.slPrice) - origEntryRef) / origEntryRef * 100;
-        newSlPrice = direction === "LONG"
-          ? avgEntry * (1 - origSlPct / 100)
-          : avgEntry * (1 + origSlPct / 100);
-        slTpUpdate.slPrice = newSlPrice;
-        slTpUpdate.gridGlobalSlPrice = newSlPrice;
-      }
+      const currentSlPrice = (trade as any).slMovedToEntry
+        ? (trade.gridGlobalSlPrice ?? trade.slPrice)   // trailing already moved SL
+        : (trade.gridGlobalSlPrice ?? trade.slPrice);  // original SL price unchanged
+      const tpUpdate: Record<string, any> = {};
 
       let newTpPrice: number | undefined;
       if (!(trade as any).tpBoosted && trade.tpPrice) {
@@ -1868,7 +1854,7 @@ export class UserRealTradingService implements OnModuleInit {
           newTpPrice = direction === "LONG"
             ? avgEntry * (1 + origTpPct / 100)
             : avgEntry * (1 - origTpPct / 100);
-          slTpUpdate.tpPrice = newTpPrice;
+          tpUpdate.tpPrice = newTpPrice;
         }
       }
 
@@ -1880,15 +1866,15 @@ export class UserRealTradingService implements OnModuleInit {
         gridAvgEntry: avgEntry,
         gridLevels: trade.gridLevels,
         gridFilledCount: filledCount,
-        ...slTpUpdate,
+        ...tpUpdate,
       });
 
-      // Update SL for new total quantity (cancel old, place new)
+      // Update SL on Binance for new total quantity (same SL price — don't move SL)
       await new Promise((r) => setTimeout(r, 1500));
       if (trade.binanceSlAlgoId) {
         await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, trade.binanceSlAlgoId).catch(() => {});
       }
-      const roundedSl = parseFloat(newSlPrice.toFixed(pricePrec));
+      const roundedSl = parseFloat(currentSlPrice.toFixed(pricePrec));
       try {
         const slOrder = await this.binanceService.setStopLoss(
           keys.apiKey, keys.apiSecret, symbol, roundedSl,
@@ -1927,7 +1913,7 @@ export class UserRealTradingService implements OnModuleInit {
         `L${level}: *×${gridQty}* @ ${fmtP(gridFillPrice)}\n` +
         `Avg Entry: *${fmtP(avgEntry)}*\n` +
         `Total Qty: *×${newTotalQty.toFixed(qtyPrec)}*\n` +
-        `SL: ${fmtP(newSlPrice)}` + (newTpPrice ? ` | TP: ${fmtP(newTpPrice)}` : "");
+        `SL: ${fmtP(currentSlPrice)}` + (newTpPrice ? ` | TP: ${fmtP(newTpPrice)}` : "");
       await this.telegramService.sendTelegramMessage(chatId, msg).catch(() => {});
 
       this.logger.log(

@@ -337,18 +337,9 @@ export class PositionMonitorService implements OnModuleInit {
             : origEntry;
           (signal as any).gridAvgEntry = avgEntry;
 
-          // Recalculate SL and TP from avgEntry using original % distances
-          // Keeps risk profile consistent as more grids fill and avgEntry shifts
-          if (!(signal as any).slMovedToEntry) {
-            const slPct = signal.stopLossPercent;
-            if (slPct > 0) {
-              const newSl = direction === "LONG"
-                ? avgEntry * (1 - slPct / 100)
-                : avgEntry * (1 + slPct / 100);
-              (signal as any).stopLossPrice = newSl;
-              (signal as any).gridGlobalSlPrice = newSl;
-            }
-          }
+          // SL stays at original entry's SL — do NOT move SL when DCA fills.
+          // Moving SL from avgEntry pushes it further against us, increasing max loss.
+          // Only TP recalculates from avgEntry (so profit target reflects average cost).
           const tpPct = (signal as any).takeProfitPercent;
           if (tpPct > 0 && !(signal as any).tpBoosted) {
             const newTp = direction === "LONG"
