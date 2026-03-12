@@ -94,8 +94,8 @@ export class AiSignalService implements OnModuleInit {
       const signalKey = info.signalKey || info.symbol;
       await this.redisService.set(`cache:ai:cooldown:${signalKey}`, true, 30 * 60);
 
-      // Track SL hits for market-wide cooldown
-      if (info.closeReason === "STOP_LOSS") {
+      // Track SL hits for market-wide cooldown (only losing SLs)
+      if (info.closeReason === "STOP_LOSS" && info.pnlPercent < 0) {
         await this.trackSlHitAndMaybeCooldown();
       }
 
@@ -271,8 +271,8 @@ export class AiSignalService implements OnModuleInit {
         // Cooldown to prevent ping-pong recreation (30 min)
         await this.redisService.set(`cache:ai:cooldown:${signalKey}`, true, 30 * 60);
 
-        // Track SL hits for market-wide cooldown
-        if (info.closeReason === "STOP_LOSS") {
+        // Track SL hits for market-wide cooldown (only losing SLs)
+        if (info.closeReason === "STOP_LOSS" && info.pnlPercent < 0) {
           await this.trackSlHitAndMaybeCooldown();
         }
 
@@ -1249,8 +1249,8 @@ export class AiSignalService implements OnModuleInit {
       reason as any,
     ).catch(() => {});
 
-    // Track SL hits for market-wide cooldown
-    if (reason === "STOP_LOSS") {
+    // Track SL hits for market-wide cooldown (only losing SLs)
+    if (reason === "STOP_LOSS" && pnl < 0) {
       await this.trackSlHitAndMaybeCooldown();
     }
 
