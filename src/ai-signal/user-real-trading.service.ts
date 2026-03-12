@@ -471,11 +471,10 @@ export class UserRealTradingService implements OnModuleInit {
 
     for (const trade of openTrades) {
       try {
-        // Skip grid trades — their SL is managed by grid system (global SL from original entry)
-        if (trade.gridLevels?.length > 0) {
-          this.logger.debug(`[RealTrading] ${symbol}: skip SL move for grid trade user ${trade.telegramId} (grid manages SL)`);
-          continue;
-        }
+        // Grid trades: use total filled quantity for SL order (not just base)
+        const tradeQty = trade.gridLevels?.length > 0
+          ? trade.gridLevels.filter((g: any) => g.status === "FILLED").reduce((sum: number, g: any) => sum + (g.quantity || 0), 0) || trade.quantity
+          : trade.quantity;
 
         const keys = await this.userSettingsService.getApiKeys(trade.telegramId, "binance");
         if (!keys?.apiKey) continue;
@@ -494,7 +493,7 @@ export class UserRealTradingService implements OnModuleInit {
         let slOrder: any;
         try {
           slOrder = await this.binanceService.setStopLoss(
-            keys.apiKey, keys.apiSecret, symbol, finalSlPrice, direction as "LONG" | "SHORT", trade.quantity,
+            keys.apiKey, keys.apiSecret, symbol, finalSlPrice, direction as "LONG" | "SHORT", tradeQty,
           );
         } catch (slErr) {
           if (slErr?.message?.includes("Precision")) {
@@ -502,7 +501,7 @@ export class UserRealTradingService implements OnModuleInit {
             finalSlPrice = parseFloat(newSlPrice.toFixed(freshPrec));
             this.logger.warn(`[RealTrading] ${symbol} SL precision retry: ${roundedSlPrice} → ${finalSlPrice}`);
             slOrder = await this.binanceService.setStopLoss(
-              keys.apiKey, keys.apiSecret, symbol, finalSlPrice, direction as "LONG" | "SHORT", trade.quantity,
+              keys.apiKey, keys.apiSecret, symbol, finalSlPrice, direction as "LONG" | "SHORT", tradeQty,
             );
           } else {
             throw slErr;
