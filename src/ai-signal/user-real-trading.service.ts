@@ -291,24 +291,12 @@ export class UserRealTradingService implements OnModuleInit {
       // GTE_GTC algo orders require an open position to exist
       await new Promise((r) => setTimeout(r, 1500));
 
-      // SL and TP — Grid users get global SL from original entry, no signal TP (grid has individual TP per level)
+      // SL and TP — Grid DCA uses signal's own SL (grids fit within SL range). TP = signal's Fibo TP.
       const roundPrice = (p: number) => parseFloat(p.toFixed(pricePrecision));
 
       let effectiveSl = stopLossPrice;
       let effectiveTp = takeProfitPrice;
-      if (isGrid) {
-        // Grid: global SL at gridGlobalSlPct from fill price (wider than signal SL to allow recovery)
-        const gridGlobalSlPct = sub.gridGlobalSlPct ?? 3.5;
-        effectiveSl = direction === "LONG"
-          ? fillPrice * (1 - gridGlobalSlPct / 100)
-          : fillPrice * (1 + gridGlobalSlPct / 100);
-        // Grid: no global TP — each grid level has individual TP via partial close
-        // Base grid TP = fillPrice ± gridTpPct
-        const gridTpPct = sub.gridTpPct ?? 0.3;
-        effectiveTp = direction === "LONG"
-          ? fillPrice * (1 + gridTpPct / 100)
-          : fillPrice * (1 - gridTpPct / 100);
-      }
+      // Grid: keep signal SL and TP as-is (no wider SL, no individual grid TP)
       let roundedSl = roundPrice(effectiveSl);
       let roundedTp = effectiveTp ? roundPrice(effectiveTp) : undefined;
 
@@ -397,13 +385,14 @@ export class UserRealTradingService implements OnModuleInit {
         status: "OPEN",
         openedAt: new Date(),
         aiSignalId: (signal as any)._id?.toString(),
-        // Grid Recovery fields
+        // Grid DCA fields
         ...(isGrid ? {
           originalEntryPrice: fillPrice,
           gridGlobalSlPrice: effectiveSl,
+          gridAvgEntry: fillPrice,
           gridFilledCount: 1,
           gridClosedCount: 0,
-          gridLevels: this.buildGridLevels(fillPrice, direction, sub),
+          gridLevels: this.buildGridLevels(fillPrice, direction, sub, effectiveSl),
         } : {}),
       });
 
@@ -442,7 +431,7 @@ export class UserRealTradingService implements OnModuleInit {
         `Stop Loss: *${fmtP(roundedSl)}* (${actualSlPct.toFixed(1)}%)${binanceSlAlgoId ? "" : " ⚠️"}\n` +
         (roundedTp ? `Take Profit: *${fmtP(roundedTp)}* (${actualTpPct.toFixed(1)}%)${binanceTpAlgoId ? "" : " ⚠️"}\n` : "") +
         `Volume: *${vol.toLocaleString()} USDT*` +
-        (isGrid ? `\n🔲 Grid: ${gridLevelCount} levels | Step ${sub.gridDeviationStep ?? 0.5}% | TP ${sub.gridTpPct ?? 0.3}%` : ``);
+        (isGrid ? `\n🔲 Grid DCA: ${gridLevelCount} levels | Signal SL/TP` : ``);
       await this.telegramService.sendTelegramMessage(chatId, msg).catch(() => {});
 
       // Register data stream to monitor fills/closings
@@ -1633,29 +1622,27 @@ export class UserRealTradingService implements OnModuleInit {
     fillPrice: number,
     direction: string,
     sub: SubscriberInfo,
+    stopLossPrice: number,
   ): Array<any> {
     const levelCount = sub.gridLevelCount ?? 5;
-    const devStep = sub.gridDeviationStep ?? 0.5;
-    const gridTpPct = sub.gridTpPct ?? 0.3;
-    // DCA weights: increasing volume at deeper levels
+    // Dynamic grid step: fit all grids within SL range with buffer
+    const slPct = Math.abs((stopLossPrice - fillPrice) / fillPrice) * 100;
+    const devStep = slPct / (levelCount + 1);
     const dcaWeights = this.getDcaWeights(levelCount);
     const grids: any[] = [];
 
     for (let i = 0; i < levelCount; i++) {
-      const dev = i * devStep; // 0, 0.5, 1.0, 1.5, 2.0
+      const dev = i * devStep;
       const volumePct = dcaWeights[i];
       if (i === 0) {
-        const tp = direction === "LONG"
-          ? fillPrice * (1 + gridTpPct / 100)
-          : fillPrice * (1 - gridTpPct / 100);
         grids.push({
-          level: 0, deviationPct: 0, fillPrice, quantity: 0, // quantity set after placement
-          tpPrice: tp, volumePct, status: "FILLED", filledAt: new Date(),
+          level: 0, deviationPct: 0, fillPrice, quantity: 0,
+          volumePct, status: "FILLED", filledAt: new Date(),
         });
       } else {
         grids.push({
-          level: i, deviationPct: dev, fillPrice: 0, quantity: 0,
-          tpPrice: 0, volumePct, status: "PENDING",
+          level: i, deviationPct: parseFloat(dev.toFixed(3)), fillPrice: 0, quantity: 0,
+          volumePct, status: "PENDING",
         });
       }
     }
@@ -1694,7 +1681,7 @@ export class UserRealTradingService implements OnModuleInit {
           const { direction, symbol, telegramId } = trade;
           let gridChanged = false;
 
-          // Check PENDING grids for fill triggers
+          // Check PENDING grids for fill triggers (DCA: add to position)
           for (const grid of grids) {
             if (grid.status !== "PENDING") continue;
             const triggerPrice = direction === "LONG"
@@ -1707,42 +1694,24 @@ export class UserRealTradingService implements OnModuleInit {
             }
           }
 
-          // Check FILLED grids for individual TP hits
-          for (const grid of grids) {
-            if (grid.status !== "FILLED" || !grid.tpPrice || !grid.quantity) continue;
-            const tpHit = direction === "LONG" ? currentPrice >= grid.tpPrice : currentPrice <= grid.tpPrice;
-            if (tpHit) {
-              await this.closeGridTp(trade as any, grid, currentPrice);
-              gridChanged = true;
-            }
-          }
+          // No individual grid TP — TP/SL for the whole position is handled by Binance algo orders.
+          // When Binance SL/TP fires, all grids close together (handled by onTradeClose/protectOpenTrades).
 
-          // Persist grid state if changed
+          // Persist grid state + recalculate avg entry if changed
           if (gridChanged) {
-            const filledCount = grids.filter(g => g.status === "FILLED" || g.status === "TP_CLOSED").length;
-            const closedCount = grids.filter(g => g.status === "TP_CLOSED" || g.status === "SL_CLOSED").length;
+            const filledGrids = grids.filter(g => g.status === "FILLED");
+            const filledCount = filledGrids.length;
+            // Recalculate weighted avg entry
+            const totalQty = filledGrids.reduce((s, g) => s + (g.quantity || 0), 0);
+            const avgEntry = totalQty > 0
+              ? filledGrids.reduce((s, g) => s + g.fillPrice * (g.quantity || 0), 0) / totalQty
+              : origEntry;
             await this.userTradeModel.findByIdAndUpdate((trade as any)._id, {
               gridLevels: grids,
               gridFilledCount: filledCount,
-              gridClosedCount: closedCount,
+              gridAvgEntry: avgEntry,
+              entryPrice: avgEntry, // sync for display
             });
-
-            // Check if all grids are closed → close trade
-            const allClosed = grids.every(g => g.status === "TP_CLOSED" || g.status === "SL_CLOSED");
-            if (allClosed) {
-              const blendedPnl = grids.reduce((sum, g) => sum + (g.pnlPct ?? 0) * (g.volumePct / 100), 0);
-              await this.userTradeModel.findByIdAndUpdate((trade as any)._id, {
-                status: "CLOSED",
-                closeReason: "GRID_COMPLETE",
-                pnlPercent: blendedPnl - BINANCE_FEE_PCT,
-                pnlUsdt: ((blendedPnl - BINANCE_FEE_PCT) / 100) * trade.notionalUsdt,
-                closedAt: new Date(),
-              });
-              await this.subscriptionService.incrementTradePnl(
-                telegramId, ((blendedPnl - BINANCE_FEE_PCT) / 100) * trade.notionalUsdt,
-              );
-              this.logger.log(`[Grid] ${symbol} user ${telegramId}: all grids closed, blended PnL ${blendedPnl.toFixed(2)}%`);
-            }
           }
         } catch (err) {
           this.logger.error(`[Grid] Error checking ${trade.symbol} user ${trade.telegramId}: ${err?.message}`);
@@ -1781,7 +1750,6 @@ export class UserRealTradingService implements OnModuleInit {
       const levelCount = sub.gridLevelCount ?? 5;
       const dcaWeights = this.getDcaWeights(levelCount);
       const gridVol = fullVol * (dcaWeights[grid.level] / 100);
-      const gridTpPct = sub.gridTpPct ?? 0.3;
 
       const [qtyPrec, pricePrec] = await Promise.all([
         this.getQuantityPrecision(symbol),
@@ -1800,23 +1768,28 @@ export class UserRealTradingService implements OnModuleInit {
       });
       const gridFillPrice = parseFloat(order.avgPrice) || currentPrice;
 
-      // Update grid level
+      // Update grid level (no individual TP — whole position uses signal TP)
       grid.status = "FILLED";
       grid.fillPrice = gridFillPrice;
       grid.quantity = gridQty;
       grid.filledAt = new Date();
-      grid.tpPrice = direction === "LONG"
-        ? gridFillPrice * (1 + gridTpPct / 100)
-        : gridFillPrice * (1 - gridTpPct / 100);
 
-      // Update total quantity on trade
+      // Update total quantity + recalculate avg entry
       const newTotalQty = trade.quantity + gridQty;
+      const filledGrids = (trade.gridLevels ?? []).filter((g: any) => g.status === "FILLED");
+      const totalQty = filledGrids.reduce((s: number, g: any) => s + (g.quantity || 0), 0) + gridQty;
+      const avgEntry = totalQty > 0
+        ? (filledGrids.reduce((s: number, g: any) => s + g.fillPrice * (g.quantity || 0), 0) + gridFillPrice * gridQty) / totalQty
+        : trade.entryPrice;
+
       await this.userTradeModel.findByIdAndUpdate((trade as any)._id, {
         quantity: newTotalQty,
-        notionalUsdt: newTotalQty * trade.entryPrice,
+        notionalUsdt: newTotalQty * avgEntry,
+        entryPrice: avgEntry,
+        gridAvgEntry: avgEntry,
       });
 
-      // Update SL for new total quantity (cancel old, place new with same global SL price)
+      // Update SL for new total quantity (cancel old, place new)
       await new Promise((r) => setTimeout(r, 1500));
       if (trade.binanceSlAlgoId) {
         await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, trade.binanceSlAlgoId).catch(() => {});
@@ -1838,11 +1811,11 @@ export class UserRealTradingService implements OnModuleInit {
         p >= 1000 ? `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :
         p >= 1 ? `$${p.toFixed(2)}` : `$${p.toFixed(4)}`;
       const msg =
-        `🔲 *Grid Level ${level} Filled*\n` +
+        `🔲 *Grid DCA L${level} Filled*\n` +
         `━━━━━━━━━━━━━━━━━━\n\n` +
         `${symbol} ${direction}\n` +
         `L${level}: *×${gridQty}* @ ${fmtP(gridFillPrice)}\n` +
-        `TP: *${fmtP(grid.tpPrice)}* (+${gridTpPct}%)\n` +
+        `Avg Entry: *${fmtP(avgEntry)}*\n` +
         `Total Qty: *×${newTotalQty.toFixed(qtyPrec)}*`;
       await this.telegramService.sendTelegramMessage(chatId, msg).catch(() => {});
 

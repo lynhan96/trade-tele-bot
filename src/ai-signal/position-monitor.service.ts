@@ -199,15 +199,11 @@ export class PositionMonitorService implements OnModuleInit {
     const sigKey = this.getSignalKey(signal);
 
     // ─── Grid DCA Simulation (signal level) ─────────────────────────────────
-    // DCA grid: deeper levels get heavier volume to average down aggressively.
-    // Volume weights: L0=10%, L1=15%, L2=20%, L3=25%, L4=30% (total=100%)
-    // Each grid has individual TP (+0.3%). Global SL at -3.5% from original entry.
-    const GRID_DEVIATION_STEP = 0.5; // % step between grids
-    const GRID_LEVEL_COUNT = 5;      // base + 4 grids
-    const GRID_TP_PCT = 0.3;         // each grid's TP: +0.3% from fill
-    const GRID_GLOBAL_SL_PCT = 3.5;  // global SL: -3.5% from original entry
-    // DCA volume weights: increasing at deeper levels
-    const DCA_WEIGHTS = [10, 15, 20, 25, 30]; // % per level (sum=100)
+    // True DCA: grids fit within signal's SL range. TP = signal TP price (Fibo).
+    // Trailing stop uses weighted avg entry. Close ALL grids together on TP/SL.
+    const GRID_LEVEL_COUNT = 5;
+    // DCA volume weights: increasing at deeper levels (sum=100)
+    const DCA_WEIGHTS = [10, 15, 20, 25, 30];
 
     const gridLevels: any[] = (signal as any).gridLevels ?? [];
     const isGridSignal = gridLevels.length > 0;
@@ -215,45 +211,44 @@ export class PositionMonitorService implements OnModuleInit {
     // Initialize grid on first tick (base grid = level 0)
     if (!isGridSignal) {
       const origEntry = entryPrice;
-      const grids: any[] = [];
+      const stopLossPrice = (signal as any).stopLossPrice;
+      const signalSlPct = Math.abs((stopLossPrice - origEntry) / origEntry) * 100;
+      // Dynamic grid step: fit all grids within SL range with buffer
+      const gridStep = signalSlPct / (GRID_LEVEL_COUNT + 1);
 
-      // Simulated volume: $1000 notional per trade
       const simNotional = 1000;
       const simQuantity = simNotional / origEntry;
+      const grids: any[] = [];
 
       for (let i = 0; i < GRID_LEVEL_COUNT; i++) {
-        const dev = i * GRID_DEVIATION_STEP;
+        const dev = i * gridStep;
         const volPct = DCA_WEIGHTS[i];
         const gridNotional = simNotional * (volPct / 100);
         if (i === 0) {
-          // Base grid: already filled at entry price (smallest position)
-          const tp = direction === "LONG"
-            ? origEntry * (1 + GRID_TP_PCT / 100)
-            : origEntry * (1 - GRID_TP_PCT / 100);
           grids.push({
             level: 0, deviationPct: 0, fillPrice: origEntry,
-            tpPrice: tp, volumePct: volPct,
+            volumePct: volPct,
             status: "FILLED", filledAt: new Date(),
             simNotional: gridNotional, simQuantity: gridNotional / origEntry,
           });
         } else {
           grids.push({
-            level: i, deviationPct: dev, fillPrice: 0,
-            tpPrice: 0, volumePct: volPct,
+            level: i, deviationPct: parseFloat(dev.toFixed(3)), fillPrice: 0,
+            volumePct: volPct,
             status: "PENDING",
           });
         }
       }
-      const globalSl = direction === "LONG"
-        ? origEntry * (1 - GRID_GLOBAL_SL_PCT / 100)
-        : origEntry * (1 + GRID_GLOBAL_SL_PCT / 100);
+
+      // Avg entry starts as L0 entry
+      const avgEntry = origEntry;
 
       (signal as any).gridLevels = grids;
       (signal as any).originalEntryPrice = origEntry;
-      (signal as any).gridGlobalSlPrice = globalSl;
+      (signal as any).gridGlobalSlPrice = stopLossPrice; // signal's own SL
       (signal as any).gridFilledCount = 1;
       (signal as any).gridClosedCount = 0;
-      (signal as any).stopLossPrice = globalSl;
+      (signal as any).gridAvgEntry = avgEntry;
       (signal as any).simNotional = simNotional;
       (signal as any).simQuantity = simQuantity;
 
@@ -261,14 +256,13 @@ export class PositionMonitorService implements OnModuleInit {
         (signal as any)._id.toString(), grids, 1, 0,
       );
       await this.signalQueueService.initGridSignal(
-        (signal as any)._id.toString(), origEntry, globalSl,
+        (signal as any)._id.toString(), origEntry, stopLossPrice, avgEntry,
       );
-      // Persist simulated volume
       await this.signalQueueService.updateSimVolume(
         (signal as any)._id.toString(), simNotional, simQuantity,
       );
       this.logger.log(
-        `[PositionMonitor] Grid init ${sigKey}: ${GRID_LEVEL_COUNT} levels, SL=${globalSl.toFixed(4)}, Vol=$${simNotional.toFixed(0)}, Qty=${simQuantity.toFixed(4)}`,
+        `[PositionMonitor] Grid DCA init ${sigKey}: ${GRID_LEVEL_COUNT} levels, step=${gridStep.toFixed(2)}%, SL=${stopLossPrice.toFixed(4)}, TP=${takeProfitPrice?.toFixed(4)}`,
       );
     }
 
@@ -277,11 +271,13 @@ export class PositionMonitorService implements OnModuleInit {
       const grids: any[] = (signal as any).gridLevels;
       const origEntry = (signal as any).originalEntryPrice ?? entryPrice;
       const globalSl = (signal as any).gridGlobalSlPrice;
+      const signalTp = takeProfitPrice; // Fibo TP price
+      let avgEntry: number = (signal as any).gridAvgEntry ?? origEntry;
       let gridChanged = false;
       let filledCount = (signal as any).gridFilledCount ?? 1;
       let closedCount = (signal as any).gridClosedCount ?? 0;
 
-      // Check PENDING grids: price dropped enough → simulate fill
+      // Check PENDING grids: price moved against position → simulate fill
       for (const grid of grids) {
         if (grid.status !== "PENDING") continue;
         const triggerPrice = direction === "LONG"
@@ -289,63 +285,184 @@ export class PositionMonitorService implements OnModuleInit {
           : origEntry * (1 + grid.deviationPct / 100);
         const triggered = direction === "LONG" ? price <= triggerPrice : price >= triggerPrice;
         if (triggered) {
+          const simTotalNotional = (signal as any).simNotional || 1000;
+          const gridNotional = simTotalNotional * (grid.volumePct / 100);
           grid.status = "FILLED";
           grid.fillPrice = price;
           grid.filledAt = new Date();
-          grid.tpPrice = direction === "LONG"
-            ? price * (1 + GRID_TP_PCT / 100)
-            : price * (1 - GRID_TP_PCT / 100);
-          // Simulated volume for this grid level (DCA weighted)
-          const simTotalNotional = (signal as any).simNotional || 1000;
-          const gridNotional = simTotalNotional * (grid.volumePct / 100);
           grid.simNotional = gridNotional;
           grid.simQuantity = gridNotional / price;
           filledCount++;
           gridChanged = true;
+
+          // Recalculate weighted average entry
+          const filledGrids = grids.filter((g) => g.status === "FILLED");
+          const totalVol = filledGrids.reduce((s, g) => s + (g.simNotional || 0), 0);
+          avgEntry = totalVol > 0
+            ? filledGrids.reduce((s, g) => s + g.fillPrice * (g.simNotional || 0), 0) / totalVol
+            : origEntry;
+          (signal as any).gridAvgEntry = avgEntry;
+
           this.logger.log(
-            `[PositionMonitor] Grid ${sigKey} L${grid.level} FILLED at ${price.toFixed(4)}, TP=${grid.tpPrice.toFixed(4)}, Qty=${grid.simQuantity.toFixed(4)}`,
+            `[PositionMonitor] Grid ${sigKey} L${grid.level} FILLED at ${price.toFixed(4)}, avgEntry=${avgEntry.toFixed(4)}, filled=${filledCount}/${GRID_LEVEL_COUNT}`,
           );
         }
       }
 
-      // Check FILLED grids: price hit individual TP → partial close
-      for (const grid of grids) {
-        if (grid.status !== "FILLED") continue;
-        const tpHit = direction === "LONG" ? price >= grid.tpPrice : price <= grid.tpPrice;
-        if (tpHit) {
-          grid.status = "TP_CLOSED";
-          grid.closedAt = new Date();
-          grid.pnlPct = direction === "LONG"
-            ? ((grid.tpPrice - grid.fillPrice) / grid.fillPrice) * 100
-            : ((grid.fillPrice - grid.tpPrice) / grid.fillPrice) * 100;
-          grid.pnlUsdt = (grid.pnlPct / 100) * (grid.simNotional || 0);
-          closedCount++;
-          gridChanged = true;
-          this.logger.log(
-            `[PositionMonitor] Grid ${sigKey} L${grid.level} TP_CLOSED +${grid.pnlPct.toFixed(2)}% (+${grid.pnlUsdt?.toFixed(2)} USDT)`,
-          );
+      // Check TP hit: signal TP price reached → close ALL grids
+      const filledGrids = grids.filter((g) => g.status === "FILLED");
+      const tpHit = signalTp && filledGrids.length > 0 && (
+        direction === "LONG" ? price >= signalTp : price <= signalTp
+      );
+
+      if (tpHit) {
+        // Close all grids at TP
+        for (const grid of grids) {
+          if (grid.status === "FILLED") {
+            grid.status = "TP_CLOSED";
+            grid.closedAt = new Date();
+            grid.exitPrice = price;
+            grid.pnlPct = direction === "LONG"
+              ? ((price - grid.fillPrice) / grid.fillPrice) * 100
+              : ((grid.fillPrice - price) / grid.fillPrice) * 100;
+            grid.pnlUsdt = (grid.pnlPct / 100) * (grid.simNotional || 0);
+            closedCount++;
+          }
+          if (grid.status === "PENDING") {
+            grid.status = "CANCELLED";
+            grid.pnlPct = 0;
+            grid.pnlUsdt = 0;
+            closedCount++;
+          }
         }
+        gridChanged = true;
       }
 
-      // Check global SL hit on remaining FILLED grids
-      const slHitGlobal = direction === "LONG" ? price <= globalSl : price >= globalSl;
-      if (slHitGlobal) {
+      // Check global SL hit → close ALL grids
+      const slHitGlobal = filledGrids.length > 0 && (
+        direction === "LONG" ? price <= globalSl : price >= globalSl
+      );
+      if (slHitGlobal && !tpHit) {
         for (const grid of grids) {
           if (grid.status === "FILLED") {
             grid.status = "SL_CLOSED";
             grid.closedAt = new Date();
+            grid.exitPrice = globalSl;
             grid.pnlPct = direction === "LONG"
               ? ((globalSl - grid.fillPrice) / grid.fillPrice) * 100
               : ((grid.fillPrice - globalSl) / grid.fillPrice) * 100;
             grid.pnlUsdt = (grid.pnlPct / 100) * (grid.simNotional || 0);
             closedCount++;
-            gridChanged = true;
           }
           if (grid.status === "PENDING") {
-            grid.status = "SL_CLOSED"; // never filled, no loss
+            grid.status = "CANCELLED";
             grid.pnlPct = 0;
             grid.pnlUsdt = 0;
             closedCount++;
+          }
+        }
+        gridChanged = true;
+      }
+
+      // Trailing stop for grid DCA: uses avg entry
+      if (!tpHit && !slHitGlobal && filledGrids.length > 0) {
+        const TRAIL_TRIGGER = 1.5;
+        const TRAIL_DISTANCE = 0.8;
+        const pnlFromAvg = direction === "LONG"
+          ? ((price - avgEntry) / avgEntry) * 100
+          : ((avgEntry - price) / avgEntry) * 100;
+
+        const prevPeak = (signal as any).peakPnlPct || 0;
+        if (pnlFromAvg > prevPeak) {
+          (signal as any).peakPnlPct = pnlFromAvg;
+        }
+        const peak = (signal as any).peakPnlPct || 0;
+
+        // Move SL to avg entry (break-even) at 1.5% from avg
+        if (peak >= TRAIL_TRIGGER && !(signal as any).slMovedToEntry) {
+          (signal as any).stopLossPrice = avgEntry;
+          (signal as any).slMovedToEntry = true;
+          (signal as any).gridGlobalSlPrice = avgEntry;
+          await this.signalQueueService.moveStopLossToEntry((signal as any)._id.toString());
+          gridChanged = true;
+          this.logger.log(
+            `[PositionMonitor] 🛡️ Grid ${sigKey} SL → avg entry ${avgEntry.toFixed(4)} (BE, peak=${peak.toFixed(2)}%)`,
+          );
+          if (this.slMovedCallback) {
+            await this.slMovedCallback(symbol, avgEntry).catch(() => {});
+          }
+          this.propagateSlMove(sigKey, symbol, avgEntry, direction);
+        }
+
+        // Continuous trailing: SL = avgEntry + (peak - 0.8%)
+        if ((signal as any).slMovedToEntry && peak > TRAIL_TRIGGER) {
+          const trailPct = Math.max(0, peak - TRAIL_DISTANCE);
+          const trailSl = direction === "LONG"
+            ? avgEntry * (1 + trailPct / 100)
+            : avgEntry * (1 - trailPct / 100);
+          const currentSl = (signal as any).gridGlobalSlPrice || avgEntry;
+          const shouldRaise = direction === "LONG" ? trailSl > currentSl : trailSl < currentSl;
+          if (shouldRaise) {
+            (signal as any).stopLossPrice = trailSl;
+            (signal as any).gridGlobalSlPrice = trailSl;
+            await this.signalQueueService.raiseStopLoss((signal as any)._id.toString(), trailSl, peak);
+            gridChanged = true;
+            this.logger.log(
+              `[PositionMonitor] 📈 Grid ${sigKey} trail SL → +${trailPct.toFixed(1)}% (${trailSl.toFixed(4)}) peak=${peak.toFixed(2)}%`,
+            );
+            this.propagateSlMove(sigKey, symbol, trailSl, direction);
+          }
+        }
+
+        // TP boost at 2% peak from avg entry
+        if (pnlFromAvg >= 2.0 && !(signal as any).tpBoosted && signalTp) {
+          (signal as any).tpBoosted = true;
+          try {
+            const hasMomentum = await this.marketDataService.hasVolumeMomentum(symbol);
+            if (hasMomentum) {
+              const currentTpPct = Math.abs(signalTp - avgEntry) / avgEntry * 100;
+              const boostedTpPct = Math.min(6, Math.max(currentTpPct, pnlFromAvg + 2.0));
+              const newTpPrice = direction === "LONG"
+                ? avgEntry * (1 + boostedTpPct / 100)
+                : avgEntry * (1 - boostedTpPct / 100);
+              (signal as any).takeProfitPrice = newTpPrice;
+              await this.signalQueueService.extendTakeProfit(
+                (signal as any)._id.toString(), newTpPrice, boostedTpPct,
+              );
+              gridChanged = true;
+              this.logger.log(
+                `[PositionMonitor] 🚀 Grid ${sigKey} TP boosted to ${boostedTpPct.toFixed(1)}% from avgEntry (${newTpPrice.toFixed(4)})`,
+              );
+              this.propagateTpMove(sigKey, symbol, newTpPrice, direction);
+            }
+          } catch (err) {
+            this.logger.warn(`[PositionMonitor] Grid TP boost error ${sigKey}: ${err?.message}`);
+          }
+        }
+
+        // Check trailing SL hit (after trail moved SL up)
+        const trailedSl = (signal as any).gridGlobalSlPrice;
+        if ((signal as any).slMovedToEntry && trailedSl) {
+          const trailSlHit = direction === "LONG" ? price <= trailedSl : price >= trailedSl;
+          if (trailSlHit) {
+            for (const grid of grids) {
+              if (grid.status === "FILLED") {
+                grid.status = "SL_CLOSED";
+                grid.closedAt = new Date();
+                grid.exitPrice = trailedSl;
+                grid.pnlPct = direction === "LONG"
+                  ? ((trailedSl - grid.fillPrice) / grid.fillPrice) * 100
+                  : ((grid.fillPrice - trailedSl) / grid.fillPrice) * 100;
+                grid.pnlUsdt = (grid.pnlPct / 100) * (grid.simNotional || 0);
+                closedCount++;
+              }
+              if (grid.status === "PENDING") {
+                grid.status = "CANCELLED";
+                grid.pnlPct = 0;
+                grid.pnlUsdt = 0;
+                closedCount++;
+              }
+            }
             gridChanged = true;
           }
         }
@@ -357,35 +474,27 @@ export class PositionMonitorService implements OnModuleInit {
         (signal as any).gridFilledCount = filledCount;
         (signal as any).gridClosedCount = closedCount;
 
-        // Calculate blended PnL (weighted by volumePct, only include filled+closed)
-        const closedGrids = grids.filter(
-          (g) => g.status === "TP_CLOSED" || g.status === "SL_CLOSED",
-        );
-        const totalVolPct = closedGrids.reduce((s, g) => s + (g.pnlPct != null ? g.volumePct : 0), 0);
-        const blendedPnl = totalVolPct > 0
-          ? closedGrids.reduce((s, g) => s + (g.pnlPct ?? 0) * g.volumePct, 0) / totalVolPct
-          : 0;
-        // Calculate total simulated USDT PnL
-        const totalPnlUsdt = closedGrids.reduce((s, g) => s + (g.pnlUsdt ?? 0), 0);
-
-        // Check if all grids resolved
+        // Check if all grids resolved (TP/SL/CANCELLED)
         const allResolved = grids.every(
-          (g) => g.status === "TP_CLOSED" || g.status === "SL_CLOSED",
+          (g) => g.status === "TP_CLOSED" || g.status === "SL_CLOSED" || g.status === "CANCELLED",
         );
 
         if (allResolved) {
-          const closeReason = grids.some((g) => g.status === "SL_CLOSED")
-            ? "STOP_LOSS" : "TAKE_PROFIT";
-          const exitPrice = slHitGlobal ? globalSl : price;
+          // Calculate total PnL from all filled grids
+          const closedGrids = grids.filter((g) => g.status === "TP_CLOSED" || g.status === "SL_CLOSED");
+          const totalPnlUsdt = closedGrids.reduce((s, g) => s + (g.pnlUsdt ?? 0), 0);
+          const totalVol = closedGrids.reduce((s, g) => s + (g.simNotional ?? 0), 0);
+          const blendedPnl = totalVol > 0 ? (totalPnlUsdt / totalVol) * 100 : 0;
 
-          // Resolve via signal queue (marks COMPLETED)
+          const closeReason = tpHit ? "TAKE_PROFIT" : "STOP_LOSS";
+          const exitPrice = tpHit ? price : (slHitGlobal ? globalSl : (signal as any).gridGlobalSlPrice);
+
           const resolved = await this.signalQueueService.resolveGridSignal(
             (signal as any)._id.toString(), grids, closedCount,
             blendedPnl, exitPrice, closeReason,
           );
 
           if (resolved) {
-            // Persist simulated USDT PnL
             if (totalPnlUsdt !== 0) {
               await this.signalQueueService.updateSimPnlUsdt(
                 (signal as any)._id.toString(), totalPnlUsdt,
@@ -396,13 +505,12 @@ export class PositionMonitorService implements OnModuleInit {
             const emoji = closeReason === "TAKE_PROFIT" ? "🎯" : "🛑";
             const usdSign = totalPnlUsdt >= 0 ? "+" : "";
             this.logger.log(
-              `[PositionMonitor] ${emoji} Grid ${sigKey} ALL RESOLVED: ${closeReason} PnL=${blendedPnl.toFixed(2)}% (${usdSign}${totalPnlUsdt.toFixed(2)} USDT)`,
+              `[PositionMonitor] ${emoji} Grid DCA ${sigKey} CLOSED: ${closeReason} avgEntry=${avgEntry.toFixed(4)} PnL=${blendedPnl.toFixed(2)}% (${usdSign}${totalPnlUsdt.toFixed(2)} USDT)`,
             );
-            // Fire resolve callback for notifications + queued signal promotion
             if (this.resolveCallback) {
               await this.resolveCallback({
                 symbol, signalKey: sigKey, direction,
-                entryPrice: (signal as any).originalEntryPrice ?? entryPrice,
+                entryPrice: avgEntry,
                 exitPrice, pnlPercent: blendedPnl,
                 pnlUsdt: totalPnlUsdt,
                 simNotional: (signal as any).simNotional,
@@ -413,16 +521,16 @@ export class PositionMonitorService implements OnModuleInit {
             }
             this.resolvingSymbols.delete(sigKey);
           }
-          return; // signal fully resolved
+          return;
         } else {
-          // Partial update — some grids closed but signal stays ACTIVE
+          // Partial update — persist grid state + avg entry
           await this.signalQueueService.updateSignalGrid(
-            (signal as any)._id.toString(), grids, filledCount, closedCount,
+            (signal as any)._id.toString(), grids, filledCount, closedCount, avgEntry,
           );
         }
       }
 
-      return; // Grid signals skip trailing stop and legacy TP/SL check
+      return; // Grid signals handled above — skip legacy TP/SL
     }
 
     // ─── Auto risk management (non-grid signals only) ─────────────────────

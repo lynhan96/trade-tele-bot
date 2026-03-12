@@ -126,21 +126,27 @@ export class AiSignal {
   @Prop({ type: Array, default: [] })
   gridLevels?: Array<{
     level: number; // 0=base, 1-4=grid levels
-    deviationPct: number; // % from original entry (0, -0.5, -1.0, ...)
+    deviationPct: number; // % from original entry (dynamic: SL% / (count+1))
     fillPrice: number; // price at which this grid was filled
-    tpPrice: number; // individual TP = fillPrice ± gridTpPct%
-    volumePct: number; // % of total volume (e.g. 20)
-    status: string; // "PENDING" | "FILLED" | "TP_CLOSED" | "SL_CLOSED"
+    exitPrice?: number; // price at which this grid was closed (TP/SL)
+    volumePct: number; // % of total volume (DCA: 10,15,20,25,30)
+    status: string; // "PENDING" | "FILLED" | "TP_CLOSED" | "SL_CLOSED" | "CANCELLED"
     filledAt?: Date;
     closedAt?: Date;
     pnlPct?: number; // realized PnL for this grid level
+    pnlUsdt?: number; // realized PnL USDT
+    simNotional?: number; // simulated notional for this grid
+    simQuantity?: number; // simulated quantity for this grid
   }>;
 
   @Prop()
-  originalEntryPrice?: number; // base grid fill price
+  originalEntryPrice?: number; // base grid fill price (L0)
 
   @Prop()
-  gridGlobalSlPrice?: number; // global SL price (-3.5% from original entry)
+  gridGlobalSlPrice?: number; // signal's SL price (not fixed 3.5%)
+
+  @Prop()
+  gridAvgEntry?: number; // DCA weighted average entry price
 
   @Prop({ default: 0 })
   gridFilledCount?: number; // how many grids have been filled

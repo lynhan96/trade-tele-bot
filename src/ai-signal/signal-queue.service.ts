@@ -284,12 +284,14 @@ export class SignalQueueService {
     gridLevels: any[],
     gridFilledCount: number,
     gridClosedCount: number,
+    gridAvgEntry?: number,
   ): Promise<void> {
-    await this.aiSignalModel.findByIdAndUpdate(signalId, {
-      gridLevels,
-      gridFilledCount,
-      gridClosedCount,
-    });
+    const update: any = { gridLevels, gridFilledCount, gridClosedCount };
+    if (gridAvgEntry != null) {
+      update.gridAvgEntry = gridAvgEntry;
+      update.entryPrice = gridAvgEntry; // sync entryPrice to avg for display
+    }
+    await this.aiSignalModel.findByIdAndUpdate(signalId, update);
   }
 
   /**
@@ -334,14 +336,17 @@ export class SignalQueueService {
     signalId: string,
     originalEntryPrice: number,
     gridGlobalSlPrice: number,
+    gridAvgEntry?: number,
   ): Promise<void> {
-    await this.aiSignalModel.findByIdAndUpdate(signalId, {
+    const update: any = {
       originalEntryPrice,
       gridGlobalSlPrice,
       stopLossPrice: gridGlobalSlPrice,
-    });
+    };
+    if (gridAvgEntry != null) update.gridAvgEntry = gridAvgEntry;
+    await this.aiSignalModel.findByIdAndUpdate(signalId, update);
     this.logger.log(
-      `[SignalQueue] Grid init: signal ${signalId} origEntry=${originalEntryPrice.toFixed(4)} globalSL=${gridGlobalSlPrice.toFixed(4)}`,
+      `[SignalQueue] Grid DCA init: signal ${signalId} origEntry=${originalEntryPrice.toFixed(4)} SL=${gridGlobalSlPrice.toFixed(4)} avgEntry=${(gridAvgEntry ?? originalEntryPrice).toFixed(4)}`,
     );
   }
 
