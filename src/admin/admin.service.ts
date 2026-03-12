@@ -228,7 +228,10 @@ export class AdminService {
     let totalPnlUsdt: number | undefined;
     let winPnl: number | undefined;
     let lossPnl: number | undefined;
+    let winPnlUsdt: number | undefined;
+    let lossPnlUsdt: number | undefined;
     if (filter.status === "COMPLETED") {
+      const pnlExpr = { $ifNull: ["$pnlUsdt", { $multiply: [{ $divide: [{ $ifNull: ["$pnlPercent", 0] }, 100] }, { $ifNull: ["$simNotional", 1000] }] }] };
       const agg = await this.signalModel.aggregate([
         { $match: { ...filter, pnlPercent: { $exists: true } } },
         {
@@ -237,9 +240,11 @@ export class AdminService {
             wins: { $sum: { $cond: [{ $gt: ["$pnlPercent", 0] }, 1, 0] } },
             losses: { $sum: { $cond: [{ $lte: ["$pnlPercent", 0] }, 1, 0] } },
             totalPnl: { $sum: "$pnlPercent" },
-            totalPnlUsdt: { $sum: { $ifNull: ["$pnlUsdt", { $multiply: [{ $divide: [{ $ifNull: ["$pnlPercent", 0] }, 100] }, { $ifNull: ["$simNotional", 1000] }] }] } },
+            totalPnlUsdt: { $sum: pnlExpr },
             winPnl: { $sum: { $cond: [{ $gt: ["$pnlPercent", 0] }, "$pnlPercent", 0] } },
             lossPnl: { $sum: { $cond: [{ $lte: ["$pnlPercent", 0] }, "$pnlPercent", 0] } },
+            winPnlUsdt: { $sum: { $cond: [{ $gt: ["$pnlPercent", 0] }, pnlExpr, 0] } },
+            lossPnlUsdt: { $sum: { $cond: [{ $lte: ["$pnlPercent", 0] }, pnlExpr, 0] } },
           },
         },
       ]);
@@ -249,9 +254,11 @@ export class AdminService {
       totalPnlUsdt = Math.round((agg[0]?.totalPnlUsdt ?? 0) * 100) / 100;
       winPnl = agg[0]?.winPnl ?? 0;
       lossPnl = agg[0]?.lossPnl ?? 0;
+      winPnlUsdt = Math.round((agg[0]?.winPnlUsdt ?? 0) * 100) / 100;
+      lossPnlUsdt = Math.round((agg[0]?.lossPnlUsdt ?? 0) * 100) / 100;
     }
 
-    return { data, total, page, limit, totalPages: Math.ceil(total / limit), wins, losses, totalPnl, totalPnlUsdt, winPnl, lossPnl };
+    return { data, total, page, limit, totalPages: Math.ceil(total / limit), wins, losses, totalPnl, totalPnlUsdt, winPnl, lossPnl, winPnlUsdt, lossPnlUsdt };
   }
 
   async getSignalStats(query: { status?: string; direction?: string }) {
