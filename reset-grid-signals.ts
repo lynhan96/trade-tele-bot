@@ -97,7 +97,6 @@ async function main() {
         simNotional: SIM_NOTIONAL,
         simQuantity: SIM_NOTIONAL / origEntry,
         slMovedToEntry: false,
-        peakPnlPct: undefined,
         tpBoosted: false,
       },
       $unset: {
