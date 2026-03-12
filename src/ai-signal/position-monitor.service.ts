@@ -202,8 +202,8 @@ export class PositionMonitorService implements OnModuleInit {
     // True DCA: grids fit within signal's SL range. TP = signal TP price (Fibo).
     // Trailing stop uses weighted avg entry. Close ALL grids together on TP/SL.
     const GRID_LEVEL_COUNT = 5;
-    // DCA volume weights: increasing at deeper levels (sum=100)
-    const DCA_WEIGHTS = [10, 15, 20, 25, 30];
+    // DCA volume weights: L0=40% base, remaining 60% DCA-weighted for L1-L4 (sum=100)
+    const DCA_WEIGHTS = [40, 6, 12, 18, 24];
 
     const gridLevels: any[] = (signal as any).gridLevels ?? [];
     const isGridSignal = gridLevels.length > 0;

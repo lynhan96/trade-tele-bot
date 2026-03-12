@@ -1649,12 +1649,17 @@ export class UserRealTradingService implements OnModuleInit {
     return grids;
   }
 
-  /** DCA volume weights: deeper levels get heavier allocation. Sum = 100%. */
+  /** DCA volume weights: L0=40% base, remaining 60% DCA-weighted for L1-L4. Sum = 100%. */
   private getDcaWeights(levelCount: number): number[] {
-    // Generate linearly increasing weights: 1, 2, 3, ..., n
-    const raw = Array.from({ length: levelCount }, (_, i) => i + 1);
+    if (levelCount <= 1) return [100];
+    const baseWeight = 40;
+    const remaining = 100 - baseWeight;
+    const dcaCount = levelCount - 1;
+    // Linearly increasing weights for DCA levels
+    const raw = Array.from({ length: dcaCount }, (_, i) => i + 1);
     const total = raw.reduce((s, v) => s + v, 0);
-    return raw.map((v) => Math.round((v / total) * 1000) / 10); // % with 1 decimal
+    const dcaWeights = raw.map((v) => Math.round((v / total) * remaining * 10) / 10);
+    return [baseWeight, ...dcaWeights];
   }
 
   /**
