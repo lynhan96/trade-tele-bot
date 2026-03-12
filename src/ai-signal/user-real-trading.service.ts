@@ -1687,6 +1687,10 @@ export class UserRealTradingService implements OnModuleInit {
           let gridChanged = false;
 
           // Check PENDING grids for fill triggers (DCA: add to position)
+          // RSI guard: only DCA when RSI shows exhaustion (likely to bounce)
+          let rsiOk: boolean | null = null;
+          const coin = symbol.replace("USDT", "");
+
           for (const grid of grids) {
             if (grid.status !== "PENDING") continue;
             const triggerPrice = direction === "LONG"
@@ -1694,6 +1698,36 @@ export class UserRealTradingService implements OnModuleInit {
               : origEntry * (1 + grid.deviationPct / 100);
             const triggered = direction === "LONG" ? currentPrice <= triggerPrice : currentPrice >= triggerPrice;
             if (triggered) {
+              // Cooldown: skip if last grid filled < 5 min ago
+              const lastFill = grids
+                .filter((g) => g.status === "FILLED" && g.filledAt)
+                .map((g) => new Date(g.filledAt).getTime())
+                .sort((a, b) => b - a)[0];
+              if (lastFill && Date.now() - lastFill < 5 * 60 * 1000) continue;
+
+              // RSI guard for L2+ (L1 is close to entry, usually safe)
+              if (grid.level >= 2 && rsiOk === null) {
+                try {
+                  const closes = await this.marketDataService.getClosePrices(coin, "15m");
+                  if (closes.length >= 14) {
+                    const { RSI } = require("technicalindicators");
+                    const rsiVals = RSI.calculate({ period: 14, values: closes });
+                    const rsi = rsiVals[rsiVals.length - 1];
+                    rsiOk = direction === "LONG" ? rsi < 40 : rsi > 60;
+                    if (!rsiOk) {
+                      this.logger.log(
+                        `[Grid] ${symbol} user ${telegramId} L${grid.level} RSI=${rsi.toFixed(1)} — skip DCA (waiting for exhaustion)`,
+                      );
+                    }
+                  } else {
+                    rsiOk = true;
+                  }
+                } catch {
+                  rsiOk = true;
+                }
+              }
+              if (grid.level >= 2 && rsiOk === false) continue;
+
               await this.placeGridOrder(trade as any, grid, currentPrice);
               gridChanged = true;
             }
