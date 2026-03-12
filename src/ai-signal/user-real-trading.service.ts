@@ -1493,37 +1493,58 @@ export class UserRealTradingService implements OnModuleInit {
               }
             }
 
-            // ── Safety net: if trailing SL should have moved but didn't ─────
-            // Position monitor handles trailing SL in real-time, but if bot restarted
-            // or listener missed, ensure SL is at least at entry when PnL >= 2%
+            // ── Trailing stop for real trades ─────────────────────────────
+            // Mirrors position-monitor logic: TRAIL_TRIGGER=1.5%, TRAIL_DISTANCE=0.8%
+            // Runs every 2min as safety net + primary trailing for trades whose signal is no longer watched
             if (currentPrice && trade.entryPrice && slPrice) {
+              const TRAIL_TRIGGER = 1.5;
+              const TRAIL_DISTANCE = 0.8;
+              // Use grid avg entry if available
+              const entry = (trade as any).gridAvgEntry || trade.entryPrice;
               const currentPnlPct = direction === "LONG"
-                ? ((currentPrice - trade.entryPrice) / trade.entryPrice) * 100
-                : ((trade.entryPrice - currentPrice) / trade.entryPrice) * 100;
-              // Only intervene if SL is BELOW entry and PnL >= 2% (trailing should have kicked in)
-              const slBelowEntry = direction === "LONG"
-                ? slPrice < trade.entryPrice * 0.999
-                : slPrice > trade.entryPrice * 1.001;
-              if (currentPnlPct >= 2 && slBelowEntry) {
-                const roundedEntry = round(trade.entryPrice);
-                this.logger.log(`[RealTrading] ${symbol} user ${telegramId}: PnL ${currentPnlPct.toFixed(1)}% >= 2% but SL ${slPrice} still below entry — safety move to ${roundedEntry}`);
-                try {
-                  if (trade.binanceSlAlgoId) {
-                    await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, trade.binanceSlAlgoId);
+                ? ((currentPrice - entry) / entry) * 100
+                : ((entry - currentPrice) / entry) * 100;
+
+              if (currentPnlPct >= TRAIL_TRIGGER) {
+                // Compute trailing SL: entry + (pnl - 0.8%)
+                const trailPct = Math.max(0, currentPnlPct - TRAIL_DISTANCE);
+                const trailSl = direction === "LONG"
+                  ? entry * (1 + trailPct / 100)
+                  : entry * (1 - trailPct / 100);
+                const roundedTrailSl = round(trailSl);
+
+                // Only move SL up (LONG) or down (SHORT), never backwards
+                const shouldMove = direction === "LONG"
+                  ? roundedTrailSl > slPrice * 1.001
+                  : roundedTrailSl < slPrice * 0.999;
+
+                if (shouldMove) {
+                  this.logger.log(`[RealTrading] ${symbol} user ${telegramId}: trailing SL ${fmtP(slPrice)} → ${fmtP(roundedTrailSl)} (PnL: +${currentPnlPct.toFixed(1)}%)`);
+                  try {
+                    if (trade.binanceSlAlgoId) {
+                      await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, trade.binanceSlAlgoId);
+                    }
+                    const tradeQty = trade.gridLevels?.length > 0
+                      ? trade.gridLevels.filter((g: any) => g.status === "FILLED").reduce((sum: number, g: any) => sum + (g.quantity || 0), 0) || trade.quantity
+                      : trade.quantity;
+                    const slOrder = await this.binanceService.setStopLoss(
+                      keys.apiKey, keys.apiSecret, symbol, roundedTrailSl,
+                      direction as "LONG" | "SHORT", tradeQty,
+                    );
+                    const newId = slOrder?.algoId?.toString() ?? slOrder?.orderId?.toString();
+                    await this.userTradeModel.updateOne({ _id: trade._id }, { $set: { slPrice: roundedTrailSl, binanceSlAlgoId: newId } });
+                    // Only notify on first move to break-even
+                    const wasBelow = direction === "LONG" ? slPrice < entry * 0.999 : slPrice > entry * 1.001;
+                    if (wasBelow) {
+                      await this.telegramService.sendTelegramMessage(chatId,
+                        `🛡️ *Trailing SL*\n\n${symbol} ${direction}\nSL: *${fmtP(roundedTrailSl)}*\nPnL: *+${currentPnlPct.toFixed(1)}%*`
+                      ).catch(() => {});
+                    }
+                  } catch (err) {
+                    this.logger.warn(`[RealTrading] ${symbol} user ${telegramId}: trailing SL failed: ${err?.message}`);
                   }
-                  const slOrder = await this.binanceService.setStopLoss(
-                    keys.apiKey, keys.apiSecret, symbol, roundedEntry,
-                    direction as "LONG" | "SHORT", trade.quantity,
-                  );
-                  const newId = slOrder?.algoId?.toString() ?? slOrder?.orderId?.toString();
-                  await this.userTradeModel.updateOne({ _id: trade._id }, { $set: { slPrice: roundedEntry, binanceSlAlgoId: newId } });
-                  await this.telegramService.sendTelegramMessage(chatId,
-                    `🛡️ *Bao Ve Vi The: SL -> Entry*\n\n${symbol} ${direction}\nSL moi: *${fmtP(roundedEntry)}* (hoa von)\nPnL: *+${currentPnlPct.toFixed(1)}%*`
-                  ).catch(() => {});
-                } catch (err) {
-                  this.logger.warn(`[RealTrading] ${symbol} user ${telegramId}: SL-to-entry failed: ${err?.message}`);
+                  continue;
                 }
-                continue; // SL handled — skip the missing SL check below
               }
             }
 
