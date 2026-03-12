@@ -532,6 +532,13 @@ export class AdminService {
         $set[key] = val;
       }
     }
+    // When re-enabling real mode, reset cycle so it starts fresh
+    if (dto.realModeEnabled === true) {
+      $set.cycleResetAt = new Date();
+      $set.cyclePeakPct = 0;
+      $set.cyclePaused = false;
+    }
+
     const update: any = {};
     if (Object.keys($set).length) update.$set = $set;
     if (Object.keys($unset).length) update.$unset = $unset;
