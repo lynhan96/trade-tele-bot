@@ -879,7 +879,8 @@ export class UserRealTradingService implements OnModuleInit {
    * Called when user re-enables real mode (/ai on).
    */
   async resetCycleForUser(telegramId: number): Promise<void> {
-    await this.subscriptionService.setCycleResetAt(telegramId, null);
+    // Set to now (not null) so frontend shows new cycle start time; peak/paused reset to 0/false
+    await this.subscriptionService.setCycleResetAt(telegramId, new Date());
     await this.redisService.delete(TP_CYCLE_COOLDOWN_KEY(telegramId));
     this.logger.log(`[RealTrading] User ${telegramId} — cycle reset on /ai on`);
   }
