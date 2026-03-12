@@ -266,7 +266,9 @@ export class UserRealTradingService implements OnModuleInit {
       // Grid: base order = 1/gridLevelCount of full volume (rest reserved for grid levels)
       const isGrid = sub.gridEnabled === true;
       const gridLevelCount = sub.gridLevelCount ?? 5;
-      const vol = isGrid ? fullVol / gridLevelCount : fullVol;
+      // DCA: L0 gets smallest portion (weight[0]), deeper levels get more
+      const dcaWeights = this.getDcaWeights(gridLevelCount);
+      const vol = isGrid ? fullVol * (dcaWeights[0] / 100) : fullVol;
       const rawQty = vol / currentPrice;
       const quantity = parseFloat(rawQty.toFixed(quantityPrecision));
       if (quantity <= 0) {
@@ -1635,11 +1637,13 @@ export class UserRealTradingService implements OnModuleInit {
     const levelCount = sub.gridLevelCount ?? 5;
     const devStep = sub.gridDeviationStep ?? 0.5;
     const gridTpPct = sub.gridTpPct ?? 0.3;
-    const volumePct = 100 / levelCount;
+    // DCA weights: increasing volume at deeper levels
+    const dcaWeights = this.getDcaWeights(levelCount);
     const grids: any[] = [];
 
     for (let i = 0; i < levelCount; i++) {
       const dev = i * devStep; // 0, 0.5, 1.0, 1.5, 2.0
+      const volumePct = dcaWeights[i];
       if (i === 0) {
         const tp = direction === "LONG"
           ? fillPrice * (1 + gridTpPct / 100)
@@ -1656,6 +1660,14 @@ export class UserRealTradingService implements OnModuleInit {
       }
     }
     return grids;
+  }
+
+  /** DCA volume weights: deeper levels get heavier allocation. Sum = 100%. */
+  private getDcaWeights(levelCount: number): number[] {
+    // Generate linearly increasing weights: 1, 2, 3, ..., n
+    const raw = Array.from({ length: levelCount }, (_, i) => i + 1);
+    const total = raw.reduce((s, v) => s + v, 0);
+    return raw.map((v) => Math.round((v / total) * 1000) / 10); // % with 1 decimal
   }
 
   /**
@@ -1767,7 +1779,8 @@ export class UserRealTradingService implements OnModuleInit {
 
       const fullVol = this.getVolForSymbol(symbol, sub.coinVolumes as any, sub.tradingBalance);
       const levelCount = sub.gridLevelCount ?? 5;
-      const gridVol = fullVol / levelCount;
+      const dcaWeights = this.getDcaWeights(levelCount);
+      const gridVol = fullVol * (dcaWeights[grid.level] / 100);
       const gridTpPct = sub.gridTpPct ?? 0.3;
 
       const [qtyPrec, pricePrec] = await Promise.all([

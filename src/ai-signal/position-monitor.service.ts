@@ -198,15 +198,16 @@ export class PositionMonitorService implements OnModuleInit {
     const { symbol, direction, entryPrice, takeProfitPrice } = signal;
     const sigKey = this.getSignalKey(signal);
 
-    // ─── Grid Recovery Simulation (signal level) ───────────────────────────
-    // Simulates grid recovery at signal level for test mode stats.
-    // 5 grids (base + 4), each 20% volume. Each grid has individual TP (+0.3%).
-    // Global SL at -3.5% from original entry. Partial closes per grid.
+    // ─── Grid DCA Simulation (signal level) ─────────────────────────────────
+    // DCA grid: deeper levels get heavier volume to average down aggressively.
+    // Volume weights: L0=10%, L1=15%, L2=20%, L3=25%, L4=30% (total=100%)
+    // Each grid has individual TP (+0.3%). Global SL at -3.5% from original entry.
     const GRID_DEVIATION_STEP = 0.5; // % step between grids
     const GRID_LEVEL_COUNT = 5;      // base + 4 grids
     const GRID_TP_PCT = 0.3;         // each grid's TP: +0.3% from fill
     const GRID_GLOBAL_SL_PCT = 3.5;  // global SL: -3.5% from original entry
-    const GRID_VOLUME_PCT = 100 / GRID_LEVEL_COUNT; // 20% each
+    // DCA volume weights: increasing at deeper levels
+    const DCA_WEIGHTS = [10, 15, 20, 25, 30]; // % per level (sum=100)
 
     const gridLevels: any[] = (signal as any).gridLevels ?? [];
     const isGridSignal = gridLevels.length > 0;
@@ -218,26 +219,27 @@ export class PositionMonitorService implements OnModuleInit {
 
       // Simulated volume: $1000 notional per trade
       const simNotional = 1000;
-      const simGridNotional = simNotional / GRID_LEVEL_COUNT; // per grid
       const simQuantity = simNotional / origEntry;
 
       for (let i = 0; i < GRID_LEVEL_COUNT; i++) {
         const dev = i * GRID_DEVIATION_STEP;
+        const volPct = DCA_WEIGHTS[i];
+        const gridNotional = simNotional * (volPct / 100);
         if (i === 0) {
-          // Base grid: already filled at entry price
+          // Base grid: already filled at entry price (smallest position)
           const tp = direction === "LONG"
             ? origEntry * (1 + GRID_TP_PCT / 100)
             : origEntry * (1 - GRID_TP_PCT / 100);
           grids.push({
             level: 0, deviationPct: 0, fillPrice: origEntry,
-            tpPrice: tp, volumePct: GRID_VOLUME_PCT,
+            tpPrice: tp, volumePct: volPct,
             status: "FILLED", filledAt: new Date(),
-            simNotional: simGridNotional, simQuantity: simGridNotional / origEntry,
+            simNotional: gridNotional, simQuantity: gridNotional / origEntry,
           });
         } else {
           grids.push({
             level: i, deviationPct: dev, fillPrice: 0,
-            tpPrice: 0, volumePct: GRID_VOLUME_PCT,
+            tpPrice: 0, volumePct: volPct,
             status: "PENDING",
           });
         }
@@ -293,9 +295,9 @@ export class PositionMonitorService implements OnModuleInit {
           grid.tpPrice = direction === "LONG"
             ? price * (1 + GRID_TP_PCT / 100)
             : price * (1 - GRID_TP_PCT / 100);
-          // Simulated volume for this grid level
+          // Simulated volume for this grid level (DCA weighted)
           const simTotalNotional = (signal as any).simNotional || 1000;
-          const gridNotional = simTotalNotional / GRID_LEVEL_COUNT;
+          const gridNotional = simTotalNotional * (grid.volumePct / 100);
           grid.simNotional = gridNotional;
           grid.simQuantity = gridNotional / price;
           filledCount++;
