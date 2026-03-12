@@ -157,17 +157,61 @@ export class SignalQueueService {
       return null;
     }
 
+    // Use gridAvgEntry for grid signals (weighted avg of filled grids)
+    const entryForPnl = (active as any).gridAvgEntry || active.entryPrice;
     const pnlPercent =
       active.direction === "LONG"
-        ? ((exitPrice - active.entryPrice) / active.entryPrice) * 100
-        : ((active.entryPrice - exitPrice) / active.entryPrice) * 100;
+        ? ((exitPrice - entryForPnl) / entryForPnl) * 100
+        : ((entryForPnl - exitPrice) / entryForPnl) * 100;
+
+    // Calculate USDT PnL from grid volumes (per-grid for accuracy)
+    const grids: any[] = (active as any).gridLevels || [];
+    let pnlUsdt: number | undefined;
+    if (grids.length > 0) {
+      let totalUsdt = 0;
+      for (const g of grids) {
+        if (g.status === "FILLED") {
+          const vol = g.simNotional || ((active as any).simNotional || 1000) * (g.volumePct / 100);
+          const gPnl = active.direction === "LONG"
+            ? ((exitPrice - g.fillPrice) / g.fillPrice) * 100
+            : ((g.fillPrice - exitPrice) / g.fillPrice) * 100;
+          totalUsdt += (gPnl / 100) * vol;
+        }
+      }
+      pnlUsdt = Math.round(totalUsdt * 100) / 100;
+    } else {
+      pnlUsdt = Math.round((pnlPercent / 100) * ((active as any).simNotional || 1000) * 100) / 100;
+    }
+
+    // Close grid levels
+    const updatedGrids = grids.map((g: any) => ({
+      ...g,
+      ...(g.status === "FILLED" ? {
+        status: reason === "TAKE_PROFIT" ? "TP_CLOSED" : "SL_CLOSED",
+        closedAt: new Date(), exitPrice,
+        pnlPct: active.direction === "LONG"
+          ? ((exitPrice - g.fillPrice) / g.fillPrice) * 100
+          : ((g.fillPrice - exitPrice) / g.fillPrice) * 100,
+        pnlUsdt: (() => {
+          const vol = g.simNotional || ((active as any).simNotional || 1000) * (g.volumePct / 100);
+          const gPnl = active.direction === "LONG"
+            ? ((exitPrice - g.fillPrice) / g.fillPrice) * 100
+            : ((g.fillPrice - exitPrice) / g.fillPrice) * 100;
+          return Math.round((gPnl / 100) * vol * 100) / 100;
+        })(),
+      } : {}),
+      ...(g.status === "PENDING" ? { status: "CANCELLED" } : {}),
+    }));
+    const gridClosedCount = updatedGrids.filter((g: any) => g.status === "TP_CLOSED" || g.status === "SL_CLOSED").length;
 
     await this.aiSignalModel.findByIdAndUpdate(activeId, {
       status: "COMPLETED",
       closeReason: reason,
       exitPrice,
       pnlPercent,
+      pnlUsdt,
       positionClosedAt: new Date(),
+      ...(grids.length > 0 ? { gridLevels: updatedGrids, gridClosedCount } : {}),
     });
 
     await this.redisService.delete(ACTIVE_KEY(symbol));
@@ -443,21 +487,56 @@ export class SignalQueueService {
     reason: string = "AUTO_CLOSE_PROFIT",
   ): Promise<void> {
     const sigKey = this.docSignalKey(doc);
+    const entryForPnl = (doc as any).gridAvgEntry || doc.entryPrice;
     const pnlPercent =
       doc.direction === "LONG"
-        ? ((exitPrice - doc.entryPrice) / doc.entryPrice) * 100
-        : ((doc.entryPrice - exitPrice) / doc.entryPrice) * 100;
+        ? ((exitPrice - entryForPnl) / entryForPnl) * 100
+        : ((entryForPnl - exitPrice) / entryForPnl) * 100;
+
+    // Per-grid USDT PnL
+    const grids: any[] = (doc as any).gridLevels || [];
+    let pnlUsdt: number;
+    if (grids.length > 0) {
+      let totalUsdt = 0;
+      for (const g of grids) {
+        if (g.status === "FILLED") {
+          const vol = g.simNotional || ((doc as any).simNotional || 1000) * (g.volumePct / 100);
+          const gPnl = doc.direction === "LONG"
+            ? ((exitPrice - g.fillPrice) / g.fillPrice) * 100
+            : ((g.fillPrice - exitPrice) / g.fillPrice) * 100;
+          totalUsdt += (gPnl / 100) * vol;
+        }
+      }
+      pnlUsdt = Math.round(totalUsdt * 100) / 100;
+    } else {
+      pnlUsdt = Math.round((pnlPercent / 100) * ((doc as any).simNotional || 1000) * 100) / 100;
+    }
+
+    // Close grid levels
+    const updatedGrids = grids.map((g: any) => ({
+      ...g,
+      ...(g.status === "FILLED" ? {
+        status: "SL_CLOSED", closedAt: new Date(), exitPrice,
+        pnlPct: doc.direction === "LONG"
+          ? ((exitPrice - g.fillPrice) / g.fillPrice) * 100
+          : ((g.fillPrice - exitPrice) / g.fillPrice) * 100,
+      } : {}),
+      ...(g.status === "PENDING" ? { status: "CANCELLED" } : {}),
+    }));
+    const gridClosedCount = updatedGrids.filter((g: any) => g.status === "SL_CLOSED" || g.status === "TP_CLOSED").length;
 
     await this.aiSignalModel.findByIdAndUpdate(doc._id, {
       status: "COMPLETED",
       closeReason: reason,
       exitPrice,
       pnlPercent,
+      pnlUsdt,
       positionClosedAt: new Date(),
+      ...(grids.length > 0 ? { gridLevels: updatedGrids, gridClosedCount } : {}),
     });
     await this.redisService.delete(ACTIVE_KEY(sigKey));
     this.logger.log(
-      `[SignalQueue] ${sigKey} COMPLETED (${reason}) — exitPrice=${exitPrice} pnl=${pnlPercent.toFixed(2)}%`,
+      `[SignalQueue] ${sigKey} COMPLETED (${reason}) — exitPrice=${exitPrice} pnl=${pnlPercent.toFixed(2)}% pnlUsdt=${pnlUsdt}`,
     );
   }
 

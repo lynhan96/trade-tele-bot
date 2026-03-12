@@ -354,10 +354,11 @@ export class AiSignalService implements OnModuleInit {
           const currentPrice = await this.marketDataService.getPrice(signal.symbol);
           if (!currentPrice) continue;
 
+          const entryForPnl = (signal as any).gridAvgEntry || signal.entryPrice;
           const pnlPercent =
             signal.direction === "LONG"
-              ? ((currentPrice - signal.entryPrice) / signal.entryPrice) * 100
-              : ((signal.entryPrice - currentPrice) / signal.entryPrice) * 100;
+              ? ((currentPrice - entryForPnl) / entryForPnl) * 100
+              : ((entryForPnl - currentPrice) / entryForPnl) * 100;
 
           // Use executedAt (activation time) if available, fallback to createdAt
           const ageRef = (signal as any).executedAt ?? (signal as any).createdAt;
@@ -1027,9 +1028,10 @@ export class AiSignalService implements OnModuleInit {
         const currentPrice = await this.marketDataService.getPrice(signal.symbol).catch(() => 0);
         if (!currentPrice) continue;
 
+        const entryRef = (signal as any).gridAvgEntry || signal.entryPrice;
         const pnlPct = signal.direction === "LONG"
-          ? ((currentPrice - signal.entryPrice) / signal.entryPrice) * 100
-          : ((signal.entryPrice - currentPrice) / signal.entryPrice) * 100;
+          ? ((currentPrice - entryRef) / entryRef) * 100
+          : ((entryRef - currentPrice) / entryRef) * 100;
 
         // Only close positions that are actually losing (< -0.5%)
         // Positions near breakeven or profitable should keep running with their SL/TP
@@ -1199,9 +1201,11 @@ export class AiSignalService implements OnModuleInit {
     if (!tpHit && !slHit) return;
 
     const reason = tpHit ? "TAKE_PROFIT" : "STOP_LOSS";
+    // Use gridAvgEntry for grid signals
+    const entryForPnl = (signal as any).gridAvgEntry || signal.entryPrice;
     const pnl = isLong
-      ? ((currentPrice - signal.entryPrice) / signal.entryPrice) * 100
-      : ((signal.entryPrice - currentPrice) / signal.entryPrice) * 100;
+      ? ((currentPrice - entryForPnl) / entryForPnl) * 100
+      : ((entryForPnl - currentPrice) / entryForPnl) * 100;
 
     this.logger.log(
       `[AiSignal] [TEST] ${signal.symbol} ${reason} at $${currentPrice} (PnL: ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}%)`,
@@ -1210,9 +1214,24 @@ export class AiSignalService implements OnModuleInit {
     // Use profile-aware signal key for dual-timeframe coins
     const sigKey = this.getSignalKey(signal);
 
-    // Simulated USDT PnL
-    const simNotional = (signal as any).simNotional || 1000;
-    const simPnlUsdt = (pnl / 100) * simNotional;
+    // Per-grid USDT PnL (each grid has different fillPrice)
+    const grids: any[] = (signal as any).gridLevels || [];
+    let simPnlUsdt: number;
+    if (grids.length > 0) {
+      let totalUsdt = 0;
+      for (const g of grids) {
+        if (g.status === "FILLED") {
+          const vol = g.simNotional || ((signal as any).simNotional || 1000) * (g.volumePct / 100);
+          const gPnl = isLong
+            ? ((currentPrice - g.fillPrice) / g.fillPrice) * 100
+            : ((g.fillPrice - currentPrice) / g.fillPrice) * 100;
+          totalUsdt += (gPnl / 100) * vol;
+        }
+      }
+      simPnlUsdt = Math.round(totalUsdt * 100) / 100;
+    } else {
+      simPnlUsdt = Math.round((pnl / 100) * ((signal as any).simNotional || 1000) * 100) / 100;
+    }
 
     // Mark COMPLETED directly in MongoDB (don't rely on Redis key existing)
     await this.aiSignalModel.findByIdAndUpdate(signal._id, {
@@ -1263,7 +1282,7 @@ export class AiSignalService implements OnModuleInit {
         `━━━━━━━━━━━━━━━━━━\n\n` +
         `${dirEmoji} ${fmtP(signal.entryPrice)} → ${fmtP(currentPrice)}\n` +
         `PnL: *${pnlSign}${pnl.toFixed(2)}% (${usdSign}${simPnlUsdt.toFixed(2)} USDT)*\n` +
-        `Vol: *$${simNotional.toLocaleString()}*\n\n` +
+        `Vol: *$${((signal as any).simNotional || 1000).toLocaleString()}*\n\n` +
         `_${reason} • Test mode_`;
 
       const subscribers = await this.subscriptionService.findSignalOnlySubscribers();

@@ -601,18 +601,28 @@ export class PositionMonitorService implements OnModuleInit {
 
         // Notify AiSignalService so it can send Telegram messages
         if (this.resolveCallback) {
+          // Use gridAvgEntry for grid signals
+          const entryForPnl = (signal as any).gridAvgEntry || signal.entryPrice;
           const pnlPercent =
             signal.direction === "LONG"
-              ? ((exitPrice - signal.entryPrice) / signal.entryPrice) * 100
-              : ((signal.entryPrice - exitPrice) / signal.entryPrice) * 100;
+              ? ((exitPrice - entryForPnl) / entryForPnl) * 100
+              : ((entryForPnl - exitPrice) / entryForPnl) * 100;
 
-          // For grid signals, pnlUsdt from filled grids vol
+          // Per-grid USDT PnL (each grid has different fillPrice)
           let pnlUsdt: number | undefined;
           const grids: any[] = (signal as any).gridLevels || [];
           if (grids.length > 0) {
-            const filledVol = grids.reduce((s, g) =>
-              s + (g.status === "FILLED" ? (g.simNotional || 0) : 0), 0);
-            pnlUsdt = filledVol > 0 ? (pnlPercent / 100) * filledVol : undefined;
+            let totalUsdt = 0;
+            for (const g of grids) {
+              if (g.status === "FILLED") {
+                const vol = g.simNotional || ((signal as any).simNotional || 1000) * (g.volumePct / 100);
+                const gPnl = signal.direction === "LONG"
+                  ? ((exitPrice - g.fillPrice) / g.fillPrice) * 100
+                  : ((g.fillPrice - exitPrice) / g.fillPrice) * 100;
+                totalUsdt += (gPnl / 100) * vol;
+              }
+            }
+            pnlUsdt = totalUsdt;
           } else {
             pnlUsdt = (pnlPercent / 100) * ((signal as any).simNotional || 1000);
           }
@@ -621,8 +631,8 @@ export class PositionMonitorService implements OnModuleInit {
             symbol,
             signalKey: sigKey,
             direction: signal.direction,
-            entryPrice: signal.entryPrice,
-            exitPrice: price,
+            entryPrice: entryForPnl,
+            exitPrice,
             pnlPercent,
             pnlUsdt,
             simNotional: (signal as any).simNotional,
