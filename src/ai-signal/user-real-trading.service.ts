@@ -76,7 +76,7 @@ export class UserRealTradingService implements OnModuleInit {
     // Delayed to allow UserDataStreamService to initialize first
     setTimeout(() => this.reRegisterOpenTradeStreams().catch(() => {}), 5_000);
 
-    // TP sync for open trades is handled by protectOpenTrades (every 2 min)
+    // TP sync for open trades is handled by protectOpenTrades (every 1 min)
     // — no need for separate startup sync.
   }
 
@@ -262,7 +262,7 @@ export class UserRealTradingService implements OnModuleInit {
       }
 
       const leverage = await this.resolveLeverage(sub, params, keys.apiKey, keys.apiSecret, symbol);
-      const fullVol = this.getVolForUser(sub.tradingBalance);
+      const fullVol = this.getVolForUser(signal.symbol, sub);
       // Grid: base order = 1/gridLevelCount of full volume (rest reserved for grid levels)
       const isGrid = sub.gridEnabled === true;
       const gridLevelCount = sub.gridLevelCount ?? 5;
@@ -1377,7 +1377,7 @@ export class UserRealTradingService implements OnModuleInit {
    * This protects clients from unprotected open positions.
    * Note: trailing SL is handled real-time by PositionMonitorService — this is a safety net only.
    */
-  @Cron("0 */2 * * * *")
+  @Cron("0 */1 * * * *")
   async protectOpenTrades(): Promise<void> {
     try {
       const openTrades = await this.userTradeModel.find({ status: "OPEN" }).exec();
@@ -1832,7 +1832,7 @@ export class UserRealTradingService implements OnModuleInit {
       const sub = await this.subscriptionService.getSubscription(telegramId);
       if (!sub || !sub.gridEnabled) return;
 
-      const fullVol = this.getVolForUser(sub.tradingBalance);
+      const fullVol = this.getVolForUser(symbol, sub);
       const levelCount = sub.gridLevelCount ?? 5;
       const dcaWeights = this.getDcaWeights(levelCount);
       const gridVol = fullVol * (dcaWeights[grid.level] / 100);
@@ -1983,9 +1983,9 @@ export class UserRealTradingService implements OnModuleInit {
    * Volume per trade = tradingBalance / maxOpenPositions.
    * tradingBalance is the total balance the user inputs.
    */
-  private getVolForUser(tradingBalance?: number): number {
-    // tradingBalance = total USDT per trade (set by user). Grid DCA weights handle per-level split.
-    return tradingBalance ?? 1000;
+  private getVolForUser(symbol: string, sub: { coinVolumes?: Record<string, number>; tradingBalance?: number }): number {
+    const base = symbol.replace(/USDT$/, '');
+    return sub.coinVolumes?.[base] ?? sub.coinVolumes?.[symbol] ?? sub.tradingBalance ?? 1000;
   }
 
   /** Fetch exchangeInfo once and cache both qty precision and price decimal places (from tickSize). */
