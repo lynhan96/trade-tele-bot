@@ -27,6 +27,7 @@
     "analyze-signals.ts",
     "fix-user-pnl.ts",
     "backfill-sim-volume.ts",
+    "migrate-grid-dca.ts",
     "dist",
     "node_modules"
   ]
