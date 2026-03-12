@@ -1,5 +1,5 @@
 /**
- * Reset 3 signals (BTCUSDT, FETUSDT, PAXGUSDT) that had old per-grid TP logic.
+ * Reset signals (OPNUSDT, SOLUSDT, ROBOUSDT) that had old per-grid TP logic.
  * Resets to: L0=FILLED (40%), L1-L4=PENDING with new DCA weights.
  * Clears old TP_CLOSED/realized PnL from invalid per-grid TP.
  *
@@ -14,7 +14,7 @@ import mongoose from "mongoose";
 const SIM_NOTIONAL = 1000;
 const GRID_LEVEL_COUNT = 5;
 const DCA_WEIGHTS = [40, 6, 12, 18, 24];
-const SYMBOLS_TO_RESET = ["BTCUSDT", "FETUSDT", "PAXGUSDT"];
+const SYMBOLS_TO_RESET = ["OPNUSDT", "SOLUSDT", "ROBOUSDT"];
 
 async function main() {
   const uri = process.env.MONGODB_URI;

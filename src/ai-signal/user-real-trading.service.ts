@@ -1702,7 +1702,7 @@ export class UserRealTradingService implements OnModuleInit {
           // No individual grid TP — TP/SL for the whole position is handled by Binance algo orders.
           // When Binance SL/TP fires, all grids close together (handled by onTradeClose/protectOpenTrades).
 
-          // Persist grid state + recalculate avg entry if changed
+          // Persist grid state + recalculate avg entry + SL/TP if changed
           if (gridChanged) {
             const filledGrids = grids.filter(g => g.status === "FILLED");
             const filledCount = filledGrids.length;
@@ -1711,11 +1711,36 @@ export class UserRealTradingService implements OnModuleInit {
             const avgEntry = totalQty > 0
               ? filledGrids.reduce((s, g) => s + g.fillPrice * (g.quantity || 0), 0) / totalQty
               : origEntry;
+
+            // Recalculate SL/TP from new avgEntry using original % distances
+            // Only if trailing stop hasn't already moved SL to break-even (match test mode)
+            const origEntryRef = trade.originalEntryPrice ?? trade.entryPrice;
+            const slTpUpdate: Record<string, any> = {};
+
+            if (!(trade as any).slMovedToEntry) {
+              const origSlPct = Math.abs(((trade as any).gridGlobalSlPrice ?? trade.slPrice) - origEntryRef) / origEntryRef * 100;
+              const newSlPrice = direction === "LONG"
+                ? avgEntry * (1 - origSlPct / 100)
+                : avgEntry * (1 + origSlPct / 100);
+              slTpUpdate.slPrice = newSlPrice;
+              slTpUpdate.gridGlobalSlPrice = newSlPrice;
+            }
+
+            if (!(trade as any).tpBoosted && trade.tpPrice) {
+              const origTpPct = Math.abs((trade.tpPrice - origEntryRef) / origEntryRef) * 100;
+              if (origTpPct > 0) {
+                slTpUpdate.tpPrice = direction === "LONG"
+                  ? avgEntry * (1 + origTpPct / 100)
+                  : avgEntry * (1 - origTpPct / 100);
+              }
+            }
+
             await this.userTradeModel.findByIdAndUpdate((trade as any)._id, {
               gridLevels: grids,
               gridFilledCount: filledCount,
               gridAvgEntry: avgEntry,
               entryPrice: avgEntry, // sync for display
+              ...slTpUpdate,
             });
           }
         } catch (err) {
@@ -1787,11 +1812,41 @@ export class UserRealTradingService implements OnModuleInit {
         ? (filledGrids.reduce((s: number, g: any) => s + g.fillPrice * (g.quantity || 0), 0) + gridFillPrice * gridQty) / totalQty
         : trade.entryPrice;
 
+      // Recalculate SL/TP from new avgEntry (match test mode logic)
+      // Only if trailing stop hasn't already moved SL / TP boost hasn't fired
+      const origEntryRef = trade.originalEntryPrice ?? trade.entryPrice;
+      const slTpUpdate: Record<string, any> = {};
+      let newSlPrice = trade.slPrice; // default: keep current SL
+
+      if (!(trade as any).slMovedToEntry) {
+        const origSlPct = Math.abs((trade.gridGlobalSlPrice ?? trade.slPrice) - origEntryRef) / origEntryRef * 100;
+        newSlPrice = direction === "LONG"
+          ? avgEntry * (1 - origSlPct / 100)
+          : avgEntry * (1 + origSlPct / 100);
+        slTpUpdate.slPrice = newSlPrice;
+        slTpUpdate.gridGlobalSlPrice = newSlPrice;
+      }
+
+      let newTpPrice: number | undefined;
+      if (!(trade as any).tpBoosted && trade.tpPrice) {
+        const origTpPct = Math.abs((trade.tpPrice - origEntryRef) / origEntryRef) * 100;
+        if (origTpPct > 0) {
+          newTpPrice = direction === "LONG"
+            ? avgEntry * (1 + origTpPct / 100)
+            : avgEntry * (1 - origTpPct / 100);
+          slTpUpdate.tpPrice = newTpPrice;
+        }
+      }
+
+      const filledCount = filledGrids.length;
       await this.userTradeModel.findByIdAndUpdate((trade as any)._id, {
         quantity: newTotalQty,
         notionalUsdt: newTotalQty * avgEntry,
         entryPrice: avgEntry,
         gridAvgEntry: avgEntry,
+        gridLevels: trade.gridLevels,
+        gridFilledCount: filledCount,
+        ...slTpUpdate,
       });
 
       // Update SL for new total quantity (cancel old, place new)
@@ -1799,7 +1854,7 @@ export class UserRealTradingService implements OnModuleInit {
       if (trade.binanceSlAlgoId) {
         await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, trade.binanceSlAlgoId).catch(() => {});
       }
-      const roundedSl = parseFloat((trade.gridGlobalSlPrice ?? trade.slPrice).toFixed(pricePrec));
+      const roundedSl = parseFloat(newSlPrice.toFixed(pricePrec));
       try {
         const slOrder = await this.binanceService.setStopLoss(
           keys.apiKey, keys.apiSecret, symbol, roundedSl,
@@ -1809,6 +1864,22 @@ export class UserRealTradingService implements OnModuleInit {
         await this.userTradeModel.findByIdAndUpdate((trade as any)._id, { binanceSlAlgoId: newSlId });
       } catch (err) {
         this.logger.error(`[Grid] ${symbol} L${level} SL update failed for user ${telegramId}: ${err?.message}`);
+      }
+
+      // Update TP for new avg entry + total quantity (cancel old, place new)
+      if (newTpPrice && trade.binanceTpAlgoId) {
+        try {
+          await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, trade.binanceTpAlgoId).catch(() => {});
+          const roundedTp = parseFloat(newTpPrice.toFixed(pricePrec));
+          const tpOrder = await this.binanceService.setTakeProfitAtPrice(
+            keys.apiKey, keys.apiSecret, symbol, roundedTp,
+            direction as "LONG" | "SHORT", newTotalQty,
+          );
+          const newTpId = tpOrder?.algoId?.toString() ?? tpOrder?.orderId?.toString();
+          await this.userTradeModel.findByIdAndUpdate((trade as any)._id, { binanceTpAlgoId: newTpId });
+        } catch (err) {
+          this.logger.error(`[Grid] ${symbol} L${level} TP update failed for user ${telegramId}: ${err?.message}`);
+        }
       }
 
       // Notify user
@@ -1821,7 +1892,8 @@ export class UserRealTradingService implements OnModuleInit {
         `${symbol} ${direction}\n` +
         `L${level}: *×${gridQty}* @ ${fmtP(gridFillPrice)}\n` +
         `Avg Entry: *${fmtP(avgEntry)}*\n` +
-        `Total Qty: *×${newTotalQty.toFixed(qtyPrec)}*`;
+        `Total Qty: *×${newTotalQty.toFixed(qtyPrec)}*\n` +
+        `SL: ${fmtP(newSlPrice)}` + (newTpPrice ? ` | TP: ${fmtP(newTpPrice)}` : "");
       await this.telegramService.sendTelegramMessage(chatId, msg).catch(() => {});
 
       this.logger.log(
@@ -1829,80 +1901,6 @@ export class UserRealTradingService implements OnModuleInit {
       );
     } catch (err) {
       this.logger.error(`[Grid] ${symbol} L${level} failed for user ${telegramId}: ${err?.message}`);
-    }
-  }
-
-  /**
-   * Close a single grid level via partial close (reduce-only market order).
-   * Each grid takes its individual profit independently.
-   */
-  private async closeGridTp(
-    trade: UserTradeDocument,
-    grid: any,
-    currentPrice: number,
-  ): Promise<void> {
-    const { telegramId, chatId, symbol, direction } = trade;
-    const level = grid.level;
-
-    const keys = await this.userSettingsService.getApiKeys(telegramId, "binance");
-    if (!keys?.apiKey) return;
-
-    try {
-      const qtyPrec = await this.getQuantityPrecision(symbol);
-      const closeQty = parseFloat(grid.quantity.toFixed(qtyPrec));
-      if (closeQty <= 0) return;
-
-      // Place reduce-only market order to partially close position
-      await this.binanceService.closePosition(
-        keys.apiKey, keys.apiSecret, symbol, closeQty, direction,
-      );
-
-      // Update grid level
-      grid.status = "TP_CLOSED";
-      grid.closedAt = new Date();
-      grid.pnlPct = direction === "LONG"
-        ? ((grid.tpPrice - grid.fillPrice) / grid.fillPrice) * 100
-        : ((grid.fillPrice - grid.tpPrice) / grid.fillPrice) * 100;
-
-      // Update remaining quantity on trade
-      const newTotalQty = Math.max(0, trade.quantity - closeQty);
-      await this.userTradeModel.findByIdAndUpdate((trade as any)._id, {
-        quantity: newTotalQty,
-      });
-
-      // Update SL quantity if positions remain
-      if (newTotalQty > 0 && trade.binanceSlAlgoId) {
-        try {
-          await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, trade.binanceSlAlgoId).catch(() => {});
-          const pricePrec = await this.getPricePrecision(symbol);
-          const roundedSl = parseFloat((trade.gridGlobalSlPrice ?? trade.slPrice).toFixed(pricePrec));
-          const slOrder = await this.binanceService.setStopLoss(
-            keys.apiKey, keys.apiSecret, symbol, roundedSl,
-            direction as "LONG" | "SHORT", newTotalQty,
-          );
-          const newSlId = slOrder?.algoId?.toString() ?? slOrder?.orderId?.toString();
-          await this.userTradeModel.findByIdAndUpdate((trade as any)._id, { binanceSlAlgoId: newSlId });
-        } catch (err) {
-          this.logger.warn(`[Grid] ${symbol} L${level} SL update after TP failed: ${err?.message}`);
-        }
-      }
-
-      // Notify user
-      const fmtP = (p: number) =>
-        p >= 1000 ? `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :
-        p >= 1 ? `$${p.toFixed(2)}` : `$${p.toFixed(4)}`;
-      const msg =
-        `✅ *Grid L${level} TP Hit*\n\n` +
-        `${symbol} ${direction}\n` +
-        `Entry: ${fmtP(grid.fillPrice)} → TP: ${fmtP(grid.tpPrice)}\n` +
-        `PnL: *+${grid.pnlPct.toFixed(2)}%*`;
-      await this.telegramService.sendTelegramMessage(chatId, msg).catch(() => {});
-
-      this.logger.log(
-        `[Grid] ${symbol} L${level} TP closed for user ${telegramId}: +${grid.pnlPct.toFixed(2)}%`,
-      );
-    } catch (err) {
-      this.logger.error(`[Grid] ${symbol} L${level} TP close failed for user ${telegramId}: ${err?.message}`);
     }
   }
 

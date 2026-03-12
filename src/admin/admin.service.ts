@@ -761,6 +761,7 @@ export class AdminService {
       ...(g.status === 'FILLED' ? { closedAt: new Date(), exitPrice, pnlPct: signal.direction === 'LONG' ? ((exitPrice - g.fillPrice) / g.fillPrice) * 100 : ((g.fillPrice - exitPrice) / g.fillPrice) * 100 } : {}),
     }));
 
+    const gridClosedCount = updatedGrids.filter((g: any) => g.status === 'SL_CLOSED' || g.status === 'TP_CLOSED').length;
     await this.signalModel.findByIdAndUpdate(id, {
       status: 'COMPLETED',
       closeReason: 'ADMIN_CLOSE',
@@ -768,7 +769,7 @@ export class AdminService {
       pnlPercent,
       pnlUsdt,
       positionClosedAt: new Date(),
-      ...(updatedGrids.length > 0 ? { gridLevels: updatedGrids } : {}),
+      ...(updatedGrids.length > 0 ? { gridLevels: updatedGrids, gridClosedCount } : {}),
     });
 
     // Remove from Redis — PositionMonitorService will detect the close
