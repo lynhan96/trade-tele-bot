@@ -1122,17 +1122,11 @@ export class AiSignalService implements OnModuleInit {
       `${this.getProfileTag(signal)}\n` +
       `_${time} • Test mode_`;
 
-    const subscribers = await this.subscriptionService.findSignalOnlySubscribers();
-    let notified = 0;
-    for (const sub of subscribers) {
-      await this.telegramService
-        .sendTelegramMessage(sub.chatId, text)
-        .catch(() => {});
-      notified++;
-    }
+    // Test mode: only notify admin
+    await this.notifyAdminOnly(text);
 
     await this.aiSignalModel
-      .findByIdAndUpdate(signal._id, { sentToUsers: notified })
+      .findByIdAndUpdate(signal._id, { sentToUsers: 1 })
       .catch(() => {});
   }
 
@@ -1449,10 +1443,8 @@ export class AiSignalService implements OnModuleInit {
         `Vol: *$${info.simNotional.toLocaleString()}*\n\n` +
         `_${info.closeReason} • Test mode_`;
 
-      const subscribers = await this.subscriptionService.findSignalOnlySubscribers();
-      for (const sub of subscribers) {
-        await this.telegramService.sendTelegramMessage(sub.chatId, text).catch(() => {});
-      }
+      // Test mode: only notify admin
+      await this.notifyAdminOnly(text);
     }
   }
 
