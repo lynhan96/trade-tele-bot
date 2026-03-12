@@ -235,7 +235,7 @@ export class AdminService {
             wins: { $sum: { $cond: [{ $gt: ["$pnlPercent", 0] }, 1, 0] } },
             losses: { $sum: { $cond: [{ $lte: ["$pnlPercent", 0] }, 1, 0] } },
             totalPnl: { $sum: "$pnlPercent" },
-            totalPnlUsdt: { $sum: { $ifNull: ["$pnlUsdt", 0] } },
+            totalPnlUsdt: { $sum: { $ifNull: ["$pnlUsdt", { $multiply: [{ $divide: [{ $ifNull: ["$pnlPercent", 0] }, 100] }, { $ifNull: ["$simNotional", 1000] }] }] } },
             winPnl: { $sum: { $cond: [{ $gt: ["$pnlPercent", 0] }, "$pnlPercent", 0] } },
             lossPnl: { $sum: { $cond: [{ $lte: ["$pnlPercent", 0] }, "$pnlPercent", 0] } },
           },
