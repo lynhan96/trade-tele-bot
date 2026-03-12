@@ -213,8 +213,8 @@ export class PositionMonitorService implements OnModuleInit {
       const origEntry = entryPrice;
       const stopLossPrice = (signal as any).stopLossPrice;
       const signalSlPct = Math.abs((stopLossPrice - origEntry) / origEntry) * 100;
-      // Dynamic grid step: fit all grids within SL range with buffer
-      const gridStep = signalSlPct / (GRID_LEVEL_COUNT + 1);
+      // Dynamic grid step: L4 at 80% of SL range, 20% buffer before SL
+      const gridStep = signalSlPct / GRID_LEVEL_COUNT;
 
       const simNotional = 1000;
       const simQuantity = simNotional / origEntry;

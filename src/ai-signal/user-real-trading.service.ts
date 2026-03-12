@@ -1625,9 +1625,9 @@ export class UserRealTradingService implements OnModuleInit {
     stopLossPrice: number,
   ): Array<any> {
     const levelCount = sub.gridLevelCount ?? 5;
-    // Dynamic grid step: fit all grids within SL range with buffer
+    // Dynamic grid step: L(N-1) at 80% of SL range, 20% buffer before SL
     const slPct = Math.abs((stopLossPrice - fillPrice) / fillPrice) * 100;
-    const devStep = slPct / (levelCount + 1);
+    const devStep = slPct / levelCount;
     const dcaWeights = this.getDcaWeights(levelCount);
     const grids: any[] = [];
 
