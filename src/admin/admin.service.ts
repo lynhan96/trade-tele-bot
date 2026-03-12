@@ -728,16 +728,47 @@ export class AdminService {
     const exitPrice = await this.fetchBinancePrice(signal.symbol);
     if (!exitPrice) return { success: false, error: 'Failed to fetch current price' };
 
+    // Use gridAvgEntry for grid signals (weighted avg of filled grids)
+    const entryForPnl = (signal as any).gridAvgEntry || signal.entryPrice;
     const pnlPercent = signal.direction === 'LONG'
-      ? ((exitPrice - signal.entryPrice) / signal.entryPrice) * 100
-      : ((signal.entryPrice - exitPrice) / signal.entryPrice) * 100;
+      ? ((exitPrice - entryForPnl) / entryForPnl) * 100
+      : ((entryForPnl - exitPrice) / entryForPnl) * 100;
+
+    // Calculate USDT PnL from grid volumes
+    const grids: any[] = (signal as any).gridLevels || [];
+    let pnlUsdt: number | undefined;
+    if (grids.length > 0) {
+      const simNotional = (signal as any).simNotional || 1000;
+      let totalUsdt = 0;
+      for (const g of grids) {
+        if (g.status === 'FILLED') {
+          const vol = g.simNotional || simNotional * (g.volumePct / 100);
+          const gPnl = signal.direction === 'LONG'
+            ? ((exitPrice - g.fillPrice) / g.fillPrice) * 100
+            : ((g.fillPrice - exitPrice) / g.fillPrice) * 100;
+          totalUsdt += (gPnl / 100) * vol;
+        }
+      }
+      pnlUsdt = Math.round(totalUsdt * 100) / 100;
+    } else {
+      pnlUsdt = Math.round((pnlPercent / 100) * ((signal as any).simNotional || 1000) * 100) / 100;
+    }
+
+    // Close all grid levels
+    const updatedGrids = grids.map((g: any) => ({
+      ...g,
+      status: g.status === 'FILLED' ? 'SL_CLOSED' : g.status === 'PENDING' ? 'CANCELLED' : g.status,
+      ...(g.status === 'FILLED' ? { closedAt: new Date(), exitPrice, pnlPct: signal.direction === 'LONG' ? ((exitPrice - g.fillPrice) / g.fillPrice) * 100 : ((g.fillPrice - exitPrice) / g.fillPrice) * 100 } : {}),
+    }));
 
     await this.signalModel.findByIdAndUpdate(id, {
       status: 'COMPLETED',
       closeReason: 'ADMIN_CLOSE',
       exitPrice,
       pnlPercent,
+      pnlUsdt,
       positionClosedAt: new Date(),
+      ...(updatedGrids.length > 0 ? { gridLevels: updatedGrids } : {}),
     });
 
     // Remove from Redis — PositionMonitorService will detect the close
