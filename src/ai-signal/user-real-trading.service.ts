@@ -2048,7 +2048,7 @@ export class UserRealTradingService implements OnModuleInit {
   // ─── Private helpers ──────────────────────────────────────────────────────
 
   /** Returns true if any grid level for this user+symbol is currently being replaced (cancel/place window). */
-  private async isGridReplacing(telegramId: string, symbol: string): Promise<boolean> {
+  private async isGridReplacing(telegramId: string | number, symbol: string): Promise<boolean> {
     const levelCount = 10; // max grid levels to check
     for (let i = 0; i < levelCount; i++) {
       const lockKey = `cache:grid-lock:${telegramId}:${symbol}:${i}`;
