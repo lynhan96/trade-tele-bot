@@ -7,6 +7,7 @@ import { MarketDataModule } from "../market-data/market-data.module";
 import { CoinFilterModule } from "../coin-filter/coin-filter.module";
 import { StrategyModule } from "../strategy/strategy.module";
 import { UserModule } from "../user/user.module";
+import { CoinGeckoModule } from "../coingecko/coingecko.module";
 
 import { AiSignalService } from "./ai-signal.service";
 import { SignalQueueService } from "./signal-queue.service";
@@ -44,6 +45,7 @@ import {
     CoinFilterModule,
     StrategyModule,
     UserModule,
+    CoinGeckoModule,
     MongooseModule.forFeature([
       { name: AiSignal.name, schema: AiSignalSchema },
       { name: AiCoinProfile.name, schema: AiCoinProfileSchema },

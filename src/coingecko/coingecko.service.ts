@@ -40,9 +40,13 @@ export interface CoinSocialData {
 const CACHE_TRENDING_KEY = "cache:coingecko:trending";
 const CACHE_CATEGORIES_KEY = "cache:coingecko:categories";
 const CACHE_SOCIAL_PREFIX = "cache:coingecko:social:";
+const CACHE_BTC_DOM_KEY = "cache:coingecko:btc-dominance";
+const CACHE_BTC_DOM_PREV_KEY = "cache:coingecko:btc-dominance:prev";
 const CACHE_TRENDING_TTL = 30 * 60;    // 30 min (trending updates every 10 min on CG)
 const CACHE_CATEGORIES_TTL = 60 * 60;  // 1 hour
 const CACHE_SOCIAL_TTL = 2 * 60 * 60;  // 2 hours (save calls on free tier)
+const CACHE_BTC_DOM_TTL = 15 * 60;     // 15 min — BTC.D changes slowly
+const CACHE_BTC_DOM_PREV_TTL = 45 * 60; // prev snapshot kept 45 min (delta window)
 
 // CoinGecko symbol → Binance symbol mapping for common discrepancies
 const SYMBOL_MAP: Record<string, string> = {
@@ -270,6 +274,44 @@ export class CoinGeckoService implements OnModuleInit {
       : 0;
 
     return trendingBoost; // For free tier, just use trending status
+  }
+
+  // ─── BTC Dominance ─────────────────────────────────────────────────────
+
+  /**
+   * Fetch BTC market cap dominance from CoinGecko public /global endpoint.
+   * Does NOT require an API key — uses public API with no auth.
+   * Returns { current, delta30m } where delta30m = change over last ~30 minutes.
+   * Positive delta = BTC.D rising (altcoin money flowing to BTC → long trap risk).
+   * Fail-open: returns null on error so callers can skip the filter safely.
+   */
+  async getBtcDominanceDelta(): Promise<{ current: number; delta30m: number } | null> {
+    try {
+      // Fetch current BTC.D (cached 15min)
+      let current = await this.redisService.get<number>(CACHE_BTC_DOM_KEY);
+      if (current == null) {
+        const axios = require("axios");
+        const res = await axios.get("https://api.coingecko.com/api/v3/global", { timeout: 8_000 });
+        const dom = res?.data?.data?.market_cap_percentage?.btc;
+        if (dom == null) return null;
+        current = parseFloat(dom.toFixed(4));
+
+        // Rotate: save old current as prev before overwriting
+        const prev = await this.redisService.get<number>(CACHE_BTC_DOM_KEY);
+        if (prev != null) {
+          await this.redisService.set(CACHE_BTC_DOM_PREV_KEY, prev, CACHE_BTC_DOM_PREV_TTL);
+        }
+        await this.redisService.set(CACHE_BTC_DOM_KEY, current, CACHE_BTC_DOM_TTL);
+        this.logger.debug(`[CoinGecko] BTC Dominance: ${current.toFixed(2)}%`);
+      }
+
+      const prev = await this.redisService.get<number>(CACHE_BTC_DOM_PREV_KEY);
+      const delta30m = prev != null ? current - prev : 0;
+      return { current, delta30m };
+    } catch (err: any) {
+      this.logger.debug(`[CoinGecko] BTC dominance fetch error: ${err?.message}`);
+      return null;
+    }
   }
 
   /**

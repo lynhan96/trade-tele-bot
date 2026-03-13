@@ -24,6 +24,7 @@ import { AiTunedParams } from "../strategy/ai-optimizer/ai-tuned-params.interfac
 import { FuturesAnalyticsService } from "../market-data/futures-analytics.service";
 import { UserRealTradingService } from "./user-real-trading.service";
 import { MarketDataService } from "../market-data/market-data.service";
+import { CoinGeckoService } from "../coingecko/coingecko.service";
 
 const AI_PAUSED_KEY = "cache:ai:paused";
 const AI_TEST_MODE_KEY = "cache:ai:test-mode";
@@ -65,6 +66,7 @@ export class AiSignalService implements OnModuleInit {
     private readonly futuresAnalyticsService: FuturesAnalyticsService,
     private readonly userRealTradingService: UserRealTradingService,
     private readonly marketDataService: MarketDataService,
+    private readonly coinGeckoService: CoinGeckoService,
     @InjectModel(AiSignal.name)
     private readonly aiSignalModel: Model<AiSignalDocument>,
     @InjectModel(AiCoinProfile.name)
@@ -856,6 +858,35 @@ export class AiSignalService implements OnModuleInit {
       }
     } catch (err) {
       this.logger.debug(`[AiSignal] Funding rate filter error for ${signalKey}: ${err?.message}`);
+    }
+
+    // ── BTC Dominance filter — block LONG alts when BTC.D rising (long trap risk) ──
+    // BTC.D rising = money flowing from alts to BTC → alt LONGs get trapped.
+    // BTC.D falling = altcoin season → alt SHORTs risky. Fail-open if fetch fails.
+    const isBtc = coin.toUpperCase() === "BTC";
+    if (!isBtc) {
+      try {
+        const domData = await this.coinGeckoService.getBtcDominanceDelta();
+        if (domData) {
+          const { current, delta30m } = domData;
+          // Block LONG alts when BTC.D rising aggressively (>+0.3% in 30min or absolute >60%)
+          if (signalResult.isLong && (delta30m > 0.3 || current > 60)) {
+            this.logger.log(
+              `[AiSignal] ${signalKey} LONG BLOCKED — BTC.D ${current.toFixed(2)}% Δ30m=${delta30m > 0 ? "+" : ""}${delta30m.toFixed(2)}% (altcoin long trap risk)`,
+            );
+            return;
+          }
+          // Block SHORT alts when BTC.D falling aggressively (<-0.3% in 30min or absolute <42%)
+          if (!signalResult.isLong && (delta30m < -0.3 || current < 42)) {
+            this.logger.log(
+              `[AiSignal] ${signalKey} SHORT BLOCKED — BTC.D ${current.toFixed(2)}% Δ30m=${delta30m.toFixed(2)}% (altcoin season, short squeeze risk)`,
+            );
+            return;
+          }
+        }
+      } catch (err) {
+        this.logger.debug(`[AiSignal] BTC dominance filter error for ${signalKey}: ${err?.message}`);
+      }
     }
 
     // Validation gate — rule-based checks + Claude Haiku contextual analysis
