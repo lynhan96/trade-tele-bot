@@ -18,7 +18,11 @@
       "Bash(xargs:*)",
       "Bash(fc:*)",
       "Bash(mkdir:*)",
-      "Bash(sed:*)"
+      "Bash(sed:*)",
+      "Read(//Users/elvislee/Workspace/DTS/elvis/admin/src/**)"
+    ],
+    "additionalDirectories": [
+      "/Users/elvislee/Workspace/DTS/elvis/admin/src/pages"
     ]
   }
 }

@@ -8,6 +8,7 @@ import { TelegramBotService } from "../telegram/telegram.service";
 import { UserSettingsService } from "../user/user-settings.service";
 import { MarketDataService } from "../market-data/market-data.service";
 import { SubscriberInfo, UserSignalSubscriptionService } from "./user-signal-subscription.service";
+import { SignalQueueService } from "./signal-queue.service";
 import { UserTrade, UserTradeDocument } from "../schemas/user-trade.schema";
 import { DailyLimitHistory, DailyLimitHistoryDocument } from "../schemas/daily-limit-history.schema";
 import { AiSignalDocument } from "../schemas/ai-signal.schema";
@@ -53,6 +54,7 @@ export class UserRealTradingService implements OnModuleInit {
     private readonly telegramService: TelegramBotService,
     private readonly redisService: RedisService,
     private readonly marketDataService: MarketDataService,
+    private readonly signalQueueService: SignalQueueService,
     @InjectModel(UserTrade.name)
     private readonly userTradeModel: Model<UserTradeDocument>,
     @InjectModel(DailyLimitHistory.name)
@@ -777,6 +779,12 @@ export class UserRealTradingService implements OnModuleInit {
         `_${reason}_`;
       await this.telegramService.sendTelegramMessage(chatId, msg).catch(() => {});
 
+      // Resolve the associated signal so it doesn't stay ACTIVE in app
+      const closeR = pnlPct >= 0 ? "TAKE_PROFIT" : "STOP_LOSS";
+      await this.signalQueueService.resolveActiveSignal(symbol, exitPrice, closeR as any).catch(e =>
+        this.logger.warn(`[RealTrading] ${symbol}: failed to resolve signal on close: ${e?.message}`),
+      );
+
       this.logger.log(
         `[RealTrading] closeRealPosition: ${symbol} ${trade.direction} @ ${exitPrice} for user ${telegramId} (${reason})`,
       );
@@ -1458,6 +1466,14 @@ export class UserRealTradingService implements OnModuleInit {
 
               this.logger.log(`[RealTrading] ${symbol} user ${telegramId}: position gone on Binance — marking CLOSED (PnL: ${pnlPct.toFixed(2)}%)`);
 
+              // Resolve the associated signal so it doesn't stay ACTIVE in app
+              if (exitPrice) {
+                const closeReason = pnlPct >= 0 ? "TAKE_PROFIT" : "STOP_LOSS";
+                await this.signalQueueService.resolveActiveSignal(symbol, exitPrice, closeReason as any).catch(err =>
+                  this.logger.warn(`[RealTrading] ${symbol}: failed to resolve signal: ${err?.message}`),
+                );
+              }
+
               // Notify user
               if (exitPrice) {
                 const sign = pnlPct >= 0 ? "+" : "";
@@ -1585,6 +1601,11 @@ export class UserRealTradingService implements OnModuleInit {
                     { new: true },
                   );
                   if (updated) {
+                    // Resolve the associated signal so it doesn't stay ACTIVE in app
+                    const closeR = pnlP >= 0 ? "TAKE_PROFIT" : "STOP_LOSS";
+                    await this.signalQueueService.resolveActiveSignal(symbol, exitP, closeR as any).catch(e =>
+                      this.logger.warn(`[RealTrading] ${symbol}: failed to resolve signal: ${e?.message}`),
+                    );
                     const s = pnlP >= 0 ? "+" : "";
                     const emoji = pnlP >= 0 ? "✅" : "❌";
                     await this.telegramService.sendTelegramMessage(chatId,
