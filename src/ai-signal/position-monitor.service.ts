@@ -296,8 +296,9 @@ export class PositionMonitorService implements OnModuleInit {
             .sort((a, b) => b - a)[0];
           if (lastFill && Date.now() - lastFill < 5 * 60 * 1000) continue;
 
-          // RSI guard for L2+ (L1 is close to entry, usually safe)
-          if (grid.level >= 2 && rsiOk === null) {
+          // RSI + momentum guard for L1+ (extended from L2+ — L1 no longer exempt)
+          // Prevents DCA during continuous selling (xả liên tục)
+          if (grid.level >= 1 && rsiOk === null) {
             try {
               const closes = await this.marketDataService.getClosePrices(coin, "15m");
               if (closes.length >= 14) {
@@ -305,10 +306,21 @@ export class PositionMonitorService implements OnModuleInit {
                 const rsiVals = RSI.calculate({ period: 14, values: closes });
                 const rsi = rsiVals[rsiVals.length - 1];
                 // LONG: only DCA if oversold (RSI<40). SHORT: only DCA if overbought (RSI>60)
-                rsiOk = direction === "LONG" ? rsi < 40 : rsi > 60;
+                const rsiExhausted = direction === "LONG" ? rsi < 40 : rsi > 60;
+
+                // Sustained momentum check: if last 3 closes are all declining (LONG) or rising (SHORT),
+                // selling/buying is still active — wait for at least 1 stabilization candle
+                const last4 = closes.slice(-4);
+                const sustainedAgainst = last4.length >= 4 && (
+                  direction === "LONG"
+                    ? last4[3] < last4[2] && last4[2] < last4[1] && last4[1] < last4[0]
+                    : last4[3] > last4[2] && last4[2] > last4[1] && last4[1] > last4[0]
+                );
+
+                rsiOk = rsiExhausted && !sustainedAgainst;
                 if (!rsiOk) {
                   this.logger.log(
-                    `[PositionMonitor] Grid ${sigKey} L${grid.level} RSI=${rsi.toFixed(1)} — skip DCA (waiting for exhaustion)`,
+                    `[PositionMonitor] Grid ${sigKey} L${grid.level} RSI=${rsi.toFixed(1)} sustained=${sustainedAgainst} — skip DCA (waiting for exhaustion/stabilization)`,
                   );
                 }
               } else {
@@ -318,7 +330,7 @@ export class PositionMonitorService implements OnModuleInit {
               rsiOk = true; // fail-open
             }
           }
-          if (grid.level >= 2 && rsiOk === false) continue;
+          if (grid.level >= 1 && rsiOk === false) continue;
           const simTotalNotional = (signal as any).simNotional || 1000;
           const gridNotional = simTotalNotional * (grid.volumePct / 100);
           grid.status = "FILLED";
