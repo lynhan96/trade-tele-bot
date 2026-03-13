@@ -242,8 +242,8 @@ export class UserRealTradingService implements OnModuleInit {
 
     const lockKey = ORDER_LOCK_KEY(telegramId, symbol, direction);
     try {
-      // Redis lock to prevent duplicate orders when INTRADAY + SWING fire simultaneously (same symbol+direction)
-      const acquired = await this.redisService.setNX(lockKey, "1", 30);
+      // Redis lock to prevent duplicate orders — 120s TTL (was 30s, too short for queued promotion gaps)
+      const acquired = await this.redisService.setNX(lockKey, "1", 120);
       if (!acquired) {
         this.logger.debug(`[RealTrading] ${symbol}: user ${telegramId} order lock active (${direction}), skipping duplicate`);
         await this.redisService.decr(slotKey); // release reserved slot

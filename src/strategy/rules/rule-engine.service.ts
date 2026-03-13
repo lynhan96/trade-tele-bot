@@ -98,23 +98,51 @@ export class RuleEngineService {
 
     // ── Price Position Filter — prevent shorting bottoms & longing tops ──
     // Check where price sits in recent 1h range (20 candles = ~20h)
-    // SHORT blocked if price in bottom 25% (shorting the floor)
-    // LONG blocked if price in top 25% (longing the ceiling)
+    // SHORT blocked if price in bottom 30% (shorting the floor)
+    // LONG blocked if price in top 30% (longing the ceiling)
     const pricePos = await this.getPricePosition(coin, "1h", 20);
     if (pricePos !== null) {
-      if (!isLong && pricePos < 25) {
+      if (!isLong && pricePos < 30) {
         this.logger.log(
-          `[RuleEngine] ${coin} SHORT blocked: price at ${pricePos.toFixed(0)}% of range (bottom 25%) — don't short the bottom`,
+          `[RuleEngine] ${coin} SHORT blocked: price at ${pricePos.toFixed(0)}% of range (bottom 30%) — don't short the bottom`,
         );
         return null;
       }
-      if (isLong && pricePos > 75) {
+      if (isLong && pricePos > 70) {
         this.logger.log(
-          `[RuleEngine] ${coin} LONG blocked: price at ${pricePos.toFixed(0)}% of range (top 25%) — don't long the top`,
+          `[RuleEngine] ${coin} LONG blocked: price at ${pricePos.toFixed(0)}% of range (top 30%) — don't long the top`,
         );
         return null;
       }
       this.logger.debug(`[RuleEngine] ${coin} price position: ${pricePos.toFixed(0)}% (${isLong ? "LONG" : "SHORT"} OK)`);
+    }
+
+    // ── Move Exhaustion Filter — don't chase moves that already happened ──
+    // If price already dropped >2% from recent 4h high → SHORT is chasing (bounce likely)
+    // If price already rallied >2% from recent 4h low → LONG is chasing (pullback likely)
+    const pricePos4h = await this.getPricePosition(coin, "4h", 6);
+    if (pricePos4h !== null) {
+      const ohlc4h = await this.indicatorService.getOhlc(coin, "4h");
+      const recentHighs = ohlc4h.highs.slice(-6);
+      const recentLows = ohlc4h.lows.slice(-6);
+      const recentHigh = Math.max(...recentHighs);
+      const recentLow = Math.min(...recentLows);
+      const currentPrice = ohlc4h.closes[ohlc4h.closes.length - 1];
+      const dropFromHigh = ((recentHigh - currentPrice) / recentHigh) * 100;
+      const riseFromLow = ((currentPrice - recentLow) / recentLow) * 100;
+
+      if (!isLong && dropFromHigh > 2) {
+        this.logger.log(
+          `[RuleEngine] ${coin} SHORT blocked: price already dropped ${dropFromHigh.toFixed(1)}% from 4h high — move exhaustion`,
+        );
+        return null;
+      }
+      if (isLong && riseFromLow > 2) {
+        this.logger.log(
+          `[RuleEngine] ${coin} LONG blocked: price already rallied ${riseFromLow.toFixed(1)}% from 4h low — move exhaustion`,
+        );
+        return null;
+      }
     }
 
     // ── Candle Momentum Confirmation — require recent candles to confirm direction ──
