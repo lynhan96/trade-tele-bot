@@ -780,7 +780,13 @@ export class RuleEngineService {
       }
     }
 
-    // Regime gate: don't short into strong bull, don't long into strong bear
+    // Regime gate: block in ranging regimes (0% TP rate — momentum fades before TP reached)
+    // Also block counter-trend in extreme regimes
+    if (params.regime === "RANGE_BOUND" || params.regime === "SIDEWAYS") {
+      this.logger.debug(`[RuleEngine] ${coin} STOCH_EMA_KDJ blocked: ranging regime (${params.regime})`);
+      await this.redisService.delete(stateKey);
+      return null;
+    }
     if (patternState.isLong && params.regime === "STRONG_BEAR") {
       this.logger.debug(`[RuleEngine] ${coin} STOCH_EMA_KDJ LONG blocked: STRONG_BEAR regime`);
       await this.redisService.delete(stateKey);
