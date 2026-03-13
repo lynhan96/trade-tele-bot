@@ -601,6 +601,19 @@ export class AiSignalService implements OnModuleInit {
       }
     }
 
+    // ── BTC RSI exhaustion gate (STRONG_BULL) ─────────────────────────────
+    // Block new LONG signals when BTC RSI > 72 in STRONG_BULL — wave is exhausted,
+    // high probability of reversal. KITE/1000SATS pattern: entered at RSI ~72+ top.
+    if (globalRegime === "STRONG_BULL" && signalResult.isLong) {
+      const btcCtxEx = await this.redisService.get<{ rsi: number; rsi4h: number }>("cache:ai:regime:btc-context");
+      if (btcCtxEx && btcCtxEx.rsi > 72) {
+        this.logger.log(
+          `[AiSignal] ${coin.toUpperCase()} LONG blocked — BTC RSI exhaustion (${btcCtxEx.rsi.toFixed(0)}) in STRONG_BULL`,
+        );
+        return;
+      }
+    }
+
     // ── VOLATILE regime: block signals against BTC direction ──────────────
     // In volatile markets, only trade in BTC's direction (crash = SHORT only, pump = LONG only)
     if (globalRegime === "VOLATILE") {
