@@ -562,11 +562,19 @@ export class AiSignalService implements OnModuleInit {
       return;
     }
 
-    // ── TREND_EMA: worst performer (avg -2.28% SL, 4/6 full SL) — require confidence 70+ ──
+    // ── Strategy-specific confidence gates ──
     const strategyName = signalResult.strategy;
+    // TREND_EMA: worst performer (avg -2.28% SL) — require confidence 70+
     if (strategyName === "TREND_EMA" && params.confidence < 70) {
       this.logger.debug(
-        `[AiSignal] ${coin.toUpperCase()} TREND_EMA blocked — confidence ${params.confidence} < 70 (strategy-specific gate)`,
+        `[AiSignal] ${coin.toUpperCase()} TREND_EMA blocked — confidence ${params.confidence} < 70`,
+      );
+      return;
+    }
+    // STOCH_EMA_KDJ: data shows conf<75 = 100% loss rate (DEGO conf=70 -3%, DENT conf=70 -2.89%)
+    if (strategyName === "STOCH_EMA_KDJ" && params.confidence < 75) {
+      this.logger.debug(
+        `[AiSignal] ${coin.toUpperCase()} STOCH_EMA_KDJ blocked — confidence ${params.confidence} < 75 (data: conf<75 = 100% SL)`,
       );
       return;
     }

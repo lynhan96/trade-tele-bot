@@ -887,11 +887,22 @@ export class RuleEngineService {
         return null;
       }
 
-      // HTF RSI not overbought
+      // HTF RSI not overbought (1h)
       const htfRsi = this.indicatorService.getRsi(htfCloses, cfg.rsiPeriod);
       if (htfRsi.last > 65) {
         this.logger.debug(`[RuleEngine] ${coin} EMA_PULLBACK LONG blocked: 1h RSI=${htfRsi.last.toFixed(1)} overbought (>65)`);
         return null;
+      }
+
+      // 4h RSI must confirm LONG direction (> 40) — prevents dead cat bounce entries
+      // Data: PLAY/AVNT/1000SATS all peak=0.0% → entered into declining 4h trend
+      const closes4h = await this.indicatorService.getCloses(coin, "4h");
+      if (closes4h.length >= 20) {
+        const rsi4h = this.indicatorService.getRsi(closes4h, 14);
+        if (rsi4h.last < 40) {
+          this.logger.debug(`[RuleEngine] ${coin} EMA_PULLBACK LONG blocked: 4h RSI=${rsi4h.last.toFixed(1)} bearish (<40) — dead cat bounce risk`);
+          return null;
+        }
       }
 
       return {
