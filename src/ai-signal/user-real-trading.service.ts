@@ -11,7 +11,7 @@ import { SubscriberInfo, UserSignalSubscriptionService } from "./user-signal-sub
 import { SignalQueueService } from "./signal-queue.service";
 import { UserTrade, UserTradeDocument } from "../schemas/user-trade.schema";
 import { DailyLimitHistory, DailyLimitHistoryDocument } from "../schemas/daily-limit-history.schema";
-import { AiSignalDocument } from "../schemas/ai-signal.schema";
+import { AiSignal, AiSignalDocument } from "../schemas/ai-signal.schema";
 import { AiTunedParams } from "../strategy/ai-optimizer/ai-tuned-params.interface";
 import { getProxyAgent } from "../utils/proxy";
 
@@ -59,6 +59,8 @@ export class UserRealTradingService implements OnModuleInit {
     private readonly userTradeModel: Model<UserTradeDocument>,
     @InjectModel(DailyLimitHistory.name)
     private readonly dailyLimitHistoryModel: Model<DailyLimitHistoryDocument>,
+    @InjectModel(AiSignal.name)
+    private readonly aiSignalModel: Model<AiSignalDocument>,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -1920,6 +1922,17 @@ export class UserRealTradingService implements OnModuleInit {
         gridFilledCount: filledCount,
         ...tpUpdate,
       });
+
+      // Sync grid state back to ai_signal so admin frontend shows grid data
+      if ((trade as any).aiSignalId) {
+        await this.aiSignalModel.findByIdAndUpdate((trade as any).aiSignalId, {
+          gridLevels: trade.gridLevels,
+          gridFilledCount: filledCount,
+          gridAvgEntry: avgEntry,
+          entryPrice: avgEntry,
+          ...(tpUpdate.tpPrice ? { takeProfitPrice: tpUpdate.tpPrice } : {}),
+        }).catch(err => this.logger.warn(`[Grid] ${symbol} signal sync failed: ${err?.message}`));
+      }
 
       // Update SL on Binance for new total quantity (same SL price — don't move SL)
       await new Promise((r) => setTimeout(r, 1500));
