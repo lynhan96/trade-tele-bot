@@ -800,6 +800,42 @@ export class AiSignalService implements OnModuleInit {
       this.logger.warn(`[AiSignal] Trend filter error for ${signalKey}: ${err?.message}`);
     }
 
+    // ── Funding rate filter: skip manipulated/over-leveraged coins ─────────────
+    // Positive funding = longs paying → over-crowded longs → block LONG (squeeze down risk)
+    // Negative funding = shorts paying → over-crowded shorts → block SHORT (squeeze up risk)
+    // |funding| > 0.5% = extreme manipulation → block signal entirely
+    // Threshold: ±0.3% per 8h session. Fail-open (allow signal if cache miss).
+    try {
+      const symbol = `${coin.toUpperCase()}${currency.toUpperCase()}`;
+      const analyticsCache = await this.futuresAnalyticsService.getCachedAnalytics();
+      const fa = analyticsCache.get(symbol);
+      if (fa) {
+        const fundingPct = fa.fundingRate * 100; // raw 0.003 → 0.3%
+        const FUNDING_DIRECTION_BLOCK = 0.3; // block directional trade if crowd is >0.3% aligned
+        const FUNDING_EXTREME_BLOCK = 0.5;   // block entirely if >0.5%
+        if (Math.abs(fundingPct) > FUNDING_EXTREME_BLOCK) {
+          this.logger.log(
+            `[AiSignal] ${signalKey} BLOCKED — extreme funding rate ${fundingPct.toFixed(4)}% (manipulation risk)`,
+          );
+          return;
+        }
+        if (fundingPct > FUNDING_DIRECTION_BLOCK && signalResult.isLong) {
+          this.logger.log(
+            `[AiSignal] ${signalKey} LONG BLOCKED — positive funding ${fundingPct.toFixed(4)}% (crowded longs, squeeze down risk)`,
+          );
+          return;
+        }
+        if (fundingPct < -FUNDING_DIRECTION_BLOCK && !signalResult.isLong) {
+          this.logger.log(
+            `[AiSignal] ${signalKey} SHORT BLOCKED — negative funding ${fundingPct.toFixed(4)}% (crowded shorts, squeeze up risk)`,
+          );
+          return;
+        }
+      }
+    } catch (err) {
+      this.logger.debug(`[AiSignal] Funding rate filter error for ${signalKey}: ${err?.message}`);
+    }
+
     // Validation gate — rule-based checks + Claude Haiku contextual analysis
     // Uses price position, candle momentum, RSI checks. Fail-open on error.
     const validationCooldownKey = `cache:ai:validation-cooldown:${signalKey}`;
