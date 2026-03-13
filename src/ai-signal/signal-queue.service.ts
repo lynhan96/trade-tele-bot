@@ -48,6 +48,7 @@ export class SignalQueueService {
     regime: string,
     isTestMode = false,
     forceProfile?: string,
+    futuresData?: { fundingRate?: number; longShortRatio?: number; takerBuyRatio?: number; openInterestUsd?: number },
   ): Promise<SignalHandleResult> {
     const symbol = `${coin.toUpperCase()}${currency.toUpperCase()}`;
     // Only dual-timeframe coins use profile-aware Redis key (must match processCoin + docSignalKey)
@@ -82,6 +83,7 @@ export class SignalQueueService {
         regime,
         "ACTIVE",
         isTestMode,
+        futuresData,
       );
       await this.redisService.set(
         ACTIVE_KEY(signalKey),
@@ -125,6 +127,7 @@ export class SignalQueueService {
       regime,
       "QUEUED",
       isTestMode,
+      futuresData,
     );
     await this.redisService.set(
       QUEUED_KEY(signalKey),
@@ -782,6 +785,7 @@ export class SignalQueueService {
     regime: string,
     status: "ACTIVE" | "QUEUED" | "SKIPPED",
     isTestMode = false,
+    futuresData?: { fundingRate?: number; longShortRatio?: number; takerBuyRatio?: number; openInterestUsd?: number },
   ): Promise<AiSignalDocument> {
     const symbol = `${coin.toUpperCase()}${currency.toUpperCase()}`;
     const MIN_SL = 2.0;
@@ -842,6 +846,10 @@ export class SignalQueueService {
       timeframeProfile: profile,
       indicatorSnapshot: { reason: signalResult.reason },
       ...(isTestMode ? { simNotional, simQuantity } : {}),
+      ...(futuresData?.fundingRate !== undefined ? { fundingRate: futuresData.fundingRate } : {}),
+      ...(futuresData?.longShortRatio !== undefined ? { longShortRatio: futuresData.longShortRatio } : {}),
+      ...(futuresData?.takerBuyRatio !== undefined ? { takerBuyRatio: futuresData.takerBuyRatio } : {}),
+      ...(futuresData?.openInterestUsd !== undefined ? { openInterestUsd: futuresData.openInterestUsd } : {}),
     });
 
     return doc;

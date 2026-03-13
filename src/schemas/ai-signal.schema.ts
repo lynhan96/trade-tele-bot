@@ -163,6 +163,19 @@ export class AiSignal {
 
   @Prop()
   pnlUsdt?: number; // simulated PnL in USDT (pnlPercent × simNotional / 100)
+
+  // ─── Futures market data at signal time ──────────────────────────────────
+  @Prop()
+  fundingRate?: number; // e.g. -0.005 = -0.5% per 8h (negative = shorts paying)
+
+  @Prop()
+  longShortRatio?: number; // >1 = more longs, <1 = more shorts
+
+  @Prop()
+  takerBuyRatio?: number; // >1 = taker buys dominant (aggressive buying)
+
+  @Prop()
+  openInterestUsd?: number; // open interest in USD at signal time
 }
 
 export const AiSignalSchema = SchemaFactory.createForClass(AiSignal);

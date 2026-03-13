@@ -818,11 +818,20 @@ export class AiSignalService implements OnModuleInit {
     // Negative funding = shorts paying → over-crowded shorts → block SHORT (squeeze up risk)
     // |funding| > 0.5% = extreme manipulation → block signal entirely
     // Threshold: ±0.3% per 8h session. Fail-open (allow signal if cache miss).
+    let signalFuturesData: { fundingRate?: number; longShortRatio?: number; takerBuyRatio?: number; openInterestUsd?: number } | undefined;
     try {
       const symbol = `${coin.toUpperCase()}${currency.toUpperCase()}`;
       const analyticsCache = await this.futuresAnalyticsService.getCachedAnalytics();
       const fa = analyticsCache.get(symbol);
       if (fa) {
+        // Capture for DB storage regardless of filter outcome
+        signalFuturesData = {
+          fundingRate: fa.fundingRate,
+          longShortRatio: fa.longShortRatio,
+          takerBuyRatio: fa.takerBuyRatio,
+          openInterestUsd: fa.openInterestUsd || 0,
+        };
+
         const fundingPct = fa.fundingRate * 100; // raw 0.003 → 0.3%
         const FUNDING_DIRECTION_BLOCK = 0.3; // block directional trade if crowd is >0.3% aligned
         const FUNDING_EXTREME_BLOCK = 0.5;   // block entirely if >0.5%
@@ -910,6 +919,7 @@ export class AiSignalService implements OnModuleInit {
       params.regime,
       isTestMode,
       forceProfile,
+      signalFuturesData,
     );
 
     if (queueResult.action === "EXECUTED") {
