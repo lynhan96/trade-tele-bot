@@ -1603,6 +1603,12 @@ export class UserRealTradingService implements OnModuleInit {
             }
 
             // ── SL missing ──────────────────────────────────────────────────
+            // Skip if a grid DCA fill is in progress — cancel/replace window causes false-positive
+            const gridReplacing = await this.isGridReplacing(telegramId, symbol);
+            if (gridReplacing) {
+              this.logger.debug(`[RealTrading] ${symbol} user ${telegramId}: protectOpenTrades skipped — grid fill in progress`);
+              continue;
+            }
             const effectiveSlPrice = slPrice;
             if (!algo?.hasSl && effectiveSlPrice) {
               this.logger.warn(`[RealTrading] ${symbol} user ${telegramId}: SL missing — placing at $${effectiveSlPrice}`);
@@ -2040,6 +2046,17 @@ export class UserRealTradingService implements OnModuleInit {
   }
 
   // ─── Private helpers ──────────────────────────────────────────────────────
+
+  /** Returns true if any grid level for this user+symbol is currently being replaced (cancel/place window). */
+  private async isGridReplacing(telegramId: string, symbol: string): Promise<boolean> {
+    const levelCount = 10; // max grid levels to check
+    for (let i = 0; i < levelCount; i++) {
+      const lockKey = `cache:grid-lock:${telegramId}:${symbol}:${i}`;
+      const locked = await this.redisService.get(lockKey);
+      if (locked) return true;
+    }
+    return false;
+  }
 
   private async resolveLeverage(
     sub: SubscriberInfo,

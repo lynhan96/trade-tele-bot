@@ -360,7 +360,8 @@ export class PositionMonitorService implements OnModuleInit {
               ? avgEntry * (1 + tpPct / 100)
               : avgEntry * (1 - tpPct / 100);
             (signal as any).takeProfitPrice = newTp;
-            this.propagateTpMove(sigKey, symbol, newTp, direction);
+            // Do NOT call propagateTpMove here — test mode simulation only.
+            // Real mode TP update after DCA fill is handled by placeGridOrder in user-real-trading.
           }
 
           this.logger.log(
