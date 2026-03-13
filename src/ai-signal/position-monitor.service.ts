@@ -521,9 +521,9 @@ export class PositionMonitorService implements OnModuleInit {
       try {
         const hasMomentum = await this.marketDataService.hasVolumeMomentum(symbol);
         if (hasMomentum) {
-          // Extend TP by 2% from current position, cap at 6%
+          // Extend TP by 2% from current position, cap at 4%
           const currentTpPct = Math.abs(takeProfitPrice - currentEntry) / currentEntry * 100;
-          const boostedTpPct = Math.min(6, Math.max(currentTpPct, pnlPct + 2.0));
+          const boostedTpPct = Math.min(4, Math.max(currentTpPct, pnlPct + 2.0));
           const newTpPrice = direction === "LONG"
             ? currentEntry * (1 + boostedTpPct / 100)
             : currentEntry * (1 - boostedTpPct / 100);

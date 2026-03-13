@@ -951,10 +951,10 @@ Respond ONLY with JSON: {"decision":"PASS"|"REJECT","reason":"brief 10-word max 
       const atrPct = this.indicatorService.getAtrPercent(ohlc.highs, ohlc.lows, ohlc.closes, 14);
 
       // ── ATR baseline SL/TP ──
-      // TP = ATR×2.0 to achieve R:R≥2 at 40% win rate. Cap 6% — signal-queue enforces further.
+      // TP = ATR×2.0 to achieve R:R≥2 at 40% win rate. Cap 4% — signal-queue enforces further.
       const maxSl = Math.min(4, Math.max(3, atrPct * 2));
       let slPct = Math.max(2, Math.min(maxSl, atrPct * 1.5));
-      let tpPct = Math.max(2.0, Math.min(6.0, atrPct * 2.0));
+      let tpPct = Math.max(2.0, Math.min(4.0, atrPct * 2.0));
 
       let slSource = "ATR";
       let tpSource = "ATR";
@@ -1068,7 +1068,7 @@ Respond ONLY with JSON: {"decision":"PASS"|"REJECT","reason":"brief 10-word max 
         tpPct = minTp;
         tpSource = tpSource === "ATR" ? "ATR(R:R)" : `${tpSource}(R:R)`;
       }
-      tpPct = Math.min(6.0, tpPct); // hard cap 6%
+      tpPct = Math.min(4.0, tpPct); // hard cap 4%
 
       defaults.stopLossPercent = parseFloat(slPct.toFixed(1));
       defaults.takeProfitPercent = parseFloat(tpPct.toFixed(1));

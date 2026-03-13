@@ -670,6 +670,17 @@ export class UserRealTradingService implements OnModuleInit {
       return; // Don't send duplicate notification
     }
 
+    // Cancel remaining algo orders (orphan prevention: when SL fires → cancel TP, when TP fires → cancel SL)
+    const tradeKeys = await this.userSettingsService.getApiKeys(telegramId, "binance");
+    if (tradeKeys?.apiKey) {
+      if ((trade as any).binanceSlAlgoId) {
+        await this.binanceService.cancelAlgoOrder(tradeKeys.apiKey, tradeKeys.apiSecret, (trade as any).binanceSlAlgoId).catch(() => {});
+      }
+      if ((trade as any).binanceTpAlgoId) {
+        await this.binanceService.cancelAlgoOrder(tradeKeys.apiKey, tradeKeys.apiSecret, (trade as any).binanceTpAlgoId).catch(() => {});
+      }
+    }
+
     // Accumulate cumulative PnL on user subscription
     await this.subscriptionService.incrementTradePnl(trade.telegramId, pnlUsdt);
 
@@ -1465,6 +1476,14 @@ export class UserRealTradingService implements OnModuleInit {
                 { new: true },
               );
               if (!updated) continue; // Already closed by onTradeClose — skip notification
+
+              // Cancel remaining algo orders (orphan prevention)
+              if ((trade as any).binanceSlAlgoId) {
+                await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, (trade as any).binanceSlAlgoId).catch(() => {});
+              }
+              if ((trade as any).binanceTpAlgoId) {
+                await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, (trade as any).binanceTpAlgoId).catch(() => {});
+              }
 
               this.logger.log(`[RealTrading] ${symbol} user ${telegramId}: position gone on Binance — marking CLOSED (PnL: ${pnlPct.toFixed(2)}%)`);
 
