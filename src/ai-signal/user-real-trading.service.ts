@@ -648,12 +648,17 @@ export class UserRealTradingService implements OnModuleInit {
       if (!trade) return;
     }
 
+    // Use gridAvgEntry for DCA trades; calculate USDT directly from quantity for precision
+    const entryRef = (trade as any).gridAvgEntry || trade.entryPrice;
     const rawPnlPct =
       trade.direction === "LONG"
-        ? ((exitPrice - trade.entryPrice) / trade.entryPrice) * 100
-        : ((trade.entryPrice - exitPrice) / trade.entryPrice) * 100;
+        ? ((exitPrice - entryRef) / entryRef) * 100
+        : ((entryRef - exitPrice) / entryRef) * 100;
     const pnlPct = rawPnlPct - BINANCE_FEE_PCT; // deduct trading fees
-    const pnlUsdt = (pnlPct / 100) * trade.notionalUsdt;
+    const rawPnlUsdt = trade.direction === "LONG"
+      ? (exitPrice - entryRef) * trade.quantity
+      : (entryRef - exitPrice) * trade.quantity;
+    const pnlUsdt = rawPnlUsdt - (BINANCE_FEE_PCT / 100) * entryRef * trade.quantity;
 
     // Atomic: only update if still OPEN (prevents duplicate notification if protectOpenTrades already closed it)
     const updated = await this.userTradeModel.findOneAndUpdate(
@@ -759,11 +764,15 @@ export class UserRealTradingService implements OnModuleInit {
       );
       const exitPrice = parseFloat(closeOrder.avgPrice) || (await this.marketDataService.getPrice(symbol)) || trade.entryPrice;
 
+      const entryRef2 = (trade as any).gridAvgEntry || trade.entryPrice;
       const rawPnlPct = trade.direction === "LONG"
-        ? ((exitPrice - trade.entryPrice) / trade.entryPrice) * 100
-        : ((trade.entryPrice - exitPrice) / trade.entryPrice) * 100;
+        ? ((exitPrice - entryRef2) / entryRef2) * 100
+        : ((entryRef2 - exitPrice) / entryRef2) * 100;
       const pnlPct = rawPnlPct - BINANCE_FEE_PCT;
-      const pnlUsdt = (pnlPct / 100) * trade.notionalUsdt;
+      const rawPnlUsdt2 = trade.direction === "LONG"
+        ? (exitPrice - entryRef2) * trade.quantity
+        : (entryRef2 - exitPrice) * trade.quantity;
+      const pnlUsdt = rawPnlUsdt2 - (BINANCE_FEE_PCT / 100) * entryRef2 * trade.quantity;
 
       await this.userTradeModel.findByIdAndUpdate((trade as any)._id, {
         status: "CLOSED",
@@ -1146,11 +1155,15 @@ export class UserRealTradingService implements OnModuleInit {
     );
     const exitPrice = parseFloat(closeOrder.avgPrice) || (await this.marketDataService.getPrice(trade.symbol)) || trade.entryPrice;
 
+    const entryRef3 = (trade as any).gridAvgEntry || trade.entryPrice;
     const rawPnlPct = trade.direction === "LONG"
-      ? ((exitPrice - trade.entryPrice) / trade.entryPrice) * 100
-      : ((trade.entryPrice - exitPrice) / trade.entryPrice) * 100;
+      ? ((exitPrice - entryRef3) / entryRef3) * 100
+      : ((entryRef3 - exitPrice) / entryRef3) * 100;
     const pnlPct = rawPnlPct - BINANCE_FEE_PCT;
-    const pnlUsdt = (pnlPct / 100) * trade.notionalUsdt;
+    const rawPnlUsdt3 = trade.direction === "LONG"
+      ? (exitPrice - entryRef3) * trade.quantity
+      : (entryRef3 - exitPrice) * trade.quantity;
+    const pnlUsdt = rawPnlUsdt3 - (BINANCE_FEE_PCT / 100) * entryRef3 * trade.quantity;
 
     await this.userTradeModel.findByIdAndUpdate((trade as any)._id, {
       status: "CLOSED",
@@ -1457,11 +1470,15 @@ export class UserRealTradingService implements OnModuleInit {
               let pnlPct = 0;
               let pnlUsdt = 0;
               if (exitPrice && trade.entryPrice) {
+                const entryRef4 = (trade as any).gridAvgEntry || trade.entryPrice;
                 const rawPct = direction === "LONG"
-                  ? ((exitPrice - trade.entryPrice) / trade.entryPrice) * 100
-                  : ((trade.entryPrice - exitPrice) / trade.entryPrice) * 100;
+                  ? ((exitPrice - entryRef4) / entryRef4) * 100
+                  : ((entryRef4 - exitPrice) / entryRef4) * 100;
                 pnlPct = rawPct - BINANCE_FEE_PCT;
-                pnlUsdt = (pnlPct / 100) * (trade.notionalUsdt || 0);
+                const rawPnlUsdt4 = direction === "LONG"
+                  ? (exitPrice - entryRef4) * trade.quantity
+                  : (entryRef4 - exitPrice) * trade.quantity;
+                pnlUsdt = rawPnlUsdt4 - (BINANCE_FEE_PCT / 100) * entryRef4 * trade.quantity;
               }
 
               // Atomic: only close if still OPEN (prevents duplicate notification with onTradeClose)
