@@ -762,6 +762,10 @@ export class RuleEngineService {
       const kdj = this.indicatorService.getKdj(highs, lows, closes, {
         rangeLength: cfg.kdjRangeLength,
       });
+      if (kdj.K.length < 2 || kdj.D.length < 2) {
+        await this.redisService.set(stateKey, patternState, PATTERN_STATE_TTL);
+        return null;
+      }
       const kLast = kdj.K[kdj.K.length - 1];
       const dLast = kdj.D[kdj.D.length - 1];
       const kPrev = kdj.K[kdj.K.length - 2];
@@ -846,13 +850,10 @@ export class RuleEngineService {
     const htfCloses = await this.indicatorService.getCloses(coin, cfg.htfKline || "1h");
     if (htfCloses.length < 50) return null;
     const htfEma = this.indicatorService.getEma(htfCloses, 21);
-    const htfEmaPrev = htfCloses.length > 21
-      ? this.indicatorService.getEma(htfCloses.slice(0, -1), 21)
-      : null;
 
-    // HTF EMA must have clear slope — flat = no direction
-    if (!htfEmaPrev) return null;
-    const htfSlope = ((htfEma.last - htfEmaPrev.last) / htfEmaPrev.last) * 100;
+    // HTF EMA must have clear slope — use consecutive EMA values (last vs secondLast)
+    if (!htfEma.secondLast) return null;
+    const htfSlope = ((htfEma.last - htfEma.secondLast) / htfEma.secondLast) * 100;
     const isUptrend = htfSlope > 0.05;  // 1h EMA rising > 0.05%
     const isDowntrend = htfSlope < -0.05; // 1h EMA falling > 0.05%
     if (!isUptrend && !isDowntrend) return null; // flat — skip
@@ -977,13 +978,6 @@ export class RuleEngineService {
     const bouncingUp = lastClose > prevClose && lastClose > prev2Close;
     const rsiTurningUp = rsi > rsiPrev;
     if (prevAtLowerBand && bouncingUp && rsi < cfg.rsiLongMax && rsiTurningUp) {
-      // LONG filter: require RSI to show oversold condition (< 45)
-      // Relaxed from <35 which was too restrictive — almost never fired LONG
-      if (rsi >= 45) {
-        this.logger.debug(`[RuleEngine] ${coin} BB_SCALP LONG blocked: RSI=${rsi.toFixed(1)} not oversold (<45)`);
-        return null;
-      }
-
       // HTF confirmation: 1h RSI must not be in downtrend (> 40)
       const htfCloses = await this.indicatorService.getCloses(coin, "1h");
       if (htfCloses.length >= 20) {
@@ -1017,6 +1011,25 @@ export class RuleEngineService {
     const rejectingDown = lastClose < prevClose && lastClose < prev2Close;
     const rsiTurningDown = rsi < rsiPrev;
     if (prevAtUpperBand && rejectingDown && rsi > cfg.rsiShortMin && rsiTurningDown) {
+      // HTF confirmation: 1h RSI must not be in strong uptrend (< 65)
+      const htfClosesShort = await this.indicatorService.getCloses(coin, "1h");
+      if (htfClosesShort.length >= 20) {
+        const htfRsiShort = this.indicatorService.getRsi(htfClosesShort, 14);
+        if (htfRsiShort.last > 65) {
+          this.logger.debug(`[RuleEngine] ${coin} BB_SCALP SHORT blocked: 1h RSI=${htfRsiShort.last.toFixed(1)} bullish (>65)`);
+          return null;
+        }
+      }
+
+      // Volume confirmation: current candle must show selling pressure
+      const lastOpenShort = ohlc.opens[ohlc.opens.length - 1];
+      const bodySizeShort = Math.abs(lastClose - lastOpenShort);
+      const candleRangeShort = ohlc.highs[ohlc.highs.length - 1] - ohlc.lows[ohlc.lows.length - 1];
+      if (candleRangeShort > 0 && bodySizeShort / candleRangeShort < 0.5) {
+        this.logger.debug(`[RuleEngine] ${coin} BB_SCALP SHORT blocked: weak rejection candle (body=${(bodySizeShort/candleRangeShort*100).toFixed(0)}%)`);
+        return null;
+      }
+
       return {
         isLong: false,
         entryPrice: lastClose,

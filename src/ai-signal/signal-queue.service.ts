@@ -338,7 +338,8 @@ export class SignalQueueService {
     const update: any = { gridLevels, gridFilledCount, gridClosedCount };
     if (gridAvgEntry != null) {
       update.gridAvgEntry = gridAvgEntry;
-      update.entryPrice = gridAvgEntry; // sync entryPrice to avg for display
+      // Do NOT overwrite entryPrice — keep it as original L0 entry for PnL fallback calculations.
+      // Display uses gridAvgEntry explicitly.
     }
     if (stopLossPrice != null) {
       update.stopLossPrice = stopLossPrice;

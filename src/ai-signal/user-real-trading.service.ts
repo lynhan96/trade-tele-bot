@@ -1851,9 +1851,10 @@ export class UserRealTradingService implements OnModuleInit {
             // SL stays at original entry's SL — do NOT move SL when DCA fills.
             // Moving SL from avgEntry pushes it further against us, increasing max loss.
             // Only TP recalculates from avgEntry (so profit target reflects average cost).
+            // TP always recalculates from avgEntry (tpBoosted only blocks momentum boost, not avg-entry recalc)
             const origEntryRef = trade.originalEntryPrice ?? trade.entryPrice;
             const tpUpdate: Record<string, any> = {};
-            if (!(trade as any).tpBoosted && trade.tpPrice) {
+            if (trade.tpPrice) {
               const origTpPct = Math.abs((trade.tpPrice - origEntryRef) / origEntryRef) * 100;
               if (origTpPct > 0) {
                 tpUpdate.tpPrice = direction === "LONG"
@@ -1943,6 +1944,7 @@ export class UserRealTradingService implements OnModuleInit {
       // Moving SL from avgEntry pushes it further against us, increasing max loss.
       // Only update SL order on Binance for new total quantity (same price).
       // Only TP recalculates from avgEntry (profit target reflects average cost).
+      // TP always recalculates from avgEntry (tpBoosted only blocks momentum boost, not avg-entry recalc)
       const origEntryRef = trade.originalEntryPrice ?? trade.entryPrice;
       const currentSlPrice = (trade as any).slMovedToEntry
         ? (trade.gridGlobalSlPrice ?? trade.slPrice)   // trailing already moved SL
@@ -1950,7 +1952,7 @@ export class UserRealTradingService implements OnModuleInit {
       const tpUpdate: Record<string, any> = {};
 
       let newTpPrice: number | undefined;
-      if (!(trade as any).tpBoosted && trade.tpPrice) {
+      if (trade.tpPrice) {
         const origTpPct = Math.abs((trade.tpPrice - origEntryRef) / origEntryRef) * 100;
         if (origTpPct > 0) {
           newTpPrice = direction === "LONG"

@@ -352,12 +352,15 @@ export class PositionMonitorService implements OnModuleInit {
           // SL stays at original entry's SL — do NOT move SL when DCA fills.
           // Moving SL from avgEntry pushes it further against us, increasing max loss.
           // Only TP recalculates from avgEntry (so profit target reflects average cost).
+          // Note: tpBoosted only blocks momentum boost (one-time at 2% peak),
+          // NOT avg-entry recalc — grids must always recalc TP from new avgEntry.
           const tpPct = (signal as any).takeProfitPercent;
-          if (tpPct > 0 && !(signal as any).tpBoosted) {
+          if (tpPct > 0) {
             const newTp = direction === "LONG"
               ? avgEntry * (1 + tpPct / 100)
               : avgEntry * (1 - tpPct / 100);
             (signal as any).takeProfitPrice = newTp;
+            this.propagateTpMove(sigKey, symbol, newTp, direction);
           }
 
           this.logger.log(
@@ -594,7 +597,9 @@ export class PositionMonitorService implements OnModuleInit {
             promoted = await this.signalQueueService.refreshEntryPrice(promoted, livePrice);
           }
           this.registerListener(promoted);
-          this.userRealTradingService.onSignalActivated(promoted, {} as any).catch((err) =>
+          // Use stored aiParams from signal (contains leverage, SL/TP config) — fallback to empty if missing
+          const promotedParams = (promoted as any).aiParams ?? {};
+          this.userRealTradingService.onSignalActivated(promoted, promotedParams).catch((err) =>
             this.logger.error(`[PositionMonitor] Real trading error (queued promoted): ${err?.message}`),
           );
           this.logger.log(
@@ -720,7 +725,8 @@ export class PositionMonitorService implements OnModuleInit {
               promoted = await this.signalQueueService.refreshEntryPrice(promoted, livePrice);
             }
             this.registerListener(promoted);
-            this.userRealTradingService.onSignalActivated(promoted, {} as any).catch((err) =>
+            const promotedParams = (promoted as any).aiParams ?? {};
+            this.userRealTradingService.onSignalActivated(promoted, promotedParams).catch((err) =>
               this.logger.error(`[PositionMonitor] Real trading error (queued promoted): ${err?.message}`),
             );
           }

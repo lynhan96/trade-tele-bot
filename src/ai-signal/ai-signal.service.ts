@@ -890,7 +890,7 @@ export class AiSignalService implements OnModuleInit {
       this.logger.warn(`[AiSignal] Validation error for ${signalKey}: ${err?.message} — APPROVED (fail-open)`);
     }
 
-    // ── Daily signal cap: atomic check+increment to prevent over-trading ──
+    // ── Daily signal cap: check BEFORE processing, increment AFTER success ──
     const MAX_DAILY_SIGNALS = 35;
     const dailyCountKey = "cache:ai:daily-signal-count";
     const now = new Date();
@@ -898,9 +898,8 @@ export class AiSignalService implements OnModuleInit {
     midnight.setUTCDate(midnight.getUTCDate() + 1);
     midnight.setUTCHours(0, 0, 0, 0);
     const ttl = Math.ceil((midnight.getTime() - now.getTime()) / 1000);
-    const newDailyCount = await this.redisService.initAndIncr(dailyCountKey, 0, ttl);
-    if (newDailyCount > MAX_DAILY_SIGNALS) {
-      await this.redisService.decr(dailyCountKey); // rollback
+    const currentDailyCount = await this.redisService.get<number>(dailyCountKey) ?? 0;
+    if (currentDailyCount >= MAX_DAILY_SIGNALS) {
       this.logger.debug(`[AiSignal] Daily signal cap reached (${MAX_DAILY_SIGNALS}) — skipping ${coin.toUpperCase()}`);
       return;
     }
@@ -921,6 +920,11 @@ export class AiSignalService implements OnModuleInit {
       forceProfile,
       signalFuturesData,
     );
+
+    // Only increment daily count for signals that were actually EXECUTED or QUEUED
+    if (queueResult.action === "EXECUTED" || queueResult.action === "QUEUED") {
+      await this.redisService.initAndIncr(dailyCountKey, 0, ttl);
+    }
 
     if (queueResult.action === "EXECUTED") {
       let activeSignal =
@@ -953,11 +957,6 @@ export class AiSignalService implements OnModuleInit {
         await this.notifySignalQueued(queuedSignal, isTestMode);
       }
     }
-    // If signal was SKIPPED by queue (already active), rollback the daily count
-    if (queueResult.action === "SKIPPED") {
-      await this.redisService.decr(dailyCountKey).catch(() => {});
-    }
-    // EXECUTED/QUEUED — daily count already incremented above
     } finally {
       this.processingCoins.delete(lockKey);
       if (isDual) this.processingCoins.delete(`${symbol}:__DUAL_LOCK__`);
@@ -1359,7 +1358,8 @@ export class AiSignalService implements OnModuleInit {
         queued = await this.signalQueueService.refreshEntryPrice(queued, livePrice);
       }
       await this.notifySignalTestMode(queued);
-      this.userRealTradingService.onSignalActivated(queued, {} as any).catch((err) =>
+      const promotedParams = (queued as any).aiParams ?? {};
+      this.userRealTradingService.onSignalActivated(queued, promotedParams).catch((err) =>
         this.logger.error(`[AiSignal] Real trading error (queued promoted): ${err?.message}`),
       );
     }
