@@ -656,7 +656,20 @@ export class RuleEngineService {
       return null;
     }
 
-    // Stage 2 confirmed — clear state and emit signal
+    // Stage 2 confirmed — apply regime gates before emitting
+    // STOCH_BB is mean reversion — only valid in ranging/sideways markets.
+    // In strong trending regimes counter-trend mean reversion = trap (LONG: 0/22 wins historically).
+    if (params.regime === "STRONG_BEAR" && patternState.isLong) {
+      await this.redisService.delete(stateKey);
+      this.logger.debug(`[RuleEngine] ${coin} STOCH_BB_PATTERN LONG blocked: STRONG_BEAR (mean reversion against trend)`);
+      return null;
+    }
+    if (params.regime === "STRONG_BULL" && !patternState.isLong) {
+      await this.redisService.delete(stateKey);
+      this.logger.debug(`[RuleEngine] ${coin} STOCH_BB_PATTERN SHORT blocked: STRONG_BULL (mean reversion against trend)`);
+      return null;
+    }
+
     await this.redisService.delete(stateKey);
 
     return {
@@ -1115,6 +1128,17 @@ export class RuleEngineService {
     }
 
     if (isLong === null || !selectedFvg) return null;
+
+    // Regime gate: block counter-trend in extreme regimes
+    // FVG LONG in STRONG_BEAR = catching falling knife; SHORT in STRONG_BULL = short squeeze
+    if (isLong && params.regime === "STRONG_BEAR") {
+      this.logger.debug(`[RuleEngine] ${coin} SMC_FVG LONG blocked: STRONG_BEAR`);
+      return null;
+    }
+    if (!isLong && params.regime === "STRONG_BULL") {
+      this.logger.debug(`[RuleEngine] ${coin} SMC_FVG SHORT blocked: STRONG_BULL`);
+      return null;
+    }
 
     // 4. RSI filter — avoid extreme RSI entries
     const rsi = this.indicatorService.getRsi(closes, cfg.rsiPeriod);

@@ -720,15 +720,15 @@ export class AiSignalService implements OnModuleInit {
       const longSLs = longTrades.filter((p) => p.closeReason === "STOP_LOSS" && (p.pnlPercent || 0) < 0).length;
       const shortSLs = shortTrades.filter((p) => p.closeReason === "STOP_LOSS" && (p.pnlPercent || 0) < 0).length;
 
-      // Block LONG if: avg LONG PnL < -1% AND at least 2 LONG SLs (confirmed losing streak)
-      if (signalResult.isLong && longPnl < -1 && longSLs >= 2) {
+      // Block LONG if: avg LONG PnL < -0.7% AND at least 2 LONG SLs (confirmed losing streak)
+      if (signalResult.isLong && longPnl < -0.7 && longSLs >= 2) {
         this.logger.log(
           `[AiSignal] ${coin.toUpperCase()} LONG blocked — market momentum anti-LONG (avgPnl=${longPnl.toFixed(1)}%, ${longSLs} SLs from ${longTrades.length} trades)`,
         );
         return;
       }
-      // Block SHORT if: avg SHORT PnL < -1% AND at least 2 SHORT SLs
-      if (!signalResult.isLong && shortPnl < -1 && shortSLs >= 2) {
+      // Block SHORT if: avg SHORT PnL < -0.7% AND at least 2 SHORT SLs
+      if (!signalResult.isLong && shortPnl < -0.7 && shortSLs >= 2) {
         this.logger.log(
           `[AiSignal] ${coin.toUpperCase()} SHORT blocked — market momentum anti-SHORT (avgPnl=${shortPnl.toFixed(1)}%, ${shortSLs} SLs from ${shortTrades.length} trades)`,
         );
@@ -750,15 +750,15 @@ export class AiSignalService implements OnModuleInit {
         const longRatio = activeLongs / activeSignals.length;
         const shortRatio = activeShorts / activeSignals.length;
 
-        // 75%+ SHORT active → market bearish → block LONG
-        if (shortRatio >= 0.75 && signalResult.isLong) {
+        // 65%+ SHORT active → market bearish → block LONG
+        if (shortRatio >= 0.65 && signalResult.isLong) {
           this.logger.log(
             `[AiSignal] ${coin.toUpperCase()} LONG blocked — ${activeShorts}/${activeSignals.length} active are SHORT (${(shortRatio * 100).toFixed(0)}%), follow bearish trend`,
           );
           return;
         }
-        // 75%+ LONG active → market bullish → block SHORT
-        if (longRatio >= 0.75 && !signalResult.isLong) {
+        // 65%+ LONG active → market bullish → block SHORT
+        if (longRatio >= 0.65 && !signalResult.isLong) {
           this.logger.log(
             `[AiSignal] ${coin.toUpperCase()} SHORT blocked — ${activeLongs}/${activeSignals.length} active are LONG (${(longRatio * 100).toFixed(0)}%), follow bullish trend`,
           );
@@ -869,15 +869,15 @@ export class AiSignalService implements OnModuleInit {
         const domData = await this.coinGeckoService.getBtcDominanceDelta();
         if (domData) {
           const { current, delta30m } = domData;
-          // Block LONG alts when BTC.D rising aggressively (>+0.3% in 30min or absolute >60%)
-          if (signalResult.isLong && (delta30m > 0.3 || current > 60)) {
+          // Block LONG alts when BTC.D rising (>+0.2% in 30min or absolute >60%)
+          if (signalResult.isLong && (delta30m > 0.2 || current > 60)) {
             this.logger.log(
               `[AiSignal] ${signalKey} LONG BLOCKED — BTC.D ${current.toFixed(2)}% Δ30m=${delta30m > 0 ? "+" : ""}${delta30m.toFixed(2)}% (altcoin long trap risk)`,
             );
             return;
           }
-          // Block SHORT alts when BTC.D falling aggressively (<-0.3% in 30min or absolute <42%)
-          if (!signalResult.isLong && (delta30m < -0.3 || current < 42)) {
+          // Block SHORT alts when BTC.D falling aggressively (<-0.2% in 30min or absolute <42%)
+          if (!signalResult.isLong && (delta30m < -0.2 || current < 42)) {
             this.logger.log(
               `[AiSignal] ${signalKey} SHORT BLOCKED — BTC.D ${current.toFixed(2)}% Δ30m=${delta30m.toFixed(2)}% (altcoin season, short squeeze risk)`,
             );
