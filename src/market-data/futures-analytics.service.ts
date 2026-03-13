@@ -72,6 +72,16 @@ export class FuturesAnalyticsService {
     return results;
   }
 
+  /**
+   * Fetch analytics for a single coin on-demand (used when cache misses).
+   * Public wrapper for fetchSingleCoinAnalytics.
+   */
+  async fetchSingleCoin(symbol: string): Promise<CoinAnalytics | null> {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const axios = require("axios");
+    return this.fetchSingleCoinAnalytics(axios, symbol);
+  }
+
   private async fetchSingleCoinAnalytics(axios: any, symbol: string): Promise<CoinAnalytics | null> {
     try {
       const [fundingRes, oiRes, lsRes, takerRes] = await Promise.allSettled([

@@ -832,7 +832,14 @@ export class AiSignalService implements OnModuleInit {
     try {
       const symbol = `${coin.toUpperCase()}${currency.toUpperCase()}`;
       const analyticsCache = await this.futuresAnalyticsService.getCachedAnalytics();
-      const fa = analyticsCache.get(symbol);
+      let fa = analyticsCache.get(symbol);
+
+      // Cache miss: fetch funding rate directly for this coin (don't fail-open on missing data)
+      if (!fa) {
+        this.logger.debug(`[AiSignal] ${signalKey} no cached analytics — fetching live funding rate`);
+        fa = await this.futuresAnalyticsService.fetchSingleCoin(symbol);
+      }
+
       if (fa) {
         // Capture for DB storage regardless of filter outcome
         signalFuturesData = {
