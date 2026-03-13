@@ -99,6 +99,11 @@ export class IndicatorService {
     };
   }
 
+  /** Return full RSI array (for divergence detection, swing analysis). */
+  getRsiArray(closes: number[], period: number): number[] {
+    return RSI.calculate({ period, values: closes });
+  }
+
   getRsiEma(closes: number[], rsiPeriod: number, emaPeriod: number): CrossValue {
     const rsiValues = RSI.calculate({ period: rsiPeriod, values: closes });
     const emaValues = EMA.calculate({ period: emaPeriod, values: rsiValues });

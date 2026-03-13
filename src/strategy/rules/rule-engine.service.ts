@@ -156,6 +156,59 @@ export class RuleEngineService {
       return null;
     }
 
+    // ── RSI Divergence Filter — block signals that go against divergence ──
+    // Bearish divergence (price ↑ RSI ↓) → block LONG (top forming, don't buy the top)
+    // Bullish divergence (price ↓ RSI ↑) → block SHORT (bottom forming, don't sell the bottom)
+    const div15m = await this.detectRsiDivergence(coin, "15m", 10);
+    if (div15m) {
+      if (div15m === "BEARISH" && isLong) {
+        this.logger.log(
+          `[RuleEngine] ${coin} LONG blocked: bearish RSI divergence on 15m — top forming, don't long`,
+        );
+        return null;
+      }
+      if (div15m === "BULLISH" && !isLong) {
+        this.logger.log(
+          `[RuleEngine] ${coin} SHORT blocked: bullish RSI divergence on 15m — bottom forming, don't short`,
+        );
+        return null;
+      }
+      // Divergence aligns with signal direction — great reversal signal
+      this.logger.log(
+        `[RuleEngine] ${coin} ${isLong ? "LONG" : "SHORT"}: ${div15m} RSI divergence confirms reversal — strong entry`,
+      );
+    }
+
+    // ── Rejection Wick Quality — boost confidence when candle confirms reversal ──
+    // For SHORT: upper wick ≥ 40% of candle range = sellers rejected higher prices (top signal)
+    // For LONG: lower wick ≥ 40% of candle range = buyers rejected lower prices (bottom signal)
+    // Not a hard block — signals can still fire without wick, but wick presence is logged for tracking
+    const ohlc15mWick = await this.indicatorService.getOhlc(coin, "15m");
+    if (ohlc15mWick.closes.length >= 2) {
+      // Check last 2 completed candles for rejection wicks
+      for (let i = 1; i <= 2; i++) {
+        const idx = ohlc15mWick.closes.length - i;
+        const h = ohlc15mWick.highs[idx];
+        const l = ohlc15mWick.lows[idx];
+        const o = ohlc15mWick.opens[idx];
+        const c = ohlc15mWick.closes[idx];
+        const candleRange = h - l;
+        if (candleRange <= 0) continue;
+
+        const upperWick = h - Math.max(o, c);
+        const lowerWick = Math.min(o, c) - l;
+
+        if (!isLong && upperWick / candleRange >= 0.4) {
+          this.logger.debug(`[RuleEngine] ${coin} SHORT: rejection wick found (upper=${(upperWick/candleRange*100).toFixed(0)}%) — good reversal signal`);
+          break;
+        }
+        if (isLong && lowerWick / candleRange >= 0.4) {
+          this.logger.debug(`[RuleEngine] ${coin} LONG: rejection wick found (lower=${(lowerWick/candleRange*100).toFixed(0)}%) — good reversal signal`);
+          break;
+        }
+      }
+    }
+
     if (winners.length >= 2) {
       // Strong confluence: 2+ strategies agree
       const names = winners.map(w => w.strategy).join("+");
@@ -177,6 +230,80 @@ export class RuleEngineService {
       `[RuleEngine] ${coin} △ ${winners[0].strategy} fired alone (1/${strategies.length}) — allowed as single`,
     );
     return primary;
+  }
+
+  /**
+   * RSI Divergence Detection — classic reversal signal for catching tops/bottoms.
+   * Bearish divergence: price makes higher high but RSI makes lower high → SHORT (top signal)
+   * Bullish divergence: price makes lower low but RSI makes higher low → LONG (bottom signal)
+   * Scans last `lookback` candles on given timeframe.
+   * Returns "BEARISH" | "BULLISH" | null.
+   */
+  private async detectRsiDivergence(
+    coin: string,
+    kline: string,
+    lookback = 10,
+    rsiPeriod = 14,
+  ): Promise<"BEARISH" | "BULLISH" | null> {
+    const ohlc = await this.indicatorService.getOhlc(coin, kline);
+    if (ohlc.closes.length < rsiPeriod + lookback + 5) return null;
+
+    const closes = ohlc.closes;
+    const highs = ohlc.highs;
+    const lows = ohlc.lows;
+    const rsiArr = this.indicatorService.getRsiArray(closes, rsiPeriod);
+
+    // RSI array is shorter than closes by (rsiPeriod) elements
+    // Align: rsiArr[i] corresponds to closes[rsiPeriod + i]
+    const offset = closes.length - rsiArr.length;
+    const len = rsiArr.length;
+    if (len < lookback + 2) return null;
+
+    // Find two most recent swing highs in price (for bearish div)
+    // Find two most recent swing lows in price (for bullish div)
+    const swingHighs: { idx: number; price: number; rsi: number }[] = [];
+    const swingLows: { idx: number; price: number; rsi: number }[] = [];
+
+    // Scan from recent to old, find local extremes (simple: higher than both neighbors)
+    for (let i = len - 2; i >= len - lookback && i >= 1; i--) {
+      const priceIdx = i + offset;
+      if (highs[priceIdx] > highs[priceIdx - 1] && highs[priceIdx] > highs[priceIdx + 1]) {
+        swingHighs.push({ idx: i, price: highs[priceIdx], rsi: rsiArr[i] });
+      }
+      if (lows[priceIdx] < lows[priceIdx - 1] && lows[priceIdx] < lows[priceIdx + 1]) {
+        swingLows.push({ idx: i, price: lows[priceIdx], rsi: rsiArr[i] });
+      }
+    }
+
+    // Bearish divergence: 2 swing highs where later price is higher but RSI is lower
+    if (swingHighs.length >= 2) {
+      const [recent, prev] = swingHighs; // already sorted recent→old
+      if (recent.price > prev.price && recent.rsi < prev.rsi) {
+        // Additional: RSI should be in overbought zone (> 55) for relevance
+        if (recent.rsi > 55) {
+          this.logger.log(
+            `[RuleEngine] ${coin} BEARISH RSI divergence on ${kline}: price ${prev.price.toFixed(4)}→${recent.price.toFixed(4)} (↑) but RSI ${prev.rsi.toFixed(1)}→${recent.rsi.toFixed(1)} (↓)`,
+          );
+          return "BEARISH";
+        }
+      }
+    }
+
+    // Bullish divergence: 2 swing lows where later price is lower but RSI is higher
+    if (swingLows.length >= 2) {
+      const [recent, prev] = swingLows;
+      if (recent.price < prev.price && recent.rsi > prev.rsi) {
+        // Additional: RSI should be in oversold zone (< 45) for relevance
+        if (recent.rsi < 45) {
+          this.logger.log(
+            `[RuleEngine] ${coin} BULLISH RSI divergence on ${kline}: price ${prev.price.toFixed(4)}→${recent.price.toFixed(4)} (↓) but RSI ${prev.rsi.toFixed(1)}→${recent.rsi.toFixed(1)} (↑)`,
+          );
+          return "BULLISH";
+        }
+      }
+    }
+
+    return null;
   }
 
   /**
