@@ -383,8 +383,11 @@ export class BinanceService {
       const client = this.createClient(apiKey, apiSecret);
       const orders: any[] = await (client as any)
         .privateRequest('GET', '/fapi/v1/openAlgoOrders', {})
-        .catch(() => []);
-      if (!Array.isArray(orders)) return result;
+        .catch((err) => {
+          this.logger.warn(`openAlgoOrders API call failed: ${err?.message}`);
+          return null; // Return null to distinguish API failure from empty list
+        });
+      if (!Array.isArray(orders)) return result; // API failed — return empty (caller should handle)
       for (const o of orders) {
         const sym = o.symbol as string;
         if (!result.has(sym)) result.set(sym, { hasSl: false, hasTp: false });

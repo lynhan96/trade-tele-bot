@@ -8,6 +8,7 @@ import { BinanceModule } from "./binance/binance.module";
 import { LoggerModule } from "./logger/logger.module";
 import { AiSignalModule } from "./ai-signal/ai-signal.module";
 import { AdminModule } from "./admin/admin.module";
+import { ExternalSignalModule } from "./external-signal/external-signal.module";
 
 @Module({
   imports: [
@@ -31,6 +32,7 @@ import { AdminModule } from "./admin/admin.module";
     TelegramModule,
     AiSignalModule,
     AdminModule,
+    ExternalSignalModule,
   ],
 })
 export class AppModule {}

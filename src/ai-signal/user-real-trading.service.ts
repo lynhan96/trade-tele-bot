@@ -1611,9 +1611,16 @@ export class UserRealTradingService implements OnModuleInit {
               continue;
             }
             const effectiveSlPrice = slPrice;
-            if (!algo?.hasSl && effectiveSlPrice) {
+            // Cooldown: skip if SL was recently placed (prevents spam when openAlgoOrders API fails)
+            const slCooldownKey = `cache:sl-placed:${telegramId}:${symbol}`;
+            const slRecentlyPlaced = await this.redisService.get(slCooldownKey);
+            if (!algo?.hasSl && effectiveSlPrice && !slRecentlyPlaced) {
               this.logger.warn(`[RealTrading] ${symbol} user ${telegramId}: SL missing — placing at $${effectiveSlPrice}`);
               try {
+                // Cancel existing SL if we have an ID (prevent duplicates on Binance)
+                if (trade.binanceSlAlgoId) {
+                  await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, trade.binanceSlAlgoId).catch(() => {});
+                }
                 const roundedSl = round(effectiveSlPrice);
                 const slOrder = await this.binanceService.setStopLoss(
                   keys.apiKey, keys.apiSecret, symbol, roundedSl,
@@ -1621,6 +1628,8 @@ export class UserRealTradingService implements OnModuleInit {
                 );
                 const newId = slOrder?.algoId?.toString() ?? slOrder?.orderId?.toString();
                 await this.userTradeModel.updateOne({ _id: trade._id }, { $set: { binanceSlAlgoId: newId } });
+                // Set cooldown to prevent spam (10 minutes)
+                await this.redisService.set(slCooldownKey, "1", 600);
                 await this.telegramService.sendTelegramMessage(chatId,
                   `🛡️ *Bao Ve Vi The: SL Duoc Dat Lai*\n\n${symbol} ${direction}\nSL: *${fmtP(roundedSl)}*\n_SL bi mat — da tu dong dat lai de bao ve vi the._`
                 ).catch(() => {});
@@ -1674,9 +1683,15 @@ export class UserRealTradingService implements OnModuleInit {
 
             // ── TP missing ──────────────────────────────────────────────────
             const effectiveTpPrice = tpPrice;
-            if (effectiveTpPrice && !algo?.hasTp) {
+            const tpCooldownKey = `cache:tp-placed:${telegramId}:${symbol}`;
+            const tpRecentlyPlaced = await this.redisService.get(tpCooldownKey);
+            if (effectiveTpPrice && !algo?.hasTp && !tpRecentlyPlaced) {
               this.logger.warn(`[RealTrading] ${symbol} user ${telegramId}: TP missing — placing at $${effectiveTpPrice}`);
               try {
+                // Cancel existing TP if we have an ID (prevent duplicates on Binance)
+                if (trade.binanceTpAlgoId) {
+                  await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, trade.binanceTpAlgoId).catch(() => {});
+                }
                 const roundedTp = round(effectiveTpPrice);
                 const tpOrder = await this.binanceService.setTakeProfitAtPrice(
                   keys.apiKey, keys.apiSecret, symbol, roundedTp,
@@ -1685,6 +1700,8 @@ export class UserRealTradingService implements OnModuleInit {
                 );
                 const newId = tpOrder?.algoId?.toString() ?? tpOrder?.orderId?.toString();
                 await this.userTradeModel.updateOne({ _id: trade._id }, { $set: { binanceTpAlgoId: newId } });
+                // Set cooldown to prevent spam (10 minutes)
+                await this.redisService.set(tpCooldownKey, "1", 600);
                 await this.telegramService.sendTelegramMessage(chatId,
                   `🛡️ *Bao Ve Vi The: TP Duoc Dat Lai*\n\n${symbol} ${direction}\nTP: *${fmtP(roundedTp)}*\n_TP bi mat — da tu dong dat lai._`
                 ).catch(() => {});

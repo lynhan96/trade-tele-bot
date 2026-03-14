@@ -68,6 +68,6 @@ import {
     UserRealTradingService,
     UserDataStreamService,
   ],
-  exports: [AiSignalService, UserSignalSubscriptionService, UserRealTradingService],
+  exports: [AiSignalService, UserSignalSubscriptionService, UserRealTradingService, SignalQueueService, PositionMonitorService],
 })
 export class AiSignalModule {}

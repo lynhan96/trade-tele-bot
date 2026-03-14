@@ -119,6 +119,9 @@ export class AiSignal {
   @Prop({ enum: ["INTRADAY", "SWING"], default: "INTRADAY" })
   timeframeProfile?: string; // "INTRADAY" or "SWING"
 
+  @Prop({ enum: ["internal", "external"], default: "internal" })
+  source?: string; // "internal" = AI scanner, "external" = TCP microservice
+
   @Prop({ type: Object, default: {} })
   indicatorSnapshot: Record<string, any>; // RSI, BB width, etc. at signal time
 

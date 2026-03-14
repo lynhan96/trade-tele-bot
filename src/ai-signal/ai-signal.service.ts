@@ -989,29 +989,7 @@ export class AiSignalService implements OnModuleInit {
     }
 
     if (queueResult.action === "EXECUTED") {
-      let activeSignal =
-        await this.signalQueueService.getActiveSignal(signalKey);
-      if (activeSignal) {
-        // Refresh entry price to current market price (candle close can be stale)
-        const livePrice = this.marketDataService.getLatestPrice(activeSignal.symbol);
-        if (livePrice && livePrice > 0) {
-          activeSignal = await this.signalQueueService.refreshEntryPrice(activeSignal, livePrice);
-        }
-
-        if (isTestMode) {
-          // Test mode: send "[TEST]" notification instead of placing real trades
-          await this.notifySignalTestMode(activeSignal);
-        } else {
-          // Live mode: place real trades + send AI-enriched notification
-          await this.broadcastSignal(activeSignal);
-        }
-        await this.notifySignalActive(activeSignal, params, isTestMode);
-
-        // Trigger real order placement for users with real mode enabled (runs independently of test mode)
-        this.userRealTradingService.onSignalActivated(activeSignal, params).catch((err) =>
-          this.logger.error(`[AiSignal] Real trading error: ${err?.message}`),
-        );
-      }
+      await this.handlePostActivation(signalKey, params, isTestMode);
     } else if (queueResult.action === "QUEUED") {
       const queuedSignal =
         await this.signalQueueService.getQueuedSignal(signalKey);
@@ -1023,6 +1001,42 @@ export class AiSignalService implements OnModuleInit {
       this.processingCoins.delete(lockKey);
       if (isDual) this.processingCoins.delete(`${symbol}:__DUAL_LOCK__`);
     }
+  }
+
+  // ─── Post-activation flow (shared by internal + external signals) ────────
+
+  /**
+   * After a signal is EXECUTED: refresh entry price, notify, trigger real trading.
+   * Called by processCoin() and ExternalSignalService.
+   */
+  async handlePostActivation(
+    signalKey: string,
+    params: Record<string, any>,
+    isTestMode?: boolean,
+  ): Promise<void> {
+    if (isTestMode === undefined) {
+      isTestMode = await this.isTestModeEnabled();
+    }
+    let activeSignal = await this.signalQueueService.getActiveSignal(signalKey);
+    if (!activeSignal) return;
+
+    // Refresh entry price to current market price (candle close can be stale)
+    const livePrice = this.marketDataService.getLatestPrice(activeSignal.symbol);
+    if (livePrice && livePrice > 0) {
+      activeSignal = await this.signalQueueService.refreshEntryPrice(activeSignal, livePrice);
+    }
+
+    if (isTestMode) {
+      await this.notifySignalTestMode(activeSignal);
+    } else {
+      await this.broadcastSignal(activeSignal);
+    }
+    await this.notifySignalActive(activeSignal, params as any, isTestMode);
+
+    // Trigger real order placement for users with real mode enabled
+    this.userRealTradingService.onSignalActivated(activeSignal, params as any).catch((err) =>
+      this.logger.error(`[AiSignal] Real trading error: ${err?.message}`),
+    );
   }
 
   // ─── Market-wide SL cooldown ─────────────────────────────────────────────

@@ -1,4 +1,5 @@
 import { NestFactory } from "@nestjs/core";
+import { MicroserviceOptions, Transport } from "@nestjs/microservices";
 import { AppModule } from "./app.module";
 import { Logger } from "@nestjs/common";
 import { createClient, RedisClientType } from "redis";
@@ -79,11 +80,21 @@ async function bootstrap() {
 
   logger.log("Binance Telegram Bot is starting (v2)...");
 
+  // ── TCP Microservice for external signals ─────────────────────────────
+  const extSignalPort = parseInt(process.env.EXTERNAL_SIGNAL_PORT || "8010", 10);
+  app.connectMicroservice<MicroserviceOptions>({
+    transport: Transport.TCP,
+    options: {
+      host: "0.0.0.0",
+      port: extSignalPort,
+    },
+  });
+
   app.enableCors();
-  await app.init();
+  await app.startAllMicroservices();
   await app.listen(process.env.ADMIN_PORT || 3001);
 
-  logger.log(`✅ Bot is running and Admin API listening on port ${process.env.ADMIN_PORT || 3001}`);
+  logger.log(`✅ Bot is running — Admin API :${process.env.ADMIN_PORT || 3001} | TCP signal receiver :${extSignalPort}`);
 
   // Graceful shutdown on SIGTERM (hot-reload / container stop)
   process.on("SIGTERM", async () => {

@@ -851,6 +851,7 @@ export class SignalQueueService {
       ...(futuresData?.longShortRatio !== undefined ? { longShortRatio: futuresData.longShortRatio } : {}),
       ...(futuresData?.takerBuyRatio !== undefined ? { takerBuyRatio: futuresData.takerBuyRatio } : {}),
       ...(futuresData?.openInterestUsd !== undefined ? { openInterestUsd: futuresData.openInterestUsd } : {}),
+      source: signalResult.strategy.startsWith("EXTERNAL_") ? "external" : "internal",
     });
 
     return doc;
