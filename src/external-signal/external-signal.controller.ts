@@ -1,4 +1,4 @@
-import { Controller, Logger } from "@nestjs/common";
+import { Controller, Logger, OnModuleInit } from "@nestjs/common";
 import { MessagePattern, Payload } from "@nestjs/microservices";
 import { ExternalSignalService } from "./external-signal.service";
 
@@ -15,10 +15,14 @@ export interface ExternalSignalPayload {
 }
 
 @Controller()
-export class ExternalSignalController {
+export class ExternalSignalController implements OnModuleInit {
   private readonly logger = new Logger(ExternalSignalController.name);
 
   constructor(private readonly externalSignalService: ExternalSignalService) {}
+
+  onModuleInit() {
+    this.logger.log(`[ExtSignal] TCP handler registered — listening for { cmd: 'bot-receive-signal' }`);
+  }
 
   @MessagePattern({ cmd: "bot-receive-signal" })
   async receiveSignal(

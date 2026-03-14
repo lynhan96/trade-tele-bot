@@ -64,14 +64,20 @@ export class ExternalSignalService {
     const direction = isLong ? "LONG" : "SHORT";
     const strategy = BOT_TYPE_MAP[payload.botType] || `EXTERNAL_${payload.botType}`;
 
+    this.logger.log(
+      `[ExtSignal] ── Processing ${symbol} ${direction} ── entry=${payload.entry} SL=${payload.stopLoss} bot=${payload.botType} period=${payload.period}`,
+    );
+
     // ── 2. Compute SL% ──────────────────────────────────────────────────
-    let slPct = Math.abs((payload.entry - payload.stopLoss) / payload.entry) * 100;
-    slPct = Math.max(2, Math.min(4, slPct)); // clamp [2%, 4%]
+    const rawSlPct = Math.abs((payload.entry - payload.stopLoss) / payload.entry) * 100;
+    let slPct = Math.max(2, Math.min(4, rawSlPct)); // clamp [2%, 4%]
+    this.logger.log(`[ExtSignal] ${symbol} SL%: raw=${rawSlPct.toFixed(2)}% → clamped=${slPct.toFixed(2)}%`);
 
     // ── 3. Duplicate guard ───────────────────────────────────────────────
     const signalKey = symbol;
     const activeSignal = await this.signalQueueService.getActiveSignal(signalKey);
     if (activeSignal) {
+      this.logger.log(`[ExtSignal] ${symbol} SKIP — already active (${activeSignal.direction})`);
       return { success: false, reason: `Already active: ${symbol} ${activeSignal.direction}` };
     }
 
@@ -79,8 +85,10 @@ export class ExternalSignalService {
     const dailyCountKey = "cache:ai:daily-signal-count";
     const currentDailyCount = (await this.redisService.get<number>(dailyCountKey)) ?? 0;
     if (currentDailyCount >= MAX_DAILY_SIGNALS) {
+      this.logger.log(`[ExtSignal] ${symbol} SKIP — daily cap reached (${currentDailyCount}/${MAX_DAILY_SIGNALS})`);
       return { success: false, reason: `Daily cap reached (${MAX_DAILY_SIGNALS})` };
     }
+    this.logger.log(`[ExtSignal] ${symbol} daily count: ${currentDailyCount}/${MAX_DAILY_SIGNALS}`);
 
     // ── 5. Custom validation (lighter than full pipeline) ────────────────
     const rejectedBy: string[] = [];
@@ -101,6 +109,7 @@ export class ExternalSignalService {
         fundingRate = fa.fundingRate;
         longShortRatio = fa.longShortRatio;
         const fundingPct = fa.fundingRate * 100;
+        this.logger.log(`[ExtSignal] ${symbol} funding=${fundingPct.toFixed(3)}% L/S=${fa.longShortRatio?.toFixed(2)}`);
         if (Math.abs(fundingPct) > 0.5) {
           rejectedBy.push("extreme_funding");
         } else if (fundingPct > 0.3 && isLong) {
@@ -108,6 +117,8 @@ export class ExternalSignalService {
         } else if (fundingPct < -0.3 && !isLong) {
           rejectedBy.push("funding_crowded_shorts");
         }
+      } else {
+        this.logger.log(`[ExtSignal] ${symbol} funding data unavailable (fail-open)`);
       }
 
       // 5b. RSI sanity (15m)
@@ -115,8 +126,11 @@ export class ExternalSignalService {
       if (ohlc15m.closes.length >= 20) {
         const rsi = this.indicatorService.getRsi(ohlc15m.closes, 14);
         rsiValue = rsi.last;
+        this.logger.log(`[ExtSignal] ${symbol} RSI(15m)=${rsi.last.toFixed(1)}`);
         if (isLong && rsi.last > 70) rejectedBy.push("rsi_overbought");
         if (!isLong && rsi.last < 30) rejectedBy.push("rsi_oversold");
+      } else {
+        this.logger.log(`[ExtSignal] ${symbol} RSI(15m) unavailable — insufficient candles (${ohlc15m.closes.length})`);
       }
 
       // 5c. Price position (1h, 20 candles)
@@ -130,6 +144,7 @@ export class ExternalSignalService {
         if (range > 0) {
           const price = ohlc1h.closes[ohlc1h.closes.length - 1];
           pricePosition = ((price - low) / range) * 100;
+          this.logger.log(`[ExtSignal] ${symbol} pricePos=${pricePosition.toFixed(0)}% (price=${price}, range=${low.toFixed(2)}-${high.toFixed(2)})`);
           if (!isLong && pricePosition < 25) rejectedBy.push("price_position_bottom");
           if (isLong && pricePosition > 75) rejectedBy.push("price_position_top");
         }
@@ -138,12 +153,15 @@ export class ExternalSignalService {
         if (ohlc1h.closes.length >= 20) {
           const htfRsi = this.indicatorService.getRsi(ohlc1h.closes, 14);
           htfRsiValue = htfRsi.last;
+          this.logger.log(`[ExtSignal] ${symbol} RSI(1h)=${htfRsi.last.toFixed(1)}`);
           if (isLong && htfRsi.last > 70) rejectedBy.push("htf_rsi_overbought");
           if (!isLong && htfRsi.last < 30) rejectedBy.push("htf_rsi_oversold");
         }
+      } else {
+        this.logger.log(`[ExtSignal] ${symbol} pricePos unavailable — insufficient 1h candles (${ohlc1h.highs.length})`);
       }
     } catch (err) {
-      this.logger.warn(`[ExtSignal] Validation error (fail-open): ${err?.message}`);
+      this.logger.warn(`[ExtSignal] ${symbol} validation error (fail-open): ${err?.message}`);
       // fail-open: approve on error
     }
 
@@ -175,23 +193,28 @@ export class ExternalSignalService {
     }
 
     // ── 6. Compute TP via existing Fib/ATR logic ─────────────────────────
+    this.logger.log(`[ExtSignal] ${symbol} ✅ validation PASSED — computing TP...`);
     let tpPct: number;
     try {
       const tunedParams = await this.aiOptimizerService.tuneParamsForSymbol(
         coin, currency, regime,
       );
+      const rawTp = tunedParams.takeProfitPercent;
       // Use AI-computed TP but enforce R:R ≥ 2
-      tpPct = Math.max(tunedParams.takeProfitPercent, slPct * 2);
+      tpPct = Math.max(rawTp, slPct * 2);
       tpPct = Math.min(tpPct, 4); // cap 4%
-    } catch {
+      this.logger.log(`[ExtSignal] ${symbol} TP: fib/ATR=${rawTp.toFixed(2)}% → R:R adjusted=${tpPct.toFixed(2)}% (SL=${slPct.toFixed(2)}%)`);
+    } catch (err) {
       // Fallback: TP = SL × 2, cap 4%
       tpPct = Math.min(slPct * 2, 4);
+      this.logger.log(`[ExtSignal] ${symbol} TP: fallback SL×2=${tpPct.toFixed(2)}% (tuneParams failed: ${err?.message})`);
     }
 
     // Compute absolute TP price
     const tpPrice = isLong
       ? payload.entry * (1 + tpPct / 100)
       : payload.entry * (1 - tpPct / 100);
+    this.logger.log(`[ExtSignal] ${symbol} entry=${payload.entry} SL=$${payload.stopLoss} TP=$${tpPrice.toFixed(4)} regime=${regime}`);
 
     // ── Save approval validation ─────────────────────────────────────────
     const parts: string[] = [
