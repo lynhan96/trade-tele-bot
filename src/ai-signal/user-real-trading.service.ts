@@ -565,6 +565,11 @@ export class UserRealTradingService implements OnModuleInit {
 
     for (const trade of openTrades) {
       try {
+        // Grid trades: use total filled quantity (not just base)
+        const tradeQty = trade.gridLevels?.length > 0
+          ? trade.gridLevels.filter((g: any) => g.status === "FILLED").reduce((sum: number, g: any) => sum + (g.quantity || 0), 0) || trade.quantity
+          : trade.quantity;
+
         const keys = await this.userSettingsService.getApiKeys(trade.telegramId, "binance");
         if (!keys?.apiKey) continue;
 
@@ -582,7 +587,7 @@ export class UserRealTradingService implements OnModuleInit {
         let tpOrder: any;
         try {
           tpOrder = await this.binanceService.setTakeProfitAtPrice(
-            keys.apiKey, keys.apiSecret, symbol, finalTpPrice, direction as "LONG" | "SHORT", trade.quantity,
+            keys.apiKey, keys.apiSecret, symbol, finalTpPrice, direction as "LONG" | "SHORT", tradeQty,
           );
         } catch (tpErr) {
           if (tpErr?.message?.includes("Precision")) {
@@ -590,7 +595,7 @@ export class UserRealTradingService implements OnModuleInit {
             finalTpPrice = parseFloat(newTpPrice.toFixed(freshPrec));
             this.logger.warn(`[RealTrading] ${symbol} TP precision retry: ${roundedTpPrice} → ${finalTpPrice}`);
             tpOrder = await this.binanceService.setTakeProfitAtPrice(
-              keys.apiKey, keys.apiSecret, symbol, finalTpPrice, direction as "LONG" | "SHORT", trade.quantity,
+              keys.apiKey, keys.apiSecret, symbol, finalTpPrice, direction as "LONG" | "SHORT", tradeQty,
             );
           } else {
             throw tpErr;
@@ -1620,7 +1625,11 @@ export class UserRealTradingService implements OnModuleInit {
             const slCooldownKey = `cache:sl-placed:${telegramId}:${symbol}`;
             const slRecentlyPlaced = await this.redisService.get(slCooldownKey);
             if (!algo?.hasSl && effectiveSlPrice && !slRecentlyPlaced) {
-              this.logger.warn(`[RealTrading] ${symbol} user ${telegramId}: SL missing — placing at $${effectiveSlPrice}`);
+              // Use grid total quantity if DCA enabled
+              const slQty = trade.gridLevels?.length > 0
+                ? trade.gridLevels.filter((g: any) => g.status === "FILLED").reduce((sum: number, g: any) => sum + (g.quantity || 0), 0) || trade.quantity
+                : trade.quantity;
+              this.logger.warn(`[RealTrading] ${symbol} user ${telegramId}: SL missing — placing at $${effectiveSlPrice} qty=${slQty}`);
               try {
                 // Cancel existing SL if we have an ID (prevent duplicates on Binance)
                 if (trade.binanceSlAlgoId) {
@@ -1629,7 +1638,7 @@ export class UserRealTradingService implements OnModuleInit {
                 const roundedSl = round(effectiveSlPrice);
                 const slOrder = await this.binanceService.setStopLoss(
                   keys.apiKey, keys.apiSecret, symbol, roundedSl,
-                  direction as "LONG" | "SHORT", trade.quantity,
+                  direction as "LONG" | "SHORT", slQty,
                 );
                 const newId = slOrder?.algoId?.toString() ?? slOrder?.orderId?.toString();
                 await this.userTradeModel.updateOne({ _id: trade._id }, { $set: { binanceSlAlgoId: newId } });
@@ -1691,7 +1700,11 @@ export class UserRealTradingService implements OnModuleInit {
             const tpCooldownKey = `cache:tp-placed:${telegramId}:${symbol}`;
             const tpRecentlyPlaced = await this.redisService.get(tpCooldownKey);
             if (effectiveTpPrice && !algo?.hasTp && !tpRecentlyPlaced) {
-              this.logger.warn(`[RealTrading] ${symbol} user ${telegramId}: TP missing — placing at $${effectiveTpPrice}`);
+              // Use grid total quantity if DCA enabled
+              const tpQty = trade.gridLevels?.length > 0
+                ? trade.gridLevels.filter((g: any) => g.status === "FILLED").reduce((sum: number, g: any) => sum + (g.quantity || 0), 0) || trade.quantity
+                : trade.quantity;
+              this.logger.warn(`[RealTrading] ${symbol} user ${telegramId}: TP missing — placing at $${effectiveTpPrice} qty=${tpQty}`);
               try {
                 // Cancel existing TP if we have an ID (prevent duplicates on Binance)
                 if (trade.binanceTpAlgoId) {
@@ -1701,7 +1714,7 @@ export class UserRealTradingService implements OnModuleInit {
                 const tpOrder = await this.binanceService.setTakeProfitAtPrice(
                   keys.apiKey, keys.apiSecret, symbol, roundedTp,
                   direction as "LONG" | "SHORT",
-                  trade.quantity,
+                  tpQty,
                 );
                 const newId = tpOrder?.algoId?.toString() ?? tpOrder?.orderId?.toString();
                 await this.userTradeModel.updateOne({ _id: trade._id }, { $set: { binanceTpAlgoId: newId } });
@@ -1982,13 +1995,14 @@ export class UserRealTradingService implements OnModuleInit {
 
       let newTpPrice: number | undefined;
       if (trade.tpPrice) {
-        const origTpPct = Math.abs((trade.tpPrice - origEntryRef) / origEntryRef) * 100;
-        if (origTpPct > 0) {
-          newTpPrice = direction === "LONG"
-            ? avgEntry * (1 + origTpPct / 100)
-            : avgEntry * (1 - origTpPct / 100);
-          tpUpdate.tpPrice = newTpPrice;
-        }
+        // Always use 4% TP from new avgEntry after DCA (MAX_TP cap)
+        // Previously used origTpPct which could be <4%, wasting DCA advantage
+        const DCA_TP_PCT = 4.0;
+        newTpPrice = direction === "LONG"
+          ? avgEntry * (1 + DCA_TP_PCT / 100)
+          : avgEntry * (1 - DCA_TP_PCT / 100);
+        tpUpdate.tpPrice = newTpPrice;
+        this.logger.log(`[Grid] ${symbol} TP recalc: avgEntry=${avgEntry.toFixed(4)} → TP=${newTpPrice.toFixed(4)} (4% from avgEntry)`);
       }
 
       const filledCount = filledGrids.length;
@@ -2031,16 +2045,20 @@ export class UserRealTradingService implements OnModuleInit {
       }
 
       // Update TP for new avg entry + total quantity (cancel old, place new)
-      if (newTpPrice && trade.binanceTpAlgoId) {
+      if (newTpPrice) {
         try {
-          await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, trade.binanceTpAlgoId).catch(() => {});
+          // Cancel old TP if exists
+          if (trade.binanceTpAlgoId) {
+            await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, trade.binanceTpAlgoId).catch(() => {});
+          }
           const roundedTp = parseFloat(newTpPrice.toFixed(pricePrec));
           const tpOrder = await this.binanceService.setTakeProfitAtPrice(
             keys.apiKey, keys.apiSecret, symbol, roundedTp,
             direction as "LONG" | "SHORT", newTotalQty,
           );
           const newTpId = tpOrder?.algoId?.toString() ?? tpOrder?.orderId?.toString();
-          await this.userTradeModel.findByIdAndUpdate((trade as any)._id, { binanceTpAlgoId: newTpId });
+          await this.userTradeModel.findByIdAndUpdate((trade as any)._id, { binanceTpAlgoId: newTpId, tpPrice: roundedTp });
+          this.logger.log(`[Grid] ${symbol} L${level} TP updated: $${roundedTp} (4% from avgEntry=${avgEntry.toFixed(4)}) qty=${newTotalQty}`);
         } catch (err) {
           this.logger.error(`[Grid] ${symbol} L${level} TP update failed for user ${telegramId}: ${err?.message}`);
         }
