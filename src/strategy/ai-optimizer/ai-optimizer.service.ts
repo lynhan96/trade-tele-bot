@@ -617,6 +617,10 @@ export class AiOptimizerService {
     stopLossPercent: number;
     takeProfitPercent: number;
     indicators: Record<string, any>;
+    fundingRate?: number;
+    longShortRatio?: number;
+    btcDominance?: number;
+    btcDomDelta30m?: number;
   }): Promise<{ approved: boolean; reason?: string }> {
     const { symbol, direction, strategy, regime, confidence, stopLossPercent, takeProfitPercent } = signal;
     const isLong = direction === "LONG";
@@ -685,7 +689,13 @@ export class AiOptimizerService {
 
     // Rule-based rejection — fast, free
     if (rejectedBy.length > 0) {
-      const reason = `Rejected by: ${rejectedBy.join(", ")}`;
+      // Include context in rejection reason too
+      const ctxParts: string[] = [];
+      if (pricePosition != null) ctxParts.push(`pos=${pricePosition.toFixed(0)}%`);
+      if (rsiValue != null) ctxParts.push(`RSI=${rsiValue.toFixed(0)}`);
+      if (htfRsiValue != null) ctxParts.push(`RSI1h=${htfRsiValue.toFixed(0)}`);
+      if (signal.fundingRate != null) ctxParts.push(`funding=${(signal.fundingRate * 100).toFixed(3)}%`);
+      const reason = `Rejected by: ${rejectedBy.join(", ")}${ctxParts.length ? ` (${ctxParts.join(", ")})` : ""}`;
       this.validationModel.create({
         symbol, direction, strategy, regime, confidence,
         stopLossPercent, takeProfitPercent,
@@ -697,7 +707,18 @@ export class AiOptimizerService {
     }
 
     // Rule checks passed — approve (AI validation removed)
-    const reason = `Rules passed: pos=${pricePosition?.toFixed(0)}%, momentum=${candleMomentum}/3, RSI=${rsiValue?.toFixed(0)}`;
+    // Build detailed reason with all available context
+    const parts: string[] = [
+      `pos=${pricePosition?.toFixed(0)}%`,
+      `momentum=${candleMomentum}/3`,
+      `RSI=${rsiValue?.toFixed(0)}`,
+    ];
+    if (htfRsiValue != null) parts.push(`RSI1h=${htfRsiValue.toFixed(0)}`);
+    if (signal.fundingRate != null) parts.push(`funding=${(signal.fundingRate * 100).toFixed(3)}%`);
+    if (signal.longShortRatio != null) parts.push(`L/S=${signal.longShortRatio.toFixed(2)}`);
+    if (signal.btcDominance != null) parts.push(`BTC.D=${signal.btcDominance.toFixed(1)}%`);
+    if (signal.btcDomDelta30m != null) parts.push(`Δ30m=${signal.btcDomDelta30m > 0 ? "+" : ""}${signal.btcDomDelta30m.toFixed(2)}%`);
+    const reason = `Rules passed: ${parts.join(", ")}`;
 
     this.validationModel.create({
       symbol, direction, strategy, regime, confidence,

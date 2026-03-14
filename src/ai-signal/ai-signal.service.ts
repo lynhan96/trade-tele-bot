@@ -887,11 +887,15 @@ export class AiSignalService implements OnModuleInit {
     // BTC.D rising = money flowing from alts to BTC → alt LONGs get trapped.
     // BTC.D falling = altcoin season → alt SHORTs risky. Fail-open if fetch fails.
     const isBtc = coin.toUpperCase() === "BTC";
+    let btcDominance: number | undefined;
+    let btcDomDelta30m: number | undefined;
     if (!isBtc) {
       try {
         const domData = await this.coinGeckoService.getBtcDominanceDelta();
         if (domData) {
           const { current, delta30m } = domData;
+          btcDominance = current;
+          btcDomDelta30m = delta30m;
           // Block LONG alts when BTC.D rising (>+0.2% in 30min or absolute >60%)
           if (signalResult.isLong && (delta30m > 0.2 || current > 60)) {
             this.logger.log(
@@ -930,6 +934,10 @@ export class AiSignalService implements OnModuleInit {
         indicators: params as any,
         stopLossPercent: params.stopLossPercent,
         takeProfitPercent: params.takeProfitPercent,
+        fundingRate: signalFuturesData?.fundingRate,
+        longShortRatio: signalFuturesData?.longShortRatio,
+        btcDominance,
+        btcDomDelta30m,
       });
       if (!validation.approved) {
         await this.redisService.set(validationCooldownKey, true, 15 * 60); // 15min cooldown (was 30min)
