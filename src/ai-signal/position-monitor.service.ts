@@ -374,8 +374,9 @@ export class PositionMonitorService implements OnModuleInit {
       // TP/SL hit detection handled by normal path below (falls through)
       const filledGrids = grids.filter((g) => g.status === "FILLED");
       if (filledGrids.length > 0) {
-        const TRAIL_TRIGGER = 1.5;
-        const TRAIL_DISTANCE = 0.8;
+        // Was 1.5/0.8 — too tight, trades closed via trail SL with tiny profit
+        const TRAIL_TRIGGER = 2.0;
+        const TRAIL_DISTANCE = 1.2;
         const pnlFromAvg = direction === "LONG"
           ? ((price - avgEntry) / avgEntry) * 100
           : ((avgEntry - price) / avgEntry) * 100;
@@ -423,7 +424,7 @@ export class PositionMonitorService implements OnModuleInit {
         }
 
         // TP boost at 2% peak from avg entry
-        if (pnlFromAvg >= 2.0 && !(signal as any).tpBoosted && signalTp) {
+        if (pnlFromAvg >= 2.5 && !(signal as any).tpBoosted && signalTp) {
           (signal as any).tpBoosted = true;
           try {
             const hasMomentum = await this.marketDataService.hasVolumeMomentum(symbol);
@@ -477,8 +478,9 @@ export class PositionMonitorService implements OnModuleInit {
     // Trailing SL + TP boost for non-grid signals only
     // (grid signals handle trailing in the grid block above)
     if (!isGridSignal) {
-      const TRAIL_TRIGGER = 1.5;
-      const TRAIL_DISTANCE = 0.8;
+      // Was 1.5/0.8 — too tight, trades closed via trail SL with tiny profit
+      const TRAIL_TRIGGER = 2.0;
+      const TRAIL_DISTANCE = 1.2;
 
       const prevPeak = (signal as any).peakPnlPct || 0;
       if (pnlPct > prevPeak) {
@@ -520,7 +522,7 @@ export class PositionMonitorService implements OnModuleInit {
     }
 
     // ─── Dynamic TP boost: extend TP on strong momentum ─────────────────
-    if (pnlPct >= 2.0 && !(signal as any).tpBoosted && takeProfitPrice) {
+    if (pnlPct >= 2.5 && !(signal as any).tpBoosted && takeProfitPrice) {
       (signal as any).tpBoosted = true; // mark as checked (one-time per signal)
       try {
         const hasMomentum = await this.marketDataService.hasVolumeMomentum(symbol);

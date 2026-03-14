@@ -499,11 +499,12 @@ export class AiSignalService implements OnModuleInit {
       // We'll apply confidence adjustments after signal direction is known (below)
     }
 
-    // Confidence floor: lowered to 60 for data gathering (was 63)
-    const CONFIDENCE_FLOOR = 60;
-    // RANGE_BOUND/SIDEWAYS: slight raise to filter obvious whipsaws
+    // Confidence floor: regime-aware
+    const CONFIDENCE_FLOOR = 63;
     const isRanging = params.regime === "RANGE_BOUND" || params.regime === "SIDEWAYS";
-    const effectiveFloor = isRanging ? 63 : CONFIDENCE_FLOOR;
+    const isStrongBull = params.regime === "STRONG_BULL";
+    // RANGE_BOUND/SIDEWAYS: 67 to filter whipsaws | STRONG_BULL: 70 (40% WR, entries at tops)
+    const effectiveFloor = isStrongBull ? 70 : isRanging ? 67 : CONFIDENCE_FLOOR;
     params.minConfidenceToTrade = Math.max(params.minConfidenceToTrade ?? 0, effectiveFloor);
     // Cap per regime — prevent AI from setting unrealistically high thresholds
     const regimeThresholdCap: Record<string, number> = {
@@ -571,10 +572,17 @@ export class AiSignalService implements OnModuleInit {
       );
       return;
     }
-    // STOCH_EMA_KDJ: data shows conf<75 = 100% loss rate (DEGO conf=70 -3%, DENT conf=70 -2.89%)
-    if (strategyName === "STOCH_EMA_KDJ" && params.confidence < 75) {
+    // STOCH_EMA_KDJ: 68% WR but only +0.38% PnL (poor R:R). conf<78 = high loss rate
+    if (strategyName === "STOCH_EMA_KDJ" && params.confidence < 78) {
       this.logger.debug(
-        `[AiSignal] ${coin.toUpperCase()} STOCH_EMA_KDJ blocked — confidence ${params.confidence} < 75 (data: conf<75 = 100% SL)`,
+        `[AiSignal] ${coin.toUpperCase()} STOCH_EMA_KDJ blocked — confidence ${params.confidence} < 78 (data: poor R:R, need higher quality)`,
+      );
+      return;
+    }
+    // EMA_PULLBACK: 61% WR but -6.32% PnL — wins are tiny, losses are heavy
+    if (strategyName === "EMA_PULLBACK" && params.confidence < 72) {
+      this.logger.debug(
+        `[AiSignal] ${coin.toUpperCase()} EMA_PULLBACK blocked — confidence ${params.confidence} < 72 (data: -6.32% total PnL)`,
       );
       return;
     }
@@ -1253,9 +1261,10 @@ export class AiSignalService implements OnModuleInit {
       ? ((currentPrice - signal.entryPrice) / signal.entryPrice) * 100
       : ((signal.entryPrice - currentPrice) / signal.entryPrice) * 100;
 
-    // ── Trailing SL: after 1.5% profit, trail SL at peak - 0.8% (never lower) ──
-    const TRAIL_TRIGGER = 1.5;
-    const TRAIL_DISTANCE = 0.8;
+    // ── Trailing SL: after 2% profit, trail SL at peak - 1.2% (never lower) ──
+    // Was 1.5/0.8 — too tight, most trades close via trail SL with tiny profit despite high WR
+    const TRAIL_TRIGGER = 2.0;
+    const TRAIL_DISTANCE = 1.2;
 
     // Track peak PnL
     const prevPeak = (signal as any).peakPnlPct || 0;

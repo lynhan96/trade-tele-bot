@@ -1548,11 +1548,12 @@ export class UserRealTradingService implements OnModuleInit {
             }
 
             // ── Trailing stop for real trades ─────────────────────────────
-            // Mirrors position-monitor logic: TRAIL_TRIGGER=1.5%, TRAIL_DISTANCE=0.8%
+            // Mirrors position-monitor logic: TRAIL_TRIGGER=2.0%, TRAIL_DISTANCE=1.2%
             // Runs every 2min as safety net + primary trailing for trades whose signal is no longer watched
             if (currentPrice && trade.entryPrice && slPrice) {
-              const TRAIL_TRIGGER = 1.5;
-              const TRAIL_DISTANCE = 0.8;
+              // Was 1.5/0.8 — too tight, trades closed via trail SL with tiny profit
+              const TRAIL_TRIGGER = 2.0;
+              const TRAIL_DISTANCE = 1.2;
               // Use grid avg entry if available
               const entry = (trade as any).gridAvgEntry || trade.entryPrice;
               const currentPnlPct = direction === "LONG"

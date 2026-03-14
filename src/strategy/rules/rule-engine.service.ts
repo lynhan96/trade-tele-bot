@@ -634,6 +634,13 @@ export class RuleEngineService {
 
     const isLong = isCrossAbove;
 
+    // TREND_EMA SHORT: 25% WR, 3/4 losses, all in RANGE_BOUND with peak=0.0%
+    // Data shows this strategy only works for LONG entries — block SHORT entirely
+    if (!isLong) {
+      this.logger.debug(`[RuleEngine] ${coin} TREND_EMA SHORT blocked: data shows 25% WR, 3/4 losses — LONG only strategy`);
+      return null;
+    }
+
     // Trend gate: price must be near the trend EMA (EMA200 on higher TF)
     // Regime-aware: widen trendRange in strong trends (coins can be further from EMA200)
     if (cfg.enableTrendGate) {
