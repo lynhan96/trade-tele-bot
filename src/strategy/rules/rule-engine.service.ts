@@ -118,28 +118,27 @@ export class RuleEngineService {
     }
 
     // ── Move Exhaustion Filter — don't chase moves that already happened ──
-    // If price already dropped >2% from recent 4h high → SHORT is chasing (bounce likely)
-    // If price already rallied >2% from recent 4h low → LONG is chasing (pullback likely)
-    const pricePos4h = await this.getPricePosition(coin, "4h", 6);
-    if (pricePos4h !== null) {
-      const ohlc4h = await this.indicatorService.getOhlc(coin, "4h");
-      const recentHighs = ohlc4h.highs.slice(-6);
-      const recentLows = ohlc4h.lows.slice(-6);
+    // Use 1h candles, 3-candle lookback (3h window) — short enough to not block during sustained trends
+    // Threshold: 3% (was 2% on 24h window — too strict, blocked everything after market drops)
+    const ohlc1hExhaust = await this.indicatorService.getOhlc(coin, "1h");
+    if (ohlc1hExhaust.closes.length >= 3) {
+      const recentHighs = ohlc1hExhaust.highs.slice(-3);
+      const recentLows = ohlc1hExhaust.lows.slice(-3);
       const recentHigh = Math.max(...recentHighs);
       const recentLow = Math.min(...recentLows);
-      const currentPrice = ohlc4h.closes[ohlc4h.closes.length - 1];
+      const currentPrice = ohlc1hExhaust.closes[ohlc1hExhaust.closes.length - 1];
       const dropFromHigh = ((recentHigh - currentPrice) / recentHigh) * 100;
       const riseFromLow = ((currentPrice - recentLow) / recentLow) * 100;
 
-      if (!isLong && dropFromHigh > 2) {
+      if (!isLong && dropFromHigh > 3) {
         this.logger.log(
-          `[RuleEngine] ${coin} SHORT blocked: price already dropped ${dropFromHigh.toFixed(1)}% from 4h high — move exhaustion`,
+          `[RuleEngine] ${coin} SHORT blocked: price dropped ${dropFromHigh.toFixed(1)}% from 3h high — move exhaustion`,
         );
         return null;
       }
-      if (isLong && riseFromLow > 2) {
+      if (isLong && riseFromLow > 3) {
         this.logger.log(
-          `[RuleEngine] ${coin} LONG blocked: price already rallied ${riseFromLow.toFixed(1)}% from 4h low — move exhaustion`,
+          `[RuleEngine] ${coin} LONG blocked: price rallied ${riseFromLow.toFixed(1)}% from 3h low — move exhaustion`,
         );
         return null;
       }
