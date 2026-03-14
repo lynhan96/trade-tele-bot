@@ -1440,7 +1440,12 @@ export class UserRealTradingService implements OnModuleInit {
           const sub = await this.subscriptionService.getSubscription(telegramId);
 
           // One call to get all open algo orders for this user
+          // Returns null when API fails — MUST skip SL/TP check to prevent spam
           const algoMap = await this.binanceService.getOpenAlgoOrders(keys.apiKey, keys.apiSecret);
+          if (algoMap === null) {
+            this.logger.warn(`[RealTrading] protectOpenTrades: getOpenAlgoOrders failed for user ${telegramId} — skipping SL/TP check`);
+            continue; // Skip this user entirely
+          }
 
           const ppCache = new Map<string, number>();
           const getPP = async (sym: string) => {

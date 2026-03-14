@@ -371,38 +371,72 @@ export class BinanceService {
   }
 
   /**
-   * Fetch all open algo orders (SL/TP) for a user.
-   * Returns a map: symbol → { hasSl, hasTp, slAlgoId, tpAlgoId }
+   * Fetch all open algo orders + regular open orders (SL/TP) for a user.
+   * Returns null when ALL API calls fail — caller MUST skip SL/TP re-placement to avoid spam.
    */
   async getOpenAlgoOrders(
     apiKey: string,
     apiSecret: string,
-  ): Promise<Map<string, { hasSl: boolean; hasTp: boolean; slAlgoId?: string; tpAlgoId?: string }>> {
+  ): Promise<Map<string, { hasSl: boolean; hasTp: boolean; slAlgoId?: string; tpAlgoId?: string }> | null> {
     const result = new Map<string, { hasSl: boolean; hasTp: boolean; slAlgoId?: string; tpAlgoId?: string }>();
+    const client = this.createClient(apiKey, apiSecret);
+    let anySuccess = false;
+
     try {
-      const client = this.createClient(apiKey, apiSecret);
-      const orders: any[] = await (client as any)
-        .privateRequest('GET', '/fapi/v1/openAlgoOrders', {})
-        .catch((err) => {
-          this.logger.warn(`openAlgoOrders API call failed: ${err?.message}`);
-          return null; // Return null to distinguish API failure from empty list
-        });
-      if (!Array.isArray(orders)) return result; // API failed — return empty (caller should handle)
-      for (const o of orders) {
-        const sym = o.symbol as string;
-        if (!result.has(sym)) result.set(sym, { hasSl: false, hasTp: false });
-        const entry = result.get(sym)!;
-        if (o.orderType === 'STOP_MARKET' || o.orderType === 'STOP') {
-          entry.hasSl = true;
-          entry.slAlgoId = o.algoId?.toString();
+      // 1. Algo orders (placed by setStopLoss/setTakeProfitAtPrice via /fapi/v1/algoOrder)
+      try {
+        const algoOrders: any[] = await (client as any).privateRequest('GET', '/fapi/v1/openAlgoOrders', {});
+        if (Array.isArray(algoOrders)) {
+          anySuccess = true;
+          for (const o of algoOrders) {
+            const sym = o.symbol as string;
+            if (!result.has(sym)) result.set(sym, { hasSl: false, hasTp: false });
+            const entry = result.get(sym)!;
+            if (o.orderType === 'STOP_MARKET' || o.orderType === 'STOP') {
+              entry.hasSl = true;
+              entry.slAlgoId = o.algoId?.toString();
+            }
+            if (o.orderType === 'TAKE_PROFIT_MARKET' || o.orderType === 'TAKE_PROFIT') {
+              entry.hasTp = true;
+              entry.tpAlgoId = o.algoId?.toString();
+            }
+          }
         }
-        if (o.orderType === 'TAKE_PROFIT_MARKET' || o.orderType === 'TAKE_PROFIT') {
-          entry.hasTp = true;
-          entry.tpAlgoId = o.algoId?.toString();
+      } catch (err) {
+        this.logger.debug(`openAlgoOrders API failed: ${err?.message}`);
+      }
+
+      // 2. Regular open orders fallback (some SL/TP may be placed as regular orders)
+      try {
+        const regularOrders: any[] = await client.futuresOpenOrders({});
+        if (Array.isArray(regularOrders)) {
+          anySuccess = true;
+          for (const o of regularOrders) {
+            const sym = o.symbol as string;
+            const oType = o.type as string;
+            if (oType !== 'STOP_MARKET' && oType !== 'STOP' && oType !== 'TAKE_PROFIT_MARKET' && oType !== 'TAKE_PROFIT') continue;
+            if (!result.has(sym)) result.set(sym, { hasSl: false, hasTp: false });
+            const entry = result.get(sym)!;
+            if (oType === 'STOP_MARKET' || oType === 'STOP') {
+              entry.hasSl = true;
+              if (!entry.slAlgoId) entry.slAlgoId = o.orderId?.toString();
+            }
+            if (oType === 'TAKE_PROFIT_MARKET' || oType === 'TAKE_PROFIT') {
+              entry.hasTp = true;
+              if (!entry.tpAlgoId) entry.tpAlgoId = o.orderId?.toString();
+            }
+          }
         }
+      } catch (err) {
+        this.logger.debug(`futuresOpenOrders fallback failed: ${err?.message}`);
       }
     } catch (err) {
-      this.logger.warn(`getOpenAlgoOrders failed: ${err?.message}`);
+      this.logger.warn(`getOpenAlgoOrders outer error: ${err?.message}`);
+    }
+
+    if (!anySuccess) {
+      this.logger.warn(`getOpenAlgoOrders: ALL API calls failed — returning null`);
+      return null;
     }
     return result;
   }
