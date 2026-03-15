@@ -15,6 +15,7 @@ import { AdminService } from "./admin.service";
 import { AdminAuthService } from "./admin-auth.service";
 import { TradingConfigService } from "../ai-signal/trading-config";
 import type { TradingConfig } from "../ai-signal/trading-config";
+import { UserRealTradingService } from "../ai-signal/user-real-trading.service";
 
 @Controller("admin")
 export class AdminController {
@@ -22,6 +23,7 @@ export class AdminController {
     private readonly adminService: AdminService,
     private readonly authService: AdminAuthService,
     private readonly tradingConfig: TradingConfigService,
+    private readonly userRealTradingService: UserRealTradingService,
   ) {}
 
   // ─── Auth (no guard) ──────────────────────────────────────────────────────
@@ -228,6 +230,12 @@ export class AdminController {
   async updateTradingConfig(@Body() body: Partial<TradingConfig>) {
     const updated = await this.tradingConfig.update(body);
     return { config: updated };
+  }
+
+  @UseGuards(AdminGuard)
+  @Get("account-pnl")
+  getAccountPnl() {
+    return this.userRealTradingService.getAllAccountPnl();
   }
 
   @UseGuards(AdminGuard)

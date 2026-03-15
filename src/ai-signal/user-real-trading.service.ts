@@ -2234,4 +2234,83 @@ export class UserRealTradingService implements OnModuleInit {
       this.logger.warn(`[RealTrading] reRegisterOpenTradeStreams error: ${err?.message}`);
     }
   }
+
+  // ─── Account PnL Snapshot ──────────────────────────────────────────────
+
+  /**
+   * Cron: every 30s fetch Binance Futures balance + positions for all real-mode users.
+   * Cached to Redis → admin panel reads from cache (no direct Binance call from frontend).
+   *
+   * Redis key: cache:account-pnl:{telegramId}
+   * TTL: 60s (stale after 2 missed cycles)
+   */
+  @Cron("*/30 * * * * *")
+  async snapshotAccountPnl(): Promise<void> {
+    try {
+      const subs = await this.subscriptionService.findRealModeSubscribers();
+      if (!subs.length) return;
+
+      for (const sub of subs) {
+        try {
+          const keys = await this.userSettingsService.getApiKeys(sub.telegramId, "binance");
+          if (!keys?.apiKey) continue;
+
+          const [balance, positions] = await Promise.all([
+            this.binanceService.getFuturesBalance(keys.apiKey, keys.apiSecret),
+            this.binanceService.getOpenPositions(keys.apiKey, keys.apiSecret),
+          ]);
+
+          if (!balance) continue;
+
+          const snapshot = {
+            telegramId: sub.telegramId,
+            username: (sub as any).username || "",
+            walletBalance: balance.walletBalance,
+            availableBalance: balance.availableBalance,
+            unrealizedPnl: balance.unrealizedPnl,
+            totalBalance: balance.walletBalance + balance.unrealizedPnl,
+            positions: (positions || []).map((p) => ({
+              symbol: p.symbol,
+              side: p.side,
+              quantity: p.quantity,
+              entryPrice: p.entryPrice,
+              markPrice: p.currentPrice,
+              unrealizedPnl: p.unrealizedPnl,
+              leverage: p.leverage,
+              margin: p.margin,
+              liquidationPrice: p.liquidationPrice,
+              stopLoss: p.stopLoss,
+              takeProfit: p.takeProfit,
+            })),
+            positionCount: (positions || []).length,
+            updatedAt: new Date().toISOString(),
+          };
+
+          await this.redisService.set(
+            `cache:account-pnl:${sub.telegramId}`,
+            snapshot,
+            60, // 60s TTL
+          );
+        } catch {
+          // fail-open per user — don't break loop
+        }
+      }
+    } catch (err) {
+      this.logger.debug(`[RealTrading] snapshotAccountPnl error: ${err?.message}`);
+    }
+  }
+
+  /**
+   * Get all account PnL snapshots from Redis (called by admin API).
+   */
+  async getAllAccountPnl(): Promise<any[]> {
+    const subs = await this.subscriptionService.findRealModeSubscribers();
+
+    const results: any[] = [];
+    for (const sub of subs) {
+      const snapshot = await this.redisService.get<any>(`cache:account-pnl:${sub.telegramId}`);
+      if (snapshot) results.push(snapshot);
+    }
+    return results;
+  }
 }
