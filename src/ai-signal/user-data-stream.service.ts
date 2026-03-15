@@ -1,5 +1,6 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
 import { BinanceService } from "../binance/binance.service";
+import { RedisService } from "../redis/redis.service";
 import { UserRealTradingService } from "./user-real-trading.service";
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -23,6 +24,7 @@ export class UserDataStreamService implements OnModuleInit, OnModuleDestroy {
 
   constructor(
     private readonly binanceService: BinanceService,
+    private readonly redisService: RedisService,
     private readonly userRealTradingService: UserRealTradingService,
   ) {}
 
@@ -151,6 +153,12 @@ export class UserDataStreamService implements OnModuleInit, OnModuleDestroy {
    *   o.ot = originalOrderType ("STOP_MARKET", "TAKE_PROFIT_MARKET", ...)
    */
   private handleEvent(telegramId: number, event: any): void {
+    // ── ACCOUNT_UPDATE: balance + position changes (realtime PnL) ──────────
+    if (event.e === "ACCOUNT_UPDATE") {
+      this.handleAccountUpdate(telegramId, event).catch(() => {});
+      return;
+    }
+
     if (event.e !== "ORDER_TRADE_UPDATE") return;
 
     const order = event.o;
@@ -190,5 +198,59 @@ export class UserDataStreamService implements OnModuleInit, OnModuleDestroy {
       .catch((err) =>
         this.logger.error(`[UserDataStream] onTradeClose error: ${err?.message}`),
       );
+  }
+
+  /**
+   * Handle ACCOUNT_UPDATE event — realtime balance + position changes.
+   * Binance sends this on every balance/position change (fills, funding, PnL mark).
+   *
+   * Event structure:
+   *   e = "ACCOUNT_UPDATE"
+   *   a.B = [{ a: "USDT", wb: "walletBalance", cw: "crossWalletBalance" }]
+   *   a.P = [{ s: symbol, pa: positionAmt, ep: entryPrice, up: unrealizedPnl, ps: "LONG"/"SHORT" }]
+   *
+   * Cached to Redis → admin panel reads from cache.
+   */
+  private async handleAccountUpdate(telegramId: number, event: any): Promise<void> {
+    const a = event.a;
+    if (!a) return;
+
+    // Parse balances
+    const usdtBalance = (a.B || []).find((b: any) => b.a === "USDT");
+    const walletBalance = usdtBalance ? parseFloat(usdtBalance.wb) : 0;
+    const crossWallet = usdtBalance ? parseFloat(usdtBalance.cw) : 0;
+
+    // Parse positions (only non-zero)
+    const positions = (a.P || [])
+      .filter((p: any) => parseFloat(p.pa) !== 0)
+      .map((p: any) => ({
+        symbol: p.s,
+        side: parseFloat(p.pa) > 0 ? "LONG" : "SHORT",
+        quantity: Math.abs(parseFloat(p.pa)),
+        entryPrice: parseFloat(p.ep),
+        unrealizedPnl: parseFloat(p.up),
+        marginType: p.mt,
+      }));
+
+    // Calculate total unrealized PnL
+    const unrealizedPnl = positions.reduce((s: number, p: any) => s + p.unrealizedPnl, 0);
+
+    // Get existing snapshot to preserve fields we don't get from ACCOUNT_UPDATE (markPrice, leverage, etc.)
+    const existing = await this.redisService.get<any>(`cache:account-pnl:${telegramId}`);
+
+    const snapshot = {
+      telegramId,
+      username: existing?.username || "",
+      walletBalance,
+      availableBalance: crossWallet,
+      unrealizedPnl,
+      totalBalance: walletBalance + unrealizedPnl,
+      positions: positions.length > 0 ? positions : (existing?.positions || []),
+      positionCount: positions.length > 0 ? positions.length : (existing?.positionCount || 0),
+      updatedAt: new Date().toISOString(),
+      source: "websocket",
+    };
+
+    await this.redisService.set(`cache:account-pnl:${telegramId}`, snapshot, 120);
   }
 }

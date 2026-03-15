@@ -2238,13 +2238,14 @@ export class UserRealTradingService implements OnModuleInit {
   // ─── Account PnL Snapshot ──────────────────────────────────────────────
 
   /**
-   * Cron: every 30s fetch Binance Futures balance + positions for all real-mode users.
-   * Cached to Redis → admin panel reads from cache (no direct Binance call from frontend).
+   * Cron: every 5min fetch Binance Futures balance + positions as FALLBACK.
+   * Primary source is WebSocket ACCOUNT_UPDATE in UserDataStreamService (realtime).
+   * This cron fills in markPrice/leverage/liquidationPrice which WS doesn't provide.
    *
    * Redis key: cache:account-pnl:{telegramId}
-   * TTL: 60s (stale after 2 missed cycles)
+   * TTL: 360s (6min, stale after 1 missed cycle)
    */
-  @Cron("*/30 * * * * *")
+  @Cron("0 */5 * * * *")
   async snapshotAccountPnl(): Promise<void> {
     try {
       const subs = await this.subscriptionService.findRealModeSubscribers();
@@ -2289,7 +2290,7 @@ export class UserRealTradingService implements OnModuleInit {
           await this.redisService.set(
             `cache:account-pnl:${sub.telegramId}`,
             snapshot,
-            60, // 60s TTL
+            360, // 6min TTL — WS updates more frequently
           );
         } catch {
           // fail-open per user — don't break loop
