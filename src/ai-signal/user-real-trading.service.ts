@@ -1564,7 +1564,7 @@ export class UserRealTradingService implements OnModuleInit {
             // Runs every 2min as safety net + primary trailing for trades whose signal is no longer watched
             if (currentPrice && trade.entryPrice && slPrice) {
               const TRAIL_TRIGGER = 2.0;
-              const TRAIL_KEEP_RATIO = 0.6; // keep 60% of peak profit
+              const TRAIL_KEEP_RATIO = 0.75; // keep 60% of peak profit
               // Use grid avg entry if available
               const entry = (trade as any).gridAvgEntry || trade.entryPrice;
               const currentPnlPct = direction === "LONG"
@@ -1937,7 +1937,7 @@ export class UserRealTradingService implements OnModuleInit {
 
             // SL stays at original entry's SL — do NOT move SL when DCA fills.
             // DCA TP: always 4% from new avgEntry (fixed, regardless of original signal TP%)
-            const DCA_TP_PCT = 4.0;
+            const DCA_TP_PCT = 3.0;
             const tpUpdate: Record<string, any> = {};
             if (trade.tpPrice) {
               tpUpdate.tpPrice = direction === "LONG"
@@ -2033,7 +2033,7 @@ export class UserRealTradingService implements OnModuleInit {
       if (trade.tpPrice) {
         // Always use 4% TP from new avgEntry after DCA (MAX_TP cap)
         // Previously used origTpPct which could be <4%, wasting DCA advantage
-        const DCA_TP_PCT = 4.0;
+        const DCA_TP_PCT = 3.0;
         newTpPrice = direction === "LONG"
           ? avgEntry * (1 + DCA_TP_PCT / 100)
           : avgEntry * (1 - DCA_TP_PCT / 100);

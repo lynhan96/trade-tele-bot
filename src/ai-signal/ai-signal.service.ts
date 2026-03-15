@@ -602,10 +602,10 @@ export class AiSignalService implements OnModuleInit {
       );
       return;
     }
-    // EMA_PULLBACK: 61% WR but -6.32% PnL — wins are tiny, losses are heavy
-    if (strategyName === "EMA_PULLBACK" && params.confidence < 72) {
+    // EMA_PULLBACK: 65% WR but -$68 PnL, R:R=0.31 — worst strategy by profit
+    if (strategyName === "EMA_PULLBACK" && params.confidence < 75) {
       this.logger.debug(
-        `[AiSignal] ${coin.toUpperCase()} EMA_PULLBACK blocked — confidence ${params.confidence} < 72 (data: -6.32% total PnL)`,
+        `[AiSignal] ${coin.toUpperCase()} EMA_PULLBACK blocked — confidence ${params.confidence} < 75 (R:R 0.31, -$68 all-time)`,
       );
       return;
     }

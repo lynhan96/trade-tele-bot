@@ -319,14 +319,15 @@ export class StrategyAutoTunerService {
       const SAFE_COINS = new Set(["BTC", "ETH", "SOL", "BNB", "XRP", "ADA", "DOT", "LINK", "AVAX"]);
 
       // A. PnL-based blacklist
-      const byCoin: Record<string, { w: number; l: number; usdt: number }> = {};
+      const byCoin: Record<string, { w: number; l: number; usdt: number; winUsdt: number; lossUsdt: number }> = {};
       for (const s of signals) {
         const coin = ((s as any).symbol || "").replace("USDT", "");
         if (!coin || SAFE_COINS.has(coin)) continue;
-        if (!byCoin[coin]) byCoin[coin] = { w: 0, l: 0, usdt: 0 };
+        if (!byCoin[coin]) byCoin[coin] = { w: 0, l: 0, usdt: 0, winUsdt: 0, lossUsdt: 0 };
         const pnl = (s as any).pnlPercent || 0;
         const usdt = (s as any).pnlUsdt || (pnl / 100 * ((s as any).simNotional || 1000));
-        if (pnl > 0) byCoin[coin].w++; else byCoin[coin].l++;
+        if (usdt > 0) { byCoin[coin].w++; byCoin[coin].winUsdt += usdt; }
+        else { byCoin[coin].l++; byCoin[coin].lossUsdt += usdt; }
         byCoin[coin].usdt += usdt;
       }
 
@@ -354,11 +355,15 @@ export class StrategyAutoTunerService {
         if (n < MIN_COIN_TRADES) continue;
         const wr = (d.w / n) * 100;
 
-        // Block if: single big loss ($20+), or 0% WR on 2+ trades, or $15+ loss on 2+ trades
+        // Block if: big loss, zero WR, negative PnL, or terrible R:R
+        const avgWin = d.w > 0 ? d.winUsdt / d.w : 0;
+        const avgLoss = d.l > 0 ? d.lossUsdt / d.l : 0;
+        const rr = avgWin > 0 && d.l > 0 ? avgWin / Math.abs(avgLoss) : 99;
         const shouldBlock =
-          (d.usdt < -20 && n >= 1) ||
-          (wr === 0 && n >= 2) ||
-          (d.usdt < -15 && n >= 2);
+          (d.usdt < -20 && n >= 1) ||       // 1 trade losing $20+ is enough
+          (wr === 0 && n >= 2) ||            // 2 trades, zero wins
+          (d.usdt < -15 && n >= 2) ||        // 2 trades, combined $15+ loss
+          (rr < 0.4 && n >= 3);              // 3+ trades, avg loss > 2.5× avg win
 
         if (!shouldBlock) continue;
 
@@ -487,19 +492,20 @@ export class StrategyAutoTunerService {
         let reason = "OK";
 
         if (n >= MIN_TRADES_TO_EVALUATE) {
-          // Check disable criteria
-          if (totalUsdt < -20) {
+          // USDT-first disable criteria (profit matters more than WR)
+          const rr = avgWin > 0 && losses > 0 ? avgWin / Math.abs(avgLoss) : 99;
+          if (totalUsdt < -15) {
             enabled = false;
-            reason = `PnL ${totalUsdt.toFixed(0)}$ < -$20 (${n} trades)`;
-          } else if (wr < 40) {
+            reason = `PnL ${totalUsdt.toFixed(0)}$ < -$15 (${n} trades)`;
+          } else if (rr < 0.5 && n >= 5) {
             enabled = false;
-            reason = `WR ${wr.toFixed(0)}% < 40% (${n} trades)`;
-          } else if (avgWin > 0 && Math.abs(avgLoss) > avgWin * 2.5) {
+            reason = `R:R ${rr.toFixed(2)}:1 < 0.5 — avg loss $${Math.abs(avgLoss).toFixed(0)} > 2× avg win $${avgWin.toFixed(0)}`;
+          } else if (wr < 35) {
             enabled = false;
-            reason = `R:R ${(avgWin / Math.abs(avgLoss)).toFixed(2)}:1 < 0.4 (loss too big)`;
+            reason = `WR ${wr.toFixed(0)}% < 35% (${n} trades)`;
           }
 
-          // Re-enable check: if was disabled but last 5 trades are positive
+          // Stricter re-enable: last 5 trades PnL > +$10 AND WR >= 60%
           if (!enabled) {
             const recent5 = trades.slice(-5);
             if (recent5.length >= 5) {
@@ -507,9 +513,11 @@ export class StrategyAutoTunerService {
                 const pnl = (t as any).pnlPercent || 0;
                 return sum + ((t as any).pnlUsdt || (pnl / 100 * ((t as any).simNotional || 1000)));
               }, 0);
-              if (recent5Pnl > 0) {
+              const recent5Wins = recent5.filter(t => ((t as any).pnlUsdt || 0) > 0).length;
+              const recent5Wr = (recent5Wins / recent5.length) * 100;
+              if (recent5Pnl > 10 && recent5Wr >= 60) {
                 enabled = true;
-                reason = `Re-enabled: last 5 trades +${recent5Pnl.toFixed(0)}$ (recovery)`;
+                reason = `Re-enabled: last 5 trades +${recent5Pnl.toFixed(0)}$ WR=${recent5Wr.toFixed(0)}%`;
               }
             }
           }

@@ -296,8 +296,9 @@ export class PositionMonitorService implements OnModuleInit {
             .sort((a, b) => b - a)[0];
           if (lastFill && Date.now() - lastFill < 5 * 60 * 1000) continue;
 
-          // RSI + momentum guard for L1+ (extended from L2+ — L1 no longer exempt)
-          // Prevents DCA during continuous selling (xả liên tục)
+          // RSI guard for L1+ — only DCA when oversold/overbought
+          // L1-L2: RSI only (small volume 6-12%, quick avg-down)
+          // L3+: RSI + sustained momentum check (large volume 18-24%, need stabilization)
           if (grid.level >= 1 && rsiOk === null) {
             try {
               const closes = await this.marketDataService.getClosePrices(coin, "15m");
@@ -305,29 +306,32 @@ export class PositionMonitorService implements OnModuleInit {
                 const { RSI } = require("technicalindicators");
                 const rsiVals = RSI.calculate({ period: 14, values: closes });
                 const rsi = rsiVals[rsiVals.length - 1];
-                // LONG: only DCA if oversold (RSI<40). SHORT: only DCA if overbought (RSI>60)
-                const rsiExhausted = direction === "LONG" ? rsi < 40 : rsi > 60;
+                const rsiExhausted = direction === "LONG" ? rsi < 45 : rsi > 55;
 
-                // Sustained momentum check: if last 3 closes are all declining (LONG) or rising (SHORT),
-                // selling/buying is still active — wait for at least 1 stabilization candle
-                const last4 = closes.slice(-4);
-                const sustainedAgainst = last4.length >= 4 && (
-                  direction === "LONG"
-                    ? last4[3] < last4[2] && last4[2] < last4[1] && last4[1] < last4[0]
-                    : last4[3] > last4[2] && last4[2] > last4[1] && last4[1] > last4[0]
-                );
+                if (grid.level <= 2) {
+                  // L1-L2: RSI only — allow DCA more freely to avg down
+                  rsiOk = rsiExhausted;
+                } else {
+                  // L3+: RSI + sustained check (bigger positions need confirmation)
+                  const last4 = closes.slice(-4);
+                  const sustainedAgainst = last4.length >= 4 && (
+                    direction === "LONG"
+                      ? last4[3] < last4[2] && last4[2] < last4[1] && last4[1] < last4[0]
+                      : last4[3] > last4[2] && last4[2] > last4[1] && last4[1] > last4[0]
+                  );
+                  rsiOk = rsiExhausted && !sustainedAgainst;
+                }
 
-                rsiOk = rsiExhausted && !sustainedAgainst;
                 if (!rsiOk) {
                   this.logger.debug(
-                    `[PositionMonitor] Grid ${sigKey} L${grid.level} RSI=${rsi.toFixed(1)} sustained=${sustainedAgainst} — skip DCA (waiting for exhaustion/stabilization)`,
+                    `[PositionMonitor] Grid ${sigKey} L${grid.level} RSI=${rsi.toFixed(1)} — skip DCA (${grid.level <= 2 ? "RSI not exhausted" : "waiting stabilization"})`,
                   );
                 }
               } else {
-                rsiOk = true; // not enough data, allow fill
+                rsiOk = true;
               }
             } catch {
-              rsiOk = true; // fail-open
+              rsiOk = true;
             }
           }
           if (grid.level >= 1 && rsiOk === false) continue;
@@ -353,7 +357,7 @@ export class PositionMonitorService implements OnModuleInit {
           // DCA TP: always 4% from new avgEntry (fixed, regardless of original signal TP%)
           // Original TP% may be 2-3.5% from Fib/ATR, but after DCA avg moves down,
           // we want consistent 4% target from the new cost basis.
-          const DCA_TP_PCT = 4.0;
+          const DCA_TP_PCT = 3.0;
           const newTp = direction === "LONG"
             ? avgEntry * (1 + DCA_TP_PCT / 100)
             : avgEntry * (1 - DCA_TP_PCT / 100);
@@ -371,7 +375,7 @@ export class PositionMonitorService implements OnModuleInit {
       const filledGrids = grids.filter((g) => g.status === "FILLED");
       if (filledGrids.length > 0) {
         const TRAIL_TRIGGER = 2.0;
-        const TRAIL_KEEP_RATIO = 0.6; // keep 60% of peak profit
+        const TRAIL_KEEP_RATIO = 0.75; // keep 60% of peak profit
         const pnlFromAvg = direction === "LONG"
           ? ((price - avgEntry) / avgEntry) * 100
           : ((avgEntry - price) / avgEntry) * 100;
@@ -485,7 +489,7 @@ export class PositionMonitorService implements OnModuleInit {
       // Trail distance: keep 60% of peak profit (dynamic, not fixed)
       // Example: peak 3% → SL at +1.8%, peak 4% → SL at +2.4%
       const TRAIL_TRIGGER = 2.0;
-      const TRAIL_KEEP_RATIO = 0.6; // keep 60% of peak (was fixed 1.2% distance → avg win only $11)
+      const TRAIL_KEEP_RATIO = 0.75; // keep 60% of peak (was fixed 1.2% distance → avg win only $11)
 
       const prevPeak = (signal as any).peakPnlPct || 0;
       if (pnlPct > prevPeak) {
