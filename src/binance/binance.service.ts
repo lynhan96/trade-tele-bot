@@ -146,16 +146,32 @@ export class BinanceService {
     try {
       const client = this.createClient(apiKey, apiSecret);
 
-      // Close position by creating opposite order (hedge mode: include positionSide)
+      // Fetch actual position size from Binance to avoid ReduceOnly rejection
+      // (DB quantity may differ from actual if grids partially filled or position was adjusted externally)
+      let actualQty = quantity;
+      try {
+        const positions = await client.futuresPositionRisk({ symbol });
+        const pos = (positions as any[]).find(
+          (p: any) => p.symbol === symbol && (side === "LONG" ? parseFloat(p.positionAmt) > 0 : parseFloat(p.positionAmt) < 0),
+        );
+        if (pos) {
+          const binanceQty = Math.abs(parseFloat(pos.positionAmt));
+          if (binanceQty > 0 && binanceQty !== quantity) {
+            this.logger.warn(`closePosition ${symbol}: DB qty=${quantity} vs Binance qty=${binanceQty} — using Binance value`);
+            actualQty = binanceQty;
+          }
+        }
+      } catch { /* fail-open: use DB quantity */ }
+
       const order = await client.futuresOrder({
         symbol,
         side: side === "LONG" ? "SELL" : "BUY",
         positionSide: side as any,
         type: "MARKET",
-        quantity: quantity.toString(),
+        quantity: actualQty.toString(),
       });
 
-      this.logger.log(`Closed position ${symbol}: ${side} ${quantity}`);
+      this.logger.log(`Closed position ${symbol}: ${side} ${actualQty}`);
       return order;
     } catch (error) {
       this.logger.error(`Error closing position ${symbol}:`, error.message);

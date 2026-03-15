@@ -319,7 +319,7 @@ export class PositionMonitorService implements OnModuleInit {
 
                 rsiOk = rsiExhausted && !sustainedAgainst;
                 if (!rsiOk) {
-                  this.logger.log(
+                  this.logger.debug(
                     `[PositionMonitor] Grid ${sigKey} L${grid.level} RSI=${rsi.toFixed(1)} sustained=${sustainedAgainst} — skip DCA (waiting for exhaustion/stabilization)`,
                   );
                 }
