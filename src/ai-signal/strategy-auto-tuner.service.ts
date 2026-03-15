@@ -5,6 +5,8 @@ import { Cron } from "@nestjs/schedule";
 import { RedisService } from "../redis/redis.service";
 import { AiSignal, AiSignalDocument } from "../schemas/ai-signal.schema";
 import { TelegramBotService } from "../telegram/telegram.service";
+import { FuturesAnalyticsService } from "../market-data/futures-analytics.service";
+import { IndicatorService } from "../strategy/indicators/indicator.service";
 
 /**
  * StrategyAutoTuner — evaluates strategy performance every 4h and auto-disables
@@ -51,6 +53,8 @@ export class StrategyAutoTunerService {
     private readonly aiSignalModel: Model<AiSignalDocument>,
     private readonly redisService: RedisService,
     private readonly telegramService: TelegramBotService,
+    private readonly futuresAnalyticsService: FuturesAnalyticsService,
+    private readonly indicatorService: IndicatorService,
   ) {
     // Run on startup after 30s delay
     setTimeout(() => {
@@ -93,8 +97,18 @@ export class StrategyAutoTunerService {
 
   /**
    * Cron: evaluate coin performance every 4 hours.
-   * Blacklists coins with 0% WR or PnL < -$20 on 2+ trades.
-   * Priority coins (BTC, ETH, SOL, BNB, XRP) are never blacklisted.
+   * Blacklist criteria (2 layers):
+   *
+   * A. PnL-based (needs trade history):
+   *    - 0% WR on 2+ trades
+   *    - PnL < -$20 on 3+ trades
+   *
+   * B. Market-based (no history needed — catches bad coins before they trade):
+   *    - Extreme funding rate: |funding| > 0.3% (crowded, manipulation risk)
+   *    - ATR > 5% on 1h (too volatile — SL 3% is not enough)
+   *    - Very low volume: < $30M 24h volume (easy to manipulate)
+   *
+   * Safe coins (BTC, ETH, SOL, BNB, XRP, ADA, DOT, LINK, AVAX) never blacklisted.
    */
   @Cron("0 5 */4 * * *") // every 4h, 5min offset from strategy eval
   async evaluateCoins(): Promise<void> {
@@ -107,6 +121,7 @@ export class StrategyAutoTunerService {
 
       const SAFE_COINS = new Set(["BTC", "ETH", "SOL", "BNB", "XRP", "ADA", "DOT", "LINK", "AVAX"]);
 
+      // A. PnL-based blacklist
       const byCoin: Record<string, { w: number; l: number; usdt: number }> = {};
       for (const s of signals) {
         const coin = ((s as any).symbol || "").replace("USDT", "");
@@ -119,6 +134,7 @@ export class StrategyAutoTunerService {
       }
 
       const blacklist: string[] = [];
+      const blacklistReasons: Record<string, string> = {};
       const prevBlacklist = await this.getCoinBlacklist();
       const changes: string[] = [];
 
@@ -127,27 +143,54 @@ export class StrategyAutoTunerService {
         if (n < MIN_COIN_TRADES) continue;
         const wr = (d.w / n) * 100;
 
-        // Blacklist: 0% WR on 2+ trades, or PnL < -$20 on 3+ trades
         if ((wr === 0 && n >= 2) || (d.usdt < -20 && n >= 3)) {
           blacklist.push(coin);
-          if (!prevBlacklist.has(coin)) {
-            changes.push(`🚫 ${coin} BLACKLISTED: WR=${wr.toFixed(0)}% PnL=${d.usdt.toFixed(0)}$ (${n} trades)`);
-          }
-        } else if (prevBlacklist.has(coin)) {
-          changes.push(`✅ ${coin} UNBLOCKED: WR=${wr.toFixed(0)}% PnL=${d.usdt >= 0 ? "+" : ""}${d.usdt.toFixed(0)}$`);
+          blacklistReasons[coin] = `WR=${wr.toFixed(0)}% PnL=${d.usdt.toFixed(0)}$ (${n} trades)`;
         }
       }
 
-      await this.redisService.set(COIN_BLACKLIST_KEY, blacklist, STRATEGY_GATES_TTL);
+      // B. Market-based blacklist (extreme funding, ATR too high)
+      try {
+        const analytics = await this.futuresAnalyticsService.getCachedAnalytics();
+        for (const [symbol, fa] of analytics.entries()) {
+          const coin = symbol.replace("USDT", "");
+          if (SAFE_COINS.has(coin) || blacklist.includes(coin)) continue;
 
-      this.logger.log(`[AutoTuner] Coin blacklist: ${blacklist.length > 0 ? blacklist.join(", ") : "(none)"}`);
+          // Extreme funding > 0.3% = crowded position, manipulation risk
+          const fundingPct = Math.abs(fa.fundingRate * 100);
+          if (fundingPct > 0.3) {
+            blacklist.push(coin);
+            blacklistReasons[coin] = `extreme funding ${(fa.fundingRate * 100).toFixed(3)}%`;
+            continue;
+          }
+        }
+      } catch {}
+
+      // Deduplicate
+      const uniqueBlacklist = [...new Set(blacklist)];
+
+      // Track changes
+      for (const coin of uniqueBlacklist) {
+        if (!prevBlacklist.has(coin)) {
+          changes.push(`🚫 ${coin}: ${blacklistReasons[coin] || "market filter"}`);
+        }
+      }
+      for (const coin of prevBlacklist) {
+        if (!uniqueBlacklist.includes(coin)) {
+          changes.push(`✅ ${coin} UNBLOCKED`);
+        }
+      }
+
+      await this.redisService.set(COIN_BLACKLIST_KEY, uniqueBlacklist, STRATEGY_GATES_TTL);
+
+      this.logger.log(`[AutoTuner] Coin blacklist (${uniqueBlacklist.length}): ${uniqueBlacklist.length > 0 ? uniqueBlacklist.join(", ") : "(none)"}`);
 
       if (changes.length > 0) {
         const adminIds = (process.env.AI_ADMIN_TELEGRAM_ID || "").split(",").filter(Boolean);
         const msg =
           `🪙 *Coin Auto-Blacklist*\n━━━━━━━━━━━━━━━━━━\n\n` +
           changes.join("\n") +
-          `\n\n_Đánh giá ${LOOKBACK_DAYS} ngày, ${signals.length} signals_`;
+          `\n\n_${uniqueBlacklist.length} coins blocked / ${LOOKBACK_DAYS} ngày_`;
         for (const id of adminIds) {
           await this.telegramService.sendTelegramMessage(parseInt(id), msg).catch(() => {});
         }
