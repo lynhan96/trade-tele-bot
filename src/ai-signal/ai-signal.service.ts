@@ -505,12 +505,19 @@ export class AiSignalService implements OnModuleInit {
       // We'll apply confidence adjustments after signal direction is known (below)
     }
 
-    // Confidence floor: regime-aware
+    // ── Market Guard (pauseAll check before heavy evaluation) ────────────────
+    const marketGuard = await this.strategyAutoTuner.getMarketGuard();
+    if (marketGuard.pauseAll) {
+      this.logger.log(`[AiSignal] ${coin.toUpperCase()} skipped — Market Guard: ALL paused (${marketGuard.reason})`);
+      return;
+    }
+
+    // Confidence floor: regime-aware, boosted by market guard when direction is unclear
     const CONFIDENCE_FLOOR = 63;
     const isRanging = params.regime === "RANGE_BOUND" || params.regime === "SIDEWAYS";
     const isStrongBull = params.regime === "STRONG_BULL";
     // RANGE_BOUND/SIDEWAYS: 67 to filter whipsaws | STRONG_BULL: 80 (43% WR, -$53 — entries at tops)
-    const effectiveFloor = isStrongBull ? 80 : isRanging ? 67 : CONFIDENCE_FLOOR;
+    const effectiveFloor = isStrongBull ? 80 : isRanging ? Math.max(67, marketGuard.confidenceFloor) : Math.max(CONFIDENCE_FLOOR, marketGuard.confidenceFloor);
     params.minConfidenceToTrade = Math.max(params.minConfidenceToTrade ?? 0, effectiveFloor);
     // Cap per regime — prevent AI from setting unrealistically high thresholds
     const regimeThresholdCap: Record<string, number> = {
@@ -533,6 +540,16 @@ export class AiSignalService implements OnModuleInit {
       params,
     );
     if (!signalResult) return;
+
+    // ── Market Guard: directional block ───────────────────────────────────
+    if (marketGuard.blockLong && signalResult.isLong) {
+      this.logger.log(`[AiSignal] ${coin.toUpperCase()} LONG blocked by Market Guard (${marketGuard.reason})`);
+      return;
+    }
+    if (marketGuard.blockShort && !signalResult.isLong) {
+      this.logger.log(`[AiSignal] ${coin.toUpperCase()} SHORT blocked by Market Guard (${marketGuard.reason})`);
+      return;
+    }
 
     // ── Directional confidence adjustment using futures data ──────────────
     // Boost confidence when futures data aligns with signal direction, penalize when against.
@@ -863,9 +880,9 @@ export class AiSignalService implements OnModuleInit {
           openInterestUsd: fa.openInterestUsd || 0,
         };
 
-        const fundingPct = fa.fundingRate * 100; // raw 0.003 → 0.3%
-        const FUNDING_DIRECTION_BLOCK = 0.3; // block directional trade if crowd is >0.3% aligned
-        const FUNDING_EXTREME_BLOCK = 0.5;   // block entirely if >0.5%
+        const fundingPct = fa.fundingRate * 100; // raw 0.001 → 0.1%
+        const FUNDING_DIRECTION_BLOCK = 0.1; // block directional trade if crowd is >0.1% aligned (was 0.3%)
+        const FUNDING_EXTREME_BLOCK = 0.3;   // block entirely if >0.3% (was 0.5%)
         if (Math.abs(fundingPct) > FUNDING_EXTREME_BLOCK) {
           this.logger.log(
             `[AiSignal] ${signalKey} BLOCKED — extreme funding rate ${fundingPct.toFixed(4)}% (manipulation risk)`,

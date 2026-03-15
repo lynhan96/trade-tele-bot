@@ -29,11 +29,28 @@ import { IndicatorService } from "../strategy/indicators/indicator.service";
 const STRATEGY_GATES_KEY = "cache:strategy-gates";
 const COIN_BLACKLIST_KEY = "cache:coin-blacklist"; // Set<string> of blocked coins
 const COIN_BLOCKED_AT_KEY = "cache:coin-blocked-at"; // Record<string, isoString> — when each coin was blocked
+const MARKET_GUARD_KEY = "cache:ai:market-guard"; // auto market condition guard
 const STRATEGY_GATES_TTL = 5 * 60 * 60; // 5h (re-evaluated every 4h)
+const MARKET_GUARD_TTL = 35 * 60; // 35min (re-evaluated every 15min)
 const MIN_TRADES_TO_EVALUATE = 8; // need at least 8 trades to judge
 const MIN_COIN_TRADES = 1; // only 1 trade needed — a $20+ loss is enough signal
 const LOOKBACK_DAYS = 3; // 3-day window — fast reaction to current market
 const MIN_BLOCK_HOURS = 12; // minimum hours a coin stays blocked before re-evaluation
+
+// BTC price thresholds for auto-guard
+const BTC_BEAR_THRESHOLD = 78_000; // below = pause all new signals
+const BTC_BULL_THRESHOLD = 88_000; // above = lift LONG restrictions
+
+export interface MarketGuard {
+  blockLong: boolean;
+  blockShort: boolean;
+  pauseAll: boolean;
+  confidenceFloor: number; // dynamic override for confidence floor
+  reason: string;
+  btcPrice: number;
+  regime: string;
+  updatedAt: string;
+}
 
 interface StrategyGate {
   enabled: boolean;
@@ -62,6 +79,7 @@ export class StrategyAutoTunerService {
     setTimeout(() => {
       this.evaluateStrategies().catch(() => {});
       this.evaluateCoins().catch(() => {});
+      this.evaluateMarketGuard().catch(() => {});
     }, 30_000);
   }
 
@@ -87,6 +105,154 @@ export class StrategyAutoTunerService {
     const gate = gates[strategy];
     if (!gate) return true; // no data = enabled by default
     return gate.enabled;
+  }
+
+  /**
+   * Get current market guard from Redis.
+   * Returns safe defaults (nothing blocked) if no guard set yet.
+   */
+  async getMarketGuard(): Promise<MarketGuard> {
+    const guard = await this.redisService.get<MarketGuard>(MARKET_GUARD_KEY);
+    return guard || {
+      blockLong: false,
+      blockShort: false,
+      pauseAll: false,
+      confidenceFloor: 63,
+      reason: "No guard data",
+      btcPrice: 0,
+      regime: "UNKNOWN",
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
+  /**
+   * Cron: evaluate market conditions every 15min and set market guard.
+   * Auto-pauses or restricts signal direction based on BTC price + regime + recent perf.
+   */
+  @Cron("0 */15 * * * *") // every 15min
+  async evaluateMarketGuard(): Promise<void> {
+    try {
+      // Get BTC price (stored as string in Redis)
+      const btcRaw = await this.redisService.get<string | number>("price:BTCUSDT");
+      const btcPrice = btcRaw ? parseFloat(String(btcRaw)) : 0;
+
+      // Get regime + BTC context
+      const regime = await this.redisService.get<string>("cache:ai:regime:global") || "MIXED";
+      const btcCtx = await this.redisService.get<{ rsi: number; rsi4h: number; priceVsEma9: number; priceVsEma200: number }>("cache:ai:regime:btc-context");
+
+      // Get recent performance
+      const recentPerf = await this.redisService.get<any[]>("cache:ai:recent-perf") || [];
+
+      const prevGuard = await this.getMarketGuard();
+
+      let blockLong = false;
+      let blockShort = false;
+      let pauseAll = false;
+      let confidenceFloor = 63;
+      const reasons: string[] = [];
+
+      // ── Rule 1: BTC price extremes ──────────────────────────────────────────
+      if (btcPrice > 0 && btcPrice < BTC_BEAR_THRESHOLD) {
+        pauseAll = true;
+        reasons.push(`BTC $${btcPrice.toLocaleString()} < $${BTC_BEAR_THRESHOLD.toLocaleString()} (extreme bear)`);
+      } else if (btcPrice > 0 && btcPrice > BTC_BULL_THRESHOLD) {
+        reasons.push(`BTC $${btcPrice.toLocaleString()} > $${BTC_BULL_THRESHOLD.toLocaleString()} (bull confirmed)`);
+        // In strong bull, only block SHORT via existing STRONG_BULL regime logic
+      }
+
+      // ── Rule 2: Regime-based direction blocking ─────────────────────────────
+      const isRanging = regime === "MIXED" || regime === "RANGE_BOUND" || regime === "SIDEWAYS";
+      if (!pauseAll && isRanging && btcCtx) {
+        // Compute directional score from BTC indicators
+        let bearScore = 0;
+        let bullScore = 0;
+
+        if (btcCtx.rsi < 45) bearScore += 2;
+        else if (btcCtx.rsi > 55) bullScore += 2;
+
+        if ((btcCtx.rsi4h ?? 50) < 45) bearScore += 2;
+        else if ((btcCtx.rsi4h ?? 50) > 55) bullScore += 2;
+
+        if (btcCtx.priceVsEma9 < -0.3) bearScore += 1;
+        else if (btcCtx.priceVsEma9 > 0.3) bullScore += 1;
+
+        if ((btcCtx.priceVsEma200 ?? 0) < 0) bearScore += 1;
+        else if ((btcCtx.priceVsEma200 ?? 0) > 0) bullScore += 1;
+
+        if (bearScore >= 4) {
+          blockLong = true;
+          reasons.push(`${regime} + bearish score ${bearScore}/6 (RSI=${btcCtx.rsi}, RSI4h=${btcCtx.rsi4h})`);
+        } else if (bullScore >= 4) {
+          blockShort = true;
+          reasons.push(`${regime} + bullish score ${bullScore}/6`);
+        } else if (bearScore >= 3) {
+          // Softer block: raise confidence floor instead
+          confidenceFloor = 70;
+          reasons.push(`${regime} + mild bear score ${bearScore}/6 → floor +7`);
+        } else {
+          // Unclear direction: raise floor in ranging regimes
+          confidenceFloor = 70;
+          reasons.push(`${regime} → confidence floor 70 (no clear direction)`);
+        }
+      }
+
+      // ── Rule 3: Recent performance override ────────────────────────────────
+      // If 3+ of last 5 completed trades are SL in same direction → block that direction for this cycle
+      if (!pauseAll && recentPerf.length >= 3) {
+        const recent5 = recentPerf.slice(-5);
+        const longSLs = recent5.filter((p) => p.direction === "LONG" && p.closeReason === "STOP_LOSS" && (p.pnlPercent || 0) < 0).length;
+        const shortSLs = recent5.filter((p) => p.direction === "SHORT" && p.closeReason === "STOP_LOSS" && (p.pnlPercent || 0) < 0).length;
+
+        if (longSLs >= 3 && !blockLong) {
+          blockLong = true;
+          reasons.push(`${longSLs}/5 recent LONG SLs — blocking LONG`);
+        }
+        if (shortSLs >= 3 && !blockShort) {
+          blockShort = true;
+          reasons.push(`${shortSLs}/5 recent SHORT SLs — blocking SHORT`);
+        }
+      }
+
+      const reason = reasons.join(" | ") || "Normal market";
+      const guard: MarketGuard = {
+        blockLong,
+        blockShort,
+        pauseAll,
+        confidenceFloor,
+        reason,
+        btcPrice,
+        regime,
+        updatedAt: new Date().toISOString(),
+      };
+
+      await this.redisService.set(MARKET_GUARD_KEY, guard, MARKET_GUARD_TTL);
+
+      // Notify admin on significant state changes
+      const changed =
+        prevGuard.blockLong !== blockLong ||
+        prevGuard.blockShort !== blockShort ||
+        prevGuard.pauseAll !== pauseAll;
+
+      if (changed) {
+        const icon = pauseAll ? "🛑" : (blockLong && blockShort) ? "⛔" : blockLong ? "🔴" : blockShort ? "🔵" : "🟢";
+        const adminIds = (process.env.AI_ADMIN_TELEGRAM_ID || "").split(",").filter(Boolean);
+        const msg =
+          `${icon} *Market Guard Update*\n━━━━━━━━━━━━━━━━━━\n\n` +
+          `${pauseAll ? "🛑 ALL signals PAUSED" : blockLong ? "🔴 LONG blocked" : blockShort ? "🔵 SHORT blocked" : "🟢 All directions open"}\n` +
+          `Confidence floor: ${confidenceFloor}\n\n` +
+          `_${reason}_\n\n` +
+          `BTC: $${btcPrice.toLocaleString()} | Regime: ${regime}`;
+        for (const id of adminIds) {
+          await this.telegramService.sendTelegramMessage(parseInt(id), msg).catch(() => {});
+        }
+      }
+
+      this.logger.log(
+        `[MarketGuard] pauseAll=${pauseAll} blockLong=${blockLong} blockShort=${blockShort} floor=${confidenceFloor} BTC=$${btcPrice.toLocaleString()} | ${reason}`,
+      );
+    } catch (err) {
+      this.logger.error(`[MarketGuard] Error: ${err?.message}`);
+    }
   }
 
   /**
@@ -192,9 +358,9 @@ export class StrategyAutoTunerService {
           const coin = symbol.replace("USDT", "");
           if (SAFE_COINS.has(coin) || blacklist.includes(coin)) continue;
 
-          // Extreme funding > 0.3% = crowded position, manipulation risk
+          // Extreme funding > 0.1% = crowded position, manipulation risk (was 0.3%)
           const fundingPct = Math.abs(fa.fundingRate * 100);
-          if (fundingPct > 0.3) {
+          if (fundingPct > 0.1) {
             blacklist.push(coin);
             blacklistReasons[coin] = `extreme funding ${(fa.fundingRate * 100).toFixed(3)}%`;
             continue;
