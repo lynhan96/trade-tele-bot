@@ -945,4 +945,78 @@ export class AdminService {
 
     return { data, total, page, limit, totalPages: Math.ceil(total / limit) };
   }
+
+  // ─── Coin Stats ───────────────────────────────────────────────────────────
+
+  async getCoinStats(query: { days?: string }) {
+    const days = Math.min(30, Math.max(1, parseInt(query.days || '7', 10)));
+    const lookbackDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+
+    const signals = await this.signalModel.find({
+      status: 'COMPLETED',
+      createdAt: { $gte: lookbackDate },
+    }).lean();
+
+    // Aggregate per coin
+    const byCoin: Record<string, {
+      symbol: string;
+      trades: number;
+      wins: number;
+      losses: number;
+      pnlUsdt: number;
+      strategies: Set<string>;
+      lastTrade: Date;
+    }> = {};
+
+    for (const s of signals) {
+      const sym = (s as any).symbol || '';
+      const coin = sym.replace('USDT', '');
+      if (!coin) continue;
+      if (!byCoin[coin]) byCoin[coin] = { symbol: sym, trades: 0, wins: 0, losses: 0, pnlUsdt: 0, strategies: new Set(), lastTrade: new Date(0) };
+      const pnl = (s as any).pnlPercent || 0;
+      const usdt = (s as any).pnlUsdt || (pnl / 100 * ((s as any).simNotional || 1000));
+      if (usdt > 0) byCoin[coin].wins++; else byCoin[coin].losses++;
+      byCoin[coin].trades++;
+      byCoin[coin].pnlUsdt += usdt;
+      if ((s as any).strategy) byCoin[coin].strategies.add((s as any).strategy);
+      const ts = new Date((s as any).createdAt || 0);
+      if (ts > byCoin[coin].lastTrade) byCoin[coin].lastTrade = ts;
+    }
+
+    const coinRows = Object.entries(byCoin).map(([coin, d]) => ({
+      coin,
+      symbol: d.symbol,
+      trades: d.trades,
+      wins: d.wins,
+      losses: d.losses,
+      winRate: d.trades > 0 ? Math.round((d.wins / d.trades) * 100) : 0,
+      pnlUsdt: Math.round(d.pnlUsdt * 100) / 100,
+      strategies: [...d.strategies],
+      lastTrade: d.lastTrade.toISOString(),
+    })).sort((a, b) => b.pnlUsdt - a.pnlUsdt);
+
+    // Blacklist from Redis
+    const blacklistRaw = await this.redisService.get<string[]>('cache:coin-blacklist');
+    const blacklist = blacklistRaw || [];
+
+    // Strategy gates from Redis (for context)
+    const gates = await this.redisService.get<Record<string, any>>('cache:strategy-gates') || {};
+
+    return { coins: coinRows, blacklist, gates, days };
+  }
+
+  async setCoinOverride(coin: string, action: 'blacklist' | 'whitelist' | 'clear') {
+    const blacklistRaw = await this.redisService.get<string[]>('cache:coin-blacklist');
+    const blacklist = new Set(blacklistRaw || []);
+    const STRATEGY_GATES_TTL = 5 * 60 * 60;
+
+    if (action === 'blacklist') {
+      blacklist.add(coin.toUpperCase());
+    } else if (action === 'whitelist' || action === 'clear') {
+      blacklist.delete(coin.toUpperCase());
+    }
+
+    await this.redisService.set('cache:coin-blacklist', [...blacklist], STRATEGY_GATES_TTL);
+    return { ok: true, coin: coin.toUpperCase(), action, blacklistSize: blacklist.size };
+  }
 }

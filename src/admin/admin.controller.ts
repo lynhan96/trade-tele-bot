@@ -199,4 +199,16 @@ export class AdminController {
   getCycleHistory(@Query() query: Record<string, string>) {
     return this.adminService.getCycleHistory(query);
   }
+
+  @UseGuards(AdminGuard)
+  @Get("coins/stats")
+  getCoinStats(@Query() query: Record<string, string>) {
+    return this.adminService.getCoinStats(query);
+  }
+
+  @UseGuards(AdminGuard)
+  @Post("coins/:coin/override")
+  setCoinOverride(@Param("coin") coin: string, @Body() body: { action: 'blacklist' | 'whitelist' | 'clear' }) {
+    return this.adminService.setCoinOverride(coin, body.action);
+  }
 }
