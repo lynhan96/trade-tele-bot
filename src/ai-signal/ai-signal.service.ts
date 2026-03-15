@@ -642,106 +642,13 @@ export class AiSignalService implements OnModuleInit {
       }
     }
 
-    // ── BTC RSI exhaustion gate (STRONG_BULL) ─────────────────────────────
-    // Block new LONG signals when BTC RSI > 72 in STRONG_BULL — wave is exhausted,
-    // high probability of reversal. KITE/1000SATS pattern: entered at RSI ~72+ top.
-    if (globalRegime === "STRONG_BULL" && signalResult.isLong) {
-      const btcCtxEx = await this.redisService.get<{ rsi: number; rsi4h: number }>("cache:ai:regime:btc-context");
-      if (btcCtxEx && btcCtxEx.rsi > 72) {
-        this.logger.log(
-          `[AiSignal] ${coin.toUpperCase()} LONG blocked — BTC RSI exhaustion (${btcCtxEx.rsi.toFixed(0)}) in STRONG_BULL`,
-        );
-        return;
-      }
-    }
-
-    // ── VOLATILE regime: block signals against BTC direction ──────────────
-    // In volatile markets, only trade in BTC's direction (crash = SHORT only, pump = LONG only)
-    if (globalRegime === "VOLATILE") {
-      const btcCtx = await this.redisService.get<{ rsi: number; priceVsEma9: number }>("cache:ai:regime:btc-context");
-      if (btcCtx) {
-        // BTC below EMA9 + low RSI = bearish volatile → block LONGs
-        if (btcCtx.priceVsEma9 < -0.5 && btcCtx.rsi < 45 && signalResult.isLong) {
-          this.logger.log(
-            `[AiSignal] ${coin.toUpperCase()} LONG skipped — VOLATILE + BTC bearish (RSI=${btcCtx.rsi.toFixed(0)}, vs EMA9=${btcCtx.priceVsEma9.toFixed(1)}%)`,
-          );
-          return;
-        }
-        // BTC above EMA9 + high RSI = bullish volatile → block SHORTs
-        if (btcCtx.priceVsEma9 > 0.5 && btcCtx.rsi > 55 && !signalResult.isLong) {
-          this.logger.log(
-            `[AiSignal] ${coin.toUpperCase()} SHORT skipped — VOLATILE + BTC bullish (RSI=${btcCtx.rsi.toFixed(0)}, vs EMA9=${btcCtx.priceVsEma9.toFixed(1)}%)`,
-          );
-          return;
-        }
-      }
-    }
-
-    // ── BTC multi-timeframe direction filter (MIXED / RANGE_BOUND / SIDEWAYS) ──
-    // Uses scoring system: each bearish/bullish signal adds points.
-    // Score >= 3 = strong directional bias → block counter-trend.
-    // This prevents LONGs when market is bleeding and SHORTs when market is pumping.
-    const neutralRegimes = ["MIXED", "RANGE_BOUND", "SIDEWAYS"];
-    if (neutralRegimes.includes(globalRegime)) {
-      const btcCtx = await this.redisService.get<{
-        rsi: number; rsi4h: number; priceVsEma9: number; priceVsEma200: number;
-      }>("cache:ai:regime:btc-context");
-      if (btcCtx) {
-        let bearScore = 0;
-        let bullScore = 0;
-
-        // Factor 1: RSI 15m (short-term momentum)
-        if (btcCtx.rsi < 40) bearScore += 2;
-        else if (btcCtx.rsi < 45) bearScore += 1;
-        else if (btcCtx.rsi > 60) bullScore += 2;
-        else if (btcCtx.rsi > 55) bullScore += 1;
-
-        // Factor 2: RSI 4h (medium-term trend)
-        if (btcCtx.rsi4h < 45) bearScore += 1;
-        else if (btcCtx.rsi4h > 55) bullScore += 1;
-
-        // Factor 3: Price vs EMA9 (immediate trend)
-        if (btcCtx.priceVsEma9 < -0.3) bearScore += 1;
-        else if (btcCtx.priceVsEma9 > 0.3) bullScore += 1;
-
-        // Factor 4: Price vs EMA200 (macro trend)
-        if (btcCtx.priceVsEma200 < -1) bearScore += 1;
-        else if (btcCtx.priceVsEma200 > 1) bullScore += 1;
-
-        // Score >= 3 = strong directional consensus → block counter-trend
-        if (bearScore >= 3 && signalResult.isLong) {
-          this.logger.log(
-            `[AiSignal] ${signalKey} LONG blocked — ${globalRegime} + BTC bearish consensus (score=${bearScore}, RSI=${btcCtx.rsi.toFixed(0)}, RSI4h=${btcCtx.rsi4h.toFixed(0)}, vsEMA9=${btcCtx.priceVsEma9.toFixed(2)}%, vsEMA200=${btcCtx.priceVsEma200.toFixed(2)}%)`,
-          );
-          return;
-        }
-        if (bullScore >= 3 && !signalResult.isLong) {
-          this.logger.log(
-            `[AiSignal] ${signalKey} SHORT blocked — ${globalRegime} + BTC bullish consensus (score=${bullScore}, RSI=${btcCtx.rsi.toFixed(0)}, RSI4h=${btcCtx.rsi4h.toFixed(0)}, vsEMA9=${btcCtx.priceVsEma9.toFixed(2)}%, vsEMA200=${btcCtx.priceVsEma200.toFixed(2)}%)`,
-          );
-          return;
-        }
-      }
-    }
-
-    // ── LONG confidence penalty: only in STRONG_BEAR (historically LONGs lose in bear markets)
-    // In MIXED/RANGE_BOUND/SIDEWAYS: let AI validation gate decide instead of hardcoded penalty
-    if (signalResult.isLong && globalRegime === "STRONG_BEAR") {
-      const penalty = 20;
-      params.confidence = Math.max(10, params.confidence - penalty);
-      this.logger.debug(
-        `[AiSignal] ${coin.toUpperCase()} LONG confidence penalty -${penalty} in ${globalRegime} (now ${params.confidence})`,
-      );
-      // Re-check confidence threshold after penalty
-      if (params.confidence < (params.minConfidenceToTrade || 40)) {
-        this.logger.log(
-          `[AiSignal] ${coin.toUpperCase()} LONG blocked — confidence ${params.confidence} < threshold ${params.minConfidenceToTrade} after penalty`,
-        );
-        return;
-      }
-    }
-
-    // NOTE: Market momentum + position imbalance filters REMOVED — handled by Market Guard cron.
+    // NOTE: 4 BTC direction filters REMOVED (2026-03-15) — all handled by Market Guard cron:
+    // - BTC RSI exhaustion (STRONG_BULL) → Market Guard dynamic BTC momentum
+    // - VOLATILE BTC direction block → Market Guard bear/bull scoring
+    // - BTC multi-TF scoring (MIXED/RANGE) → Market Guard Rule 2 (identical scoring)
+    // - LONG -20 penalty (STRONG_BEAR) → Market Guard blocks LONG when bear
+    // - Market momentum filter → Market Guard Rule 3 (recent perf)
+    // - Position imbalance filter → removed (caused deadlocks)
     // Duplicate logic was causing deadlocks (both LONG+SHORT blocked simultaneously).
     // Market Guard evaluates every 15min: recent perf SLs + regime scoring.
 

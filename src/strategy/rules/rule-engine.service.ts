@@ -172,27 +172,8 @@ export class RuleEngineService {
     }
 
     // ── RSI Divergence Filter — block signals that go against divergence ──
-    // Bearish divergence (price ↑ RSI ↓) → block LONG (top forming, don't buy the top)
-    // Bullish divergence (price ↓ RSI ↑) → block SHORT (bottom forming, don't sell the bottom)
-    const div15m = await this.detectRsiDivergence(coin, "15m", 10);
-    if (div15m) {
-      if (div15m === "BEARISH" && isLong) {
-        this.logger.log(
-          `[RuleEngine] ${coin} LONG blocked: bearish RSI divergence on 15m — top forming, don't long`,
-        );
-        return null;
-      }
-      if (div15m === "BULLISH" && !isLong) {
-        this.logger.log(
-          `[RuleEngine] ${coin} SHORT blocked: bullish RSI divergence on 15m — bottom forming, don't short`,
-        );
-        return null;
-      }
-      // Divergence aligns with signal direction — great reversal signal
-      this.logger.log(
-        `[RuleEngine] ${coin} ${isLong ? "LONG" : "SHORT"}: ${div15m} RSI divergence confirms reversal — strong entry`,
-      );
-    }
+    // NOTE: RSI divergence filter REMOVED (2026-03-15) — rarely triggers, adds latency (extra OHLC fetch)
+    // Divergence detection kept as method for future use if needed.
 
     // ── Rejection Wick Quality — boost confidence when candle confirms reversal ──
     // For SHORT: upper wick ≥ 40% of candle range = sellers rejected higher prices (top signal)
