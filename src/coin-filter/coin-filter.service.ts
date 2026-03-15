@@ -124,11 +124,19 @@ export class CoinFilterService {
       socialScore = trendingSymbols.has(entry.coin) ? 1.0 : 0;
     }
 
+    // Volume tier bonus: reward high-volume coins (more liquid, less manipulation)
+    // >$500M = +0.15, >$200M = +0.10, >$100M = +0.05, <$50M = -0.05 penalty
+    let volumeTierBonus = 0;
+    if (entry.quoteVolume >= 500_000_000) volumeTierBonus = 0.15;
+    else if (entry.quoteVolume >= 200_000_000) volumeTierBonus = 0.10;
+    else if (entry.quoteVolume >= 100_000_000) volumeTierBonus = 0.05;
+    else if (entry.quoteVolume < 50_000_000) volumeTierBonus = -0.05;
+
     // Weighted total — redistribute social weight when CoinGecko disabled
-    if (hasSocial) {
-      return volScore * 0.35 + volatilityScore * 0.25 + analyticsScore * 0.25 + socialScore * 0.15;
-    }
-    return volScore * 0.4 + volatilityScore * 0.3 + analyticsScore * 0.3;
+    const base = hasSocial
+      ? volScore * 0.35 + volatilityScore * 0.25 + analyticsScore * 0.25 + socialScore * 0.15
+      : volScore * 0.4 + volatilityScore * 0.3 + analyticsScore * 0.3;
+    return base + volumeTierBonus;
   }
 
   /**
