@@ -38,8 +38,9 @@ const LOOKBACK_DAYS = 3; // 3-day window — fast reaction to current market
 const MIN_BLOCK_HOURS = 12; // minimum hours a coin stays blocked before re-evaluation
 
 // BTC price thresholds for auto-guard
-const BTC_BEAR_THRESHOLD = 78_000; // below = pause all new signals
-const BTC_BULL_THRESHOLD = 88_000; // above = lift LONG restrictions
+const BTC_PANIC_THRESHOLD = 72_000;  // below = pause ALL (extreme panic)
+const BTC_BEAR_THRESHOLD  = 78_000;  // below = block LONG only, SHORT still allowed
+const BTC_BULL_THRESHOLD  = 88_000;  // above = lift LONG restrictions
 
 export interface MarketGuard {
   blockLong: boolean;
@@ -152,12 +153,17 @@ export class StrategyAutoTunerService {
       const reasons: string[] = [];
 
       // ── Rule 1: BTC price extremes ──────────────────────────────────────────
-      if (btcPrice > 0 && btcPrice < BTC_BEAR_THRESHOLD) {
+      if (btcPrice > 0 && btcPrice < BTC_PANIC_THRESHOLD) {
+        // TRUE panic zone: pause everything
         pauseAll = true;
-        reasons.push(`BTC $${btcPrice.toLocaleString()} < $${BTC_BEAR_THRESHOLD.toLocaleString()} (extreme bear)`);
+        reasons.push(`BTC $${btcPrice.toLocaleString()} < $${BTC_PANIC_THRESHOLD.toLocaleString()} (panic zone — all paused)`);
+      } else if (btcPrice > 0 && btcPrice < BTC_BEAR_THRESHOLD) {
+        // Bear zone: allow SHORT (fade bounces), block LONG (catching falling knives)
+        blockLong = true;
+        confidenceFloor = 70; // higher bar for SHORT too in bear
+        reasons.push(`BTC $${btcPrice.toLocaleString()} $${BTC_PANIC_THRESHOLD.toLocaleString()}–$${BTC_BEAR_THRESHOLD.toLocaleString()} (bear zone — LONG blocked, SHORT allowed)`);
       } else if (btcPrice > 0 && btcPrice > BTC_BULL_THRESHOLD) {
         reasons.push(`BTC $${btcPrice.toLocaleString()} > $${BTC_BULL_THRESHOLD.toLocaleString()} (bull confirmed)`);
-        // In strong bull, only block SHORT via existing STRONG_BULL regime logic
       }
 
       // ── Rule 2: Regime-based direction blocking ─────────────────────────────
