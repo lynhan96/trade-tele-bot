@@ -1890,18 +1890,13 @@ export class UserRealTradingService implements OnModuleInit {
               : origEntry;
 
             // SL stays at original entry's SL — do NOT move SL when DCA fills.
-            // Moving SL from avgEntry pushes it further against us, increasing max loss.
-            // Only TP recalculates from avgEntry (so profit target reflects average cost).
-            // TP always recalculates from avgEntry (tpBoosted only blocks momentum boost, not avg-entry recalc)
-            const origEntryRef = trade.originalEntryPrice ?? trade.entryPrice;
+            // DCA TP: always 4% from new avgEntry (fixed, regardless of original signal TP%)
+            const DCA_TP_PCT = 4.0;
             const tpUpdate: Record<string, any> = {};
             if (trade.tpPrice) {
-              const origTpPct = Math.abs((trade.tpPrice - origEntryRef) / origEntryRef) * 100;
-              if (origTpPct > 0) {
-                tpUpdate.tpPrice = direction === "LONG"
-                  ? avgEntry * (1 + origTpPct / 100)
-                  : avgEntry * (1 - origTpPct / 100);
-              }
+              tpUpdate.tpPrice = direction === "LONG"
+                ? avgEntry * (1 + DCA_TP_PCT / 100)
+                : avgEntry * (1 - DCA_TP_PCT / 100);
             }
 
             await this.userTradeModel.findByIdAndUpdate((trade as any)._id, {
@@ -1982,11 +1977,7 @@ export class UserRealTradingService implements OnModuleInit {
         : trade.entryPrice;
 
       // SL stays at original price — do NOT move SL when DCA fills.
-      // Moving SL from avgEntry pushes it further against us, increasing max loss.
-      // Only update SL order on Binance for new total quantity (same price).
-      // Only TP recalculates from avgEntry (profit target reflects average cost).
-      // TP always recalculates from avgEntry (tpBoosted only blocks momentum boost, not avg-entry recalc)
-      const origEntryRef = trade.originalEntryPrice ?? trade.entryPrice;
+      // DCA TP: always 4% from new avgEntry
       const currentSlPrice = (trade as any).slMovedToEntry
         ? (trade.gridGlobalSlPrice ?? trade.slPrice)   // trailing already moved SL
         : (trade.gridGlobalSlPrice ?? trade.slPrice);  // original SL price unchanged

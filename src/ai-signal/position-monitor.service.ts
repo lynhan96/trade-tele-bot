@@ -350,19 +350,15 @@ export class PositionMonitorService implements OnModuleInit {
           (signal as any).gridAvgEntry = avgEntry;
 
           // SL stays at original entry's SL — do NOT move SL when DCA fills.
-          // Moving SL from avgEntry pushes it further against us, increasing max loss.
-          // Only TP recalculates from avgEntry (so profit target reflects average cost).
-          // Note: tpBoosted only blocks momentum boost (one-time at 2% peak),
-          // NOT avg-entry recalc — grids must always recalc TP from new avgEntry.
-          const tpPct = (signal as any).takeProfitPercent;
-          if (tpPct > 0) {
-            const newTp = direction === "LONG"
-              ? avgEntry * (1 + tpPct / 100)
-              : avgEntry * (1 - tpPct / 100);
-            (signal as any).takeProfitPrice = newTp;
-            // Do NOT call propagateTpMove here — test mode simulation only.
-            // Real mode TP update after DCA fill is handled by placeGridOrder in user-real-trading.
-          }
+          // DCA TP: always 4% from new avgEntry (fixed, regardless of original signal TP%)
+          // Original TP% may be 2-3.5% from Fib/ATR, but after DCA avg moves down,
+          // we want consistent 4% target from the new cost basis.
+          const DCA_TP_PCT = 4.0;
+          const newTp = direction === "LONG"
+            ? avgEntry * (1 + DCA_TP_PCT / 100)
+            : avgEntry * (1 - DCA_TP_PCT / 100);
+          (signal as any).takeProfitPrice = newTp;
+          (signal as any).takeProfitPercent = DCA_TP_PCT; // update stored % for consistency
 
           this.logger.log(
             `[PositionMonitor] Grid ${sigKey} L${grid.level} FILLED at ${price.toFixed(4)}, avgEntry=${avgEntry.toFixed(4)}, SL=${(signal as any).stopLossPrice?.toFixed(4)}, TP=${(signal as any).takeProfitPrice?.toFixed(4)}, filled=${filledCount}/${GRID_LEVEL_COUNT}`,
