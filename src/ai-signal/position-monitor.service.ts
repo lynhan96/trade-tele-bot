@@ -374,9 +374,8 @@ export class PositionMonitorService implements OnModuleInit {
       // TP/SL hit detection handled by normal path below (falls through)
       const filledGrids = grids.filter((g) => g.status === "FILLED");
       if (filledGrids.length > 0) {
-        // Was 1.5/0.8 — too tight, trades closed via trail SL with tiny profit
         const TRAIL_TRIGGER = 2.0;
-        const TRAIL_DISTANCE = 1.2;
+        const TRAIL_KEEP_RATIO = 0.6; // keep 60% of peak profit
         const pnlFromAvg = direction === "LONG"
           ? ((price - avgEntry) / avgEntry) * 100
           : ((avgEntry - price) / avgEntry) * 100;
@@ -387,7 +386,7 @@ export class PositionMonitorService implements OnModuleInit {
         }
         const peak = (signal as any).peakPnlPct || 0;
 
-        // Move SL to avg entry (break-even) at 1.5% from avg
+        // Move SL to avg entry (break-even) at 2% from avg
         if (peak >= TRAIL_TRIGGER && !(signal as any).slMovedToEntry) {
           (signal as any).stopLossPrice = avgEntry;
           (signal as any).slMovedToEntry = true;
@@ -403,9 +402,9 @@ export class PositionMonitorService implements OnModuleInit {
           this.propagateSlMove(sigKey, symbol, avgEntry, direction);
         }
 
-        // Continuous trailing: SL = avgEntry + (peak - 0.8%)
+        // Continuous trailing: keep 60% of peak profit
         if ((signal as any).slMovedToEntry && peak > TRAIL_TRIGGER) {
-          const trailPct = Math.max(0, peak - TRAIL_DISTANCE);
+          const trailPct = peak * TRAIL_KEEP_RATIO;
           const trailSl = direction === "LONG"
             ? avgEntry * (1 + trailPct / 100)
             : avgEntry * (1 - trailPct / 100);
@@ -478,9 +477,11 @@ export class PositionMonitorService implements OnModuleInit {
     // Trailing SL + TP boost for non-grid signals only
     // (grid signals handle trailing in the grid block above)
     if (!isGridSignal) {
-      // Was 1.5/0.8 — too tight, trades closed via trail SL with tiny profit
+      // Trail trigger: move SL to break-even at 2% profit
+      // Trail distance: keep 60% of peak profit (dynamic, not fixed)
+      // Example: peak 3% → SL at +1.8%, peak 4% → SL at +2.4%
       const TRAIL_TRIGGER = 2.0;
-      const TRAIL_DISTANCE = 1.2;
+      const TRAIL_KEEP_RATIO = 0.6; // keep 60% of peak (was fixed 1.2% distance → avg win only $11)
 
       const prevPeak = (signal as any).peakPnlPct || 0;
       if (pnlPct > prevPeak) {
@@ -504,7 +505,7 @@ export class PositionMonitorService implements OnModuleInit {
       }
 
       if ((signal as any).slMovedToEntry && peak > TRAIL_TRIGGER) {
-        const trailPct = Math.max(0, peak - TRAIL_DISTANCE);
+        const trailPct = peak * TRAIL_KEEP_RATIO; // keep 60% of peak
         const trailSl = direction === "LONG"
           ? currentEntry * (1 + trailPct / 100)
           : currentEntry * (1 - trailPct / 100);

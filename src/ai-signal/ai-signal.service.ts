@@ -503,8 +503,8 @@ export class AiSignalService implements OnModuleInit {
     const CONFIDENCE_FLOOR = 63;
     const isRanging = params.regime === "RANGE_BOUND" || params.regime === "SIDEWAYS";
     const isStrongBull = params.regime === "STRONG_BULL";
-    // RANGE_BOUND/SIDEWAYS: 67 to filter whipsaws | STRONG_BULL: 70 (40% WR, entries at tops)
-    const effectiveFloor = isStrongBull ? 70 : isRanging ? 67 : CONFIDENCE_FLOOR;
+    // RANGE_BOUND/SIDEWAYS: 67 to filter whipsaws | STRONG_BULL: 80 (43% WR, -$53 — entries at tops)
+    const effectiveFloor = isStrongBull ? 80 : isRanging ? 67 : CONFIDENCE_FLOOR;
     params.minConfidenceToTrade = Math.max(params.minConfidenceToTrade ?? 0, effectiveFloor);
     // Cap per regime — prevent AI from setting unrealistically high thresholds
     const regimeThresholdCap: Record<string, number> = {
@@ -513,7 +513,7 @@ export class AiSignalService implements OnModuleInit {
       MIXED: 68,
       VOLATILE: 70,
       BTC_CORRELATION: 68,
-      STRONG_BULL: 72,
+      STRONG_BULL: 80, // was 72 — effectively blocks most signals (floor=80, cap=80 → only max-confidence passes)
       STRONG_BEAR: 72,
     };
     const cap = regimeThresholdCap[params.regime] ?? 68;

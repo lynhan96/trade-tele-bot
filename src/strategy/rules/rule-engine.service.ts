@@ -53,10 +53,26 @@ export class RuleEngineService {
     // TREND_EMA & EMA_PULLBACK re-enabled (2026-03-10) with improvements:
     // TREND_EMA: +RSI exhaustion check + trend freshness (max 1.5% from cross)
     // EMA_PULLBACK: direction from 1h EMA slope (not regime) + 2-candle confirmation + stricter RSI
-    const strategies = [
+    const allStrategies = [
       "RSI_CROSS", "RSI_ZONE", "TREND_EMA", "EMA_PULLBACK",
       "BB_SCALP", "STOCH_BB_PATTERN", "STOCH_EMA_KDJ", "SMC_FVG",
     ];
+
+    // ── Filter out auto-disabled strategies (StrategyAutoTuner) ──
+    const gatesRaw = await this.redisService.get<Record<string, { enabled: boolean }>>("cache:strategy-gates");
+    const strategies = allStrategies.filter((s) => {
+      if (!gatesRaw || !gatesRaw[s]) return true; // no gate = enabled
+      if (!gatesRaw[s].enabled) {
+        this.logger.debug(`[RuleEngine] ${coin} ${s} auto-disabled by StrategyAutoTuner`);
+        return false;
+      }
+      return true;
+    });
+
+    if (strategies.length === 0) {
+      this.logger.debug(`[RuleEngine] ${coin} all strategies disabled — skipping`);
+      return null;
+    }
 
     // ── Multi-strategy confluence mode ──
     this.logger.debug(`[RuleEngine] ${coin} confluence check: ${strategies.join(" + ")}`);
