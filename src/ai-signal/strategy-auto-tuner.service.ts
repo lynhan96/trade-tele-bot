@@ -25,8 +25,10 @@ import { TelegramBotService } from "../telegram/telegram.service";
  */
 
 const STRATEGY_GATES_KEY = "cache:strategy-gates";
+const COIN_BLACKLIST_KEY = "cache:coin-blacklist"; // Set<string> of blocked coins
 const STRATEGY_GATES_TTL = 5 * 60 * 60; // 5h (re-evaluated every 4h)
 const MIN_TRADES_TO_EVALUATE = 8; // need at least 8 trades to judge
+const MIN_COIN_TRADES = 2; // need at least 2 trades to blacklist a coin
 const LOOKBACK_DAYS = 7; // evaluate last 7 days of data
 
 interface StrategyGate {
@@ -51,7 +53,10 @@ export class StrategyAutoTunerService {
     private readonly telegramService: TelegramBotService,
   ) {
     // Run on startup after 30s delay
-    setTimeout(() => this.evaluateStrategies().catch(() => {}), 30_000);
+    setTimeout(() => {
+      this.evaluateStrategies().catch(() => {});
+      this.evaluateCoins().catch(() => {});
+    }, 30_000);
   }
 
   /**
@@ -76,6 +81,80 @@ export class StrategyAutoTunerService {
     const gate = gates[strategy];
     if (!gate) return true; // no data = enabled by default
     return gate.enabled;
+  }
+
+  /**
+   * Get blacklisted coins from Redis. Used by AiSignalService to skip coins.
+   */
+  async getCoinBlacklist(): Promise<Set<string>> {
+    const list = await this.redisService.get<string[]>(COIN_BLACKLIST_KEY);
+    return new Set(list || []);
+  }
+
+  /**
+   * Cron: evaluate coin performance every 4 hours.
+   * Blacklists coins with 0% WR or PnL < -$20 on 2+ trades.
+   * Priority coins (BTC, ETH, SOL, BNB, XRP) are never blacklisted.
+   */
+  @Cron("0 5 */4 * * *") // every 4h, 5min offset from strategy eval
+  async evaluateCoins(): Promise<void> {
+    try {
+      const lookbackDate = new Date(Date.now() - LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
+      const signals = await this.aiSignalModel.find({
+        status: "COMPLETED",
+        createdAt: { $gte: lookbackDate },
+      }).lean();
+
+      const SAFE_COINS = new Set(["BTC", "ETH", "SOL", "BNB", "XRP", "ADA", "DOT", "LINK", "AVAX"]);
+
+      const byCoin: Record<string, { w: number; l: number; usdt: number }> = {};
+      for (const s of signals) {
+        const coin = ((s as any).symbol || "").replace("USDT", "");
+        if (!coin || SAFE_COINS.has(coin)) continue;
+        if (!byCoin[coin]) byCoin[coin] = { w: 0, l: 0, usdt: 0 };
+        const pnl = (s as any).pnlPercent || 0;
+        const usdt = (s as any).pnlUsdt || (pnl / 100 * ((s as any).simNotional || 1000));
+        if (pnl > 0) byCoin[coin].w++; else byCoin[coin].l++;
+        byCoin[coin].usdt += usdt;
+      }
+
+      const blacklist: string[] = [];
+      const prevBlacklist = await this.getCoinBlacklist();
+      const changes: string[] = [];
+
+      for (const [coin, d] of Object.entries(byCoin)) {
+        const n = d.w + d.l;
+        if (n < MIN_COIN_TRADES) continue;
+        const wr = (d.w / n) * 100;
+
+        // Blacklist: 0% WR on 2+ trades, or PnL < -$20 on 3+ trades
+        if ((wr === 0 && n >= 2) || (d.usdt < -20 && n >= 3)) {
+          blacklist.push(coin);
+          if (!prevBlacklist.has(coin)) {
+            changes.push(`🚫 ${coin} BLACKLISTED: WR=${wr.toFixed(0)}% PnL=${d.usdt.toFixed(0)}$ (${n} trades)`);
+          }
+        } else if (prevBlacklist.has(coin)) {
+          changes.push(`✅ ${coin} UNBLOCKED: WR=${wr.toFixed(0)}% PnL=${d.usdt >= 0 ? "+" : ""}${d.usdt.toFixed(0)}$`);
+        }
+      }
+
+      await this.redisService.set(COIN_BLACKLIST_KEY, blacklist, STRATEGY_GATES_TTL);
+
+      this.logger.log(`[AutoTuner] Coin blacklist: ${blacklist.length > 0 ? blacklist.join(", ") : "(none)"}`);
+
+      if (changes.length > 0) {
+        const adminIds = (process.env.AI_ADMIN_TELEGRAM_ID || "").split(",").filter(Boolean);
+        const msg =
+          `🪙 *Coin Auto-Blacklist*\n━━━━━━━━━━━━━━━━━━\n\n` +
+          changes.join("\n") +
+          `\n\n_Đánh giá ${LOOKBACK_DAYS} ngày, ${signals.length} signals_`;
+        for (const id of adminIds) {
+          await this.telegramService.sendTelegramMessage(parseInt(id), msg).catch(() => {});
+        }
+      }
+    } catch (err) {
+      this.logger.error(`[AutoTuner] Coin evaluation error: ${err?.message}`);
+    }
   }
 
   /**

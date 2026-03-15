@@ -25,6 +25,7 @@ import { FuturesAnalyticsService } from "../market-data/futures-analytics.servic
 import { UserRealTradingService } from "./user-real-trading.service";
 import { MarketDataService } from "../market-data/market-data.service";
 import { CoinGeckoService } from "../coingecko/coingecko.service";
+import { StrategyAutoTunerService } from "./strategy-auto-tuner.service";
 
 const AI_PAUSED_KEY = "cache:ai:paused";
 const AI_TEST_MODE_KEY = "cache:ai:test-mode";
@@ -67,6 +68,7 @@ export class AiSignalService implements OnModuleInit {
     private readonly userRealTradingService: UserRealTradingService,
     private readonly marketDataService: MarketDataService,
     private readonly coinGeckoService: CoinGeckoService,
+    private readonly strategyAutoTuner: StrategyAutoTunerService,
     @InjectModel(AiSignal.name)
     private readonly aiSignalModel: Model<AiSignalDocument>,
     @InjectModel(AiCoinProfile.name)
@@ -441,9 +443,13 @@ export class AiSignalService implements OnModuleInit {
     globalRegime: string,
     forceProfile?: string,
   ): Promise<void> {
-    // Early exit: skip coins that already have an active signal (saves compute + avoids SKIPPED spam)
+    // Early exit: skip blacklisted coins (auto-tuner disabled due to poor PnL)
     const symbol = `${coin.toUpperCase()}${currency.toUpperCase()}`;
     const coinUpper = coin.toUpperCase();
+    const coinBlacklist = await this.strategyAutoTuner.getCoinBlacklist();
+    if (coinBlacklist.has(coinUpper)) {
+      return; // silently skip — logged by auto-tuner
+    }
     const isDual = DUAL_TIMEFRAME_COINS.includes(coinUpper);
 
     // For dual-timeframe coins, use profile-aware lock key
