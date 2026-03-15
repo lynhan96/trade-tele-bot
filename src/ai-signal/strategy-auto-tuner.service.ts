@@ -28,10 +28,12 @@ import { IndicatorService } from "../strategy/indicators/indicator.service";
 
 const STRATEGY_GATES_KEY = "cache:strategy-gates";
 const COIN_BLACKLIST_KEY = "cache:coin-blacklist"; // Set<string> of blocked coins
+const COIN_BLOCKED_AT_KEY = "cache:coin-blocked-at"; // Record<string, isoString> — when each coin was blocked
 const STRATEGY_GATES_TTL = 5 * 60 * 60; // 5h (re-evaluated every 4h)
 const MIN_TRADES_TO_EVALUATE = 8; // need at least 8 trades to judge
 const MIN_COIN_TRADES = 1; // only 1 trade needed — a $20+ loss is enough signal
-const LOOKBACK_DAYS = 7; // evaluate last 7 days of data
+const LOOKBACK_DAYS = 3; // 3-day window — fast reaction to current market
+const MIN_BLOCK_HOURS = 12; // minimum hours a coin stays blocked before re-evaluation
 
 interface StrategyGate {
   enabled: boolean;
@@ -136,22 +138,51 @@ export class StrategyAutoTunerService {
       const blacklist: string[] = [];
       const blacklistReasons: Record<string, string> = {};
       const prevBlacklist = await this.getCoinBlacklist();
+      const blockedAt = await this.redisService.get<Record<string, string>>(COIN_BLOCKED_AT_KEY) || {};
       const changes: string[] = [];
+
+      // Build map of most-recent trade per coin (for auto-unblock check)
+      const lastTradeByCoin: Record<string, { pnlUsdt: number; createdAt: Date }> = {};
+      for (const s of signals) {
+        const coin = ((s as any).symbol || "").replace("USDT", "");
+        if (!coin) continue;
+        const ts = new Date((s as any).createdAt || 0);
+        if (!lastTradeByCoin[coin] || ts > lastTradeByCoin[coin].createdAt) {
+          const pnl = (s as any).pnlPercent || 0;
+          const usdt = (s as any).pnlUsdt || (pnl / 100 * ((s as any).simNotional || 1000));
+          lastTradeByCoin[coin] = { pnlUsdt: usdt, createdAt: ts };
+        }
+      }
 
       for (const [coin, d] of Object.entries(byCoin)) {
         const n = d.w + d.l;
         if (n < MIN_COIN_TRADES) continue;
         const wr = (d.w / n) * 100;
 
-        // Block if: single big loss ($20+), or 0% WR on 2+ trades, or $20+ loss on 2+ trades
+        // Block if: single big loss ($20+), or 0% WR on 2+ trades, or $15+ loss on 2+ trades
+        const shouldBlock =
+          (d.usdt < -20 && n >= 1) ||
+          (wr === 0 && n >= 2) ||
+          (d.usdt < -15 && n >= 2);
+
+        if (!shouldBlock) continue;
+
+        // Auto-unblock check: if coin was blocked 12h+ ago AND most recent trade is a WIN → skip re-block
+        const blockedTime = blockedAt[coin] ? new Date(blockedAt[coin]).getTime() : 0;
+        const hoursSinceBlock = (Date.now() - blockedTime) / (1000 * 60 * 60);
+        const lastTrade = lastTradeByCoin[coin];
         if (
-          (d.usdt < -20 && n >= 1) ||   // 1 trade losing $20+ is enough
-          (wr === 0 && n >= 2) ||         // 2 trades, zero wins
-          (d.usdt < -15 && n >= 2)        // 2 trades, combined $15+ loss
+          prevBlacklist.has(coin) &&
+          hoursSinceBlock >= MIN_BLOCK_HOURS &&
+          lastTrade && lastTrade.pnlUsdt > 0
         ) {
-          blacklist.push(coin);
-          blacklistReasons[coin] = `WR=${wr.toFixed(0)}% PnL=${d.usdt.toFixed(0)}$ (${n} trades)`;
+          // Most recent trade is a win → market recovered → unblock
+          this.logger.log(`[AutoTuner] ✅ ${coin} auto-unblocked: last trade +${lastTrade.pnlUsdt.toFixed(1)}$ (was blocked ${hoursSinceBlock.toFixed(0)}h ago)`);
+          continue;
         }
+
+        blacklist.push(coin);
+        blacklistReasons[coin] = `WR=${wr.toFixed(0)}% PnL=${d.usdt.toFixed(0)}$ (${n} trades)`;
       }
 
       // B. Market-based blacklist (extreme funding, ATR too high)
@@ -174,19 +205,23 @@ export class StrategyAutoTunerService {
       // Deduplicate
       const uniqueBlacklist = [...new Set(blacklist)];
 
-      // Track changes
+      // Track changes + update blockedAt timestamps
+      const newBlockedAt = { ...blockedAt };
       for (const coin of uniqueBlacklist) {
         if (!prevBlacklist.has(coin)) {
           changes.push(`🚫 ${coin}: ${blacklistReasons[coin] || "market filter"}`);
+          newBlockedAt[coin] = new Date().toISOString(); // record when newly blocked
         }
       }
       for (const coin of prevBlacklist) {
         if (!uniqueBlacklist.includes(coin)) {
           changes.push(`✅ ${coin} UNBLOCKED`);
+          delete newBlockedAt[coin];
         }
       }
 
       await this.redisService.set(COIN_BLACKLIST_KEY, uniqueBlacklist, STRATEGY_GATES_TTL);
+      await this.redisService.set(COIN_BLOCKED_AT_KEY, newBlockedAt, STRATEGY_GATES_TTL);
 
       this.logger.log(`[AutoTuner] Coin blacklist (${uniqueBlacklist.length}): ${uniqueBlacklist.length > 0 ? uniqueBlacklist.join(", ") : "(none)"}`);
 
