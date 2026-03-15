@@ -30,7 +30,7 @@ const STRATEGY_GATES_KEY = "cache:strategy-gates";
 const COIN_BLACKLIST_KEY = "cache:coin-blacklist"; // Set<string> of blocked coins
 const STRATEGY_GATES_TTL = 5 * 60 * 60; // 5h (re-evaluated every 4h)
 const MIN_TRADES_TO_EVALUATE = 8; // need at least 8 trades to judge
-const MIN_COIN_TRADES = 2; // need at least 2 trades to blacklist a coin
+const MIN_COIN_TRADES = 1; // only 1 trade needed — a $20+ loss is enough signal
 const LOOKBACK_DAYS = 7; // evaluate last 7 days of data
 
 interface StrategyGate {
@@ -143,7 +143,12 @@ export class StrategyAutoTunerService {
         if (n < MIN_COIN_TRADES) continue;
         const wr = (d.w / n) * 100;
 
-        if ((wr === 0 && n >= 2) || (d.usdt < -20 && n >= 3)) {
+        // Block if: single big loss ($20+), or 0% WR on 2+ trades, or $20+ loss on 2+ trades
+        if (
+          (d.usdt < -20 && n >= 1) ||   // 1 trade losing $20+ is enough
+          (wr === 0 && n >= 2) ||         // 2 trades, zero wins
+          (d.usdt < -15 && n >= 2)        // 2 trades, combined $15+ loss
+        ) {
           blacklist.push(coin);
           blacklistReasons[coin] = `WR=${wr.toFixed(0)}% PnL=${d.usdt.toFixed(0)}$ (${n} trades)`;
         }
