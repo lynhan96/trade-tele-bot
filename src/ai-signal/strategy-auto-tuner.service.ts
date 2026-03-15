@@ -37,10 +37,6 @@ const MIN_COIN_TRADES = 1; // only 1 trade needed — a $20+ loss is enough sign
 const LOOKBACK_DAYS = 3; // 3-day window — fast reaction to current market
 const MIN_BLOCK_HOURS = 12; // minimum hours a coin stays blocked before re-evaluation
 
-// BTC price thresholds for auto-guard
-const BTC_PANIC_THRESHOLD = 72_000;  // below = pause ALL (extreme panic)
-const BTC_BEAR_THRESHOLD  = 78_000;  // below = block LONG only, SHORT still allowed
-const BTC_BULL_THRESHOLD  = 88_000;  // above = lift LONG restrictions
 
 export interface MarketGuard {
   blockLong: boolean;
@@ -133,9 +129,12 @@ export class StrategyAutoTunerService {
   @Cron("0 */15 * * * *") // every 15min
   async evaluateMarketGuard(): Promise<void> {
     try {
-      // Get BTC price (stored as string in Redis)
+      // Get BTC price
       const btcRaw = await this.redisService.get<string | number>("price:BTCUSDT");
       const btcPrice = btcRaw ? parseFloat(String(btcRaw)) : 0;
+
+      // Get BTC 4h candles for dynamic momentum scoring (already cached by MarketDataService)
+      const btc4hCloses = await this.redisService.get<number[]>("cache:candle:close:BTC:4h");
 
       // Get regime + BTC context
       const regime = await this.redisService.get<string>("cache:ai:regime:global") || "MIXED";
@@ -152,18 +151,42 @@ export class StrategyAutoTunerService {
       let confidenceFloor = 63;
       const reasons: string[] = [];
 
-      // ── Rule 1: BTC price extremes ──────────────────────────────────────────
-      if (btcPrice > 0 && btcPrice < BTC_PANIC_THRESHOLD) {
-        // TRUE panic zone: pause everything
-        pauseAll = true;
-        reasons.push(`BTC $${btcPrice.toLocaleString()} < $${BTC_PANIC_THRESHOLD.toLocaleString()} (panic zone — all paused)`);
-      } else if (btcPrice > 0 && btcPrice < BTC_BEAR_THRESHOLD) {
-        // Bear zone: allow SHORT (fade bounces), block LONG (catching falling knives)
-        blockLong = true;
-        confidenceFloor = 70; // higher bar for SHORT too in bear
-        reasons.push(`BTC $${btcPrice.toLocaleString()} $${BTC_PANIC_THRESHOLD.toLocaleString()}–$${BTC_BEAR_THRESHOLD.toLocaleString()} (bear zone — LONG blocked, SHORT allowed)`);
-      } else if (btcPrice > 0 && btcPrice > BTC_BULL_THRESHOLD) {
-        reasons.push(`BTC $${btcPrice.toLocaleString()} > $${BTC_BULL_THRESHOLD.toLocaleString()} (bull confirmed)`);
+      // ── Rule 1: Dynamic BTC momentum — relative % moves, no hardcoded prices ─
+      // Uses BTC candle data already cached in Redis to measure momentum
+      if (btcPrice > 0 && btc4hCloses && btc4hCloses.length >= 2) {
+        const prev4h = btc4hCloses[btc4hCloses.length - 2];
+        const change4h = prev4h > 0 ? ((btcPrice - prev4h) / prev4h) * 100 : 0;
+
+        // 24h change: compare last 6x 4h candles (= 24h ago)
+        const prev24hIdx = Math.max(0, btc4hCloses.length - 7);
+        const prev24h = btc4hCloses[prev24hIdx];
+        const change24h = prev24h > 0 ? ((btcPrice - prev24h) / prev24h) * 100 : 0;
+
+        // BTC below EMA200 = structural bear (from btcCtx)
+        const belowEma200 = btcCtx ? (btcCtx.priceVsEma200 ?? 1) < 0 : false;
+        const belowEma9   = btcCtx ? btcCtx.priceVsEma9 < -0.5 : false;
+
+        if (change24h <= -8 || (change4h <= -4 && belowEma200)) {
+          // Panic: -8% in 24h OR sharp dump -4% in 4h while below EMA200
+          pauseAll = true;
+          reasons.push(`BTC panic: 24h=${change24h.toFixed(1)}% 4h=${change4h.toFixed(1)}% belowEMA200=${belowEma200}`);
+        } else if (change4h <= -2.5 || (belowEma200 && btcCtx && btcCtx.rsi < 42)) {
+          // Bear: -2.5% in 4h OR structurally below EMA200 with RSI weak
+          blockLong = true;
+          confidenceFloor = 70;
+          reasons.push(`BTC bear: 4h=${change4h.toFixed(1)}% belowEMA200=${belowEma200} RSI=${btcCtx?.rsi ?? '?'}`);
+        } else if (change4h >= 1.5 && btcCtx && btcCtx.priceVsEma9 > 0.2) {
+          // Bull momentum: +1.5% in 4h + above EMA9
+          reasons.push(`BTC bull momentum: 4h=+${change4h.toFixed(1)}%`);
+        }
+      } else if (btcCtx) {
+        // No candle data — fall back to indicator-only scoring
+        const belowEma200 = (btcCtx.priceVsEma200 ?? 1) < 0;
+        if (belowEma200 && btcCtx.rsi < 40 && (btcCtx.rsi4h ?? 50) < 40) {
+          blockLong = true;
+          confidenceFloor = 70;
+          reasons.push(`BTC structural bear: below EMA200, RSI=${btcCtx.rsi}, RSI4h=${btcCtx.rsi4h}`);
+        }
       }
 
       // ── Rule 2: Regime-based direction blocking ─────────────────────────────
