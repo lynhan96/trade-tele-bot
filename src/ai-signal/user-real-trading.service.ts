@@ -1467,13 +1467,15 @@ export class UserRealTradingService implements OnModuleInit {
             this.logger.warn(`[RealTrading] protectOpenTrades: getOpenPositions failed for user ${telegramId}, skipping position check: ${err?.message}`);
             continue; // Skip this user entirely — don't falsely close trades
           }
-          const openSymbols = new Set(binancePositions.map((p) => p.symbol));
+          // Match by symbol+direction (not just symbol) — Hedge mode has separate LONG/SHORT positions
+          // A LONG position closing doesn't mean SHORT is also closed
+          const openPositionKeys = new Set(binancePositions.map((p) => `${p.symbol}:${p.side}`));
 
           for (const trade of trades) {
             const { symbol, direction, slPrice, tpPrice, chatId } = trade;
 
             // Position already closed on Binance — mark trade as closed with PnL
-            if (!openSymbols.has(symbol)) {
+            if (!openPositionKeys.has(`${symbol}:${direction}`)) {
               // Try to get actual fill price from Binance trade history, fallback to WebSocket
               let exitPrice = await this.binanceService.getLastFillPrice(keys.apiKey, keys.apiSecret, symbol)
                 || this.marketDataService.getLatestPrice(symbol);
