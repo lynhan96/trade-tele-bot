@@ -239,7 +239,10 @@ export class ExternalSignalService {
       .catch((e) => this.logger.warn(`[ExtSignal] Save validation error: ${e?.message}`));
 
     // ── 7. Create signal via SignalQueueService ──────────────────────────
-    const isTestMode = await this.aiSignalService.isTestModeEnabled();
+    // External signals always run in real mode (not affected by global test-mode toggle)
+    // Internal AI signals use test mode for simulation, but external signals come from
+    // a separate system that has already decided to trade.
+    const isTestMode = false;
 
     const signalResult: SignalResult = {
       isLong,
