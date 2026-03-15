@@ -741,72 +741,9 @@ export class AiSignalService implements OnModuleInit {
       }
     }
 
-    // ── Market momentum filter: block direction that keeps losing ───────────
-    // Analyzes ALL recent trades (not just SLs) to detect directional bias.
-    // If one direction has net negative PnL while the other is positive → block the loser.
-    // More sensitive than old "3/5 SLs" check which rarely triggered.
-    const recentPerf = await this.redisService.get<any[]>("cache:ai:recent-perf") || [];
-    if (recentPerf.length >= 3) {
-      const longTrades = recentPerf.filter((p) => p.direction === "LONG");
-      const shortTrades = recentPerf.filter((p) => p.direction === "SHORT");
-
-      const longPnl = longTrades.length > 0
-        ? longTrades.reduce((s, p) => s + (p.pnlPercent || 0), 0) / longTrades.length
-        : 0;
-      const shortPnl = shortTrades.length > 0
-        ? shortTrades.reduce((s, p) => s + (p.pnlPercent || 0), 0) / shortTrades.length
-        : 0;
-      const longSLs = longTrades.filter((p) => p.closeReason === "STOP_LOSS" && (p.pnlPercent || 0) < 0).length;
-      const shortSLs = shortTrades.filter((p) => p.closeReason === "STOP_LOSS" && (p.pnlPercent || 0) < 0).length;
-
-      // Block LONG if: avg LONG PnL < -0.7% AND at least 2 LONG SLs (confirmed losing streak)
-      if (signalResult.isLong && longPnl < -0.7 && longSLs >= 2) {
-        this.logger.log(
-          `[AiSignal] ${coin.toUpperCase()} LONG blocked — market momentum anti-LONG (avgPnl=${longPnl.toFixed(1)}%, ${longSLs} SLs from ${longTrades.length} trades)`,
-        );
-        return;
-      }
-      // Block SHORT if: avg SHORT PnL < -0.7% AND at least 2 SHORT SLs
-      if (!signalResult.isLong && shortPnl < -0.7 && shortSLs >= 2) {
-        this.logger.log(
-          `[AiSignal] ${coin.toUpperCase()} SHORT blocked — market momentum anti-SHORT (avgPnl=${shortPnl.toFixed(1)}%, ${shortSLs} SLs from ${shortTrades.length} trades)`,
-        );
-        return;
-      }
-    }
-
-    // ── Active position imbalance: follow the crowd ─────────────────────────
-    // If 75%+ of active signals are in one direction, the market has spoken.
-    // Block the minority direction to avoid fighting the trend.
-    try {
-      const activeSignals = await this.aiSignalModel.find(
-        { status: "ACTIVE" },
-        { direction: 1 },
-      ).lean();
-      if (activeSignals.length >= 4) {
-        const activeLongs = activeSignals.filter((s) => s.direction === "LONG").length;
-        const activeShorts = activeSignals.length - activeLongs;
-        const longRatio = activeLongs / activeSignals.length;
-        const shortRatio = activeShorts / activeSignals.length;
-
-        // 65%+ SHORT active → market bearish → block LONG
-        if (shortRatio >= 0.65 && signalResult.isLong) {
-          this.logger.log(
-            `[AiSignal] ${coin.toUpperCase()} LONG blocked — ${activeShorts}/${activeSignals.length} active are SHORT (${(shortRatio * 100).toFixed(0)}%), follow bearish trend`,
-          );
-          return;
-        }
-        // 65%+ LONG active → market bullish → block SHORT
-        if (longRatio >= 0.65 && !signalResult.isLong) {
-          this.logger.log(
-            `[AiSignal] ${coin.toUpperCase()} SHORT blocked — ${activeLongs}/${activeSignals.length} active are LONG (${(longRatio * 100).toFixed(0)}%), follow bullish trend`,
-          );
-          return;
-        }
-      }
-    } catch (err) {
-      this.logger.debug(`[AiSignal] Active position imbalance check failed: ${err?.message}`);
-    }
+    // NOTE: Market momentum + position imbalance filters REMOVED — handled by Market Guard cron.
+    // Duplicate logic was causing deadlocks (both LONG+SHORT blocked simultaneously).
+    // Market Guard evaluates every 15min: recent perf SLs + regime scoring.
 
     // ── Per-coin 4h EMA trend alignment ─────────────────────────────────────
     // Block signals that go against the coin's own 4h trend, regardless of global regime.

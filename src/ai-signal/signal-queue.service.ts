@@ -5,6 +5,7 @@ import { RedisService } from "../redis/redis.service";
 import { AiSignal, AiSignalDocument } from "../schemas/ai-signal.schema";
 import { AiTunedParams } from "../strategy/ai-optimizer/ai-tuned-params.interface";
 import { SignalResult } from "../strategy/rules/rule-engine.service";
+import { TradingConfigService } from "./trading-config";
 
 export interface SignalHandleResult {
   action: "EXECUTED" | "QUEUED" | "SKIPPED";
@@ -32,6 +33,7 @@ export class SignalQueueService {
     @InjectModel(AiSignal.name)
     private readonly aiSignalModel: Model<AiSignalDocument>,
     private readonly redisService: RedisService,
+    private readonly tradingConfig: TradingConfigService,
   ) {}
 
   // ─── Main entry point ────────────────────────────────────────────────────
@@ -789,14 +791,10 @@ export class SignalQueueService {
     futuresData?: { fundingRate?: number; longShortRatio?: number; takerBuyRatio?: number; openInterestUsd?: number },
   ): Promise<AiSignalDocument> {
     const symbol = `${coin.toUpperCase()}${currency.toUpperCase()}`;
-    const MIN_SL = 1.5;
-    const MAX_SL = 2.5;   // hard cap — reduces avg loss from $25 → $25 max
-    const MIN_TP = 2.0;
-    const MAX_TP = 3.0;   // was 4% — only 9/105 trades hit TP, lower target = more TP hits
-    // SL clamped [1.5%, 2.5%], TP = max(TP, SL×1.5) capped at 3%
-    const stopLossPercent = Math.min(MAX_SL, Math.max(params.stopLossPercent, MIN_SL));
-    const rawTp = Math.max(MIN_TP, params.takeProfitPercent, stopLossPercent * 1.5);
-    const takeProfitPercent = Math.min(MAX_TP, rawTp);
+    const cfg = this.tradingConfig.get();
+    const stopLossPercent = Math.min(cfg.slMax, Math.max(params.stopLossPercent, cfg.slMin));
+    const rawTp = Math.max(cfg.tpMin, params.takeProfitPercent, stopLossPercent * cfg.tpRrMultiplier);
+    const takeProfitPercent = Math.min(cfg.tpMax, rawTp);
     const entryPrice = signalResult.entryPrice;
 
     const stopLossPrice = signalResult.isLong

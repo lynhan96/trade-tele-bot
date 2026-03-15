@@ -18,6 +18,7 @@ import { UserSignalSubscriptionService } from "./user-signal-subscription.servic
 import { UserRealTradingService } from "./user-real-trading.service";
 import { UserDataStreamService } from "./user-data-stream.service";
 import { StrategyAutoTunerService } from "./strategy-auto-tuner.service";
+import { TradingConfigService } from "./trading-config";
 import { AiSignal, AiSignalSchema } from "../schemas/ai-signal.schema";
 import {
   AiCoinProfile,
@@ -69,7 +70,8 @@ import {
     UserRealTradingService,
     UserDataStreamService,
     StrategyAutoTunerService,
+    TradingConfigService,
   ],
-  exports: [AiSignalService, UserSignalSubscriptionService, UserRealTradingService, SignalQueueService, PositionMonitorService],
+  exports: [AiSignalService, UserSignalSubscriptionService, UserRealTradingService, SignalQueueService, PositionMonitorService, TradingConfigService],
 })
 export class AiSignalModule {}

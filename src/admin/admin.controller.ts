@@ -13,12 +13,15 @@ import {
 import { AdminGuard } from "./admin.guard";
 import { AdminService } from "./admin.service";
 import { AdminAuthService } from "./admin-auth.service";
+import { TradingConfigService } from "../ai-signal/trading-config";
+import type { TradingConfig } from "../ai-signal/trading-config";
 
 @Controller("admin")
 export class AdminController {
   constructor(
     private readonly adminService: AdminService,
     private readonly authService: AdminAuthService,
+    private readonly tradingConfig: TradingConfigService,
   ) {}
 
   // ─── Auth (no guard) ──────────────────────────────────────────────────────
@@ -210,5 +213,27 @@ export class AdminController {
   @Post("coins/:coin/override")
   setCoinOverride(@Param("coin") coin: string, @Body() body: { action: 'blacklist' | 'whitelist' | 'clear' }) {
     return this.adminService.setCoinOverride(coin, body.action);
+  }
+
+  // ─── Trading Config ──────────────────────────────────────────────────────
+
+  @UseGuards(AdminGuard)
+  @Get("trading-config")
+  getTradingConfig() {
+    return { config: this.tradingConfig.get() };
+  }
+
+  @UseGuards(AdminGuard)
+  @Patch("trading-config")
+  async updateTradingConfig(@Body() body: Partial<TradingConfig>) {
+    const updated = await this.tradingConfig.update(body);
+    return { config: updated };
+  }
+
+  @UseGuards(AdminGuard)
+  @Post("trading-config/reset")
+  async resetTradingConfig() {
+    const config = await this.tradingConfig.reset();
+    return { config };
   }
 }
