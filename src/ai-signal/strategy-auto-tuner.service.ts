@@ -242,6 +242,29 @@ export class StrategyAutoTunerService {
         }
       }
 
+      // Prevent deadlock: if both directions blocked → only block the weaker direction
+      // (allow the direction that indicators/regime favor)
+      if (blockLong && blockShort && !pauseAll) {
+        // Regime scoring already determined a preferred direction
+        // Recent perf is short-term noise — regime scoring is more reliable
+        // Keep the regime-based block, drop the recent-perf block
+        if (reasons.some(r => r.includes("recent LONG SLs"))) {
+          blockLong = false; // regime says bullish → allow LONG despite recent SLs
+          confidenceFloor = Math.max(confidenceFloor, 72); // but raise bar
+          reasons.push("deadlock resolved: allow LONG with higher floor");
+        } else if (reasons.some(r => r.includes("recent SHORT SLs"))) {
+          blockShort = false;
+          confidenceFloor = Math.max(confidenceFloor, 72);
+          reasons.push("deadlock resolved: allow SHORT with higher floor");
+        } else {
+          // Both from regime scoring — shouldn't happen, but fallback: allow both with high floor
+          blockLong = false;
+          blockShort = false;
+          confidenceFloor = 75;
+          reasons.push("deadlock resolved: both open with floor 75");
+        }
+      }
+
       const reason = reasons.join(" | ") || "Normal market";
       const guard: MarketGuard = {
         blockLong,
