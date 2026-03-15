@@ -1579,7 +1579,42 @@ export class UserRealTradingService implements OnModuleInit {
               const nearTp = distanceToTp < 0.5;
 
               if (nearTp) {
-                this.logger.debug(`[RealTrading] ${symbol} user ${telegramId}: near TP (${distanceToTp.toFixed(2)}% away) — trail SL frozen`);
+                // Near TP: check if existing Binance SL order is dangerously tight
+                // (trail may have tightened it to within 0.4% of current price)
+                // If so, widen it back to break-even to give TP room to execute.
+                const slDistanceFromPrice = slPrice
+                  ? (direction === "LONG"
+                    ? (currentPrice - slPrice) / currentPrice
+                    : (slPrice - currentPrice) / currentPrice) * 100
+                  : Infinity;
+
+                const SL_TOO_TIGHT_THRESHOLD = 0.4; // SL within 0.4% of price = danger of premature fill
+                if (slDistanceFromPrice < SL_TOO_TIGHT_THRESHOLD && trade.binanceSlAlgoId) {
+                  // Widen SL back to break-even (entry price) — safe floor while TP is being hunted
+                  const safeSlPrice = round(entry);
+                  const isSafeSlBetter = direction === "LONG" ? safeSlPrice < slPrice : safeSlPrice > slPrice;
+                  if (isSafeSlBetter) {
+                    this.logger.log(
+                      `[RealTrading] 🎯 ${symbol} user ${telegramId}: nearTP (${distanceToTp.toFixed(2)}% away) + SL too tight (${slDistanceFromPrice.toFixed(2)}% from price) → widen SL to breakeven ${fmtP(safeSlPrice)}`,
+                    );
+                    try {
+                      await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, trade.binanceSlAlgoId);
+                      const tradeQty = trade.gridLevels?.length > 0
+                        ? trade.gridLevels.filter((g: any) => g.status === "FILLED").reduce((sum: number, g: any) => sum + (g.quantity || 0), 0) || trade.quantity
+                        : trade.quantity;
+                      const slOrder = await this.binanceService.setStopLoss(
+                        keys.apiKey, keys.apiSecret, symbol, safeSlPrice,
+                        direction as "LONG" | "SHORT", tradeQty,
+                      );
+                      const newId = slOrder?.algoId?.toString() ?? slOrder?.orderId?.toString();
+                      await this.userTradeModel.updateOne({ _id: trade._id }, { $set: { slPrice: safeSlPrice, binanceSlAlgoId: newId } });
+                    } catch (err) {
+                      this.logger.warn(`[RealTrading] ${symbol} user ${telegramId}: nearTP SL widen failed: ${err?.message}`);
+                    }
+                  }
+                } else {
+                  this.logger.debug(`[RealTrading] ${symbol} user ${telegramId}: near TP (${distanceToTp.toFixed(2)}% away), SL ok (${slDistanceFromPrice.toFixed(2)}% from price) — trail frozen`);
+                }
               } else if (currentPnlPct >= TRAIL_TRIGGER) {
                 // Compute trailing SL: keep 60% of current profit
                 const trailPct = currentPnlPct * TRAIL_KEEP_RATIO;
