@@ -1571,7 +1571,16 @@ export class UserRealTradingService implements OnModuleInit {
                 ? ((currentPrice - entry) / entry) * 100
                 : ((entry - currentPrice) / entry) * 100;
 
-              if (currentPnlPct >= TRAIL_TRIGGER) {
+              // TP proximity lock: if within 0.5% of TP → freeze trail, let TP execute
+              const tpPrice = trade.tpPrice;
+              const distanceToTp = tpPrice
+                ? (direction === "LONG" ? (tpPrice - currentPrice) / currentPrice : (currentPrice - tpPrice) / currentPrice) * 100
+                : Infinity;
+              const nearTp = distanceToTp < 0.5;
+
+              if (nearTp) {
+                this.logger.debug(`[RealTrading] ${symbol} user ${telegramId}: near TP (${distanceToTp.toFixed(2)}% away) — trail SL frozen`);
+              } else if (currentPnlPct >= TRAIL_TRIGGER) {
                 // Compute trailing SL: keep 60% of current profit
                 const trailPct = currentPnlPct * TRAIL_KEEP_RATIO;
                 const trailSl = direction === "LONG"

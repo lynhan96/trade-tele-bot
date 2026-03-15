@@ -399,7 +399,13 @@ export class PositionMonitorService implements OnModuleInit {
         }
 
         // Continuous trailing: keep 60% of peak profit
-        if ((signal as any).slMovedToEntry && peak > TRAIL_TRIGGER) {
+        // TP proximity lock: if price within 0.5% of TP → freeze trail, let TP execute
+        const distanceToTp = signalTp
+          ? (direction === "LONG" ? (signalTp - price) / price : (price - signalTp) / price) * 100
+          : Infinity;
+        const nearTp = distanceToTp < 0.5;
+
+        if ((signal as any).slMovedToEntry && peak > TRAIL_TRIGGER && !nearTp) {
           const trailPct = peak * TRAIL_KEEP_RATIO;
           const trailSl = direction === "LONG"
             ? avgEntry * (1 + trailPct / 100)
@@ -416,6 +422,8 @@ export class PositionMonitorService implements OnModuleInit {
             );
             this.propagateSlMove(sigKey, symbol, trailSl, direction);
           }
+        } else if (nearTp) {
+          this.logger.debug(`[PositionMonitor] 🎯 Grid ${sigKey} near TP (${distanceToTp.toFixed(2)}% away) — trail SL frozen`);
         }
 
         // TP boost at 2% peak from avg entry
@@ -500,7 +508,13 @@ export class PositionMonitorService implements OnModuleInit {
         this.propagateSlMove(sigKey, symbol, currentEntry, direction);
       }
 
-      if ((signal as any).slMovedToEntry && peak > TRAIL_TRIGGER) {
+      // TP proximity lock: if price within 0.5% of TP → freeze trail, let TP execute
+      const distanceToTp = takeProfitPrice
+        ? (direction === "LONG" ? (takeProfitPrice - price) / price : (price - takeProfitPrice) / price) * 100
+        : Infinity;
+      const nearTp = distanceToTp < 0.5;
+
+      if ((signal as any).slMovedToEntry && peak > TRAIL_TRIGGER && !nearTp) {
         const trailPct = peak * TRAIL_KEEP_RATIO; // keep 60% of peak
         const trailSl = direction === "LONG"
           ? currentEntry * (1 + trailPct / 100)
@@ -515,6 +529,8 @@ export class PositionMonitorService implements OnModuleInit {
           );
           this.propagateSlMove(sigKey, symbol, trailSl, direction);
         }
+      } else if (nearTp) {
+        this.logger.debug(`[PositionMonitor] 🎯 ${sigKey} near TP (${distanceToTp.toFixed(2)}% away) — trail SL frozen`);
       }
     }
 
