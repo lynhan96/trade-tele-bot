@@ -85,14 +85,15 @@ export class ExternalSignalService {
       return { success: false, reason: `Already active: ${symbol} ${activeSignal.direction}` };
     }
 
-    // ── 4. Daily signal cap ──────────────────────────────────────────────
-    const dailyCountKey = "cache:ai:daily-signal-count";
-    const currentDailyCount = (await this.redisService.get<number>(dailyCountKey)) ?? 0;
-    if (currentDailyCount >= MAX_DAILY_SIGNALS) {
-      this.logger.log(`[ExtSignal] ${symbol} SKIP — daily cap reached (${currentDailyCount}/${MAX_DAILY_SIGNALS})`);
-      return { success: false, reason: `Daily cap reached (${MAX_DAILY_SIGNALS})` };
+    // ── 4. Max concurrent external signals cap ────────────────────────────
+    const MAX_EXTERNAL_ACTIVE = 5;
+    const allActive = await this.signalQueueService.getAllActiveSignals();
+    const externalActive = allActive.filter((s: any) => s.source === "external");
+    if (externalActive.length >= MAX_EXTERNAL_ACTIVE) {
+      this.logger.log(`[ExtSignal] ${symbol} SKIP — external cap reached (${externalActive.length}/${MAX_EXTERNAL_ACTIVE})`);
+      return { success: false, reason: `External active cap reached (${MAX_EXTERNAL_ACTIVE})` };
     }
-    this.logger.log(`[ExtSignal] ${symbol} daily count: ${currentDailyCount}/${MAX_DAILY_SIGNALS}`);
+    this.logger.log(`[ExtSignal] ${symbol} external active: ${externalActive.length}/${MAX_EXTERNAL_ACTIVE}`);
 
     // ── No validation — external signals are pre-validated by source ──
     const regime = (await this.redisService.get<string>("cache:ai:regime")) || "MIXED";
@@ -175,12 +176,13 @@ export class ExternalSignalService {
 
     if (queueResult.action === "EXECUTED" || queueResult.action === "QUEUED") {
       // Increment daily count
+      const dailyKey = "cache:ai:daily-signal-count";
       const now = Date.now();
       const midnight = new Date(now);
       midnight.setUTCDate(midnight.getUTCDate() + 1);
       midnight.setUTCHours(0, 0, 0, 0);
       const ttl = Math.ceil((midnight.getTime() - now) / 1000);
-      await this.redisService.initAndIncr(dailyCountKey, 0, ttl);
+      await this.redisService.initAndIncr(dailyKey, 0, ttl);
     }
 
     if (queueResult.action === "EXECUTED") {
