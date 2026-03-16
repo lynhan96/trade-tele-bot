@@ -2,11 +2,14 @@ import { Injectable, Logger } from "@nestjs/common";
 import { InjectModel } from "@nestjs/mongoose";
 import { Model } from "mongoose";
 import { Cron } from "@nestjs/schedule";
+import { ConfigService } from "@nestjs/config";
+import Anthropic from "@anthropic-ai/sdk";
 import { RedisService } from "../redis/redis.service";
 import { AiSignal, AiSignalDocument } from "../schemas/ai-signal.schema";
 import { TelegramBotService } from "../telegram/telegram.service";
 import { FuturesAnalyticsService } from "../market-data/futures-analytics.service";
 import { IndicatorService } from "../strategy/indicators/indicator.service";
+import { TradingConfigService } from "./trading-config";
 
 /**
  * StrategyAutoTuner — evaluates strategy performance every 4h and auto-disables
@@ -64,6 +67,8 @@ interface StrategyGate {
 export class StrategyAutoTunerService {
   private readonly logger = new Logger(StrategyAutoTunerService.name);
 
+  private readonly anthropic: Anthropic | null = null;
+
   constructor(
     @InjectModel(AiSignal.name)
     private readonly aiSignalModel: Model<AiSignalDocument>,
@@ -71,7 +76,11 @@ export class StrategyAutoTunerService {
     private readonly telegramService: TelegramBotService,
     private readonly futuresAnalyticsService: FuturesAnalyticsService,
     private readonly indicatorService: IndicatorService,
+    private readonly configService: ConfigService,
+    private readonly tradingConfig: TradingConfigService,
   ) {
+    const apiKey = this.configService.get<string>("ANTHROPIC_API_KEY");
+    if (apiKey) this.anthropic = new Anthropic({ apiKey });
     // Run on startup after 30s delay
     setTimeout(() => {
       this.evaluateStrategies().catch(() => {});
@@ -599,6 +608,210 @@ export class StrategyAutoTunerService {
       }
     } catch (err) {
       this.logger.error(`[AutoTuner] Error: ${err?.message}`);
+    }
+  }
+
+  // ── AI Strategy Reviewer — Haiku reviews overall system every 4h ──────
+  @Cron("0 30 */4 * * *") // every 4h at :30 (offset from evaluateStrategies)
+  async aiReviewStrategies(): Promise<void> {
+    if (!this.anthropic) return;
+
+    try {
+      const lookbackDate = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
+
+      // Gather context
+      const signals = await this.aiSignalModel.find({
+        status: "COMPLETED",
+        createdAt: { $gte: lookbackDate },
+      }).lean();
+
+      if (signals.length < 5) {
+        this.logger.log("[AIReview] Not enough data (<5 signals) — skipping");
+        return;
+      }
+
+      // Strategy stats
+      const stratStats: Record<string, { n: number; w: number; pnl: number; avgW: number; avgL: number }> = {};
+      for (const s of signals) {
+        const st = (s as any).strategy || "UNKNOWN";
+        if (!stratStats[st]) stratStats[st] = { n: 0, w: 0, pnl: 0, avgW: 0, avgL: 0 };
+        stratStats[st].n++;
+        const pnl = (s as any).pnlUsdt || 0;
+        stratStats[st].pnl += pnl;
+        if (pnl > 0) { stratStats[st].w++; stratStats[st].avgW += pnl; }
+        else stratStats[st].avgL += pnl;
+      }
+      for (const st of Object.keys(stratStats)) {
+        const s = stratStats[st];
+        s.avgW = s.w > 0 ? s.avgW / s.w : 0;
+        s.avgL = (s.n - s.w) > 0 ? s.avgL / (s.n - s.w) : 0;
+      }
+
+      // Coin stats (top losers)
+      const coinStats: Record<string, { n: number; pnl: number; w: number }> = {};
+      for (const s of signals) {
+        const coin = (s as any).symbol?.replace("USDT", "") || "?";
+        if (!coinStats[coin]) coinStats[coin] = { n: 0, pnl: 0, w: 0 };
+        coinStats[coin].n++;
+        coinStats[coin].pnl += (s as any).pnlUsdt || 0;
+        if (((s as any).pnlUsdt || 0) > 0) coinStats[coin].w++;
+      }
+
+      // Direction stats
+      let longPnl = 0, longN = 0, longW = 0, shortPnl = 0, shortN = 0, shortW = 0;
+      for (const s of signals) {
+        const pnl = (s as any).pnlUsdt || 0;
+        if ((s as any).direction === "LONG") { longPnl += pnl; longN++; if (pnl > 0) longW++; }
+        else { shortPnl += pnl; shortN++; if (pnl > 0) shortW++; }
+      }
+
+      // Market context
+      const guard = await this.getMarketGuard();
+      const gates = await this.getGates();
+      const blacklist = await this.getCoinBlacklist();
+      const cfg = this.tradingConfig.get();
+
+      // Recent 5 trades
+      const recent = signals.slice(-5).map(s => ({
+        symbol: (s as any).symbol, direction: (s as any).direction,
+        strategy: (s as any).strategy, pnl: ((s as any).pnlUsdt || 0).toFixed(1),
+        close: (s as any).closeReason,
+      }));
+
+      // Top 5 losing coins
+      const topLosers = Object.entries(coinStats)
+        .sort((a, b) => a[1].pnl - b[1].pnl)
+        .slice(0, 5)
+        .map(([coin, s]) => `${coin}: ${s.n} trades, ${s.w}W, $${s.pnl.toFixed(0)}`);
+
+      const prompt = `You are a crypto futures trading system reviewer. Analyze the following 3-day performance data and return ONLY a JSON object with recommended actions.
+
+STRATEGY PERFORMANCE (3 days):
+${Object.entries(stratStats).map(([st, s]) => `${st}: ${s.n} trades, WR=${s.w}/${s.n} (${Math.round(s.w/s.n*100)}%), PnL=$${s.pnl.toFixed(0)}, avgWin=$${s.avgW.toFixed(0)}, avgLoss=$${s.avgL.toFixed(0)}`).join("\n")}
+
+DIRECTION PERFORMANCE:
+LONG: ${longN} trades, WR=${Math.round(longW/Math.max(longN,1)*100)}%, PnL=$${longPnl.toFixed(0)}
+SHORT: ${shortN} trades, WR=${Math.round(shortW/Math.max(shortN,1)*100)}%, PnL=$${shortPnl.toFixed(0)}
+
+TOP LOSING COINS: ${topLosers.join(" | ")}
+
+MARKET: BTC=$${guard.btcPrice} regime=${guard.regime} RSI=${(await this.redisService.get<any>("cache:ai:regime:btc-context"))?.rsi ?? "?"}
+Guard: blockLong=${guard.blockLong} blockShort=${guard.blockShort}
+Current blacklist: [${[...blacklist].join(",")}]
+Current config: tpMax=${cfg.tpMax}%, slMax=${cfg.slMax}%, confidenceFloor=${cfg.confidenceFloor}
+
+RECENT 5 TRADES: ${JSON.stringify(recent)}
+
+CURRENT STRATEGY GATES: ${JSON.stringify(Object.fromEntries(Object.entries(gates).map(([k,v]) => [k, {enabled: v.enabled, reason: v.reason}])))}
+
+Rules:
+- Disable strategy if: PnL < -$15 OR 0% WR on 2+ trades OR R:R < 0.4 (avgLoss > 2.5× avgWin)
+- Re-enable if: was disabled but recent data shows recovery (WR>50% on 3+ recent trades)
+- Blacklist coin if: 0% WR on 2+ trades OR single trade loss > $20 OR total PnL < -$20
+- Adjust confidenceFloor: raise to 70+ if market uncertain, lower to 63 if trending clear
+- Do NOT change tpMax or slMax unless data strongly supports it
+
+Return ONLY valid JSON (no markdown, no explanation):
+{
+  "disableStrategies": ["STRATEGY_NAME"],
+  "enableStrategies": ["STRATEGY_NAME"],
+  "blacklistCoins": ["COIN"],
+  "unblacklistCoins": ["COIN"],
+  "confidenceFloor": 63,
+  "reasoning": "brief explanation"
+}`;
+
+      const response = await this.anthropic.messages.create({
+        model: "claude-haiku-4-5-20251001",
+        max_tokens: 500,
+        messages: [{ role: "user", content: prompt }],
+      });
+
+      const text = (response.content[0] as any)?.text || "";
+      this.logger.log(`[AIReview] Haiku response: ${text}`);
+
+      // Parse JSON
+      let actions: {
+        disableStrategies?: string[];
+        enableStrategies?: string[];
+        blacklistCoins?: string[];
+        unblacklistCoins?: string[];
+        confidenceFloor?: number;
+        reasoning?: string;
+      };
+      try {
+        actions = JSON.parse(text);
+      } catch {
+        // Try to extract JSON from text
+        const jsonMatch = text.match(/\{[\s\S]*\}/);
+        if (jsonMatch) actions = JSON.parse(jsonMatch[0]);
+        else throw new Error("No valid JSON in response");
+      }
+
+      const appliedActions: string[] = [];
+
+      // Apply strategy disables
+      if (actions.disableStrategies?.length) {
+        const currentGates = await this.getGates();
+        for (const st of actions.disableStrategies) {
+          if (currentGates[st]?.enabled !== false) {
+            await this.redisService.set(`cache:strategy-override:${st}`, "disable", 5 * 60 * 60);
+            appliedActions.push(`❌ Disabled ${st}`);
+          }
+        }
+      }
+
+      // Apply strategy enables
+      if (actions.enableStrategies?.length) {
+        for (const st of actions.enableStrategies) {
+          await this.redisService.delete(`cache:strategy-override:${st}`);
+          appliedActions.push(`✅ Enabled ${st}`);
+        }
+      }
+
+      // Apply coin blacklist
+      if (actions.blacklistCoins?.length) {
+        const currentBl = await this.getCoinBlacklist();
+        for (const coin of actions.blacklistCoins) {
+          currentBl.add(coin.toUpperCase());
+        }
+        await this.redisService.set(COIN_BLACKLIST_KEY, [...currentBl], 0);
+        appliedActions.push(`🚫 Blacklisted: ${actions.blacklistCoins.join(", ")}`);
+      }
+
+      // Apply coin unblacklist
+      if (actions.unblacklistCoins?.length) {
+        const currentBl = await this.getCoinBlacklist();
+        for (const coin of actions.unblacklistCoins) {
+          currentBl.delete(coin.toUpperCase());
+        }
+        await this.redisService.set(COIN_BLACKLIST_KEY, [...currentBl], 0);
+        appliedActions.push(`✅ Unblacklisted: ${actions.unblacklistCoins.join(", ")}`);
+      }
+
+      // Apply confidence floor
+      if (actions.confidenceFloor && actions.confidenceFloor !== cfg.confidenceFloor) {
+        await this.tradingConfig.update({ confidenceFloor: actions.confidenceFloor });
+        appliedActions.push(`📊 Confidence floor: ${cfg.confidenceFloor} → ${actions.confidenceFloor}`);
+      }
+
+      // Notify admin
+      if (appliedActions.length > 0) {
+        const adminIds = (process.env.AI_ADMIN_TELEGRAM_ID || "").split(",").filter(Boolean);
+        const msg =
+          `🤖 *AI Strategy Review*\n━━━━━━━━━━━━━━━━━━\n\n` +
+          appliedActions.join("\n") +
+          `\n\n_${actions.reasoning || "No reasoning"}_` +
+          `\n\n_${signals.length} signals analyzed / 3 days_`;
+        for (const id of adminIds) {
+          await this.telegramService.sendTelegramMessage(parseInt(id), msg).catch(() => {});
+        }
+        this.logger.log(`[AIReview] Applied ${appliedActions.length} actions: ${appliedActions.join(", ")}`);
+      } else {
+        this.logger.log(`[AIReview] No changes recommended. Reasoning: ${actions.reasoning || "N/A"}`);
+      }
+    } catch (err) {
+      this.logger.warn(`[AIReview] Error: ${err?.message}`);
     }
   }
 }
