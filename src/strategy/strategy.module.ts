@@ -5,6 +5,7 @@ import { MarketDataModule } from "../market-data/market-data.module";
 import { IndicatorService } from "./indicators/indicator.service";
 import { RuleEngineService } from "./rules/rule-engine.service";
 import { AiOptimizerService } from "./ai-optimizer/ai-optimizer.service";
+import { TradingConfigService } from "../ai-signal/trading-config";
 import {
   AiRegimeHistory,
   AiRegimeHistorySchema,
@@ -28,7 +29,7 @@ import {
       { name: AiSignalValidation.name, schema: AiSignalValidationSchema },
     ]),
   ],
-  providers: [IndicatorService, RuleEngineService, AiOptimizerService],
-  exports: [IndicatorService, RuleEngineService, AiOptimizerService],
+  providers: [IndicatorService, RuleEngineService, AiOptimizerService, TradingConfigService],
+  exports: [IndicatorService, RuleEngineService, AiOptimizerService, TradingConfigService],
 })
 export class StrategyModule {}

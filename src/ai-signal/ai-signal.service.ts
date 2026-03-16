@@ -26,6 +26,7 @@ import { UserRealTradingService } from "./user-real-trading.service";
 import { MarketDataService } from "../market-data/market-data.service";
 import { CoinGeckoService } from "../coingecko/coingecko.service";
 import { StrategyAutoTunerService } from "./strategy-auto-tuner.service";
+import { TradingConfigService } from "./trading-config";
 
 const AI_PAUSED_KEY = "cache:ai:paused";
 const AI_TEST_MODE_KEY = "cache:ai:test-mode";
@@ -69,6 +70,7 @@ export class AiSignalService implements OnModuleInit {
     private readonly marketDataService: MarketDataService,
     private readonly coinGeckoService: CoinGeckoService,
     private readonly strategyAutoTuner: StrategyAutoTunerService,
+    private readonly tradingConfig: TradingConfigService,
     @InjectModel(AiSignal.name)
     private readonly aiSignalModel: Model<AiSignalDocument>,
     @InjectModel(AiCoinProfile.name)
@@ -1150,10 +1152,10 @@ export class AiSignalService implements OnModuleInit {
       ? ((currentPrice - signal.entryPrice) / signal.entryPrice) * 100
       : ((signal.entryPrice - currentPrice) / signal.entryPrice) * 100;
 
-    // ── Trailing SL: after 2% profit, trail SL at peak - 1.2% (never lower) ──
-    // Was 1.5/0.8 — too tight, most trades close via trail SL with tiny profit despite high WR
-    const TRAIL_TRIGGER = 2.0;
-    const TRAIL_DISTANCE = 1.2;
+    // ── Trailing SL: use config values ──
+    const cfg = this.tradingConfig.get();
+    const TRAIL_TRIGGER = cfg.trailTrigger;
+    const TRAIL_KEEP_RATIO = cfg.trailKeepRatio;
 
     // Track peak PnL
     const prevPeak = (signal as any).peakPnlPct || 0;
@@ -1173,22 +1175,31 @@ export class AiSignalService implements OnModuleInit {
       await this.notifySlMovedToEntry(signal.symbol, signal.entryPrice);
     }
 
-    // Continuous trailing: SL = entry + (peak - 0.8%), only raise
+    // Continuous trailing: SL = entry + (peak × keepRatio), only raise
+    // TP proximity lock: freeze trail when within tpProximityLock% of TP
     if ((signal as any).slMovedToEntry && peak > TRAIL_TRIGGER) {
-      const trailPct = Math.max(0, peak - TRAIL_DISTANCE);
-      const trailSl = isLong
-        ? signal.entryPrice * (1 + trailPct / 100)
-        : signal.entryPrice * (1 - trailPct / 100);
+      const tpPrice = signal.takeProfitPrice;
+      const distanceToTp = tpPrice
+        ? Math.abs((tpPrice - currentPrice) / currentPrice) * 100
+        : 999;
+      const nearTp = distanceToTp < cfg.tpProximityLock;
 
-      const currentSl = (signal as any).stopLossPrice || signal.entryPrice;
-      const shouldRaise = isLong ? trailSl > currentSl : trailSl < currentSl;
+      if (!nearTp) {
+        const trailPct = peak * TRAIL_KEEP_RATIO;
+        const trailSl = isLong
+          ? signal.entryPrice * (1 + trailPct / 100)
+          : signal.entryPrice * (1 - trailPct / 100);
 
-      if (shouldRaise) {
-        (signal as any).stopLossPrice = trailSl;
-        await this.signalQueueService.raiseStopLoss((signal as any)._id.toString(), trailSl, peak);
-        this.logger.log(
-          `[AiSignal] [TEST] 📈 ${signal.symbol} trailing SL → +${trailPct.toFixed(1)}% (${trailSl.toFixed(4)}) peak: ${peak.toFixed(2)}%`,
-        );
+        const currentSl = (signal as any).stopLossPrice || signal.entryPrice;
+        const shouldRaise = isLong ? trailSl > currentSl : trailSl < currentSl;
+
+        if (shouldRaise) {
+          (signal as any).stopLossPrice = trailSl;
+          await this.signalQueueService.raiseStopLoss((signal as any)._id.toString(), trailSl, peak);
+          this.logger.log(
+            `[AiSignal] [TEST] 📈 ${signal.symbol} trailing SL → +${trailPct.toFixed(1)}% (${trailSl.toFixed(4)}) peak: ${peak.toFixed(2)}%`,
+          );
+        }
       }
     }
 

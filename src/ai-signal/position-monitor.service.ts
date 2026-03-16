@@ -6,6 +6,7 @@ import { MarketDataService } from "../market-data/market-data.service";
 import { SignalQueueService } from "./signal-queue.service";
 import { AiSignalDocument } from "../schemas/ai-signal.schema";
 import { UserRealTradingService } from "./user-real-trading.service";
+import { TradingConfigService } from "./trading-config";
 
 export interface ResolvedSignalInfo {
   symbol: string;
@@ -79,6 +80,7 @@ export class PositionMonitorService implements OnModuleInit {
     private readonly marketDataService: MarketDataService,
     private readonly signalQueueService: SignalQueueService,
     private readonly userRealTradingService: UserRealTradingService,
+    private readonly tradingConfig: TradingConfigService,
   ) {
     this.monitorApiKey = configService.get<string>(
       "AI_MONITOR_BINANCE_API_KEY",
@@ -306,7 +308,10 @@ export class PositionMonitorService implements OnModuleInit {
                 const { RSI } = require("technicalindicators");
                 const rsiVals = RSI.calculate({ period: 14, values: closes });
                 const rsi = rsiVals[rsiVals.length - 1];
-                const rsiExhausted = direction === "LONG" ? rsi < 45 : rsi > 55;
+                const cfg = this.tradingConfig?.get();
+                const rsiLongThresh = cfg?.gridRsiLong ?? 45;
+                const rsiShortThresh = cfg?.gridRsiShort ?? 55;
+                const rsiExhausted = direction === "LONG" ? rsi < rsiLongThresh : rsi > rsiShortThresh;
 
                 if (grid.level <= 2) {
                   // L1-L2: RSI only — allow DCA more freely to avg down

@@ -19,6 +19,7 @@ import {
   AiSignalValidationDocument,
 } from "../../schemas/ai-signal-validation.schema";
 import { AiTunedParams } from "./ai-tuned-params.interface";
+import { TradingConfigService } from "../../ai-signal/trading-config";
 
 const AI_PARAMS_TTL = 6 * 60 * 60; // 6h cache — params don't change fast, save API cost
 const AI_PARAMS_JITTER = 60 * 60; // ±30 min random offset to stagger expiry
@@ -50,6 +51,7 @@ export class AiOptimizerService {
     private readonly marketConfigModel: Model<AiMarketConfigDocument>,
     @InjectModel(AiSignalValidation.name)
     private readonly validationModel: Model<AiSignalValidationDocument>,
+    private readonly tradingConfig: TradingConfigService,
   ) {
     const apiKey = this.configService.get<string>("ANTHROPIC_API_KEY");
     if (apiKey) {
@@ -857,7 +859,7 @@ Respond ONLY with JSON: {"decision":"PASS"|"REJECT","reason":"brief 10-word max 
       strategy: isTrend ? "EMA_PULLBACK|TREND_EMA|RSI_CROSS" : isSideways ? "BB_SCALP|RSI_CROSS" : "RSI_CROSS|BB_SCALP",
       confidence: 65, // base default — overridden by dynamic calculation in getAtrAdjustedDefaults
       stopLossPercent: 2.0,
-      takeProfitPercent: 4.0,   // default 2:1 R:R (was 2.0 — 1:1 R:R, not profitable at 40% win)
+      takeProfitPercent: 3.0,   // matches tpMax from config
       minConfidenceToTrade: 50, // floor enforced in ai-signal.service.ts (CONFIDENCE_FLOOR=63)
       rsiCross: {
         primaryKline: "15m",
@@ -971,11 +973,11 @@ Respond ONLY with JSON: {"decision":"PASS"|"REJECT","reason":"brief 10-word max 
       const currentPrice = ohlc.closes[ohlc.closes.length - 1];
       const atrPct = this.indicatorService.getAtrPercent(ohlc.highs, ohlc.lows, ohlc.closes, 14);
 
-      // ── ATR baseline SL/TP ──
-      // TP = ATR×2.0 to achieve R:R≥2 at 40% win rate. Cap 4% — signal-queue enforces further.
-      const maxSl = Math.min(4, Math.max(3, atrPct * 2));
-      let slPct = Math.max(2, Math.min(maxSl, atrPct * 1.5));
-      let tpPct = Math.max(2.0, Math.min(4.0, atrPct * 2.0));
+      // ── ATR baseline SL/TP ── uses TradingConfig for caps
+      const cfg = this.tradingConfig.get();
+      const maxSl = Math.min(cfg.slMax + 1, Math.max(cfg.slMax, atrPct * 2));
+      let slPct = Math.max(cfg.slMin, Math.min(maxSl, atrPct * 1.5));
+      let tpPct = Math.max(cfg.tpMin, Math.min(cfg.tpMax, atrPct * 2.0));
 
       let slSource = "ATR";
       let tpSource = "ATR";
@@ -1009,11 +1011,11 @@ Respond ONLY with JSON: {"decision":"PASS"|"REJECT","reason":"brief 10-word max 
             let obSlPct: number | null = null;
             if (nearestBullishOb) {
               const dist = ((currentPrice - nearestBullishOb.low) / currentPrice) * 100;
-              if (dist >= 2.0 && dist <= 4.0) obSlPct = dist;
+              if (dist >= cfg.slMin && dist <= cfg.slMax + 1) obSlPct = dist;
             }
             if (nearestBearishOb && !obSlPct) {
               const dist = ((nearestBearishOb.high - currentPrice) / currentPrice) * 100;
-              if (dist >= 2.0 && dist <= 4.0) obSlPct = dist;
+              if (dist >= cfg.slMin && dist <= cfg.slMax + 1) obSlPct = dist;
             }
 
             if (obSlPct) {
@@ -1048,7 +1050,7 @@ Respond ONLY with JSON: {"decision":"PASS"|"REJECT","reason":"brief 10-word max 
               const ret618 = fib.retracements.find(r => r.level === 0.618);
               if (ret618) {
                 const fibSlPct = Math.abs((currentPrice - ret618.price) / currentPrice) * 100;
-                if (fibSlPct >= 2.0 && fibSlPct <= 4.0) {
+                if (fibSlPct >= cfg.slMin && fibSlPct <= cfg.slMax + 1) {
                   slPct = parseFloat(fibSlPct.toFixed(1));
                   slSource = "Fib0.618";
                   this.logger.debug(
@@ -1058,14 +1060,14 @@ Respond ONLY with JSON: {"decision":"PASS"|"REJECT","reason":"brief 10-word max 
               }
             }
 
-            // Step 2: TP — pick smallest extension that achieves R:R ≥ 2:1 vs final slPct
-            const targetTpPct = slPct * 2.0; // minimum TP for R:R 2:1
+            // Step 2: TP — pick smallest extension that achieves R:R ≥ tpRrMultiplier vs final slPct
+            const targetTpPct = slPct * cfg.tpRrMultiplier;
             const fibTpExtLevels = [1.272, 1.618, 2.0, 2.618]; // try smallest first
             for (const level of fibTpExtLevels) {
               const ext = fib.extensions.find(e => e.level === level);
               if (ext) {
                 const fibTpPct = Math.abs((ext.price - currentPrice) / currentPrice) * 100;
-                if (fibTpPct >= targetTpPct && fibTpPct <= 6.0) {
+                if (fibTpPct >= targetTpPct && fibTpPct <= cfg.tpMax + 1) {
                   tpPct = parseFloat(fibTpPct.toFixed(1));
                   tpSource = `Fib${level}`;
                   (defaults as any).fibTpUsed = true;
@@ -1081,15 +1083,14 @@ Respond ONLY with JSON: {"decision":"PASS"|"REJECT","reason":"brief 10-word max 
         }
       }
 
-      // ── Enforce minimum R:R 2:1 fallback — fires only when Fib couldn't satisfy R:R ──
-      // (e.g., no Fib levels in range, or all extensions too far/too close)
-      const minTp = parseFloat((slPct * 2.0).toFixed(1));
+      // ── Enforce minimum R:R fallback — fires only when Fib couldn't satisfy R:R ──
+      const minTp = parseFloat((slPct * cfg.tpRrMultiplier).toFixed(1));
       if (tpPct < minTp) {
-        this.logger.debug(`[AiOptimizer] ${coin} R:R fallback: TP ${tpPct}% → ${minTp}% (SL=${slPct}%, no Fib ext found)`);
+        this.logger.debug(`[AiOptimizer] ${coin} R:R fallback: TP ${tpPct}% → ${minTp}% (SL=${slPct}%, R:R=${cfg.tpRrMultiplier})`);
         tpPct = minTp;
         tpSource = tpSource === "ATR" ? "ATR(R:R)" : `${tpSource}(R:R)`;
       }
-      tpPct = Math.min(4.0, tpPct); // hard cap 4%
+      tpPct = Math.min(cfg.tpMax, tpPct); // hard cap from config
 
       defaults.stopLossPercent = parseFloat(slPct.toFixed(1));
       defaults.takeProfitPercent = parseFloat(tpPct.toFixed(1));

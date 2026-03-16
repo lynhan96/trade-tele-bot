@@ -227,16 +227,17 @@ export class StrategyAutoTunerService {
 
       // ── Rule 3: Recent performance override ────────────────────────────────
       // If 3+ of last 5 completed trades are SL in same direction → block that direction for this cycle
+      // Always add reason even if already blocked (needed for deadlock resolver)
       if (!pauseAll && recentPerf.length >= 3) {
         const recent5 = recentPerf.slice(-5);
         const longSLs = recent5.filter((p) => p.direction === "LONG" && p.closeReason === "STOP_LOSS" && (p.pnlPercent || 0) < 0).length;
         const shortSLs = recent5.filter((p) => p.direction === "SHORT" && p.closeReason === "STOP_LOSS" && (p.pnlPercent || 0) < 0).length;
 
-        if (longSLs >= 3 && !blockLong) {
+        if (longSLs >= 3) {
           blockLong = true;
           reasons.push(`${longSLs}/5 recent LONG SLs — blocking LONG`);
         }
-        if (shortSLs >= 3 && !blockShort) {
+        if (shortSLs >= 3) {
           blockShort = true;
           reasons.push(`${shortSLs}/5 recent SHORT SLs — blocking SHORT`);
         }
