@@ -1660,15 +1660,31 @@ export class UserRealTradingService implements OnModuleInit {
                   }
 
                   if (momentumHold) {
+                    // Coin still moving favorably → skip, let it run
                     this.logger.log(
-                      `[RealTrading] ${symbol} user ${telegramId}: trail breached but HOLDING (momentum still favorable, PnL: +${currentPnlPct.toFixed(1)}%)`,
+                      `[RealTrading] ${symbol} user ${telegramId}: trail breached but HOLDING (momentum favorable, PnL: +${currentPnlPct.toFixed(1)}%)`,
                     );
+                    // Reset breach counter — momentum is still active
+                    await this.redisService.delete(`cache:trail-breach:${telegramId}:${symbol}`);
                   } else {
-                    // Momentum faded — close via market order from backend
-                    this.logger.log(
-                      `[RealTrading] ${symbol} user ${telegramId}: trail SL breached + no momentum → closing via backend (peak=${peak.toFixed(1)}% PnL=${currentPnlPct.toFixed(1)}%)`,
-                    );
-                    await this.closeRealPosition(telegramId, chatId, symbol, "STOP_LOSS");
+                    // Momentum faded — increment breach counter, close after 2 consecutive cycles (4min)
+                    const breachKey = `cache:trail-breach:${telegramId}:${symbol}`;
+                    const breachCount = parseInt(await this.redisService.get(breachKey) || "0", 10) + 1;
+                    await this.redisService.set(breachKey, String(breachCount), 300); // 5min TTL
+
+                    if (breachCount >= 2) {
+                      // 2 consecutive cycles (4min) below trail + no momentum → close
+                      this.logger.log(
+                        `[RealTrading] ${symbol} user ${telegramId}: trail breached ${breachCount}x + no momentum → closing (peak=${peak.toFixed(1)}% PnL=${currentPnlPct.toFixed(1)}%)`,
+                      );
+                      await this.redisService.delete(breachKey);
+                      await this.closeRealPosition(telegramId, chatId, symbol, "STOP_LOSS");
+                    } else {
+                      // First breach without momentum — wait 1 more cycle to confirm
+                      this.logger.log(
+                        `[RealTrading] ${symbol} user ${telegramId}: trail breached (${breachCount}/2), no momentum — waiting next cycle (PnL: +${currentPnlPct.toFixed(1)}%)`,
+                      );
+                    }
                   }
                   continue;
                 } else {
