@@ -404,10 +404,11 @@ export class PositionMonitorService implements OnModuleInit {
           if (this.slMovedCallback) {
             await this.slMovedCallback(symbol, avgEntry).catch(() => {});
           }
-          this.propagateSlMove(sigKey, symbol, avgEntry, direction);
+          // NOTE: Do NOT propagate trail SL to Binance — backend manages exit via protectOpenTrades
+          // Original SL on Binance stays as safety net
         }
 
-        // Continuous trailing: keep 60% of peak profit
+        // Continuous trailing: keep 75% of peak profit (DB only — not pushed to Binance)
         // TP proximity lock: if price within 0.5% of TP → freeze trail, let TP execute
         const distanceToTp = signalTp
           ? (direction === "LONG" ? (signalTp - price) / price : (price - signalTp) / price) * 100
@@ -429,7 +430,7 @@ export class PositionMonitorService implements OnModuleInit {
             this.logger.log(
               `[PositionMonitor] 📈 Grid ${sigKey} trail SL → +${trailPct.toFixed(1)}% (${trailSl.toFixed(4)}) peak=${peak.toFixed(2)}%`,
             );
-            this.propagateSlMove(sigKey, symbol, trailSl, direction);
+            // NOTE: Trail SL stays in DB only — protectOpenTrades handles real mode exit with momentum check
           }
         } else if (nearTp) {
           this.logger.debug(`[PositionMonitor] 🎯 Grid ${sigKey} near TP (${distanceToTp.toFixed(2)}% away) — trail SL frozen`);
@@ -514,7 +515,7 @@ export class PositionMonitorService implements OnModuleInit {
             this.logger.warn(`[PositionMonitor] slMovedCallback error ${sigKey}: ${e?.message}`),
           );
         }
-        this.propagateSlMove(sigKey, symbol, currentEntry, direction);
+        // NOTE: Do NOT propagate trail SL to Binance — backend manages exit via protectOpenTrades
       }
 
       // TP proximity lock: if price within 0.5% of TP → freeze trail, let TP execute
@@ -524,7 +525,7 @@ export class PositionMonitorService implements OnModuleInit {
       const nearTp = distanceToTp < 0.5;
 
       if ((signal as any).slMovedToEntry && peak > TRAIL_TRIGGER && !nearTp) {
-        const trailPct = peak * TRAIL_KEEP_RATIO; // keep 60% of peak
+        const trailPct = peak * TRAIL_KEEP_RATIO;
         const trailSl = direction === "LONG"
           ? currentEntry * (1 + trailPct / 100)
           : currentEntry * (1 - trailPct / 100);
@@ -536,7 +537,7 @@ export class PositionMonitorService implements OnModuleInit {
           this.logger.log(
             `[PositionMonitor] 📈 ${sigKey} trailing SL → +${trailPct.toFixed(1)}% (${trailSl.toFixed(4)}) peak: ${peak.toFixed(2)}%`,
           );
-          this.propagateSlMove(sigKey, symbol, trailSl, direction);
+          // NOTE: Trail SL stays in DB only — protectOpenTrades handles real mode exit with momentum check
         }
       } else if (nearTp) {
         this.logger.debug(`[PositionMonitor] 🎯 ${sigKey} near TP (${distanceToTp.toFixed(2)}% away) — trail SL frozen`);

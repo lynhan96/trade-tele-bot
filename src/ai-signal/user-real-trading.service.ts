@@ -1616,44 +1616,69 @@ export class UserRealTradingService implements OnModuleInit {
                   this.logger.debug(`[RealTrading] ${symbol} user ${telegramId}: near TP (${distanceToTp.toFixed(2)}% away), SL ok (${slDistanceFromPrice.toFixed(2)}% from price) — trail frozen`);
                 }
               } else if (currentPnlPct >= TRAIL_TRIGGER) {
-                // Compute trailing SL: keep 60% of current profit
+                // ── Backend-managed trail with momentum hold ──
+                // Instead of updating Binance SL: check if price has fallen below trail level
+                // and if momentum has faded → close via market order
                 const trailPct = currentPnlPct * TRAIL_KEEP_RATIO;
                 const trailSl = direction === "LONG"
                   ? entry * (1 + trailPct / 100)
                   : entry * (1 - trailPct / 100);
-                const roundedTrailSl = round(trailSl);
 
-                // Only move SL up (LONG) or down (SHORT), never backwards
-                const shouldMove = direction === "LONG"
-                  ? roundedTrailSl > slPrice * 1.001
-                  : roundedTrailSl < slPrice * 0.999;
+                // Read signal's peak and trail SL from DB (position-monitor tracks this)
+                const signal = await this.signalQueueService.findActiveSignalBySymbol(symbol);
+                const dbTrailSl = signal?.stopLossPrice || trailSl;
+                const peak = (signal as any)?.peakPnlPct || currentPnlPct;
 
-                if (shouldMove) {
-                  this.logger.log(`[RealTrading] ${symbol} user ${telegramId}: trailing SL ${fmtP(slPrice)} → ${fmtP(roundedTrailSl)} (PnL: +${currentPnlPct.toFixed(1)}%)`);
+                // Check if price crossed below the DB trail SL level
+                const trailBreached = direction === "LONG"
+                  ? currentPrice <= dbTrailSl
+                  : currentPrice >= dbTrailSl;
+
+                if (trailBreached) {
+                  // Trail SL level breached — check momentum before closing
+                  // If coin is still moving in our favor (strong candle), HOLD
+                  let momentumHold = false;
                   try {
-                    if (trade.binanceSlAlgoId) {
-                      await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, trade.binanceSlAlgoId);
+                    const closes = await this.marketDataService.getClosePrices(symbol.replace("USDT", ""), "15m");
+                    if (closes.length >= 3) {
+                      const last = closes[closes.length - 1];
+                      const prev = closes[closes.length - 2];
+                      const candleGreen = last > prev;
+                      // Get RSI to check if still in favorable zone
+                      const { RSI } = require("technicalindicators");
+                      const rsiVals = RSI.calculate({ period: 14, values: closes });
+                      const rsi = rsiVals.length > 0 ? rsiVals[rsiVals.length - 1] : 50;
+
+                      if (direction === "LONG" && candleGreen && rsi < 70) {
+                        momentumHold = true; // Coin still pumping, hold
+                      } else if (direction === "SHORT" && !candleGreen && rsi > 30) {
+                        momentumHold = true; // Coin still dumping, hold
+                      }
                     }
-                    const tradeQty = trade.gridLevels?.length > 0
-                      ? trade.gridLevels.filter((g: any) => g.status === "FILLED").reduce((sum: number, g: any) => sum + (g.quantity || 0), 0) || trade.quantity
-                      : trade.quantity;
-                    const slOrder = await this.binanceService.setStopLoss(
-                      keys.apiKey, keys.apiSecret, symbol, roundedTrailSl,
-                      direction as "LONG" | "SHORT", tradeQty,
+                  } catch {
+                    // Fail-open: close if can't check momentum
+                  }
+
+                  if (momentumHold) {
+                    this.logger.log(
+                      `[RealTrading] ${symbol} user ${telegramId}: trail breached but HOLDING (momentum still favorable, PnL: +${currentPnlPct.toFixed(1)}%)`,
                     );
-                    const newId = slOrder?.algoId?.toString() ?? slOrder?.orderId?.toString();
-                    await this.userTradeModel.updateOne({ _id: trade._id }, { $set: { slPrice: roundedTrailSl, binanceSlAlgoId: newId } });
-                    // Only notify on first move to break-even
-                    const wasBelow = direction === "LONG" ? slPrice < entry * 0.999 : slPrice > entry * 1.001;
-                    if (wasBelow) {
-                      await this.telegramService.sendTelegramMessage(chatId,
-                        `🛡️ *Trailing SL*\n\n${symbol} ${direction}\nSL: *${fmtP(roundedTrailSl)}*\nPnL: *+${currentPnlPct.toFixed(1)}%*`
-                      ).catch(() => {});
-                    }
-                  } catch (err) {
-                    this.logger.warn(`[RealTrading] ${symbol} user ${telegramId}: trailing SL failed: ${err?.message}`);
+                  } else {
+                    // Momentum faded — close via market order from backend
+                    this.logger.log(
+                      `[RealTrading] ${symbol} user ${telegramId}: trail SL breached + no momentum → closing via backend (peak=${peak.toFixed(1)}% PnL=${currentPnlPct.toFixed(1)}%)`,
+                    );
+                    await this.closeRealPosition(telegramId, chatId, symbol, "STOP_LOSS");
                   }
                   continue;
+                } else {
+                  // Trail not breached — just log trail level, don't update Binance SL
+                  const trailLockPct = direction === "LONG"
+                    ? ((dbTrailSl - entry) / entry) * 100
+                    : ((entry - dbTrailSl) / entry) * 100;
+                  this.logger.debug(
+                    `[RealTrading] ${symbol} user ${telegramId}: trail OK, lock=+${trailLockPct.toFixed(1)}% PnL=+${currentPnlPct.toFixed(1)}% (backend-managed)`,
+                  );
                 }
               }
             }

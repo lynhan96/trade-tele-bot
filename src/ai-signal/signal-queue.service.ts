@@ -142,6 +142,16 @@ export class SignalQueueService {
     return { action: "QUEUED", signalId: doc._id.toString() };
   }
 
+  /** Find the active signal for a symbol (used by protectOpenTrades for trail SL level). */
+  async findActiveSignalBySymbol(symbol: string): Promise<AiSignalDocument | null> {
+    // Try direct key first, then with :INTRADAY/:SWING suffix
+    let activeId = await this.redisService.get<string>(ACTIVE_KEY(symbol));
+    if (!activeId) activeId = await this.redisService.get<string>(ACTIVE_KEY(`${symbol}:INTRADAY`));
+    if (!activeId) activeId = await this.redisService.get<string>(ACTIVE_KEY(`${symbol}:SWING`));
+    if (!activeId) return null;
+    return this.aiSignalModel.findById(activeId);
+  }
+
   // ─── Position resolution ─────────────────────────────────────────────────
 
   /**
