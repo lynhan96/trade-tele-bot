@@ -811,6 +811,8 @@ Return ONLY valid JSON (no markdown, no explanation):
           currentGates: Object.fromEntries(Object.entries(gates).map(([k, v]) => [k, { enabled: v.enabled, reason: v.reason }])),
           blacklist: [...blacklist],
         },
+        prompt,
+        rawResponse: text,
         actions,
         reasoning: actions.reasoning || "",
         appliedActions,

@@ -11,6 +11,12 @@ export class AiReview {
   @Prop({ type: Object })
   context: Record<string, any>; // input data sent to AI
 
+  @Prop()
+  prompt: string; // full prompt sent to AI
+
+  @Prop()
+  rawResponse: string; // raw AI response text
+
   @Prop({ type: Object })
   actions: Record<string, any>; // AI response (parsed JSON)
 

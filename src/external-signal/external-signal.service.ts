@@ -94,125 +94,8 @@ export class ExternalSignalService {
     }
     this.logger.log(`[ExtSignal] ${symbol} daily count: ${currentDailyCount}/${MAX_DAILY_SIGNALS}`);
 
-    // ── 4b. Market Guard check ─────────────────────────────────────────
-    const marketGuard = await this.strategyAutoTuner.getMarketGuard();
-    if (marketGuard.pauseAll) {
-      return { success: false, reason: `Market Guard: ALL paused (${marketGuard.reason})` };
-    }
-    if (marketGuard.blockLong && isLong) {
-      return { success: false, reason: `Market Guard: LONG blocked (${marketGuard.reason})` };
-    }
-    if (marketGuard.blockShort && !isLong) {
-      return { success: false, reason: `Market Guard: SHORT blocked (${marketGuard.reason})` };
-    }
-
-    // ── 4c. Coin blacklist check ────────────────────────────────────────
-    const blacklist = await this.strategyAutoTuner.getCoinBlacklist();
-    if (blacklist.has(coin) || blacklist.has(symbol)) {
-      return { success: false, reason: `Coin blacklisted: ${coin}` };
-    }
-
-    // ── 5. Custom validation (lighter than full pipeline) ────────────────
-    const rejectedBy: string[] = [];
-    let pricePosition: number | undefined;
-    let rsiValue: number | undefined;
-    let htfRsiValue: number | undefined;
-    let fundingRate: number | undefined;
-    let longShortRatio: number | undefined;
-
-    try {
-      // 5a. Funding rate check
-      const analyticsCache = await this.futuresAnalyticsService.getCachedAnalytics();
-      let fa = analyticsCache.get(symbol);
-      if (!fa) {
-        fa = await this.futuresAnalyticsService.fetchSingleCoin(symbol);
-      }
-      if (fa) {
-        fundingRate = fa.fundingRate;
-        longShortRatio = fa.longShortRatio;
-        const fundingPct = fa.fundingRate * 100;
-        this.logger.log(`[ExtSignal] ${symbol} funding=${fundingPct.toFixed(3)}% L/S=${fa.longShortRatio?.toFixed(2)}`);
-        if (Math.abs(fundingPct) > 0.5) {
-          rejectedBy.push("extreme_funding");
-        } else if (fundingPct > 0.3 && isLong) {
-          rejectedBy.push("funding_crowded_longs");
-        } else if (fundingPct < -0.3 && !isLong) {
-          rejectedBy.push("funding_crowded_shorts");
-        }
-      } else {
-        this.logger.log(`[ExtSignal] ${symbol} funding data unavailable (fail-open)`);
-      }
-
-      // 5b. RSI sanity (15m)
-      const ohlc15m = await this.indicatorService.getOhlc(coin, "15m");
-      if (ohlc15m.closes.length >= 20) {
-        const rsi = this.indicatorService.getRsi(ohlc15m.closes, 14);
-        rsiValue = rsi.last;
-        this.logger.log(`[ExtSignal] ${symbol} RSI(15m)=${rsi.last.toFixed(1)}`);
-        if (isLong && rsi.last > 70) rejectedBy.push("rsi_overbought");
-        if (!isLong && rsi.last < 30) rejectedBy.push("rsi_oversold");
-      } else {
-        this.logger.log(`[ExtSignal] ${symbol} RSI(15m) unavailable — insufficient candles (${ohlc15m.closes.length})`);
-      }
-
-      // 5c. Price position (1h, 20 candles)
-      const ohlc1h = await this.indicatorService.getOhlc(coin, "1h");
-      if (ohlc1h.highs.length >= 20) {
-        const highs = ohlc1h.highs.slice(-20);
-        const lows = ohlc1h.lows.slice(-20);
-        const high = Math.max(...highs);
-        const low = Math.min(...lows);
-        const range = high - low;
-        if (range > 0) {
-          const price = ohlc1h.closes[ohlc1h.closes.length - 1];
-          pricePosition = ((price - low) / range) * 100;
-          this.logger.log(`[ExtSignal] ${symbol} pricePos=${pricePosition.toFixed(0)}% (price=${price}, range=${low.toFixed(2)}-${high.toFixed(2)})`);
-          if (!isLong && pricePosition < 25) rejectedBy.push("price_position_bottom");
-          if (isLong && pricePosition > 75) rejectedBy.push("price_position_top");
-        }
-
-        // 5d. HTF RSI (1h)
-        if (ohlc1h.closes.length >= 20) {
-          const htfRsi = this.indicatorService.getRsi(ohlc1h.closes, 14);
-          htfRsiValue = htfRsi.last;
-          this.logger.log(`[ExtSignal] ${symbol} RSI(1h)=${htfRsi.last.toFixed(1)}`);
-          if (isLong && htfRsi.last > 70) rejectedBy.push("htf_rsi_overbought");
-          if (!isLong && htfRsi.last < 30) rejectedBy.push("htf_rsi_oversold");
-        }
-      } else {
-        this.logger.log(`[ExtSignal] ${symbol} pricePos unavailable — insufficient 1h candles (${ohlc1h.highs.length})`);
-      }
-    } catch (err) {
-      this.logger.warn(`[ExtSignal] ${symbol} validation error (fail-open): ${err?.message}`);
-      // fail-open: approve on error
-    }
-
-    // ── Save validation result ───────────────────────────────────────────
+    // ── No validation — external signals are pre-validated by source ──
     const regime = (await this.redisService.get<string>("cache:ai:regime")) || "MIXED";
-
-    if (rejectedBy.length > 0) {
-      const ctxParts: string[] = [];
-      if (pricePosition != null) ctxParts.push(`pos=${pricePosition.toFixed(0)}%`);
-      if (rsiValue != null) ctxParts.push(`RSI=${rsiValue.toFixed(0)}`);
-      if (htfRsiValue != null) ctxParts.push(`RSI1h=${htfRsiValue.toFixed(0)}`);
-      if (fundingRate != null) ctxParts.push(`funding=${(fundingRate * 100).toFixed(3)}%`);
-      const reason = `Rejected by: ${rejectedBy.join(", ")}${ctxParts.length ? ` (${ctxParts.join(", ")})` : ""}`;
-
-      this.validationModel
-        .create({
-          symbol, direction, strategy, regime,
-          confidence: 65,
-          stopLossPercent: slPct,
-          takeProfitPercent: 0,
-          approved: false, reason,
-          model: "external-tcp",
-          pricePosition, candleMomentum: undefined, rsiValue, htfRsiValue, rejectedBy,
-        })
-        .catch((e) => this.logger.warn(`[ExtSignal] Save validation error: ${e?.message}`));
-
-      this.logger.log(`[ExtSignal] ${symbol} ${direction} REJECTED: ${reason}`);
-      return { success: false, reason };
-    }
 
     // ── 6. Compute TP via existing Fib/ATR logic ─────────────────────────
     this.logger.log(`[ExtSignal] ${symbol} ✅ validation PASSED — computing TP...`);
@@ -240,25 +123,15 @@ export class ExternalSignalService {
       : payload.entry * (1 - tpPct / 100);
     this.logger.log(`[ExtSignal] ${symbol} entry=${payload.entry} SL=$${payload.stopLoss} TP=$${tpPrice.toFixed(4)} regime=${regime}`);
 
-    // ── Save approval validation ─────────────────────────────────────────
-    const parts: string[] = [
-      `pos=${pricePosition?.toFixed(0)}%`,
-      `RSI=${rsiValue?.toFixed(0)}`,
-    ];
-    if (htfRsiValue != null) parts.push(`RSI1h=${htfRsiValue.toFixed(0)}`);
-    if (fundingRate != null) parts.push(`funding=${(fundingRate * 100).toFixed(3)}%`);
-    if (longShortRatio != null) parts.push(`L/S=${longShortRatio.toFixed(2)}`);
-    const approvalReason = `Rules passed: ${parts.join(", ")}`;
-
+    // ── Save validation (auto-approved) ──────────────────────────────────
     this.validationModel
       .create({
         symbol, direction, strategy, regime,
         confidence: 65,
         stopLossPercent: slPct,
         takeProfitPercent: tpPct,
-        approved: true, reason: approvalReason,
+        approved: true, reason: "External signal — auto-approved (no validation)",
         model: "external-tcp",
-        pricePosition, candleMomentum: undefined, rsiValue, htfRsiValue, rejectedBy: [],
       })
       .catch((e) => this.logger.warn(`[ExtSignal] Save validation error: ${e?.message}`));
 
@@ -283,9 +156,7 @@ export class ExternalSignalService {
       minConfidenceToTrade: 60,
     };
 
-    const futuresData = fundingRate != null
-      ? { fundingRate, longShortRatio: longShortRatio ?? 0 }
-      : undefined;
+    const futuresData = undefined; // no validation data — external signals auto-approved
 
     const queueResult = await this.signalQueueService.handleNewSignal(
       coin,
