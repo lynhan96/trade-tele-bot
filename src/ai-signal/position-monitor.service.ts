@@ -712,6 +712,10 @@ export class PositionMonitorService implements OnModuleInit {
         const symbol = signal.symbol;
         const sigKey = this.getSignalKey(signal);
 
+        // Test mode signals have no Binance position — skip position check
+        // They are managed by the price listener (handlePriceTick) instead
+        if ((signal as any).isTestMode) continue;
+
         // If position for this symbol is still open → no action
         if (openPositions.has(symbol)) continue;
 
