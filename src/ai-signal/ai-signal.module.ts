@@ -72,6 +72,6 @@ import {
     StrategyAutoTunerService,
     TradingConfigService,
   ],
-  exports: [AiSignalService, UserSignalSubscriptionService, UserRealTradingService, SignalQueueService, PositionMonitorService, TradingConfigService],
+  exports: [AiSignalService, UserSignalSubscriptionService, UserRealTradingService, SignalQueueService, PositionMonitorService, TradingConfigService, StrategyAutoTunerService],
 })
 export class AiSignalModule {}

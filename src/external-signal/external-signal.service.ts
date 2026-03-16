@@ -7,6 +7,8 @@ import { AiSignalService } from "../ai-signal/ai-signal.service";
 import { AiOptimizerService } from "../strategy/ai-optimizer/ai-optimizer.service";
 import { IndicatorService } from "../strategy/indicators/indicator.service";
 import { FuturesAnalyticsService } from "../market-data/futures-analytics.service";
+import { StrategyAutoTunerService } from "../ai-signal/strategy-auto-tuner.service";
+import { TradingConfigService } from "../ai-signal/trading-config";
 import {
   AiSignalValidation,
   AiSignalValidationDocument,
@@ -39,6 +41,8 @@ export class ExternalSignalService {
     private readonly aiOptimizerService: AiOptimizerService,
     private readonly indicatorService: IndicatorService,
     private readonly futuresAnalyticsService: FuturesAnalyticsService,
+    private readonly strategyAutoTuner: StrategyAutoTunerService,
+    private readonly tradingConfig: TradingConfigService,
     @InjectModel(AiSignalValidation.name)
     private readonly validationModel: Model<AiSignalValidationDocument>,
   ) {}
@@ -89,6 +93,24 @@ export class ExternalSignalService {
       return { success: false, reason: `Daily cap reached (${MAX_DAILY_SIGNALS})` };
     }
     this.logger.log(`[ExtSignal] ${symbol} daily count: ${currentDailyCount}/${MAX_DAILY_SIGNALS}`);
+
+    // ── 4b. Market Guard check ─────────────────────────────────────────
+    const marketGuard = await this.strategyAutoTuner.getMarketGuard();
+    if (marketGuard.pauseAll) {
+      return { success: false, reason: `Market Guard: ALL paused (${marketGuard.reason})` };
+    }
+    if (marketGuard.blockLong && isLong) {
+      return { success: false, reason: `Market Guard: LONG blocked (${marketGuard.reason})` };
+    }
+    if (marketGuard.blockShort && !isLong) {
+      return { success: false, reason: `Market Guard: SHORT blocked (${marketGuard.reason})` };
+    }
+
+    // ── 4c. Coin blacklist check ────────────────────────────────────────
+    const blacklist = await this.strategyAutoTuner.getCoinBlacklist();
+    if (blacklist.has(coin) || blacklist.has(symbol)) {
+      return { success: false, reason: `Coin blacklisted: ${coin}` };
+    }
 
     // ── 5. Custom validation (lighter than full pipeline) ────────────────
     const rejectedBy: string[] = [];
@@ -199,14 +221,16 @@ export class ExternalSignalService {
       const tunedParams = await this.aiOptimizerService.tuneParamsForSymbol(
         coin, currency, regime,
       );
+      const cfg = this.tradingConfig.get();
       const rawTp = tunedParams.takeProfitPercent;
-      // Use AI-computed TP but enforce R:R ≥ 2
-      tpPct = Math.max(rawTp, slPct * 2);
-      tpPct = Math.min(tpPct, 4); // cap 4%
+      // Use AI-computed TP but enforce R:R from config
+      tpPct = Math.max(rawTp, slPct * cfg.tpRrMultiplier);
+      tpPct = Math.min(tpPct, cfg.tpMax);
       this.logger.log(`[ExtSignal] ${symbol} TP: fib/ATR=${rawTp.toFixed(2)}% → R:R adjusted=${tpPct.toFixed(2)}% (SL=${slPct.toFixed(2)}%)`);
     } catch (err) {
-      // Fallback: TP = SL × 2, cap 4%
-      tpPct = Math.min(slPct * 2, 4);
+      // Fallback: TP = SL × R:R, cap from config
+      const cfg = this.tradingConfig.get();
+      tpPct = Math.min(slPct * cfg.tpRrMultiplier, cfg.tpMax);
       this.logger.log(`[ExtSignal] ${symbol} TP: fallback SL×2=${tpPct.toFixed(2)}% (tuneParams failed: ${err?.message})`);
     }
 
