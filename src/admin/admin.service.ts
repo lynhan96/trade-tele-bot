@@ -11,6 +11,7 @@ import { AiRegimeHistory, AiRegimeHistoryDocument } from '../schemas/ai-regime-h
 import { UserSettings, UserSettingsDocument } from '../schemas/user-settings.schema';
 import { AiSignalValidation, AiSignalValidationDocument } from '../schemas/ai-signal-validation.schema';
 import { DailyLimitHistory, DailyLimitHistoryDocument } from '../schemas/daily-limit-history.schema';
+import { AiReview, AiReviewDocument } from '../schemas/ai-review.schema';
 import { UserRealTradingService } from '../ai-signal/user-real-trading.service';
 
 /** Must match the key in SignalQueueService. */
@@ -33,6 +34,7 @@ export class AdminService {
     @InjectModel(UserSettings.name) private userSettingsModel: Model<UserSettingsDocument>,
     @InjectModel(AiSignalValidation.name) private validationModel: Model<AiSignalValidationDocument>,
     @InjectModel(DailyLimitHistory.name) private dailyLimitHistoryModel: Model<DailyLimitHistoryDocument>,
+    @InjectModel(AiReview.name) private aiReviewModel: Model<AiReviewDocument>,
     private readonly redisService: RedisService,
     private readonly userRealTradingService: UserRealTradingService,
   ) {}
@@ -1018,5 +1020,15 @@ export class AdminService {
 
     await this.redisService.set('cache:coin-blacklist', [...blacklist], STRATEGY_GATES_TTL);
     return { ok: true, coin: coin.toUpperCase(), action, blacklistSize: blacklist.size };
+  }
+
+  async getAiReviews(query: Record<string, string>) {
+    const limit = parseInt(query.limit || '20', 10);
+    const reviews = await this.aiReviewModel
+      .find()
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .lean();
+    return reviews;
   }
 }

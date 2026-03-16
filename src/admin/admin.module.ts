@@ -18,6 +18,7 @@ import { UserSettings, UserSettingsSchema } from "../schemas/user-settings.schem
 import { AdminAccount, AdminAccountSchema } from "../schemas/admin-account.schema";
 import { AiSignalValidation, AiSignalValidationSchema } from "../schemas/ai-signal-validation.schema";
 import { DailyLimitHistory, DailyLimitHistorySchema } from "../schemas/daily-limit-history.schema";
+import { AiReview, AiReviewSchema } from "../schemas/ai-review.schema";
 
 @Module({
   imports: [
@@ -33,6 +34,7 @@ import { DailyLimitHistory, DailyLimitHistorySchema } from "../schemas/daily-lim
       { name: AdminAccount.name, schema: AdminAccountSchema },
       { name: AiSignalValidation.name, schema: AiSignalValidationSchema },
       { name: DailyLimitHistory.name, schema: DailyLimitHistorySchema },
+      { name: AiReview.name, schema: AiReviewSchema },
     ]),
     RedisModule,
     AiSignalModule,

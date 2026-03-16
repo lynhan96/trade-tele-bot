@@ -37,6 +37,7 @@ import {
   DailyLimitHistory,
   DailyLimitHistorySchema,
 } from "../schemas/daily-limit-history.schema";
+import { AiReview, AiReviewSchema } from "../schemas/ai-review.schema";
 
 @Module({
   imports: [
@@ -58,6 +59,7 @@ import {
       },
       { name: UserTrade.name, schema: UserTradeSchema },
       { name: DailyLimitHistory.name, schema: DailyLimitHistorySchema },
+      { name: AiReview.name, schema: AiReviewSchema },
     ]),
   ],
   providers: [

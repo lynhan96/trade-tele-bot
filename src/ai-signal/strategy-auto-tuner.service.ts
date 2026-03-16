@@ -6,6 +6,7 @@ import { ConfigService } from "@nestjs/config";
 import Anthropic from "@anthropic-ai/sdk";
 import { RedisService } from "../redis/redis.service";
 import { AiSignal, AiSignalDocument } from "../schemas/ai-signal.schema";
+import { AiReview, AiReviewDocument } from "../schemas/ai-review.schema";
 import { TelegramBotService } from "../telegram/telegram.service";
 import { FuturesAnalyticsService } from "../market-data/futures-analytics.service";
 import { IndicatorService } from "../strategy/indicators/indicator.service";
@@ -72,6 +73,8 @@ export class StrategyAutoTunerService {
   constructor(
     @InjectModel(AiSignal.name)
     private readonly aiSignalModel: Model<AiSignalDocument>,
+    @InjectModel(AiReview.name)
+    private readonly aiReviewModel: Model<AiReviewDocument>,
     private readonly redisService: RedisService,
     private readonly telegramService: TelegramBotService,
     private readonly futuresAnalyticsService: FuturesAnalyticsService,
@@ -86,6 +89,8 @@ export class StrategyAutoTunerService {
       this.evaluateStrategies().catch(() => {});
       this.evaluateCoins().catch(() => {});
       this.evaluateMarketGuard().catch(() => {});
+      // AI review on startup (60s delay for data to load)
+      setTimeout(() => this.aiReviewStrategies().catch(() => {}), 30_000);
     }, 30_000);
   }
 
@@ -794,6 +799,26 @@ Return ONLY valid JSON (no markdown, no explanation):
         await this.tradingConfig.update({ confidenceFloor: actions.confidenceFloor });
         appliedActions.push(`📊 Confidence floor: ${cfg.confidenceFloor} → ${actions.confidenceFloor}`);
       }
+
+      // Save to DB
+      await this.aiReviewModel.create({
+        type: "strategy_review",
+        context: {
+          strategyStats: stratStats,
+          direction: { long: { n: longN, w: longW, pnl: longPnl }, short: { n: shortN, w: shortW, pnl: shortPnl } },
+          topLosers,
+          recent,
+          currentGates: Object.fromEntries(Object.entries(gates).map(([k, v]) => [k, { enabled: v.enabled, reason: v.reason }])),
+          blacklist: [...blacklist],
+        },
+        actions,
+        reasoning: actions.reasoning || "",
+        appliedActions,
+        signalsAnalyzed: signals.length,
+        regime: guard.regime,
+        btcPrice: guard.btcPrice,
+        model: "claude-haiku-4-5",
+      }).catch(e => this.logger.warn(`[AIReview] DB save error: ${e?.message}`));
 
       // Notify admin
       if (appliedActions.length > 0) {

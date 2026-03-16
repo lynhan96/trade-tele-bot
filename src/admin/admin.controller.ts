@@ -72,6 +72,12 @@ export class AdminController {
   }
 
   @UseGuards(AdminGuard)
+  @Get("ai-reviews")
+  getAiReviews(@Query() query: Record<string, string>) {
+    return this.adminService.getAiReviews(query);
+  }
+
+  @UseGuards(AdminGuard)
   @Patch("signals/:id")
   updateSignal(@Param("id") id: string, @Body() dto: Record<string, unknown>) {
     return this.adminService.updateSignal(id, dto);
