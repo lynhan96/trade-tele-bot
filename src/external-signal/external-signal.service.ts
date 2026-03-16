@@ -72,6 +72,13 @@ export class ExternalSignalService {
       `[ExtSignal] ── Processing ${symbol} ${direction} ── entry=${payload.entry} SL=${payload.stopLoss} bot=${payload.botType} period=${payload.period}`,
     );
 
+    // ── Strategy override check (admin can disable specific external bots) ──
+    const override = await this.redisService.get<string>(`cache:strategy-override:${strategy}`);
+    if (override === "disable") {
+      this.logger.log(`[ExtSignal] ${symbol} SKIP — ${strategy} disabled by admin`);
+      return { success: false, reason: `${strategy} disabled` };
+    }
+
     // ── 2. Compute SL% ──────────────────────────────────────────────────
     const rawSlPct = Math.abs((payload.entry - payload.stopLoss) / payload.entry) * 100;
     let slPct = Math.max(2, Math.min(4, rawSlPct)); // clamp [2%, 4%]
