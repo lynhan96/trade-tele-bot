@@ -893,6 +893,9 @@ export class AiSignalService implements OnModuleInit {
     const livePrice = this.marketDataService.getLatestPrice(activeSignal.symbol);
     if (livePrice && livePrice > 0) {
       activeSignal = await this.signalQueueService.refreshEntryPrice(activeSignal, livePrice);
+      // Update position monitor's in-memory signal reference so SL/TP checks
+      // and close notifications use the refreshed entry (not stale original)
+      this.positionMonitorService.refreshSignalReference(activeSignal);
     }
 
     if (isTestMode) {
@@ -1311,6 +1314,7 @@ export class AiSignalService implements OnModuleInit {
       const livePrice = this.marketDataService.getLatestPrice(queued.symbol);
       if (livePrice && livePrice > 0) {
         queued = await this.signalQueueService.refreshEntryPrice(queued, livePrice);
+        this.positionMonitorService.refreshSignalReference(queued);
       }
       await this.notifySignalTestMode(queued);
       const promotedParams = (queued as any).aiParams ?? {};

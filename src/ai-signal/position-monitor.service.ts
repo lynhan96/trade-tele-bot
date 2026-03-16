@@ -169,6 +169,20 @@ export class PositionMonitorService implements OnModuleInit {
     );
   }
 
+  /**
+   * Re-register listener with updated signal (e.g. after refreshEntryPrice).
+   * Preserves trail/peak state from the old signal if not present in the new one.
+   */
+  refreshSignalReference(updatedSignal: AiSignalDocument): void {
+    const sigKey = this.getSignalKey(updatedSignal);
+    if (!this.watchedSymbols.has(sigKey)) return;
+    this.unregisterListener(updatedSignal);
+    this.registerListener(updatedSignal);
+    this.logger.debug(
+      `[PositionMonitor] Refreshed ${sigKey} — entry=${updatedSignal.entryPrice} SL=${updatedSignal.stopLossPrice} TP=${updatedSignal.takeProfitPrice ?? "N/A"}`,
+    );
+  }
+
   unregisterListener(signal: AiSignalDocument): void;
   unregisterListener(sigKey: string, symbol?: string): void;
   unregisterListener(signalOrKey: AiSignalDocument | string, symbol?: string): void {
@@ -761,16 +775,18 @@ export class PositionMonitorService implements OnModuleInit {
             );
           }
 
+          // Use gridAvgEntry for grid signals (same logic as handlePriceTick)
+          const entryForPnl = (signal as any).gridAvgEntry || signal.entryPrice;
           const pnlPercent =
             signal.direction === "LONG"
-              ? ((exitPrice - signal.entryPrice) / signal.entryPrice) * 100
-              : ((signal.entryPrice - exitPrice) / signal.entryPrice) * 100;
+              ? ((exitPrice - entryForPnl) / entryForPnl) * 100
+              : ((entryForPnl - exitPrice) / entryForPnl) * 100;
 
           resolved.push({
             symbol,
             signalKey: sigKey,
             direction: signal.direction,
-            entryPrice: signal.entryPrice,
+            entryPrice: entryForPnl,
             exitPrice,
             pnlPercent,
             closeReason: "POSITION_CLOSED",

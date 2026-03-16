@@ -800,7 +800,7 @@ export class UserRealTradingService implements OnModuleInit {
         `${emoji} *Real Mode: Lenh Da Dong*\n` +
         `━━━━━━━━━━━━━━━━━━\n\n` +
         `${symbol} ${trade.direction}\n` +
-        `Entry: *${fmtP(trade.entryPrice)}*\n` +
+        `Entry: *${fmtP(entryRef2)}*\n` +
         `Exit: *${fmtP(exitPrice)}*\n` +
         `PnL: *${sign}${pnlPct.toFixed(2)}% (${sign}${pnlUsdt.toFixed(2)} USDT)*\n\n` +
         `_${reason}_`;
@@ -1528,8 +1528,12 @@ export class UserRealTradingService implements OnModuleInit {
               if (exitPrice) {
                 const sign = pnlPct >= 0 ? "+" : "";
                 const emoji = pnlPct >= 0 ? "✅" : "❌";
+                const entryDisplay = (trade as any).gridAvgEntry || trade.entryPrice;
+                const fmtPn = (p: number) =>
+                  p >= 1000 ? `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :
+                  p >= 1 ? `$${p.toFixed(2)}` : `$${p.toFixed(4)}`;
                 await this.telegramService.sendTelegramMessage(chatId,
-                  `${emoji} *Real Mode: Lenh Da Dong*\n━━━━━━━━━━━━━━━━━━\n\n${symbol} ${direction}\nPnL: *${sign}${pnlPct.toFixed(2)}% (${sign}${pnlUsdt.toFixed(2)} USDT)*\n_Vi the da dong tren Binance_`
+                  `${emoji} *Real Mode: Lenh Da Dong*\n━━━━━━━━━━━━━━━━━━\n\n${symbol} ${direction}\nEntry: *${fmtPn(entryDisplay)}*\nExit: *${fmtPn(exitPrice)}*\nPnL: *${sign}${pnlPct.toFixed(2)}% (${sign}${pnlUsdt.toFixed(2)} USDT)*\n_Vi the da dong tren Binance_`
                 ).catch(() => {});
               }
               continue;
