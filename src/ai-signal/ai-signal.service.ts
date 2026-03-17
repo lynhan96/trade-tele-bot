@@ -775,15 +775,24 @@ export class AiSignalService implements OnModuleInit {
     // Validation gate — rule-based checks + Claude Haiku contextual analysis
     // Uses price position, candle momentum, RSI checks. Fail-open on error.
     const validationCooldownKey = `cache:ai:validation-cooldown:${signalKey}`;
+    const sym = `${coin.toUpperCase()}${currency.toUpperCase()}`;
+    const dir = signalResult.isLong ? "LONG" : "SHORT";
+    let valBase: any = {
+      symbol: sym, direction: dir, strategy: signalResult.strategy,
+      regime: params.regime || "UNKNOWN", confidence: params.confidence ?? 0,
+      stopLossPercent: params.stopLossPercent, takeProfitPercent: params.takeProfitPercent,
+    };
+    let validationReason = "";
+    let gateAction = "APPROVE";
+    let gateReason = "";
     try {
       const cooldown = await this.redisService.get<boolean>(validationCooldownKey);
       if (cooldown) {
         return; // on cooldown from recent rejection
       }
-
       const validation = await this.aiOptimizerService.validateSignal({
-        symbol: `${coin.toUpperCase()}${currency.toUpperCase()}`,
-        direction: signalResult.isLong ? "LONG" : "SHORT",
+        symbol: sym,
+        direction: dir,
         strategy: signalResult.strategy,
         confidence: params.confidence ?? 0,
         regime: params.regime,
@@ -795,125 +804,95 @@ export class AiSignalService implements OnModuleInit {
         btcDominance,
         btcDomDelta30m,
       });
+
+      // Update valBase with indicator data from validation
+      valBase = {
+        ...valBase,
+        pricePosition: validation.pricePosition, candleMomentum: validation.candleMomentum,
+        rsiValue: validation.rsiValue, htfRsiValue: validation.htfRsiValue,
+      };
+      validationReason = validation.reason;
+
       if (!validation.approved) {
-        await this.redisService.set(validationCooldownKey, true, 15 * 60); // 15min cooldown (was 30min)
-        this.logger.log(
-          `[AiSignal] ${signalKey} REJECTED by rule validation (15min cooldown): ${validation.reason}`,
-        );
+        await this.redisService.set(validationCooldownKey, true, 15 * 60);
+        this.logger.log(`[AiSignal] ${signalKey} REJECTED by rule validation (15min cooldown): ${validation.reason}`);
+        this.validationModel.create({
+          ...valBase, approved: false, model: "rule-engine",
+          reason: validation.reason, rejectedBy: validation.rejectedBy,
+        }).catch(() => {});
         return;
       }
       this.logger.debug(`[AiSignal] ${signalKey} APPROVED: ${validation.reason}`);
-    } catch (err) {
-      // Fail-open: approve on error — don't block good signals
-      this.logger.warn(`[AiSignal] Validation error for ${signalKey}: ${err?.message} — APPROVED (fail-open)`);
-    }
 
-    // ── AI Signal Gate (Tier 2): contextual signal evaluation ──────────────
-    try {
-      const gateResult = await this.aiMarketAnalyst.evaluateSignal({
-        symbol: `${coin.toUpperCase()}${currency.toUpperCase()}`,
-        direction: signalResult.isLong ? "LONG" : "SHORT",
-        strategy: signalResult.strategy,
-        confidence: params.confidence ?? 0,
-        entryPrice: signalResult.entryPrice,
-        stopLossPercent: params.stopLossPercent,
-        takeProfitPercent: params.takeProfitPercent,
-        regime: params.regime,
-      });
-
-      const sym = `${coin.toUpperCase()}${currency.toUpperCase()}`;
-      const dir = signalResult.isLong ? "LONG" : "SHORT";
-
-      if (gateResult.action === "REJECT") {
-        this.logger.log(
-          `[AiSignal] ${signalKey} REJECTED by AI Signal Gate: ${gateResult.reason}`,
-        );
-        this.validationModel.create({
+      // ── AI Signal Gate (Tier 2) ──
+      try {
+        const gateResult = await this.aiMarketAnalyst.evaluateSignal({
           symbol: sym, direction: dir, strategy: signalResult.strategy,
-          regime: params.regime || "UNKNOWN", confidence: params.confidence ?? 0,
+          confidence: params.confidence ?? 0, entryPrice: signalResult.entryPrice,
           stopLossPercent: params.stopLossPercent, takeProfitPercent: params.takeProfitPercent,
-          approved: false, model: "ai-signal-gate",
-          reason: `REJECTED: ${gateResult.reason}`,
-          rejectedBy: ["ai-signal-gate"],
-        }).catch(() => {});
-        return;
-      }
-      if (gateResult.action === "ADJUST") {
-        if (gateResult.adjustedConfidence) params.confidence = gateResult.adjustedConfidence;
-        if (gateResult.adjustedSL) params.stopLossPercent = gateResult.adjustedSL;
-        if (gateResult.adjustedTP) params.takeProfitPercent = gateResult.adjustedTP;
-        this.logger.log(
-          `[AiSignal] ${signalKey} ADJUSTED by AI Signal Gate: ${gateResult.reason}`,
-        );
-        this.validationModel.create({
-          symbol: sym, direction: dir, strategy: signalResult.strategy,
-          regime: params.regime || "UNKNOWN", confidence: params.confidence ?? 0,
-          stopLossPercent: params.stopLossPercent, takeProfitPercent: params.takeProfitPercent,
-          approved: true, model: "ai-signal-gate",
-          reason: `ADJUSTED: ${gateResult.reason}`,
-        }).catch(() => {});
-      } else {
-        this.validationModel.create({
-          symbol: sym, direction: dir, strategy: signalResult.strategy,
-          regime: params.regime || "UNKNOWN", confidence: params.confidence ?? 0,
-          stopLossPercent: params.stopLossPercent, takeProfitPercent: params.takeProfitPercent,
-          approved: true, model: "ai-signal-gate",
-          reason: `APPROVED: ${gateResult.reason}`,
-        }).catch(() => {});
-      }
-    } catch (err) {
-      this.logger.warn(`[AiSignal] AI Signal Gate error for ${signalKey}: ${err?.message} — pass-through`);
-    }
+          regime: params.regime,
+        });
+        gateAction = gateResult.action;
+        gateReason = gateResult.reason || "";
 
-    // ── AI direction-aware confidence: different min for favored vs counter-trend ──
-    try {
-      const aiAnalysis = await this.aiMarketAnalyst.getAnalysis();
-      if (aiAnalysis) {
-        const dirMinConf = signalResult.isLong ? aiAnalysis.longConfidenceMin : aiAnalysis.shortConfidenceMin;
-        if ((params.confidence ?? 0) < dirMinConf) {
-          const dirLabel = signalResult.isLong ? "LONG" : "SHORT";
-          this.logger.log(
-            `[AiSignal] ${signalKey} ${dirLabel} blocked — AI confidence ${params.confidence} < ${dirMinConf} (bias: ${aiAnalysis.directionBias})`,
-          );
+        if (gateResult.action === "REJECT") {
+          this.logger.log(`[AiSignal] ${signalKey} REJECTED by AI Signal Gate: ${gateResult.reason}`);
           this.validationModel.create({
-            symbol: `${coin.toUpperCase()}${currency.toUpperCase()}`,
-            direction: dirLabel, strategy: signalResult.strategy,
-            regime: params.regime || "UNKNOWN", confidence: params.confidence ?? 0,
-            stopLossPercent: params.stopLossPercent, takeProfitPercent: params.takeProfitPercent,
-            approved: false, model: "ai-direction-bias",
-            reason: `${dirLabel} blocked: conf ${params.confidence} < ${dirMinConf} (bias: ${aiAnalysis.directionBias})`,
-            rejectedBy: ["ai-direction-bias"],
+            ...valBase, approved: false, model: "ai-signal-gate",
+            reason: `[rule-engine] ${validationReason}\n[ai-signal-gate] REJECTED: ${gateResult.reason}`,
+            rejectedBy: ["ai-signal-gate"],
           }).catch(() => {});
           return;
         }
+        if (gateResult.action === "ADJUST") {
+          if (gateResult.adjustedConfidence) params.confidence = gateResult.adjustedConfidence;
+          if (gateResult.adjustedSL) params.stopLossPercent = gateResult.adjustedSL;
+          if (gateResult.adjustedTP) params.takeProfitPercent = gateResult.adjustedTP;
+          this.logger.log(`[AiSignal] ${signalKey} ADJUSTED by AI Signal Gate: ${gateResult.reason}`);
+        }
+      } catch (err) {
+        this.logger.warn(`[AiSignal] AI Signal Gate error for ${signalKey}: ${err?.message} — pass-through`);
       }
-    } catch {}
 
-    // ── Strategy weight check: AI can reduce/disable specific strategies ──────
-    try {
-      const weight = await this.aiMarketAnalyst.getStrategyWeight(signalResult.strategy);
-      if (weight <= 0) {
-        this.logger.log(`[AiSignal] ${signalKey} BLOCKED — strategy ${signalResult.strategy} weight=0 (AI disabled)`);
-        this.validationModel.create({
-          symbol: `${coin.toUpperCase()}${currency.toUpperCase()}`,
-          direction: signalResult.isLong ? "LONG" : "SHORT",
-          strategy: signalResult.strategy,
-          regime: params.regime || "UNKNOWN", confidence: params.confidence ?? 0,
-          stopLossPercent: params.stopLossPercent, takeProfitPercent: params.takeProfitPercent,
-          approved: false, model: "ai-strategy-weight",
-          reason: `Strategy ${signalResult.strategy} disabled (weight=0)`,
-          rejectedBy: ["ai-strategy-weight"],
-        }).catch(() => {});
-        return;
-      }
-      if (weight < 1.0) {
-        // Reduce: randomly skip based on weight (e.g. weight=0.5 → 50% chance skip)
-        if (Math.random() > weight) {
-          this.logger.debug(`[AiSignal] ${signalKey} SKIPPED — strategy ${signalResult.strategy} weight=${weight} (AI reduced)`);
+      // ── AI direction-aware confidence (Tier 3) ──
+      try {
+        const aiAnalysis = await this.aiMarketAnalyst.getAnalysis();
+        if (aiAnalysis) {
+          const dirMinConf = signalResult.isLong ? aiAnalysis.longConfidenceMin : aiAnalysis.shortConfidenceMin;
+          if ((params.confidence ?? 0) < dirMinConf) {
+            this.logger.log(`[AiSignal] ${signalKey} ${dir} blocked — AI confidence ${params.confidence} < ${dirMinConf} (bias: ${aiAnalysis.directionBias})`);
+            this.validationModel.create({
+              ...valBase, approved: false, model: "ai-direction-bias",
+              reason: `[rule-engine] ${validationReason}\n[ai-signal-gate] ${gateAction}: ${gateReason}\n[ai-direction-bias] REJECTED: conf ${params.confidence} < ${dirMinConf} (bias: ${aiAnalysis.directionBias})`,
+              rejectedBy: ["ai-direction-bias"],
+            }).catch(() => {});
+            return;
+          }
+        }
+      } catch {}
+
+      // ── Strategy weight check (Tier 4) ──
+      try {
+        const weight = await this.aiMarketAnalyst.getStrategyWeight(signalResult.strategy);
+        if (weight <= 0) {
+          this.logger.log(`[AiSignal] ${signalKey} BLOCKED — strategy ${signalResult.strategy} weight=0 (AI disabled)`);
+          this.validationModel.create({
+            ...valBase, approved: false, model: "ai-strategy-weight",
+            reason: `[rule-engine] ${validationReason}\n[ai-strategy-weight] REJECTED: ${signalResult.strategy} disabled (weight=0)`,
+            rejectedBy: ["ai-strategy-weight"],
+          }).catch(() => {});
           return;
         }
-      }
-    } catch {}
+        if (weight < 1.0) {
+          if (Math.random() > weight) {
+            this.logger.debug(`[AiSignal] ${signalKey} SKIPPED — strategy ${signalResult.strategy} weight=${weight} (AI reduced)`);
+            return;
+          }
+        }
+      } catch {}
+    } catch (err) {
+      this.logger.warn(`[AiSignal] Validation error for ${signalKey}: ${err?.message} — APPROVED (fail-open)`);
+    }
 
     // ── Daily signal cap: check BEFORE processing, increment AFTER success ──
     const MAX_DAILY_SIGNALS = 35;
@@ -928,6 +907,13 @@ export class AiSignalService implements OnModuleInit {
       this.logger.debug(`[AiSignal] Daily signal cap reached (${MAX_DAILY_SIGNALS}) — skipping ${coin.toUpperCase()}`);
       return;
     }
+
+    // ── Save combined validation record (all tiers passed) ──
+    this.validationModel.create({
+      ...valBase, approved: true, model: gateAction === "ADJUST" ? "ai-signal-gate" : "rule-engine",
+      reason: `[rule-engine] ${validationReason}${gateReason ? `\n[ai-signal-gate] ${gateAction}: ${gateReason}` : ""}`,
+      rejectedBy: [],
+    }).catch(() => {});
 
     const isTestMode = await this.isTestModeEnabled();
 

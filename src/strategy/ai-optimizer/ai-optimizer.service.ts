@@ -623,7 +623,7 @@ export class AiOptimizerService {
     longShortRatio?: number;
     btcDominance?: number;
     btcDomDelta30m?: number;
-  }): Promise<{ approved: boolean; reason?: string }> {
+  }): Promise<{ approved: boolean; reason: string; pricePosition?: number; candleMomentum?: number; rsiValue?: number; htfRsiValue?: number; rejectedBy: string[] }> {
     const { symbol, direction, strategy, regime, confidence, stopLossPercent, takeProfitPercent } = signal;
     const isLong = direction === "LONG";
     const rejectedBy: string[] = [];
@@ -698,14 +698,7 @@ export class AiOptimizerService {
       if (htfRsiValue != null) ctxParts.push(`RSI1h=${htfRsiValue.toFixed(0)}`);
       if (signal.fundingRate != null) ctxParts.push(`funding=${(signal.fundingRate * 100).toFixed(3)}%`);
       const reason = `Rejected by: ${rejectedBy.join(", ")}${ctxParts.length ? ` (${ctxParts.join(", ")})` : ""}`;
-      this.validationModel.create({
-        symbol, direction, strategy, regime, confidence,
-        stopLossPercent, takeProfitPercent,
-        approved: false, reason,
-        model: "rule-engine",
-        pricePosition, candleMomentum, rsiValue, htfRsiValue, rejectedBy,
-      }).catch((e) => this.logger.warn(`[AiOptimizer] Failed to save validation: ${e?.message}`));
-      return { approved: false, reason };
+      return { approved: false, reason, pricePosition, candleMomentum, rsiValue, htfRsiValue, rejectedBy };
     }
 
     // Rule checks passed — approve (AI validation removed)
@@ -722,16 +715,7 @@ export class AiOptimizerService {
     if (signal.btcDomDelta30m != null) parts.push(`Δ30m=${signal.btcDomDelta30m > 0 ? "+" : ""}${signal.btcDomDelta30m.toFixed(2)}%`);
     const reason = `Rules passed: ${parts.join(", ")}`;
 
-    this.validationModel.create({
-      symbol, direction, strategy, regime, confidence,
-      stopLossPercent, takeProfitPercent,
-      approved: true, reason,
-      model: "rule-engine",
-      pricePosition, candleMomentum, rsiValue, htfRsiValue,
-      rejectedBy: [],
-    }).catch((e) => this.logger.warn(`[AiOptimizer] Failed to save validation: ${e?.message}`));
-
-    return { approved: true, reason };
+    return { approved: true, reason, pricePosition, candleMomentum, rsiValue, htfRsiValue, rejectedBy: [] as string[] };
   }
 
   /**
