@@ -308,18 +308,9 @@ export class StrategyAutoTunerService {
         prevGuard.blockShort !== blockShort ||
         prevGuard.pauseAll !== pauseAll;
 
+      // Log only — AI Market Analyst handles notifications now
       if (changed) {
-        const icon = pauseAll ? "🛑" : (blockLong && blockShort) ? "⛔" : blockLong ? "🔴" : blockShort ? "🔵" : "🟢";
-        const adminIds = (process.env.AI_ADMIN_TELEGRAM_ID || "").split(",").filter(Boolean);
-        const msg =
-          `${icon} *Market Guard Update*\n━━━━━━━━━━━━━━━━━━\n\n` +
-          `${pauseAll ? "🛑 ALL signals PAUSED" : blockLong ? "🔴 LONG blocked" : blockShort ? "🔵 SHORT blocked" : "🟢 All directions open"}\n` +
-          `Confidence floor: ${confidenceFloor}\n\n` +
-          `_${reason}_\n\n` +
-          `BTC: $${btcPrice.toLocaleString()} | Regime: ${regime}`;
-        for (const id of adminIds) {
-          await this.telegramService.sendTelegramMessage(parseInt(id), msg).catch(() => {});
-        }
+        this.logger.log(`[MarketGuard] State changed: pauseAll=${pauseAll} blockLong=${blockLong} blockShort=${blockShort}`);
       }
 
       this.logger.log(
@@ -471,15 +462,9 @@ export class StrategyAutoTunerService {
 
       this.logger.log(`[AutoTuner] Coin blacklist (${uniqueBlacklist.length}): ${uniqueBlacklist.length > 0 ? uniqueBlacklist.join(", ") : "(none)"}`);
 
+      // Log only — no Telegram notification
       if (changes.length > 0) {
-        const adminIds = (process.env.AI_ADMIN_TELEGRAM_ID || "").split(",").filter(Boolean);
-        const msg =
-          `🪙 *Coin Auto-Blacklist*\n━━━━━━━━━━━━━━━━━━\n\n` +
-          changes.join("\n") +
-          `\n\n_${uniqueBlacklist.length} coins blocked / ${LOOKBACK_DAYS} ngày_`;
-        for (const id of adminIds) {
-          await this.telegramService.sendTelegramMessage(parseInt(id), msg).catch(() => {});
-        }
+        this.logger.log(`[AutoTuner] Coin blacklist changes: ${changes.join(", ")}`);
       }
     } catch (err) {
       this.logger.error(`[AutoTuner] Coin evaluation error: ${err?.message}`);
@@ -608,16 +593,9 @@ export class StrategyAutoTunerService {
         );
       }
 
-      // Notify admin on changes
+      // Log only — no Telegram notification
       if (changes.length > 0) {
-        const adminIds = (process.env.AI_ADMIN_TELEGRAM_ID || "").split(",").filter(Boolean);
-        const msg =
-          `📊 *Strategy Auto-Tuner*\n━━━━━━━━━━━━━━━━━━\n\n` +
-          changes.join("\n") +
-          `\n\n_Đánh giá ${signals.length} signals / ${LOOKBACK_DAYS} ngày_`;
-        for (const id of adminIds) {
-          await this.telegramService.sendTelegramMessage(parseInt(id), msg).catch(() => {});
-        }
+        this.logger.log(`[AutoTuner] Strategy changes: ${changes.join(", ")}`);
       }
     } catch (err) {
       this.logger.error(`[AutoTuner] Error: ${err?.message}`);
