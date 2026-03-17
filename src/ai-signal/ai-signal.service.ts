@@ -26,6 +26,7 @@ import { UserRealTradingService } from "./user-real-trading.service";
 import { MarketDataService } from "../market-data/market-data.service";
 import { CoinGeckoService } from "../coingecko/coingecko.service";
 import { StrategyAutoTunerService } from "./strategy-auto-tuner.service";
+import { AiMarketAnalystService } from "./ai-market-analyst.service";
 import { TradingConfigService } from "./trading-config";
 
 const AI_PAUSED_KEY = "cache:ai:paused";
@@ -70,6 +71,7 @@ export class AiSignalService implements OnModuleInit {
     private readonly marketDataService: MarketDataService,
     private readonly coinGeckoService: CoinGeckoService,
     private readonly strategyAutoTuner: StrategyAutoTunerService,
+    private readonly aiMarketAnalyst: AiMarketAnalystService,
     private readonly tradingConfig: TradingConfigService,
     @InjectModel(AiSignal.name)
     private readonly aiSignalModel: Model<AiSignalDocument>,
@@ -820,6 +822,67 @@ export class AiSignalService implements OnModuleInit {
       // Fail-open: approve on error — don't block good signals
       this.logger.warn(`[AiSignal] Validation error for ${signalKey}: ${err?.message} — APPROVED (fail-open)`);
     }
+
+    // ── AI Signal Gate (Tier 2): contextual signal evaluation ──────────────
+    try {
+      const gateResult = await this.aiMarketAnalyst.evaluateSignal({
+        symbol: `${coin.toUpperCase()}${currency.toUpperCase()}`,
+        direction: signalResult.isLong ? "LONG" : "SHORT",
+        strategy: signalResult.strategy,
+        confidence: params.confidence ?? 0,
+        entryPrice: signalResult.entryPrice,
+        stopLossPercent: params.stopLossPercent,
+        takeProfitPercent: params.takeProfitPercent,
+        regime: params.regime,
+      });
+
+      if (gateResult.action === "REJECT") {
+        this.logger.log(
+          `[AiSignal] ${signalKey} REJECTED by AI Signal Gate: ${gateResult.reason}`,
+        );
+        return;
+      }
+      if (gateResult.action === "ADJUST") {
+        if (gateResult.adjustedConfidence) params.confidence = gateResult.adjustedConfidence;
+        if (gateResult.adjustedSL) params.stopLossPercent = gateResult.adjustedSL;
+        if (gateResult.adjustedTP) params.takeProfitPercent = gateResult.adjustedTP;
+        this.logger.log(
+          `[AiSignal] ${signalKey} ADJUSTED by AI Signal Gate: ${gateResult.reason}`,
+        );
+      }
+    } catch (err) {
+      this.logger.warn(`[AiSignal] AI Signal Gate error for ${signalKey}: ${err?.message} — pass-through`);
+    }
+
+    // ── AI direction-aware confidence: different min for favored vs counter-trend ──
+    try {
+      const aiAnalysis = await this.aiMarketAnalyst.getAnalysis();
+      if (aiAnalysis) {
+        const dirMinConf = signalResult.isLong ? aiAnalysis.longConfidenceMin : aiAnalysis.shortConfidenceMin;
+        if ((params.confidence ?? 0) < dirMinConf) {
+          this.logger.log(
+            `[AiSignal] ${signalKey} ${signalResult.isLong ? "LONG" : "SHORT"} blocked — AI confidence ${params.confidence} < ${dirMinConf} (bias: ${aiAnalysis.directionBias})`,
+          );
+          return;
+        }
+      }
+    } catch {}
+
+    // ── Strategy weight check: AI can reduce/disable specific strategies ──────
+    try {
+      const weight = await this.aiMarketAnalyst.getStrategyWeight(signalResult.strategy);
+      if (weight <= 0) {
+        this.logger.log(`[AiSignal] ${signalKey} BLOCKED — strategy ${signalResult.strategy} weight=0 (AI disabled)`);
+        return;
+      }
+      if (weight < 1.0) {
+        // Reduce: randomly skip based on weight (e.g. weight=0.5 → 50% chance skip)
+        if (Math.random() > weight) {
+          this.logger.debug(`[AiSignal] ${signalKey} SKIPPED — strategy ${signalResult.strategy} weight=${weight} (AI reduced)`);
+          return;
+        }
+      }
+    } catch {}
 
     // ── Daily signal cap: check BEFORE processing, increment AFTER success ──
     const MAX_DAILY_SIGNALS = 35;

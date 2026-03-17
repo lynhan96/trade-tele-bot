@@ -140,8 +140,16 @@ export class StrategyAutoTunerService {
    * Cron: evaluate market conditions every 15min and set market guard.
    * Auto-pauses or restricts signal direction based on BTC price + regime + recent perf.
    */
+  // NOTE: Market Guard is now handled by AiMarketAnalystService (AI-driven).
+  // This rule-based version is kept as fallback — runs only if AI analysis is missing.
   @Cron("0 */15 * * * *") // every 15min
   async evaluateMarketGuard(): Promise<void> {
+    // Skip if AI Market Analyst has already set a guard (within last 20min)
+    const aiAnalysis = await this.redisService.get<any>("cache:ai:market-analysis");
+    if (aiAnalysis) {
+      this.logger.debug("[MarketGuard] Skipping rule-based guard — AI analysis active");
+      return;
+    }
     try {
       // Get BTC price
       const btcRaw = await this.redisService.get<string | number>("price:BTCUSDT");
