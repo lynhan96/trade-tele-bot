@@ -590,29 +590,8 @@ export class AiSignalService implements OnModuleInit {
       return;
     }
 
-    // ── Strategy-specific confidence gates ──
-    const strategyName = signalResult.strategy;
-    // TREND_EMA: worst performer (avg -2.28% SL) — require confidence 70+
-    if (strategyName === "TREND_EMA" && params.confidence < 70) {
-      this.logger.debug(
-        `[AiSignal] ${coin.toUpperCase()} TREND_EMA blocked — confidence ${params.confidence} < 70`,
-      );
-      return;
-    }
-    // STOCH_EMA_KDJ: 68% WR but only +0.38% PnL (poor R:R). conf<78 = high loss rate
-    if (strategyName === "STOCH_EMA_KDJ" && params.confidence < 78) {
-      this.logger.debug(
-        `[AiSignal] ${coin.toUpperCase()} STOCH_EMA_KDJ blocked — confidence ${params.confidence} < 78 (data: poor R:R, need higher quality)`,
-      );
-      return;
-    }
-    // EMA_PULLBACK: 65% WR but -$68 PnL, R:R=0.31 — worst strategy by profit
-    if (strategyName === "EMA_PULLBACK" && params.confidence < 75) {
-      this.logger.debug(
-        `[AiSignal] ${coin.toUpperCase()} EMA_PULLBACK blocked — confidence ${params.confidence} < 75 (R:R 0.31, -$68 all-time)`,
-      );
-      return;
-    }
+    // Strategy-specific confidence gates REMOVED — now handled by AI Signal Gate (Tier 2)
+    // and AI direction-aware confidence (per-direction min from AI Market Analyst)
 
     // ── Global regime trend filter (uses indicator-based globalRegime, not AI params.regime) ──
     // STRONG_BEAR: only SHORT signals (unless futures sentiment is strongly bullish).

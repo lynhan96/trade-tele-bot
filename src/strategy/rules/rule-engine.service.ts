@@ -54,8 +54,8 @@ export class RuleEngineService {
     // TREND_EMA: +RSI exhaustion check + trend freshness (max 1.5% from cross)
     // EMA_PULLBACK: direction from 1h EMA slope (not regime) + 2-candle confirmation + stricter RSI
     const allStrategies = [
-      "RSI_CROSS", "RSI_ZONE", "TREND_EMA", "EMA_PULLBACK",
-      "BB_SCALP", "STOCH_BB_PATTERN", "STOCH_EMA_KDJ", "SMC_FVG",
+      "RSI_CROSS", "TREND_EMA", "EMA_PULLBACK",
+      "STOCH_EMA_KDJ", "SMC_FVG",
     ];
 
     // ── Filter out auto-disabled strategies (StrategyAutoTuner) ──
@@ -351,18 +351,12 @@ export class RuleEngineService {
     switch (strategy) {
       case "RSI_CROSS":
         return this.evalRsiCross(coin, currency, params);
-      case "RSI_ZONE":
-        return this.evalRsiZone(coin, currency, params);
       case "TREND_EMA":
         return this.evalTrendEma(coin, currency, params);
-      case "STOCH_BB_PATTERN":
-        return this.evalStochBbPattern(coin, currency, params);
       case "STOCH_EMA_KDJ":
         return this.evalStochEmaKdj(coin, currency, params);
       case "EMA_PULLBACK":
         return this.evalEmaPullback(coin, currency, params);
-      case "BB_SCALP":
-        return this.evalBbScalp(coin, currency, params);
       case "SMC_FVG":
         return this.evalSmcFvg(coin, currency, params);
       default:
@@ -520,82 +514,6 @@ export class RuleEngineService {
     };
   }
 
-  // ─── RSI_ZONE (ported from F8 Config 3) ─────────────────────────────────
-
-  async evalRsiZone(
-    coin: string,
-    currency: string,
-    params: AiTunedParams,
-  ): Promise<SignalResult | null> {
-    const cfg = params.rsiZone;
-    if (!cfg) return null;
-
-    const closes = await this.indicatorService.getCloses(coin, cfg.primaryKline);
-    if (closes.length < 50) return null;
-
-    // Use previous candle RSI (excludeLatestCandle = true in F8 Config 3)
-    const closesToUse = cfg.excludeLatestCandle ? closes.slice(0, -1) : closes;
-    const rsi = this.indicatorService.getRsi(closesToUse, cfg.rsiPeriod);
-
-    // Skip degenerate RSI (freshly seeded coins with too few real candles)
-    if (rsi.last >= 99.9 || rsi.last <= 0.1) return null;
-
-    const isLongZone = rsi.last < cfg.rsiBottom;
-    const isShortZone = rsi.last > cfg.rsiTop;
-
-    if (!isLongZone && !isShortZone) return null;
-
-    const isLong = isLongZone;
-
-    // Regime gate: don't short into a strong bull trend, don't long into a strong bear trend
-    if (isLong && params.regime === "STRONG_BEAR") {
-      this.logger.debug(`[RuleEngine] ${coin} RSI_ZONE LONG blocked: STRONG_BEAR regime`);
-      return null;
-    }
-    if (!isLong && params.regime === "STRONG_BULL") {
-      this.logger.debug(`[RuleEngine] ${coin} RSI_ZONE SHORT blocked: STRONG_BULL regime`);
-      return null;
-    }
-
-    // Initial candle direction gate
-    if (cfg.enableInitialCandle) {
-      const ohlc = await this.indicatorService.getOhlc(coin, cfg.primaryKline);
-      if (ohlc.opens.length > 0) {
-        const lastClose = ohlc.closes[ohlc.closes.length - 1];
-        const lastOpen = ohlc.opens[ohlc.opens.length - 1];
-        const isGreen = lastClose > lastOpen;
-        if (isLong && !isGreen) return null;
-        if (!isLong && isGreen) return null;
-      }
-    }
-
-    // HTF RSI confirmation
-    if (cfg.enableHtfRsi) {
-      const htfCloses = await this.indicatorService.getCloses(coin, cfg.htfKline);
-      if (htfCloses.length >= 50) {
-        const htfRsi = this.indicatorService.getRsi(htfCloses, cfg.rsiPeriod);
-        const htfRsiEma = this.indicatorService.getRsiEma(
-          htfCloses,
-          cfg.rsiPeriod,
-          cfg.rsiEmaPeriod || 9,
-        );
-        const htfIsBullish = htfRsi.last > htfRsiEma.last;
-        if (isLong && !htfIsBullish) return null;
-        if (!isLong && htfIsBullish) return null;
-      }
-    }
-
-    const entryPrice = closes[closes.length - 1];
-    const zone = isLong ? `oversold (${rsi.last.toFixed(1)} < ${cfg.rsiBottom})` : `overbought (${rsi.last.toFixed(1)} > ${cfg.rsiTop})`;
-
-    return {
-      isLong,
-      entryPrice,
-      strategy: "RSI_ZONE",
-      reason: `RSI(${cfg.rsiPeriod}) ${zone} on ${cfg.primaryKline}`,
-    };
-  }
-
   // ─── TREND_EMA (ported from F1) ──────────────────────────────────────────
 
   async evalTrendEma(
@@ -701,140 +619,6 @@ export class RuleEngineService {
       entryPrice,
       strategy: "TREND_EMA",
       reason: `EMA(${cfg.fastPeriod}) ${crossType} EMA(${cfg.slowPeriod}), RSI=${rsi.last.toFixed(1)}, dist=${moveFromCross.toFixed(1)}% on ${cfg.primaryKline}`,
-    };
-  }
-
-  // ─── STOCH_BB_PATTERN (ported from F4) — 2-stage ────────────────────────
-
-  async evalStochBbPattern(
-    coin: string,
-    currency: string,
-    params: AiTunedParams,
-  ): Promise<SignalResult | null> {
-    const cfg = params.stochBbPattern;
-    if (!cfg) return null;
-
-    const stateKey = `cache:ai-signal:state:${coin}:STOCH_BB`;
-    const ohlc = await this.indicatorService.getOhlc(coin, cfg.primaryKline);
-    const { opens, highs, lows, closes } = ohlc;
-
-    if (closes.length < 50) return null;
-
-    const bb = this.indicatorService.getBollingerBands(closes, cfg.bbPeriod, cfg.bbStdDev);
-    const bbWidth = this.indicatorService.getBbWidth(bb);
-    const currentPrice = closes[closes.length - 1];
-
-    const stochResult = this.indicatorService.getStochastic(
-      highs,
-      lows,
-      closes,
-      cfg.stochK,
-      cfg.stochSmoothK,
-      cfg.stochSmoothD,
-    );
-
-    const stochK = {
-      last: stochResult.smoothedK[stochResult.smoothedK.length - 1],
-      secondLast: stochResult.smoothedK[stochResult.smoothedK.length - 2],
-    };
-    const stochD = {
-      last: stochResult.smoothedD[stochResult.smoothedD.length - 1],
-      secondLast: stochResult.smoothedD[stochResult.smoothedD.length - 2],
-    };
-
-    let patternState = await this.redisService.get<{
-      isLong: boolean;
-      count: number;
-    }>(stateKey);
-
-    // Stage 1: detect 3-candle reversal pattern near BB band
-    if (!patternState) {
-      const n = closes.length;
-      if (n < 4) return null;
-
-      const c3 = { open: opens[n - 4], close: closes[n - 4] }; // oldest
-      const c2 = { open: opens[n - 3], close: closes[n - 3] };
-      const c1 = { open: opens[n - 2], close: closes[n - 2] }; // most recent closed
-
-      const isGreen = (c) => c.close > c.open;
-
-      // LONG pattern: RED-GREEN-RED at lower BB
-      const isLongPattern =
-        !isGreen(c3) && isGreen(c2) && !isGreen(c1);
-      // SHORT pattern: GREEN-RED-GREEN at upper BB
-      const isShortPattern =
-        isGreen(c3) && !isGreen(c2) && isGreen(c1);
-
-      if (!isLongPattern && !isShortPattern) return null;
-
-      const isLong = isLongPattern;
-      const bbBand = isLong ? bb.lower : bb.upper;
-      const distPct = (Math.abs(currentPrice - bbBand) / bbWidth) * 100;
-
-      if (distPct > cfg.rangeCondition1) return null; // price too far from band
-
-      // Store Stage 1 state
-      await this.redisService.set(
-        stateKey,
-        { isLong, count: 1 },
-        PATTERN_STATE_TTL,
-      );
-      this.logger.debug(`[RuleEngine] ${coin} STOCH_BB Stage 1 triggered (${isLong ? "LONG" : "SHORT"})`);
-      return null; // wait for Stage 2
-    }
-
-    // Stage 2: Stochastic cross confirmation
-    patternState = { ...patternState, count: patternState.count + 1 };
-
-    const bbBand = patternState.isLong ? bb.lower : bb.upper;
-    const distPct = (Math.abs(currentPrice - bbBand) / bbWidth) * 100;
-
-    // Stage 2 entry conditions
-    const longStage2 =
-      patternState.isLong &&
-      this.indicatorService.crossedAbove(stochK, stochD) &&
-      stochD.last < cfg.stochLong &&
-      distPct < cfg.rangeCondition2;
-
-    const shortStage2 =
-      !patternState.isLong &&
-      this.indicatorService.crossedBelow(stochK, stochD) &&
-      stochD.last > cfg.stochShort &&
-      distPct < cfg.rangeCondition2;
-
-    if (!longStage2 && !shortStage2) {
-      if (patternState.count >= cfg.maxCandleCount) {
-        // Too many candles without confirmation — reset
-        await this.redisService.delete(stateKey);
-        this.logger.debug(`[RuleEngine] ${coin} STOCH_BB Stage 1 expired (${cfg.maxCandleCount} candles)`);
-      } else {
-        // Save updated count
-        await this.redisService.set(stateKey, patternState, PATTERN_STATE_TTL);
-      }
-      return null;
-    }
-
-    // Stage 2 confirmed — apply regime gates before emitting
-    // STOCH_BB is mean reversion — only valid in ranging/sideways markets.
-    // In strong trending regimes counter-trend mean reversion = trap (LONG: 0/22 wins historically).
-    if (params.regime === "STRONG_BEAR" && patternState.isLong) {
-      await this.redisService.delete(stateKey);
-      this.logger.debug(`[RuleEngine] ${coin} STOCH_BB_PATTERN LONG blocked: STRONG_BEAR (mean reversion against trend)`);
-      return null;
-    }
-    if (params.regime === "STRONG_BULL" && !patternState.isLong) {
-      await this.redisService.delete(stateKey);
-      this.logger.debug(`[RuleEngine] ${coin} STOCH_BB_PATTERN SHORT blocked: STRONG_BULL (mean reversion against trend)`);
-      return null;
-    }
-
-    await this.redisService.delete(stateKey);
-
-    return {
-      isLong: patternState.isLong,
-      entryPrice: currentPrice,
-      strategy: "STOCH_BB_PATTERN",
-      reason: `3-candle reversal at ${patternState.isLong ? "lower" : "upper"} BB + Stoch cross (K=${stochK.last.toFixed(1)}, D=${stochD.last.toFixed(1)}) on ${cfg.primaryKline}`,
     };
   }
 
@@ -1071,155 +855,8 @@ export class RuleEngineService {
       };
     }
 
-    // SHORT: downtrend + price rallied to EMA21, consecutive rejection
-    if (isDowntrend) {
-      const touchedEma = prevPrice >= ema.last * 0.99 || currentPrice >= ema.last * 0.99;
-      const isRed = currentPrice < currentOpen;
-      const prevIsRed = prevPrice < prevOpen;
-      const consecutiveReject = isRed && prevIsRed; // 2 red candles = confirmed rejection
-      const belowSupport = currentPrice < emaSupport.last;
-      const rsiOk = rsi.last >= 45 && rsi.last <= 70; // not oversold (SHORT only when RSI 45-70)
-
-      if (!touchedEma || !consecutiveReject || !belowSupport || !rsiOk) {
-        this.logger.debug(
-          `[RuleEngine] ${coin} EMA_PULLBACK SHORT miss: touch=${touchedEma} 2red=${consecutiveReject} support=${belowSupport} rsi=${rsi.last.toFixed(1)}(45-70)`,
-        );
-        return null;
-      }
-
-      // HTF RSI not oversold — don't short when already oversold (bounce likely)
-      const htfRsi = this.indicatorService.getRsi(htfCloses, cfg.rsiPeriod);
-      if (htfRsi.last < 35) {
-        this.logger.debug(`[RuleEngine] ${coin} EMA_PULLBACK SHORT blocked: 1h RSI=${htfRsi.last.toFixed(1)} oversold (<35) — bounce likely`);
-        return null;
-      }
-
-      return {
-        isLong: false,
-        entryPrice: currentPrice,
-        strategy: "EMA_PULLBACK",
-        reason: `Rally to EMA(${cfg.emaPeriod})=${ema.last.toFixed(2)}, 2-candle reject, RSI=${rsi.last.toFixed(1)}, htfSlope=${htfSlope.toFixed(2)}%`,
-      };
-    }
-
-    return null;
-  }
-
-  // ─── BB_SCALP (mean reversion at Bollinger Band extremes, SIDEWAYS regime) ─
-  // DATA: SHORT 16 trades, 0 SL = +30.87%. LONG 22 trades, 0 wins, 9 SL = -13.32%.
-  // LONGs bounce off lower band in downtrends → false bounces. Needs HTF confirmation.
-
-  private async evalBbScalp(
-    coin: string,
-    currency: string,
-    params: AiTunedParams,
-  ): Promise<SignalResult | null> {
-    const cfg = params.bbScalp ?? {
-      primaryKline: "15m",
-      bbPeriod: 20,
-      bbStdDev: 2.0,
-      bbTolerance: 0.1,
-      rsiPeriod: 14,
-      rsiLongMax: 45,
-      rsiShortMin: 55,
-    };
-
-    // BB_SCALP is a mean-reversion strategy — only valid in tight ranging/sideways markets
-    // Firing in MIXED/BULL/BEAR/VOLATILE leads to false bounces (e.g. BTC SHORT in uptrend)
-    const regime = params.regime ?? "MIXED";
-    const allowedRegimes = ["SIDEWAYS", "RANGE_BOUND"];
-    if (!allowedRegimes.includes(regime)) {
-      this.logger.debug(`[RuleEngine] ${coin} BB_SCALP blocked: regime=${regime} (only SIDEWAYS/RANGE_BOUND)`);
-      return null;
-    }
-
-    const ohlc = await this.indicatorService.getOhlc(coin, cfg.primaryKline);
-    if (ohlc.closes.length < cfg.bbPeriod + cfg.rsiPeriod + 5) return null;
-
-    const closes = ohlc.closes;
-    const lastClose = closes[closes.length - 1];
-    const prevClose = closes[closes.length - 2];
-    const prev2Close = closes[closes.length - 3];
-
-    // Bollinger Bands
-    const { upper, lower } = this.indicatorService.getBollingerBands(
-      closes,
-      cfg.bbPeriod,
-      cfg.bbStdDev,
-    );
-
-    // RSI
-    const rsiSeries = this.indicatorService.getRsi(closes, cfg.rsiPeriod);
-    const rsi = rsiSeries.last;
-    const rsiPrev = rsiSeries.secondLast ?? rsi;
-
-    const toleranceFactor = cfg.bbTolerance / 100;
-
-    // ── LONG: confirmed bounce off lower band ──────────────────────────────
-    const prevAtLowerBand = prevClose <= lower * (1 + toleranceFactor);
-    const bouncingUp = lastClose > prevClose && lastClose > prev2Close;
-    const rsiTurningUp = rsi > rsiPrev;
-    if (prevAtLowerBand && bouncingUp && rsi < cfg.rsiLongMax && rsiTurningUp) {
-      // HTF confirmation: 1h RSI must not be in downtrend (> 40)
-      const htfCloses = await this.indicatorService.getCloses(coin, "1h");
-      if (htfCloses.length >= 20) {
-        const htfRsi = this.indicatorService.getRsi(htfCloses, 14);
-        if (htfRsi.last < 40) {
-          this.logger.debug(`[RuleEngine] ${coin} BB_SCALP LONG blocked: 1h RSI=${htfRsi.last.toFixed(1)} bearish (<40)`);
-          return null;
-        }
-      }
-
-      // Volume confirmation: current candle must show buying pressure
-      const lastOpen = ohlc.opens[ohlc.opens.length - 1];
-      const bodySize = Math.abs(lastClose - lastOpen);
-      const candleRange = ohlc.highs[ohlc.highs.length - 1] - ohlc.lows[ohlc.lows.length - 1];
-      // Body must be > 50% of candle range (strong green, not doji)
-      if (candleRange > 0 && bodySize / candleRange < 0.5) {
-        this.logger.debug(`[RuleEngine] ${coin} BB_SCALP LONG blocked: weak bounce candle (body=${(bodySize/candleRange*100).toFixed(0)}%)`);
-        return null;
-      }
-
-      return {
-        isLong: true,
-        entryPrice: lastClose,
-        strategy: "BB_SCALP",
-        reason: `BB bounce LONG: prev=${prevClose.toFixed(4)} at lower BB=${lower.toFixed(4)}, RSI ${rsiPrev.toFixed(0)}→${rsi.toFixed(0)} on ${cfg.primaryKline}`,
-      };
-    }
-
-    // ── SHORT: confirmed rejection at upper band ───────────────────────────
-    const prevAtUpperBand = prevClose >= upper * (1 - toleranceFactor);
-    const rejectingDown = lastClose < prevClose && lastClose < prev2Close;
-    const rsiTurningDown = rsi < rsiPrev;
-    if (prevAtUpperBand && rejectingDown && rsi > cfg.rsiShortMin && rsiTurningDown) {
-      // HTF confirmation: 1h RSI must not be in strong uptrend (< 65)
-      const htfClosesShort = await this.indicatorService.getCloses(coin, "1h");
-      if (htfClosesShort.length >= 20) {
-        const htfRsiShort = this.indicatorService.getRsi(htfClosesShort, 14);
-        if (htfRsiShort.last > 65) {
-          this.logger.debug(`[RuleEngine] ${coin} BB_SCALP SHORT blocked: 1h RSI=${htfRsiShort.last.toFixed(1)} bullish (>65)`);
-          return null;
-        }
-      }
-
-      // Volume confirmation: current candle must show selling pressure
-      const lastOpenShort = ohlc.opens[ohlc.opens.length - 1];
-      const bodySizeShort = Math.abs(lastClose - lastOpenShort);
-      const candleRangeShort = ohlc.highs[ohlc.highs.length - 1] - ohlc.lows[ohlc.lows.length - 1];
-      if (candleRangeShort > 0 && bodySizeShort / candleRangeShort < 0.5) {
-        this.logger.debug(`[RuleEngine] ${coin} BB_SCALP SHORT blocked: weak rejection candle (body=${(bodySizeShort/candleRangeShort*100).toFixed(0)}%)`);
-        return null;
-      }
-
-      return {
-        isLong: false,
-        entryPrice: lastClose,
-        strategy: "BB_SCALP",
-        reason: `BB rejection SHORT: prev=${prevClose.toFixed(4)} at upper BB=${upper.toFixed(4)}, RSI ${rsiPrev.toFixed(0)}→${rsi.toFixed(0)} on ${cfg.primaryKline}`,
-      };
-    }
-
+    // EMA_PULLBACK SHORT removed — data: 4 trades, 50% WR, -$67 PnL
+    // LONG: 20 trades, 70% WR — pullback strategy works best for dip buying
     return null;
   }
 

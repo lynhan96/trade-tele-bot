@@ -27,7 +27,7 @@ const BOT_TYPE_MAP: Record<string, string> = {
   BOT_FUTURE_CT_5: "EXTERNAL_CT_5",
   BOT_FUTURE_CT_6: "EXTERNAL_CT_6",
   BOT_FUTURE_CT_7: "EXTERNAL_CT_7",
-  BOT_FUTURE_CT_8: "EXTERNAL_CT_8",
+  // BOT_FUTURE_CT_8 removed — 14% WR, -$54 PnL
 };
 
 @Injectable()
