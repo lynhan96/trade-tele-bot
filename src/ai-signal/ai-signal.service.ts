@@ -837,6 +837,7 @@ export class AiSignalService implements OnModuleInit {
 
         if (gateResult.action === "REJECT") {
           this.logger.log(`[AiSignal] ${signalKey} REJECTED by AI Signal Gate: ${gateResult.reason}`);
+          await this.redisService.set(validationCooldownKey, true, 15 * 60);
           this.validationModel.create({
             ...valBase, approved: false, model: "ai-signal-gate",
             reason: `[rule-engine] ${validationReason}\n[ai-signal-gate] REJECTED: ${gateResult.reason}`,
@@ -861,6 +862,7 @@ export class AiSignalService implements OnModuleInit {
           const dirMinConf = signalResult.isLong ? aiAnalysis.longConfidenceMin : aiAnalysis.shortConfidenceMin;
           if ((params.confidence ?? 0) < dirMinConf) {
             this.logger.log(`[AiSignal] ${signalKey} ${dir} blocked — AI confidence ${params.confidence} < ${dirMinConf} (bias: ${aiAnalysis.directionBias})`);
+            await this.redisService.set(validationCooldownKey, true, 15 * 60);
             this.validationModel.create({
               ...valBase, approved: false, model: "ai-direction-bias",
               reason: `[rule-engine] ${validationReason}\n[ai-signal-gate] ${gateAction}: ${gateReason}\n[ai-direction-bias] REJECTED: conf ${params.confidence} < ${dirMinConf} (bias: ${aiAnalysis.directionBias})`,
@@ -876,6 +878,7 @@ export class AiSignalService implements OnModuleInit {
         const weight = await this.aiMarketAnalyst.getStrategyWeight(signalResult.strategy);
         if (weight <= 0) {
           this.logger.log(`[AiSignal] ${signalKey} BLOCKED — strategy ${signalResult.strategy} weight=0 (AI disabled)`);
+          await this.redisService.set(validationCooldownKey, true, 15 * 60);
           this.validationModel.create({
             ...valBase, approved: false, model: "ai-strategy-weight",
             reason: `[rule-engine] ${validationReason}\n[ai-strategy-weight] REJECTED: ${signalResult.strategy} disabled (weight=0)`,
