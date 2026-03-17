@@ -279,8 +279,8 @@ RULES:
 - When market is bullish, prefer LONG signals on pullbacks; only SHORT with very high confidence
 - When market is bearish, prefer SHORT signals on bounces; only LONG with very high confidence
 
-Return ONLY valid JSON (no markdown):
-{"action":"APPROVE|REJECT|ADJUST","adjustedConfidence":75,"adjustedSL":3.0,"adjustedTP":5.0,"reason":"brief explanation"}
+Return ONLY valid JSON (no markdown). "reason" MUST be in Vietnamese:
+{"action":"APPROVE|REJECT|ADJUST","adjustedConfidence":75,"adjustedSL":3.0,"adjustedTP":5.0,"reason":"giải thích ngắn gọn bằng tiếng Việt"}
 
 For APPROVE without changes, omit adjusted fields. For REJECT, omit adjusted fields.`;
 
@@ -406,8 +406,8 @@ RULES:
 - strategyWeights: 0.0=disable, 0.5=reduce signals, 1.0=normal, 1.5=boost priority
 - Only recommend changes you're confident about. Don't change what's working.
 
-Return ONLY valid JSON:
-{"slMin":2.0,"slMax":4.0,"tpMin":3.0,"tpMax":6.0,"confidenceFloor":65,"strategyWeights":{"RSI_ZONE":0.5,"EMA_PULLBACK":1.0},"directionBias":"LONG","reasoning":"brief explanation"}`;
+Return ONLY valid JSON. "reasoning" MUST be in Vietnamese:
+{"slMin":2.0,"slMax":4.0,"tpMin":3.0,"tpMax":6.0,"confidenceFloor":65,"strategyWeights":{"RSI_ZONE":0.5,"EMA_PULLBACK":1.0},"directionBias":"LONG","reasoning":"giải thích ngắn gọn bằng tiếng Việt"}`;
 
       const response = await this.anthropic.messages.create({
         model: "claude-haiku-4-5-20251001",
@@ -696,8 +696,8 @@ DECISION FRAMEWORK:
 7. blockLong/blockShort: Only true in extreme cases (BTC crash, alt dump >5%)
 8. pauseAll: Only if BTC crashes -5%+ in 4h or market extremely uncertain
 
-Return ONLY valid JSON:
-{"regime":"RANGE_BOUND","directionBias":"LONG","blockLong":false,"blockShort":false,"pauseAll":false,"longConfidenceMin":63,"shortConfidenceMin":78,"slAdjust":{"min":2.0,"max":4.0},"tpAdjust":{"min":3.0,"max":6.0},"riskLevel":"MODERATE","strategyWeights":{"RSI_ZONE":0.5,"EMA_PULLBACK":1.2,"TREND_EMA":1.0,"SMC_FVG":0.8,"STOCH_EMA_KDJ":0.7,"RSI_CROSS":1.0,"STOCH_BB_PATTERN":0.8,"BB_SCALP":0.5},"reasoning":"brief explanation"}`;
+Return ONLY valid JSON. "reasoning" MUST be in Vietnamese:
+{"regime":"RANGE_BOUND","directionBias":"LONG","blockLong":false,"blockShort":false,"pauseAll":false,"longConfidenceMin":63,"shortConfidenceMin":78,"slAdjust":{"min":2.0,"max":4.0},"tpAdjust":{"min":3.0,"max":6.0},"riskLevel":"MODERATE","strategyWeights":{"RSI_ZONE":0.5,"EMA_PULLBACK":1.2,"TREND_EMA":1.0,"SMC_FVG":0.8,"STOCH_EMA_KDJ":0.7,"RSI_CROSS":1.0,"STOCH_BB_PATTERN":0.8,"BB_SCALP":0.5},"reasoning":"giải thích ngắn gọn bằng tiếng Việt"}`;
 
     try {
       const response = await this.anthropic!.messages.create({

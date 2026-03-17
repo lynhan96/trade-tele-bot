@@ -724,14 +724,14 @@ Rules:
 - Adjust confidenceFloor: raise to 70+ if market uncertain, lower to 63 if trending clear
 - Do NOT change tpMax or slMax unless data strongly supports it
 
-Return ONLY valid JSON (no markdown, no explanation):
+Return ONLY valid JSON (no markdown, no explanation). "reasoning" MUST be in Vietnamese:
 {
   "disableStrategies": ["STRATEGY_NAME"],
   "enableStrategies": ["STRATEGY_NAME"],
   "blacklistCoins": ["COIN"],
   "unblacklistCoins": ["COIN"],
   "confidenceFloor": 63,
-  "reasoning": "brief explanation"
+  "reasoning": "giải thích ngắn gọn bằng tiếng Việt"
 }`;
 
       const response = await this.anthropic.messages.create({
