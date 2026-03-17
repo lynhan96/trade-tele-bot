@@ -830,17 +830,8 @@ Return ONLY valid JSON (no markdown, no explanation):
         model: "claude-haiku-4-5",
       }).catch(e => this.logger.warn(`[AIReview] DB save error: ${e?.message}`));
 
-      // Notify admin
+      // Log only — no Telegram notification (AI Market Analyst handles notifications now)
       if (appliedActions.length > 0) {
-        const adminIds = (process.env.AI_ADMIN_TELEGRAM_ID || "").split(",").filter(Boolean);
-        const msg =
-          `🤖 *AI Strategy Review*\n━━━━━━━━━━━━━━━━━━\n\n` +
-          appliedActions.join("\n") +
-          `\n\n_${actions.reasoning || "No reasoning"}_` +
-          `\n\n_${signals.length} signals analyzed / 3 days_`;
-        for (const id of adminIds) {
-          await this.telegramService.sendTelegramMessage(parseInt(id), msg).catch(() => {});
-        }
         this.logger.log(`[AIReview] Applied ${appliedActions.length} actions: ${appliedActions.join(", ")}`);
       } else {
         this.logger.log(`[AIReview] No changes recommended. Reasoning: ${actions.reasoning || "N/A"}`);

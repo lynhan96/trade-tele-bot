@@ -178,12 +178,14 @@ export class AiMarketAnalystService {
       if (changed) {
         const icon = guard.pauseAll ? "🛑" : guard.blockLong ? "🔴" : guard.blockShort ? "🔵" : "🟢";
         const pulseEmoji = altPulse.momentum === "BULLISH" ? "📈" : altPulse.momentum === "BEARISH" ? "📉" : "➡️";
+        const biasVi = analysis.directionBias === "LONG" ? "Ưu tiên LONG" : analysis.directionBias === "SHORT" ? "Ưu tiên SHORT" : "Trung lập";
+        const riskVi = { LOW: "Thấp", MODERATE: "Trung bình", HIGH: "Cao", EXTREME: "Cực cao" }[analysis.riskLevel] || analysis.riskLevel;
         const msg =
-          `${icon} *AI Market Analyst*\n━━━━━━━━━━━━━━━━━━\n\n` +
-          `Regime: *${analysis.regime}* | Bias: *${analysis.directionBias}*\n` +
-          `Risk: *${analysis.riskLevel}*\n\n` +
-          `${pulseEmoji} Alt Pulse: ${altPulse.green4h}% green (avg ${altPulse.avgChange4h > 0 ? "+" : ""}${altPulse.avgChange4h.toFixed(1)}%)\n` +
-          `LONG min conf: ${analysis.longConfidenceMin} | SHORT min conf: ${analysis.shortConfidenceMin}\n` +
+          `${icon} *Phân tích thị trường (AI)*\n━━━━━━━━━━━━━━━━━━\n\n` +
+          `Chế độ: *${analysis.regime}* | ${biasVi}\n` +
+          `Rủi ro: *${riskVi}*\n\n` +
+          `${pulseEmoji} Alt: ${altPulse.green4h}% tăng 4h (TB ${altPulse.avgChange4h > 0 ? "+" : ""}${altPulse.avgChange4h.toFixed(1)}%)\n` +
+          `Conf tối thiểu: LONG ${analysis.longConfidenceMin} | SHORT ${analysis.shortConfidenceMin}\n` +
           `SL: ${analysis.slAdjust.min}-${analysis.slAdjust.max}% | TP: ${analysis.tpAdjust.min}-${analysis.tpAdjust.max}%\n\n` +
           `_${analysis.reasoning}_`;
         const adminIds = (process.env.AI_ADMIN_TELEGRAM_ID || "").split(",").filter(Boolean);
@@ -459,10 +461,10 @@ Return ONLY valid JSON:
       if (appliedChanges.length > 0) {
         const adminIds = (process.env.AI_ADMIN_TELEGRAM_ID || "").split(",").filter(Boolean);
         const msg =
-          `🧠 *AI Strategy Learner*\n━━━━━━━━━━━━━━━━━━\n\n` +
+          `🧠 *AI tự điều chỉnh*\n━━━━━━━━━━━━━━━━━━\n\n` +
           appliedChanges.join("\n") +
-          `\n\n_${actions.reasoning || "No reasoning"}_` +
-          `\n_${signals.length} trades analyzed (24h)_`;
+          `\n\n_${actions.reasoning || ""}_` +
+          `\n_${signals.length} lệnh phân tích (24h)_`;
         for (const id of adminIds) {
           await this.telegramService.sendTelegramMessage(parseInt(id), msg).catch(() => {});
         }
