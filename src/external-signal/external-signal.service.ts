@@ -66,7 +66,11 @@ export class ExternalSignalService {
     const symbol = `${coin}${currency}`;
     const isLong = payload.equity === "LONG";
     const direction = isLong ? "LONG" : "SHORT";
-    const strategy = BOT_TYPE_MAP[payload.botType] || `EXTERNAL_${payload.botType}`;
+    const strategy = BOT_TYPE_MAP[payload.botType];
+    if (!strategy) {
+      this.logger.log(`[ExtSignal] ${symbol} REJECTED — unknown/disabled botType: ${payload.botType}`);
+      return { success: false, reason: `Unknown botType: ${payload.botType}` };
+    }
 
     this.logger.log(
       `[ExtSignal] ── Processing ${symbol} ${direction} ── entry=${payload.entry} SL=${payload.stopLoss} bot=${payload.botType} period=${payload.period}`,

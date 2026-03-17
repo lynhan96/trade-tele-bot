@@ -286,7 +286,7 @@ For APPROVE without changes, omit adjusted fields. For REJECT, omit adjusted fie
 
       const response = await this.anthropic.messages.create({
         model: "claude-haiku-4-5-20251001",
-        max_tokens: 300,
+        max_tokens: 500,
         messages: [{ role: "user", content: prompt }],
       });
 
@@ -411,7 +411,7 @@ Return ONLY valid JSON. "reasoning" MUST be in Vietnamese:
 
       const response = await this.anthropic.messages.create({
         model: "claude-haiku-4-5-20251001",
-        max_tokens: 500,
+        max_tokens: 800,
         messages: [{ role: "user", content: prompt }],
       });
 
@@ -702,7 +702,7 @@ Return ONLY valid JSON. "reasoning" MUST be in Vietnamese:
     try {
       const response = await this.anthropic!.messages.create({
         model: "claude-haiku-4-5-20251001",
-        max_tokens: 600,
+        max_tokens: 1024,
         messages: [{ role: "user", content: prompt }],
       });
 
