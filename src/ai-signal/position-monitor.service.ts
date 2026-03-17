@@ -372,19 +372,25 @@ export class PositionMonitorService implements OnModuleInit {
             : origEntry;
           (signal as any).gridAvgEntry = avgEntry;
 
-          // SL stays at original entry's SL — do NOT move SL when DCA fills.
-          // DCA TP: always 4% from new avgEntry (fixed, regardless of original signal TP%)
-          // Original TP% may be 2-3.5% from Fib/ATR, but after DCA avg moves down,
-          // we want consistent 4% target from the new cost basis.
+          // Recalculate SL from new avgEntry — keep same % distance as original
+          const origSlPct = origEntry > 0
+            ? Math.abs(((signal as any).gridGlobalSlPrice ?? (signal as any).stopLossPrice) - origEntry) / origEntry * 100
+            : 2.5;
+          const newSl = direction === "LONG"
+            ? avgEntry * (1 - origSlPct / 100)
+            : avgEntry * (1 + origSlPct / 100);
+          (signal as any).stopLossPrice = newSl;
+
+          // DCA TP: 3% from new avgEntry
           const DCA_TP_PCT = 3.0;
           const newTp = direction === "LONG"
             ? avgEntry * (1 + DCA_TP_PCT / 100)
             : avgEntry * (1 - DCA_TP_PCT / 100);
           (signal as any).takeProfitPrice = newTp;
-          (signal as any).takeProfitPercent = DCA_TP_PCT; // update stored % for consistency
+          (signal as any).takeProfitPercent = DCA_TP_PCT;
 
           this.logger.log(
-            `[PositionMonitor] Grid ${sigKey} L${grid.level} FILLED at ${price.toFixed(4)}, avgEntry=${avgEntry.toFixed(4)}, SL=${(signal as any).stopLossPrice?.toFixed(4)}, TP=${(signal as any).takeProfitPrice?.toFixed(4)}, filled=${filledCount}/${GRID_LEVEL_COUNT}`,
+            `[PositionMonitor] Grid ${sigKey} L${grid.level} FILLED at ${price.toFixed(4)}, avgEntry=${avgEntry.toFixed(4)}, SL=${newSl.toFixed(4)} (${origSlPct.toFixed(1)}%), TP=${newTp.toFixed(4)}, filled=${filledCount}/${GRID_LEVEL_COUNT}`,
           );
         }
       }

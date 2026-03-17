@@ -1980,8 +1980,15 @@ export class UserRealTradingService implements OnModuleInit {
               ? filledGrids.reduce((s, g) => s + g.fillPrice * (g.quantity || 0), 0) / totalQty
               : origEntry;
 
-            // SL stays at original entry's SL — do NOT move SL when DCA fills.
-            // DCA TP: always 4% from new avgEntry (fixed, regardless of original signal TP%)
+            // Recalculate SL from new avgEntry — keep same % distance as original
+            const origSlPct = origEntry > 0
+              ? Math.abs((trade.slPrice - origEntry) / origEntry * 100)
+              : 2.5; // fallback
+            const newSlPrice = direction === "LONG"
+              ? avgEntry * (1 - origSlPct / 100)
+              : avgEntry * (1 + origSlPct / 100);
+
+            // DCA TP: 3% from new avgEntry
             const DCA_TP_PCT = 3.0;
             const tpUpdate: Record<string, any> = {};
             if (trade.tpPrice) {
@@ -1990,11 +1997,16 @@ export class UserRealTradingService implements OnModuleInit {
                 : avgEntry * (1 - DCA_TP_PCT / 100);
             }
 
+            this.logger.log(
+              `[Grid] ${symbol} user ${telegramId} DCA recalc: avgEntry=${avgEntry.toFixed(4)} SL=${newSlPrice.toFixed(4)} (${origSlPct.toFixed(1)}% from avg) old SL=${trade.slPrice.toFixed(4)}`,
+            );
+
             await this.userTradeModel.findByIdAndUpdate((trade as any)._id, {
               gridLevels: grids,
               gridFilledCount: filledCount,
               gridAvgEntry: avgEntry,
               entryPrice: avgEntry, // sync for display
+              slPrice: newSlPrice,
               ...tpUpdate,
             });
           }
