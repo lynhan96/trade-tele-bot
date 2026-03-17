@@ -21,6 +21,10 @@ import {
   AiCoinProfileDocument,
 } from "../schemas/ai-coin-profile.schema";
 import { AiTunedParams } from "../strategy/ai-optimizer/ai-tuned-params.interface";
+import {
+  AiSignalValidation,
+  AiSignalValidationDocument,
+} from "../schemas/ai-signal-validation.schema";
 import { FuturesAnalyticsService } from "../market-data/futures-analytics.service";
 import { UserRealTradingService } from "./user-real-trading.service";
 import { MarketDataService } from "../market-data/market-data.service";
@@ -77,6 +81,8 @@ export class AiSignalService implements OnModuleInit {
     private readonly aiSignalModel: Model<AiSignalDocument>,
     @InjectModel(AiCoinProfile.name)
     private readonly aiCoinProfileModel: Model<AiCoinProfileDocument>,
+    @InjectModel(AiSignalValidation.name)
+    private readonly validationModel: Model<AiSignalValidationDocument>,
   ) {
     this.defaultTestMode =
       configService.get("AI_TEST_MODE", "false") === "true";
@@ -815,10 +821,21 @@ export class AiSignalService implements OnModuleInit {
         regime: params.regime,
       });
 
+      const sym = `${coin.toUpperCase()}${currency.toUpperCase()}`;
+      const dir = signalResult.isLong ? "LONG" : "SHORT";
+
       if (gateResult.action === "REJECT") {
         this.logger.log(
           `[AiSignal] ${signalKey} REJECTED by AI Signal Gate: ${gateResult.reason}`,
         );
+        this.validationModel.create({
+          symbol: sym, direction: dir, strategy: signalResult.strategy,
+          regime: params.regime || "UNKNOWN", confidence: params.confidence ?? 0,
+          stopLossPercent: params.stopLossPercent, takeProfitPercent: params.takeProfitPercent,
+          approved: false, model: "ai-signal-gate",
+          reason: `REJECTED: ${gateResult.reason}`,
+          rejectedBy: ["ai-signal-gate"],
+        }).catch(() => {});
         return;
       }
       if (gateResult.action === "ADJUST") {
@@ -828,6 +845,21 @@ export class AiSignalService implements OnModuleInit {
         this.logger.log(
           `[AiSignal] ${signalKey} ADJUSTED by AI Signal Gate: ${gateResult.reason}`,
         );
+        this.validationModel.create({
+          symbol: sym, direction: dir, strategy: signalResult.strategy,
+          regime: params.regime || "UNKNOWN", confidence: params.confidence ?? 0,
+          stopLossPercent: params.stopLossPercent, takeProfitPercent: params.takeProfitPercent,
+          approved: true, model: "ai-signal-gate",
+          reason: `ADJUSTED: ${gateResult.reason}`,
+        }).catch(() => {});
+      } else {
+        this.validationModel.create({
+          symbol: sym, direction: dir, strategy: signalResult.strategy,
+          regime: params.regime || "UNKNOWN", confidence: params.confidence ?? 0,
+          stopLossPercent: params.stopLossPercent, takeProfitPercent: params.takeProfitPercent,
+          approved: true, model: "ai-signal-gate",
+          reason: `APPROVED: ${gateResult.reason}`,
+        }).catch(() => {});
       }
     } catch (err) {
       this.logger.warn(`[AiSignal] AI Signal Gate error for ${signalKey}: ${err?.message} — pass-through`);
@@ -839,9 +871,19 @@ export class AiSignalService implements OnModuleInit {
       if (aiAnalysis) {
         const dirMinConf = signalResult.isLong ? aiAnalysis.longConfidenceMin : aiAnalysis.shortConfidenceMin;
         if ((params.confidence ?? 0) < dirMinConf) {
+          const dirLabel = signalResult.isLong ? "LONG" : "SHORT";
           this.logger.log(
-            `[AiSignal] ${signalKey} ${signalResult.isLong ? "LONG" : "SHORT"} blocked — AI confidence ${params.confidence} < ${dirMinConf} (bias: ${aiAnalysis.directionBias})`,
+            `[AiSignal] ${signalKey} ${dirLabel} blocked — AI confidence ${params.confidence} < ${dirMinConf} (bias: ${aiAnalysis.directionBias})`,
           );
+          this.validationModel.create({
+            symbol: `${coin.toUpperCase()}${currency.toUpperCase()}`,
+            direction: dirLabel, strategy: signalResult.strategy,
+            regime: params.regime || "UNKNOWN", confidence: params.confidence ?? 0,
+            stopLossPercent: params.stopLossPercent, takeProfitPercent: params.takeProfitPercent,
+            approved: false, model: "ai-direction-bias",
+            reason: `${dirLabel} blocked: conf ${params.confidence} < ${dirMinConf} (bias: ${aiAnalysis.directionBias})`,
+            rejectedBy: ["ai-direction-bias"],
+          }).catch(() => {});
           return;
         }
       }
@@ -852,6 +894,16 @@ export class AiSignalService implements OnModuleInit {
       const weight = await this.aiMarketAnalyst.getStrategyWeight(signalResult.strategy);
       if (weight <= 0) {
         this.logger.log(`[AiSignal] ${signalKey} BLOCKED — strategy ${signalResult.strategy} weight=0 (AI disabled)`);
+        this.validationModel.create({
+          symbol: `${coin.toUpperCase()}${currency.toUpperCase()}`,
+          direction: signalResult.isLong ? "LONG" : "SHORT",
+          strategy: signalResult.strategy,
+          regime: params.regime || "UNKNOWN", confidence: params.confidence ?? 0,
+          stopLossPercent: params.stopLossPercent, takeProfitPercent: params.takeProfitPercent,
+          approved: false, model: "ai-strategy-weight",
+          reason: `Strategy ${signalResult.strategy} disabled (weight=0)`,
+          rejectedBy: ["ai-strategy-weight"],
+        }).catch(() => {});
         return;
       }
       if (weight < 1.0) {
