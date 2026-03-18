@@ -252,7 +252,14 @@ export class AiMarketAnalystService {
         close: (t as any).closeReason,
       }));
 
-      const prompt = `You are an AI signal gate for a crypto futures trading bot. Evaluate this signal and decide whether to APPROVE, REJECT, or ADJUST it.
+      const prompt = `You are an AI signal gate for a crypto futures trading bot with AUTO-HEDGE protection.
+
+SYSTEM CONTEXT:
+- Bot has AUTO-HEDGE mode ON: when a position loses >3%, system opens opposite hedge to scalp profit
+- DCA grid: 3 levels (L0=40%, L1=25%, L2=35%) with safety SL at -8%
+- Hedge continuously scalps trend, banking profit to offset main loss
+- This means: moderate risk is ACCEPTABLE because hedge covers downside
+- Trail SL is the primary profit-taking mechanism (not fixed TP)
 
 SIGNAL:
 - ${params.symbol} ${params.direction} (strategy: ${params.strategy})
@@ -271,13 +278,15 @@ MARKET CONTEXT:
 - Alt pulse: ${altPulse ? `${altPulse.green4h}% green 4h, avg ${altPulse.avgChange4h.toFixed(1)}%, momentum: ${altPulse.momentum}` : "N/A"}
 - Risk level: ${analysis?.riskLevel || "UNKNOWN"}
 
-RULES:
-- REJECT if signal direction opposes strong market trend (e.g. SHORT when 70%+ alts green and coin in uptrend)
-- REJECT if coin has 4+ consecutive losses in same direction recently (hedge mode covers partial losses)
-- ADJUST if SL/TP doesn't match volatility (e.g. tight SL in volatile coin)
-- APPROVE if signal aligns with market direction and has good setup
-- When market is bullish, prefer LONG signals on pullbacks; only SHORT with very high confidence
-- When market is bearish, prefer SHORT signals on bounces; only LONG with very high confidence
+RULES (with hedge protection context):
+- APPROVE if signal aligns with market direction — hedge covers if wrong
+- APPROVE pullback entries in trending market (high probability + hedge safety net)
+- REJECT only if signal CLEARLY opposes strong market trend (e.g. SHORT when 70%+ alts green AND coin in strong uptrend)
+- REJECT if coin has 4+ consecutive losses in same direction (pattern suggests structural issue, not random)
+- ADJUST SL/TP if volatility mismatch — hedge works better with appropriate SL room
+- Be MORE permissive than without hedge — the system can recover from bad entries via hedge scalping
+- When market is bullish, LONG pullbacks are high-quality; SHORT only with very strong reversal signals
+- When market is bearish, SHORT bounces are high-quality; LONG only with very strong support signals
 
 Return ONLY valid JSON (no markdown). "reason" MUST be in Vietnamese:
 {"action":"APPROVE|REJECT|ADJUST","adjustedConfidence":75,"adjustedSL":3.0,"adjustedTP":5.0,"reason":"giải thích ngắn gọn bằng tiếng Việt"}
