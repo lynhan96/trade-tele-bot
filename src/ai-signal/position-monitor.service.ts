@@ -968,12 +968,14 @@ export class PositionMonitorService implements OnModuleInit {
 
     (signal as any).hedgeSafetySlPrice = safetySlPrice;
     (signal as any).stopLossPrice = safetySlPrice;
+    (signal as any).slMovedToEntry = false; // Reset — SL is now below entry, not a profit lock
 
     // Persist to DB
     await this.aiSignalModel.findByIdAndUpdate((signal as any)._id, {
       originalSlPrice: currentSl,
       hedgeSafetySlPrice: safetySlPrice,
       stopLossPrice: safetySlPrice,
+      slMovedToEntry: false,
     });
 
     this.logger.log(
