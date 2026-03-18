@@ -657,15 +657,16 @@ export class PositionMonitorService implements OnModuleInit {
           await this.handleHedgeClose(signal, exitAction, price);
         }
 
-        // When hedge is active: skip normal TP detection, but still check safety SL
-        const safetySlPrice = (signal as any).hedgeSafetySlPrice || (signal as any).stopLossPrice;
-        const safetySLHit = direction === "LONG"
-          ? price <= safetySlPrice
-          : price >= safetySlPrice;
+        // When hedge is active: NO SL — hedge IS the risk management
+        // Only catastrophic stop at -25% (exchange issues, depeg, extreme events)
+        const currentEntry = (signal as any).gridAvgEntry || entryPrice;
+        const catastrophicPct = direction === "LONG"
+          ? ((price - currentEntry) / currentEntry) * 100
+          : ((currentEntry - price) / currentEntry) * 100;
 
-        if (!safetySLHit) return; // Skip normal TP/SL — hedge manages the position
+        if (catastrophicPct > -25) return; // Skip all SL/TP — hedge manages, keep rỉa
 
-        // Safety SL hit — close hedge first, then fall through to close main
+        // Catastrophic -25% — force close everything
         this.logger.warn(
           `[PositionMonitor] ${sigKey} SAFETY SL hit at ${price} (safety=${safetySlPrice}) while hedge active — force closing both`,
         );
