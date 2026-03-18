@@ -29,6 +29,7 @@
     "backfill-sim-volume.ts",
     "migrate-grid-dca.ts",
     "reset-grid-signals.ts",
+    "fix-pnl-usdt.ts",
     "dist",
     "node_modules"
   ]

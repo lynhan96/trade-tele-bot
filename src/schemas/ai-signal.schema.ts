@@ -179,6 +179,46 @@ export class AiSignal {
 
   @Prop()
   openInterestUsd?: number; // open interest in USD at signal time
+
+  // ─── Auto-Hedge ──────────────────────────────────────────────────────
+  @Prop({ default: false })
+  hedgeActive?: boolean; // hedge position currently open?
+
+  @Prop({ default: 0 })
+  hedgeCycleCount?: number; // completed hedge cycles
+
+  @Prop()
+  hedgeEntryPrice?: number; // entry of current hedge
+
+  @Prop()
+  hedgeDirection?: string; // LONG/SHORT (opposite of signal)
+
+  @Prop()
+  hedgeQuantity?: number; // simulated quantity for hedge
+
+  @Prop()
+  hedgeSimNotional?: number; // simulated notional for hedge
+
+  @Prop()
+  hedgeTpPrice?: number; // TP price for hedge side
+
+  @Prop()
+  hedgeOpenedAt?: Date;
+
+  @Prop()
+  originalSlPrice?: number; // SL before hedge improvements
+
+  @Prop({ type: Array, default: [] })
+  hedgeHistory?: Array<{
+    cycle: number;
+    entryPrice: number;
+    exitPrice: number;
+    pnlPct: number;
+    pnlUsdt: number;
+    slImprovement: number;
+    openedAt: Date;
+    closedAt: Date;
+  }>;
 }
 
 export const AiSignalSchema = SchemaFactory.createForClass(AiSignal);
