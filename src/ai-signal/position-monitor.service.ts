@@ -1188,18 +1188,23 @@ export class PositionMonitorService implements OnModuleInit {
       (signal as any).originalSlPrice = currentSl;
     }
 
-    // Hedge active = NO SL — hedge IS the risk management
-    // Only catastrophic -25% check in handlePriceTick, no price-based SL
-    (signal as any).hedgeSafetySlPrice = 0;
-    (signal as any).stopLossPrice = 0;
-    (signal as any).stopLossPercent = 0;
+    // Widen SL to hedgeSafetySlPct (default 10%) — wide safety net, hedge manages risk
+    const safetySlPct = cfg.hedgeSafetySlPct || 10;
+    const avgEntry = (signal as any).gridAvgEntry || entryPrice;
+    const safetySlPrice = direction === "LONG"
+      ? +(avgEntry * (1 - safetySlPct / 100)).toFixed(6)
+      : +(avgEntry * (1 + safetySlPct / 100)).toFixed(6);
+
+    (signal as any).hedgeSafetySlPrice = safetySlPrice;
+    (signal as any).stopLossPrice = safetySlPrice;
+    (signal as any).stopLossPercent = safetySlPct;
     (signal as any).slMovedToEntry = false;
 
     // Persist to DB (only set originalSlPrice if not already saved from a previous cycle)
     const widenUpdates: Record<string, any> = {
-      hedgeSafetySlPrice: 0,
-      stopLossPrice: 0,
-      stopLossPercent: 0,
+      hedgeSafetySlPrice: safetySlPrice,
+      stopLossPrice: safetySlPrice,
+      stopLossPercent: safetySlPct,
       slMovedToEntry: false,
     };
     if ((signal as any).originalSlPrice === currentSl) {
@@ -1208,7 +1213,7 @@ export class PositionMonitorService implements OnModuleInit {
     await this.aiSignalModel.findByIdAndUpdate((signal as any)._id, widenUpdates);
 
     this.logger.log(
-      `[PositionMonitor] ${sigKey} SL removed for hedge: ${currentSl} → 0 (hedge IS risk management, catastrophic -25% only)`,
+      `[PositionMonitor] ${sigKey} SL widened for hedge: ${currentSl} → ${safetySlPrice} (-${safetySlPct}% safety net)`,
     );
   }
 

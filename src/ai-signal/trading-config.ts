@@ -167,7 +167,7 @@ export const DEFAULT_TRADING_CONFIG: TradingConfig = {
 
   // Auto-Hedge
   hedgeEnabled: true,
-  hedgeSafetySlPct: 8.0,
+  hedgeSafetySlPct: 10.0,
   hedgePartialTriggerPct: 3.0,
   hedgeFullTriggerPct: 5.0,
   hedgePartialSizeRatio: 0.5,
