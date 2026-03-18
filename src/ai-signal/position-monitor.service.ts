@@ -1031,7 +1031,7 @@ export class PositionMonitorService implements OnModuleInit {
     await this.aiSignalModel.findByIdAndUpdate((signal as any)._id, widenUpdates);
 
     this.logger.log(
-      `[PositionMonitor] ${sigKey} SL widened for hedge: ${currentSl} → ${safetySlPrice} (safety net -${cfg.hedgeSafetySlPct}%)`,
+      `[PositionMonitor] ${sigKey} SL removed for hedge: ${currentSl} → 0 (hedge IS risk management, catastrophic -25% only)`,
     );
   }
 
