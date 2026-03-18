@@ -200,13 +200,19 @@ export class AiSignal {
   hedgeSimNotional?: number; // simulated notional for hedge
 
   @Prop()
+  hedgePhase?: string; // "PARTIAL" (50%) | "FULL" (100%)
+
+  @Prop()
   hedgeTpPrice?: number; // TP price for hedge side
 
   @Prop()
   hedgeOpenedAt?: Date;
 
   @Prop()
-  originalSlPrice?: number; // SL before hedge improvements
+  originalSlPrice?: number; // SL before hedge improvements (original tight SL)
+
+  @Prop()
+  hedgeSafetySlPrice?: number; // wide safety net SL (e.g. -8%)
 
   @Prop({ type: Array, default: [] })
   hedgeHistory?: Array<{

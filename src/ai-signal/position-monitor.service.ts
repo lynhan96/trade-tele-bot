@@ -1,12 +1,15 @@
 import { Injectable, Logger, OnModuleInit } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
+import { InjectModel } from "@nestjs/mongoose";
+import { Model } from "mongoose";
 import { RedisService } from "../redis/redis.service";
 import { BinanceService } from "../binance/binance.service";
 import { MarketDataService } from "../market-data/market-data.service";
 import { SignalQueueService } from "./signal-queue.service";
-import { AiSignalDocument } from "../schemas/ai-signal.schema";
+import { AiSignal, AiSignalDocument } from "../schemas/ai-signal.schema";
 import { UserRealTradingService } from "./user-real-trading.service";
 import { TradingConfigService } from "./trading-config";
+import { HedgeManagerService, HedgeAction } from "./hedge-manager.service";
 
 export interface ResolvedSignalInfo {
   symbol: string;
@@ -58,6 +61,9 @@ export class PositionMonitorService implements OnModuleInit {
   /** Callback for TP boosted on momentum. */
   private tpBoostedCallback?: (symbol: string, newTp: number, newTpPct: number, direction: string) => Promise<void>;
 
+  /** Callback for hedge events (open/close). */
+  private hedgeCallback?: (signal: AiSignalDocument, action: HedgeAction, price: number) => Promise<void>;
+
   /** Debounce timers for SL/TP propagation — prevents rapid tick spam to Binance */
   private slDebounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private tpDebounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -74,6 +80,10 @@ export class PositionMonitorService implements OnModuleInit {
     this.tpBoostedCallback = cb;
   }
 
+  setHedgeCallback(cb: (signal: AiSignalDocument, action: HedgeAction, price: number) => Promise<void>): void {
+    this.hedgeCallback = cb;
+  }
+
   constructor(
     private readonly configService: ConfigService,
     private readonly redisService: RedisService,
@@ -82,6 +92,9 @@ export class PositionMonitorService implements OnModuleInit {
     private readonly signalQueueService: SignalQueueService,
     private readonly userRealTradingService: UserRealTradingService,
     private readonly tradingConfig: TradingConfigService,
+    private readonly hedgeManager: HedgeManagerService,
+    @InjectModel(AiSignal.name)
+    private readonly aiSignalModel: Model<AiSignalDocument>,
   ) {
     this.monitorApiKey = configService.get<string>(
       "AI_MONITOR_BINANCE_API_KEY",
@@ -294,6 +307,9 @@ export class PositionMonitorService implements OnModuleInit {
       let filledCount = (signal as any).gridFilledCount ?? 1;
       let closedCount = (signal as any).gridClosedCount ?? 0;
 
+      // Skip grid DCA fills when hedge is active in FULL phase (don't add to losing position)
+      const skipGridFills = !!(signal as any).hedgeActive && (signal as any).hedgePhase === "FULL";
+
       // Check PENDING grids: price moved against position → simulate fill
       // RSI guard: only DCA when RSI shows exhaustion (likely to bounce)
       let rsiOk: boolean | null = null; // null = not yet computed
@@ -301,6 +317,7 @@ export class PositionMonitorService implements OnModuleInit {
 
       for (const grid of grids) {
         if (grid.status !== "PENDING") continue;
+        if (skipGridFills) continue;
         const triggerPrice = direction === "LONG"
           ? origEntry * (1 - grid.deviationPct / 100)
           : origEntry * (1 + grid.deviationPct / 100);
@@ -398,6 +415,8 @@ export class PositionMonitorService implements OnModuleInit {
 
       // Trailing stop for grid DCA: uses avg entry
       // TP/SL hit detection handled by normal path below (falls through)
+      // Skip trail SL when hedge is active — hedge manages risk
+      const skipTrailSl = !!(signal as any).hedgeActive;
       const filledGrids = grids.filter((g) => g.status === "FILLED");
       if (filledGrids.length > 0) {
         const TRAIL_TRIGGER = 2.0;
@@ -412,8 +431,8 @@ export class PositionMonitorService implements OnModuleInit {
         }
         const peak = (signal as any).peakPnlPct || 0;
 
-        // Move SL to avg entry (break-even) at 2% from avg
-        if (peak >= TRAIL_TRIGGER && !(signal as any).slMovedToEntry) {
+        // Move SL to avg entry (break-even) at 2% from avg — skip when hedge active
+        if (!skipTrailSl && peak >= TRAIL_TRIGGER && !(signal as any).slMovedToEntry) {
           (signal as any).stopLossPrice = avgEntry;
           (signal as any).slMovedToEntry = true;
           (signal as any).gridGlobalSlPrice = avgEntry;
@@ -431,30 +450,33 @@ export class PositionMonitorService implements OnModuleInit {
 
         // Continuous trailing: keep 75% of peak profit (DB only — not pushed to Binance)
         // TP proximity lock: if price within 0.5% of TP → freeze trail, let TP execute
-        const distanceToTp = signalTp
-          ? (direction === "LONG" ? (signalTp - price) / price : (price - signalTp) / price) * 100
-          : Infinity;
-        const nearTp = distanceToTp < 0.5;
+        // Skip when hedge active — hedge manages risk
+        if (!skipTrailSl) {
+          const distanceToTp = signalTp
+            ? (direction === "LONG" ? (signalTp - price) / price : (price - signalTp) / price) * 100
+            : Infinity;
+          const nearTp = distanceToTp < 0.5;
 
-        if ((signal as any).slMovedToEntry && peak > TRAIL_TRIGGER && !nearTp) {
-          const trailPct = peak * TRAIL_KEEP_RATIO;
-          const trailSl = direction === "LONG"
-            ? avgEntry * (1 + trailPct / 100)
-            : avgEntry * (1 - trailPct / 100);
-          const currentSl = (signal as any).gridGlobalSlPrice || avgEntry;
-          const shouldRaise = direction === "LONG" ? trailSl > currentSl : trailSl < currentSl;
-          if (shouldRaise) {
-            (signal as any).stopLossPrice = trailSl;
-            (signal as any).gridGlobalSlPrice = trailSl;
-            await this.signalQueueService.raiseStopLoss((signal as any)._id.toString(), trailSl, peak);
-            gridChanged = true;
-            this.logger.log(
-              `[PositionMonitor] 📈 Grid ${sigKey} trail SL → +${trailPct.toFixed(1)}% (${trailSl.toFixed(4)}) peak=${peak.toFixed(2)}%`,
-            );
-            // NOTE: Trail SL stays in DB only — protectOpenTrades handles real mode exit with momentum check
+          if ((signal as any).slMovedToEntry && peak > TRAIL_TRIGGER && !nearTp) {
+            const trailPct = peak * TRAIL_KEEP_RATIO;
+            const trailSl = direction === "LONG"
+              ? avgEntry * (1 + trailPct / 100)
+              : avgEntry * (1 - trailPct / 100);
+            const currentSl = (signal as any).gridGlobalSlPrice || avgEntry;
+            const shouldRaise = direction === "LONG" ? trailSl > currentSl : trailSl < currentSl;
+            if (shouldRaise) {
+              (signal as any).stopLossPrice = trailSl;
+              (signal as any).gridGlobalSlPrice = trailSl;
+              await this.signalQueueService.raiseStopLoss((signal as any)._id.toString(), trailSl, peak);
+              gridChanged = true;
+              this.logger.log(
+                `[PositionMonitor] 📈 Grid ${sigKey} trail SL → +${trailPct.toFixed(1)}% (${trailSl.toFixed(4)}) peak=${peak.toFixed(2)}%`,
+              );
+              // NOTE: Trail SL stays in DB only — protectOpenTrades handles real mode exit with momentum check
+            }
+          } else if (nearTp) {
+            this.logger.debug(`[PositionMonitor] 🎯 Grid ${sigKey} near TP (${distanceToTp.toFixed(2)}% away) — trail SL frozen`);
           }
-        } else if (nearTp) {
-          this.logger.debug(`[PositionMonitor] 🎯 Grid ${sigKey} near TP (${distanceToTp.toFixed(2)}% away) — trail SL frozen`);
         }
 
         // TP boost at 2% peak from avg entry
@@ -511,7 +533,8 @@ export class PositionMonitorService implements OnModuleInit {
 
     // Trailing SL + TP boost for non-grid signals only
     // (grid signals handle trailing in the grid block above)
-    if (!isGridSignal) {
+    // Skip trail SL when hedge is active — hedge manages risk
+    if (!isGridSignal && !(signal as any).hedgeActive) {
       // Trail trigger: move SL to break-even at 2% profit
       // Trail distance: keep 60% of peak profit (dynamic, not fixed)
       // Example: peak 3% → SL at +1.8%, peak 4% → SL at +2.4%
@@ -598,6 +621,50 @@ export class PositionMonitorService implements OnModuleInit {
       }
     }
 
+    // ─── Auto-Hedge Logic ──────────────────────────────────────────────────
+    const hedgeCfg = this.tradingConfig.get();
+    const hedgeEnabled = hedgeCfg.hedgeEnabled;
+    const hedgeActive = !!(signal as any).hedgeActive;
+
+    if (hedgeEnabled) {
+      // First tick with hedge enabled: widen SL to safety net
+      if (!(signal as any).hedgeSafetySlPrice) {
+        await this.widenSlForHedge(signal, hedgeCfg);
+      }
+
+      if (!hedgeActive) {
+        // Check if PnL crosses hedge trigger
+        if (pnlPct <= -hedgeCfg.hedgePartialTriggerPct) {
+          const regime = (signal as any).regime || "MIXED";
+          const action = await this.hedgeManager.checkHedge(signal, price, pnlPct, regime);
+          if (action && action.action !== "NONE") {
+            await this.handleHedgeAction(signal, action, price);
+          }
+        }
+      } else {
+        // Hedge is active — check for exit
+        const exitAction = this.hedgeManager.checkHedgeExit(signal, price);
+        if (exitAction && exitAction.action === "CLOSE_HEDGE") {
+          await this.handleHedgeClose(signal, exitAction, price);
+        }
+
+        // When hedge is active: skip normal TP detection, but still check safety SL
+        const safetySlPrice = (signal as any).hedgeSafetySlPrice || (signal as any).stopLossPrice;
+        const safetySLHit = direction === "LONG"
+          ? price <= safetySlPrice
+          : price >= safetySlPrice;
+
+        if (!safetySLHit) return; // Skip normal TP/SL — hedge manages the position
+
+        // Safety SL hit — fall through to normal resolution below
+        this.logger.warn(
+          `[PositionMonitor] ${sigKey} SAFETY SL hit at ${price} (safety=${safetySlPrice}) while hedge active — force closing`,
+        );
+        // Clean up hedge state
+        await this.hedgeManager.cleanupSignal((signal as any)._id?.toString());
+      }
+    }
+
     // ─── Original TP/SL check (non-grid signals) ──────────────────────────
     // Re-read takeProfitPrice in case it was boosted above
     const effectiveTpPrice = (signal as any).takeProfitPrice ?? takeProfitPrice;
@@ -616,6 +683,8 @@ export class PositionMonitorService implements OnModuleInit {
     if (this.resolvingSymbols.has(sigKey)) return;
     this.resolvingSymbols.add(sigKey);
     this.unregisterListener(signal);
+    // Clean up hedge tracking when signal fully closes
+    await this.hedgeManager.cleanupSignal((signal as any)._id?.toString()).catch(() => {});
 
     const reason = tpHit ? "TAKE_PROFIT" : "STOP_LOSS";
     const emoji = tpHit ? "🎯" : "🛑";
@@ -876,5 +945,151 @@ export class PositionMonitorService implements OnModuleInit {
 
   private async getCurrentPrice(symbol: string): Promise<number> {
     return (await this.marketDataService.getPrice(symbol)) ?? 0;
+  }
+
+  // ─── Auto-Hedge helpers ─────────────────────────────────────────────────
+
+  /**
+   * Widen SL to safety net on first tick when hedge is enabled.
+   * Saves original SL so it can be restored after hedge closes.
+   */
+  private async widenSlForHedge(signal: AiSignalDocument, cfg: any): Promise<void> {
+    const sigKey = this.getSignalKey(signal);
+    const { direction, entryPrice } = signal;
+    const currentSl = (signal as any).stopLossPrice;
+
+    // Save original SL
+    (signal as any).originalSlPrice = currentSl;
+
+    // Calculate wide safety net SL
+    const safetySlPrice = direction === "LONG"
+      ? +(entryPrice * (1 - cfg.hedgeSafetySlPct / 100)).toFixed(6)
+      : +(entryPrice * (1 + cfg.hedgeSafetySlPct / 100)).toFixed(6);
+
+    (signal as any).hedgeSafetySlPrice = safetySlPrice;
+    (signal as any).stopLossPrice = safetySlPrice;
+
+    // Persist to DB
+    await this.aiSignalModel.findByIdAndUpdate((signal as any)._id, {
+      originalSlPrice: currentSl,
+      hedgeSafetySlPrice: safetySlPrice,
+      stopLossPrice: safetySlPrice,
+    });
+
+    this.logger.log(
+      `[PositionMonitor] ${sigKey} SL widened for hedge: ${currentSl} → ${safetySlPrice} (safety net -${cfg.hedgeSafetySlPct}%)`,
+    );
+  }
+
+  /**
+   * Handle hedge open/upgrade action (sim mode — updates signal fields directly).
+   */
+  private async handleHedgeAction(
+    signal: AiSignalDocument,
+    action: HedgeAction,
+    currentPrice: number,
+  ): Promise<void> {
+    const sigKey = this.getSignalKey(signal);
+    const signalId = (signal as any)._id?.toString();
+    if (!signalId) return;
+
+    const phase = action.action === "OPEN_PARTIAL" ? "PARTIAL" : "FULL";
+
+    // Update in-memory signal
+    (signal as any).hedgeActive = true;
+    (signal as any).hedgePhase = phase;
+    (signal as any).hedgeDirection = action.hedgeDirection;
+    (signal as any).hedgeEntryPrice = currentPrice;
+    (signal as any).hedgeSimNotional = action.hedgeNotional;
+    (signal as any).hedgeTpPrice = action.hedgeTpPrice;
+    (signal as any).hedgeOpenedAt = new Date();
+
+    // Persist to DB
+    await this.aiSignalModel.findByIdAndUpdate(signalId, {
+      hedgeActive: true,
+      hedgePhase: phase,
+      hedgeDirection: action.hedgeDirection,
+      hedgeEntryPrice: currentPrice,
+      hedgeSimNotional: action.hedgeNotional,
+      hedgeTpPrice: action.hedgeTpPrice,
+      hedgeOpenedAt: new Date(),
+    });
+
+    this.logger.log(
+      `[PositionMonitor] ${sigKey} HEDGE ${action.action} | ${action.hedgeDirection} | ` +
+      `Entry: ${currentPrice} | Notional: $${action.hedgeNotional?.toFixed(2)} | TP: ${action.hedgeTpPrice} | ` +
+      `Reason: ${action.reason}`,
+    );
+
+    // Notify via callback (AiSignalService sends Telegram message)
+    if (this.hedgeCallback) {
+      await this.hedgeCallback(signal, action, currentPrice).catch((err) =>
+        this.logger.warn(`[PositionMonitor] hedgeCallback error ${sigKey}: ${err?.message}`),
+      );
+    }
+  }
+
+  /**
+   * Handle hedge close action (sim mode — updates signal fields, pushes to history).
+   */
+  private async handleHedgeClose(
+    signal: AiSignalDocument,
+    action: HedgeAction,
+    currentPrice: number,
+  ): Promise<void> {
+    const sigKey = this.getSignalKey(signal);
+    const signalId = (signal as any)._id?.toString();
+    if (!signalId) return;
+
+    const cycleCount = ((signal as any).hedgeCycleCount || 0) + 1;
+
+    // Build hedge history entry
+    const historyEntry = {
+      phase: (signal as any).hedgePhase,
+      direction: (signal as any).hedgeDirection,
+      entryPrice: (signal as any).hedgeEntryPrice,
+      exitPrice: currentPrice,
+      notional: (signal as any).hedgeSimNotional,
+      pnlPct: action.hedgePnlPct,
+      pnlUsdt: action.hedgePnlUsdt,
+      openedAt: (signal as any).hedgeOpenedAt,
+      closedAt: new Date(),
+      reason: action.reason,
+    };
+
+    // Determine new SL: use improved SL from hedge profit, or keep current safety SL
+    const newSlPrice = action.newSlPrice || (signal as any).hedgeSafetySlPrice || (signal as any).stopLossPrice;
+
+    // Update in-memory signal
+    (signal as any).hedgeActive = false;
+    (signal as any).hedgePhase = undefined;
+    (signal as any).hedgeDirection = undefined;
+    (signal as any).hedgeEntryPrice = undefined;
+    (signal as any).hedgeSimNotional = undefined;
+    (signal as any).hedgeTpPrice = undefined;
+    (signal as any).hedgeOpenedAt = undefined;
+    (signal as any).hedgeCycleCount = cycleCount;
+    (signal as any).stopLossPrice = newSlPrice;
+
+    // Persist to DB
+    await this.aiSignalModel.findByIdAndUpdate(signalId, {
+      hedgeActive: false,
+      $unset: { hedgePhase: 1, hedgeDirection: 1, hedgeEntryPrice: 1, hedgeSimNotional: 1, hedgeTpPrice: 1, hedgeOpenedAt: 1 },
+      hedgeCycleCount: cycleCount,
+      stopLossPrice: newSlPrice,
+      $push: { hedgeHistory: historyEntry },
+    });
+
+    this.logger.log(
+      `[PositionMonitor] ${sigKey} HEDGE CLOSED | PnL: ${action.hedgePnlPct?.toFixed(2)}% ($${action.hedgePnlUsdt?.toFixed(2)}) | ` +
+      `SL: ${newSlPrice} | Cycle: ${cycleCount} | Reason: ${action.reason}`,
+    );
+
+    // Notify via callback
+    if (this.hedgeCallback) {
+      await this.hedgeCallback(signal, action, currentPrice).catch((err) =>
+        this.logger.warn(`[PositionMonitor] hedgeCallback error ${sigKey}: ${err?.message}`),
+      );
+    }
   }
 }

@@ -99,6 +99,19 @@ export class UserTrade {
 
   @Prop({ default: 0 })
   gridClosedCount?: number;
+
+  // ─── Auto-Hedge ──────────────────────────────────────────────────────
+  @Prop({ default: false })
+  isHedge?: boolean; // this trade is a hedge (don't count in position slots)
+
+  @Prop()
+  parentTradeId?: string; // ref to the original trade being hedged
+
+  @Prop()
+  hedgeCycle?: number; // which hedge cycle (1, 2, 3)
+
+  @Prop()
+  hedgePhase?: string; // "PARTIAL" | "FULL"
 }
 
 export const UserTradeSchema = SchemaFactory.createForClass(UserTrade);

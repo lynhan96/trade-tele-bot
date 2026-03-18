@@ -147,6 +147,10 @@ export class AiSignalService implements OnModuleInit {
       await this.notifyTpBoosted(symbol, newTp, newTpPct, direction);
     });
 
+    this.positionMonitorService.setHedgeCallback(async (signal, action, price) => {
+      await this.notifyHedgeEvent(signal, action, price);
+    });
+
     // Cleanup orphaned actives + duplicate completed signals on startup
     try {
       const orphans = await this.signalQueueService.cleanupOrphanedActives();
@@ -1574,6 +1578,44 @@ export class AiSignalService implements OnModuleInit {
 
       // Test mode: only notify admin
       await this.notifyAdminOnly(text);
+    }
+  }
+
+  private async notifyHedgeEvent(signal: any, action: any, price: number): Promise<void> {
+    try {
+      const fmtP = this.fmtPrice;
+      const sym = signal.symbol;
+      const dir = signal.direction;
+      const hedgeDir = action.hedgeDirection || (dir === "LONG" ? "SHORT" : "LONG");
+
+      if (action.action === "OPEN_PARTIAL" || action.action === "UPGRADE_FULL") {
+        const phase = action.action === "OPEN_PARTIAL" ? "50%" : "100%";
+        const emoji = action.action === "OPEN_PARTIAL" ? "🛡️" : "🔒";
+        const text =
+          `${emoji} *${sym} HEDGE ${phase}* 🧪\n` +
+          `━━━━━━━━━━━━━━━━━━\n\n` +
+          `Main: ${dir} | Hedge: *${hedgeDir}*\n` +
+          `Entry: ${fmtP(price)} | TP: ${fmtP(action.hedgeTpPrice)}\n` +
+          `Vol: *$${action.hedgeNotional?.toFixed(0)}*\n` +
+          `Reason: ${action.reason}\n\n` +
+          `_Auto-Hedge • Test mode_`;
+        await this.notifyAdminOnly(text);
+      } else if (action.action === "CLOSE_HEDGE") {
+        const pnlSign = (action.hedgePnlPct ?? 0) >= 0 ? "+" : "";
+        const usdSign = (action.hedgePnlUsdt ?? 0) >= 0 ? "+" : "";
+        const emoji = (action.hedgePnlPct ?? 0) >= 0 ? "✅" : "❌";
+        const text =
+          `${emoji} *${sym} HEDGE CLOSED* 🧪\n` +
+          `━━━━━━━━━━━━━━━━━━\n\n` +
+          `PnL: *${pnlSign}${(action.hedgePnlPct ?? 0).toFixed(2)}% (${usdSign}${(action.hedgePnlUsdt ?? 0).toFixed(2)} USDT)*\n` +
+          `SL improved: ${fmtP(action.newSlPrice)}\n` +
+          `Cycle: ${(signal.hedgeCycleCount || 0) + 1}\n` +
+          `Reason: ${action.reason}\n\n` +
+          `_Auto-Hedge • Test mode_`;
+        await this.notifyAdminOnly(text);
+      }
+    } catch (err) {
+      this.logger.warn(`[AiSignal] Hedge notification error: ${err?.message}`);
     }
   }
 

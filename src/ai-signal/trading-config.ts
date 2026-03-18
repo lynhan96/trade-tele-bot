@@ -80,6 +80,24 @@ export interface TradingConfig {
   tunerDisableRR: number;           // Disable if R:R < this (default 0.5)
   tunerReEnablePnl: number;         // Re-enable if last 5 PnL > this (default 10)
   tunerReEnableWR: number;          // Re-enable if last 5 WR ≥ this (default 60)
+
+  // ── Auto-Hedge ─────────────────────────────────────────────────────────
+  hedgeEnabled: boolean;              // Master switch (default false)
+  hedgeSafetySlPct: number;           // Wide safety net SL % when hedge on (default 8.0)
+  hedgePartialTriggerPct: number;     // Trigger partial (50%) at -X% (default 3.0)
+  hedgeFullTriggerPct: number;        // Trigger full (100%) at -X% (default 5.0)
+  hedgePartialSizeRatio: number;      // Partial hedge size (default 0.5)
+  hedgeFullSizeRatio: number;         // Full hedge size (default 1.0)
+  hedgeTpPctTrend: number;            // TP for trending regime (default 2.0)
+  hedgeTpPctVolatile: number;         // TP for volatile regime (default 2.5)
+  hedgeTpPctDefault: number;          // TP default (default 1.5)
+  hedgeSlImprovementRatio: number;    // Fraction of profit → SL improvement (default 0.8)
+  hedgeMaxCycles: number;             // Max cycles per signal (default 3)
+  hedgeCooldownMin: number;           // Min minutes between cycles (default 10)
+  hedgeTrailTrigger: number;          // Trail hedge TP trigger % (default 1.5)
+  hedgeTrailKeepRatio: number;        // Keep this fraction of hedge peak (default 0.8)
+  hedgeBlockRegimes: string[];        // Don't hedge in these regimes
+  hedgeMaxFundingPct: number;         // Block hedge if |funding| > this % (default 0.03)
 }
 
 export const DEFAULT_TRADING_CONFIG: TradingConfig = {
@@ -127,6 +145,24 @@ export const DEFAULT_TRADING_CONFIG: TradingConfig = {
   tunerLookbackDays: 3, tunerMinTrades: 8,
   tunerDisablePnl: -15, tunerDisableRR: 0.5,
   tunerReEnablePnl: 10, tunerReEnableWR: 60,
+
+  // Auto-Hedge
+  hedgeEnabled: false,
+  hedgeSafetySlPct: 8.0,
+  hedgePartialTriggerPct: 3.0,
+  hedgeFullTriggerPct: 5.0,
+  hedgePartialSizeRatio: 0.5,
+  hedgeFullSizeRatio: 1.0,
+  hedgeTpPctTrend: 2.0,
+  hedgeTpPctVolatile: 2.5,
+  hedgeTpPctDefault: 1.5,
+  hedgeSlImprovementRatio: 0.8,
+  hedgeMaxCycles: 3,
+  hedgeCooldownMin: 10,
+  hedgeTrailTrigger: 1.5,
+  hedgeTrailKeepRatio: 0.8,
+  hedgeBlockRegimes: ["RANGE_BOUND", "SIDEWAYS"],
+  hedgeMaxFundingPct: 0.03,
 };
 
 const TRADING_CONFIG_KEY = "cache:ai:trading-config";
