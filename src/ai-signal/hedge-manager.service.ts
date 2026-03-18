@@ -57,9 +57,15 @@ export class HedgeManagerService {
         return this.checkHedgeExit(signal, currentPrice);
       }
 
-      // --- Only cooldown between cycles (no other blocks) ---
-      // Hedge always allowed: regime, age, consecutive losses, effective loss — all removed
+      // --- Only cooldown + max cycles check ---
       // Hedge is our primary risk management, must always be available
+
+      // Max cycles check
+      const cycleCount = signal.hedgeCycleCount || 0;
+      if (cycleCount >= cfg.hedgeMaxCycles) {
+        this.logger.debug(`[${signal.coin}] Max hedge cycles reached (${cycleCount}/${cfg.hedgeMaxCycles})`);
+        return null;
+      }
 
       // Cooldown check between hedge cycles (prevent rapid re-entry whipsaw)
       if (signal.hedgeHistory?.length > 0) {
@@ -71,8 +77,8 @@ export class HedgeManagerService {
         }
       }
 
-      // Track banked profit for logging
-      const banked = this.bankedProfitMap.get(signalId) || 0;
+      // Calculate banked profit from hedgeHistory (survives restart)
+      const banked = (signal.hedgeHistory || []).reduce((sum: number, h: any) => sum + (h.pnlUsdt || 0), 0);
 
       // PnL not bad enough to hedge
       if (pnlPct > -cfg.hedgePartialTriggerPct) return null;

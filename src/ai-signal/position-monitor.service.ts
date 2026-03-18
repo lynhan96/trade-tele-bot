@@ -174,12 +174,21 @@ export class PositionMonitorService implements OnModuleInit {
     if ((signal as any).tpBoosted) (signal as any).tpBoosted = true;
     if ((signal as any).peakPnlPct) (signal as any).peakPnlPct = (signal as any).peakPnlPct;
 
-    // Eagerly widen SL for hedge on registration (don't wait for first tick)
-    if (!(signal as any).hedgeSafetySlPrice) {
-      const hedgeCfg = this.tradingConfig?.get();
-      if (hedgeCfg?.hedgeEnabled) {
-        this.widenSlForHedge(signal, hedgeCfg).catch(() => {});
+    // When hedge enabled: immediately set SL=0 in memory (no SL, hedge covers)
+    // Persist to DB async — but in-memory SL=0 prevents early SL hit before DB write
+    const hedgeCfg = this.tradingConfig?.get();
+    if (hedgeCfg?.hedgeEnabled && (signal as any).stopLossPrice > 0) {
+      if (!(signal as any).originalSlPrice) {
+        (signal as any).originalSlPrice = (signal as any).stopLossPrice;
       }
+      (signal as any).stopLossPrice = 0;
+      (signal as any).stopLossPercent = 0;
+      (signal as any).hedgeSafetySlPrice = 0;
+      // Persist async
+      this.aiSignalModel.findByIdAndUpdate((signal as any)._id, {
+        originalSlPrice: (signal as any).originalSlPrice,
+        stopLossPrice: 0, stopLossPercent: 0, hedgeSafetySlPrice: 0,
+      }).catch(() => {});
     }
 
     const cb = (price: number) => this.handlePriceTick(signal, price);
