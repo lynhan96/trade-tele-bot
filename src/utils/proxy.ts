@@ -1,16 +1,26 @@
 import { HttpsProxyAgent } from "https-proxy-agent";
 
 const PROXIES = [
-  "http://9SM6Of:YhAvBfsm@snvn1.tunproxy.com:21992",
-  "http://9SM6Of:YhAvBfsm@snvn7.tunproxy.com:15947",
-  "http://9SM6Of:YhAvBfsm@snvn2.tunproxy.com:23441",
-  "http://9SM6Of:YhAvBfsm@snvn9.tunproxy.com:13740",
-  "http://9SM6Of:YhAvBfsm@snvn3.tunproxy.com:19224",
-  "http://9SM6Of:YhAvBfsm@snf3.tunproxy.com:13679",
-  "http://9SM6Of:YhAvBfsm@snvt2.tunproxy.com:25517",
-  "http://9SM6Of:YhAvBfsm@snvt9.tunproxy.com:16179",
-  "http://9SM6Of:YhAvBfsm@snf3.tunproxy.com:15064",
-  "http://9SM6Of:YhAvBfsm@snvn4.tunproxy.com:13176",
+  "http://4L9CkL:MKpLcE3q@snvn9.tunproxy.com:12225",
+  "http://4L9CkL:MKpLcE3q@snf1.tunproxy.com:17933",
+  "http://4L9CkL:MKpLcE3q@snvt8.tunproxy.com:19170",
+  "http://4L9CkL:MKpLcE3q@snvt7.tunproxy.com:34293",
+  "http://4L9CkL:MKpLcE3q@snvn10.tunproxy.com:21323",
+  "http://4L9CkL:MKpLcE3q@snvn5.tunproxy.com:11266",
+  "http://4L9CkL:MKpLcE3q@snf6.tunproxy.com:27006",
+  "http://4L9CkL:MKpLcE3q@snvn3.tunproxy.com:31960",
+  "http://4L9CkL:MKpLcE3q@snvt4.tunproxy.com:22116",
+  "http://4L9CkL:MKpLcE3q@snvt6.tunproxy.com:15433",
+  "http://4L9CkL:MKpLcE3q@snf2.tunproxy.com:11186",
+  "http://4L9CkL:MKpLcE3q@snf3.tunproxy.com:18318",
+  "http://4L9CkL:MKpLcE3q@snvt6.tunproxy.com:30319",
+  "http://4L9CkL:MKpLcE3q@snvn11.tunproxy.com:22380",
+  "http://4L9CkL:MKpLcE3q@snf1.tunproxy.com:16601",
+  "http://4L9CkL:MKpLcE3q@snvt1.tunproxy.com:23896",
+  "http://4L9CkL:MKpLcE3q@snvt10.tunproxy.com:28436",
+  "http://4L9CkL:MKpLcE3q@snvn8.tunproxy.com:21325",
+  "http://4L9CkL:MKpLcE3q@snvn2.tunproxy.com:19251",
+  "http://4L9CkL:MKpLcE3q@snf3.tunproxy.com:24616",
 ];
 
 let index = 0;
