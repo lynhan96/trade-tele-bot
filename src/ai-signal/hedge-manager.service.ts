@@ -57,37 +57,11 @@ export class HedgeManagerService {
         return this.checkHedgeExit(signal, currentPrice);
       }
 
-      // --- Pre-checks before opening a new hedge ---
+      // --- Only cooldown between cycles (no other blocks) ---
+      // Hedge always allowed: regime, age, consecutive losses, effective loss — all removed
+      // Hedge is our primary risk management, must always be available
 
-      // Block in certain regimes
-      if (cfg.hedgeBlockRegimes?.includes(regime)) return null;
-
-      // Don't hedge if max cycles reached
-      if ((signal.hedgeCycleCount || 0) >= cfg.hedgeMaxCycles) return null;
-
-      // Don't hedge if signal is too old
-      if (signal.openedAt || signal.executedAt) {
-        const openTime = signal.openedAt || signal.executedAt;
-        const ageHours = (Date.now() - new Date(openTime).getTime()) / 3600000;
-        if (ageHours > MAX_SIGNAL_AGE_HOURS) return null;
-      }
-
-      // Check consecutive losses — stop hedging if too many
-      const consLosses = this.consecutiveLossMap.get(signalId) || 0;
-      if (consLosses >= cfg.hedgeMaxConsecutiveLosses) {
-        return null;
-      }
-
-      // Check effective max loss: don't widen further if banked profit can't cover
-      const banked = this.bankedProfitMap.get(signalId) || 0;
-      const filledVol = this.getFilledVol(signal);
-      const currentSafetySlPct = signal.hedgeSafetySlPrice && signal.entryPrice
-        ? Math.abs((signal.hedgeSafetySlPrice - signal.entryPrice) / signal.entryPrice * 100)
-        : cfg.hedgeSafetySlPct;
-      const effectiveLoss = (currentSafetySlPct / 100) * filledVol - banked;
-      if (effectiveLoss > cfg.hedgeMaxEffectiveLoss) return null;
-
-      // Cooldown check between hedge cycles
+      // Cooldown check between hedge cycles (prevent rapid re-entry whipsaw)
       if (signal.hedgeHistory?.length > 0) {
         const lastHedge = signal.hedgeHistory[signal.hedgeHistory.length - 1];
         if (lastHedge?.closedAt) {
