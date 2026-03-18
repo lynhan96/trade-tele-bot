@@ -1011,19 +1011,18 @@ export class PositionMonitorService implements OnModuleInit {
       (signal as any).originalSlPrice = currentSl;
     }
 
-    // Calculate wide safety net SL
-    const safetySlPrice = direction === "LONG"
-      ? +(entryPrice * (1 - cfg.hedgeSafetySlPct / 100)).toFixed(6)
-      : +(entryPrice * (1 + cfg.hedgeSafetySlPct / 100)).toFixed(6);
-
-    (signal as any).hedgeSafetySlPrice = safetySlPrice;
-    (signal as any).stopLossPrice = safetySlPrice;
-    (signal as any).slMovedToEntry = false; // Reset — SL is now below entry, not a profit lock
+    // Hedge active = NO SL — hedge IS the risk management
+    // Only catastrophic -25% check in handlePriceTick, no price-based SL
+    (signal as any).hedgeSafetySlPrice = 0;
+    (signal as any).stopLossPrice = 0;
+    (signal as any).stopLossPercent = 0;
+    (signal as any).slMovedToEntry = false;
 
     // Persist to DB (only set originalSlPrice if not already saved from a previous cycle)
     const widenUpdates: Record<string, any> = {
-      hedgeSafetySlPrice: safetySlPrice,
-      stopLossPrice: safetySlPrice,
+      hedgeSafetySlPrice: 0,
+      stopLossPrice: 0,
+      stopLossPercent: 0,
       slMovedToEntry: false,
     };
     if ((signal as any).originalSlPrice === currentSl) {
