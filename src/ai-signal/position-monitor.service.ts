@@ -876,8 +876,10 @@ export class PositionMonitorService implements OnModuleInit {
     // Re-read takeProfitPrice in case it was boosted above
     const effectiveTpPrice = (signal as any).takeProfitPrice ?? takeProfitPrice;
     const stopLossPrice = (signal as any).stopLossPrice;
-    const slHit =
-      direction === "LONG" ? price <= stopLossPrice : price >= stopLossPrice;
+    // SL=0 means hedge mode (SL disabled) — never trigger SL on price check
+    const slHit = stopLossPrice > 0
+      ? (direction === "LONG" ? price <= stopLossPrice : price >= stopLossPrice)
+      : false;
     const tpHit = effectiveTpPrice
       ? direction === "LONG"
         ? price >= effectiveTpPrice
