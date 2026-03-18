@@ -273,7 +273,7 @@ MARKET CONTEXT:
 
 RULES:
 - REJECT if signal direction opposes strong market trend (e.g. SHORT when 70%+ alts green and coin in uptrend)
-- REJECT if coin has 2+ consecutive losses in same direction recently
+- REJECT if coin has 4+ consecutive losses in same direction recently (hedge mode covers partial losses)
 - ADJUST if SL/TP doesn't match volatility (e.g. tight SL in volatile coin)
 - APPROVE if signal aligns with market direction and has good setup
 - When market is bullish, prefer LONG signals on pullbacks; only SHORT with very high confidence
