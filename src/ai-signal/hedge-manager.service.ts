@@ -61,8 +61,11 @@ export class HedgeManagerService {
         return this.checkHedgeExit(signal, currentPrice);
       }
 
-      // --- Only cooldown + max cycles check ---
-      // Hedge is our primary risk management, must always be available
+      // --- Regime block ---
+      if (cfg.hedgeBlockRegimes?.length > 0 && cfg.hedgeBlockRegimes.includes(regime)) {
+        this.logger.debug(`[${signal.coin}] Hedge blocked by regime: ${regime}`);
+        return null;
+      }
 
       // Cooldown check between hedge cycles (prevent rapid re-entry whipsaw)
       if (signal.hedgeHistory?.length > 0) {
@@ -177,30 +180,14 @@ export class HedgeManagerService {
         : ((hedgeEntry - currentPrice) / hedgeEntry) * 100;
       const hedgePnlUsdt = (hedgePnlPct / 100) * hedgeNotional;
 
-      // ── 0. Net Positive Exit: hedgeBanked + currentHedgePnl + mainPnl > 0 → close ALL ──
-      if (mainPnlPct !== undefined) {
-        const banked = (signal.hedgeHistory || []).reduce((sum: number, h: any) => sum + (h.pnlUsdt || 0), 0);
-        const netPnl = banked + hedgePnlUsdt + (mainPnlPct / 100) * (signal.simNotional || 1000);
-        if (netPnl > 0) {
-          this.logger.log(
-            `[${signal.coin}] NET POSITIVE EXIT | Main: ${mainPnlPct.toFixed(2)}% | Hedge: $${hedgePnlUsdt.toFixed(2)} | Banked: $${banked.toFixed(2)} | Net: $${netPnl.toFixed(2)}`,
-          );
-          return {
-            action: 'CLOSE_HEDGE',
-            hedgePnlPct,
-            hedgePnlUsdt,
-            bankedProfit: banked,
-            consecutiveLosses: 0,
-            hedgePhase: 'NET_POSITIVE_EXIT',
-            reason: `Net positive: main $${(mainPnlPct / 100 * (signal.simNotional || 1000)).toFixed(2)} + hedge $${hedgePnlUsdt.toFixed(2)} + banked $${banked.toFixed(2)} = $${netPnl.toFixed(2)}`,
-          };
-        }
-      }
+      // NOTE: Net Positive Exit is handled in PositionMonitor.handlePriceTick (closes both hedge + main)
+      // Do NOT duplicate here — PositionMonitor has full context to resolve the main signal.
 
       // ── 1. Recovery Close: main recovered past -1% → close hedge (no longer needed) ──
       if (mainPnlPct !== undefined && mainPnlPct > -1.0) {
         this.cleanupPeakTracking(signalId);
-        const banked = this.bankedProfitMap.get(signalId) || 0;
+        // Use DB hedgeHistory for banked profit (survives restart)
+        const banked = (signal.hedgeHistory || []).reduce((sum: number, h: any) => sum + (h.pnlUsdt || 0), 0);
 
         this.logger.log(
           `[${signal.coin}] Hedge RECOVERY CLOSE | Main recovered to ${mainPnlPct.toFixed(2)}% | ` +
@@ -273,10 +260,10 @@ export class HedgeManagerService {
     // Reset consecutive losses on win
     this.consecutiveLossMap.set(signalId, 0);
 
-    // Bank the profit
-    const prevBanked = this.bankedProfitMap.get(signalId) || 0;
+    // Bank the profit — use DB hedgeHistory (survives restart) + current profit
+    const prevBanked = (signal.hedgeHistory || []).reduce((sum: number, h: any) => sum + (h.pnlUsdt || 0), 0);
     const newBanked = prevBanked + Math.max(0, hedgePnlUsdt);
-    this.bankedProfitMap.set(signalId, newBanked);
+    this.bankedProfitMap.set(signalId, newBanked); // keep in-memory cache in sync
 
     // Calculate SL improvement
     const originalNotional = signal.simNotional || signal.notional || 0;
