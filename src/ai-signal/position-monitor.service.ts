@@ -174,6 +174,14 @@ export class PositionMonitorService implements OnModuleInit {
     if ((signal as any).tpBoosted) (signal as any).tpBoosted = true;
     if ((signal as any).peakPnlPct) (signal as any).peakPnlPct = (signal as any).peakPnlPct;
 
+    // Eagerly widen SL for hedge on registration (don't wait for first tick)
+    if (!(signal as any).hedgeSafetySlPrice) {
+      const hedgeCfg = this.tradingConfig?.get();
+      if (hedgeCfg?.hedgeEnabled) {
+        this.widenSlForHedge(signal, hedgeCfg).catch(() => {});
+      }
+    }
+
     const cb = (price: number) => this.handlePriceTick(signal, price);
     this.listenerRefs.set(sigKey, cb);
     this.watchedSymbols.add(sigKey);
