@@ -221,12 +221,17 @@ export class SignalQueueService {
     }));
     const gridClosedCount = updatedGrids.filter((g: any) => g.status === "TP_CLOSED" || g.status === "SL_CLOSED").length;
 
+    // Include hedge history PnL in total (net = main + all hedge cycles)
+    const hedgeHistory: any[] = (active as any).hedgeHistory || [];
+    const hedgeTotalUsdt = hedgeHistory.reduce((sum: number, h: any) => sum + (h.pnlUsdt || 0), 0);
+    const netPnlUsdt = Math.round(((pnlUsdt || 0) + hedgeTotalUsdt) * 100) / 100;
+
     await this.aiSignalModel.findByIdAndUpdate(activeId, {
       status: "COMPLETED",
       closeReason: reason,
       exitPrice,
       pnlPercent,
-      pnlUsdt,
+      pnlUsdt: netPnlUsdt,
       positionClosedAt: new Date(),
       ...(grids.length > 0 ? { gridLevels: updatedGrids, gridClosedCount } : {}),
     });
@@ -543,18 +548,23 @@ export class SignalQueueService {
     }));
     const gridClosedCount = updatedGrids.filter((g: any) => g.status === "SL_CLOSED" || g.status === "TP_CLOSED").length;
 
+    // Include hedge history PnL in total
+    const hedgeHist: any[] = (doc as any).hedgeHistory || [];
+    const hedgeTotalUsdt = hedgeHist.reduce((sum: number, h: any) => sum + (h.pnlUsdt || 0), 0);
+    const netPnlUsdt = Math.round(((pnlUsdt || 0) + hedgeTotalUsdt) * 100) / 100;
+
     await this.aiSignalModel.findByIdAndUpdate(doc._id, {
       status: "COMPLETED",
       closeReason: reason,
       exitPrice,
       pnlPercent,
-      pnlUsdt,
+      pnlUsdt: netPnlUsdt,
       positionClosedAt: new Date(),
       ...(grids.length > 0 ? { gridLevels: updatedGrids, gridClosedCount } : {}),
     });
     await this.redisService.delete(ACTIVE_KEY(sigKey));
     this.logger.log(
-      `[SignalQueue] ${sigKey} COMPLETED (${reason}) — exitPrice=${exitPrice} pnl=${pnlPercent.toFixed(2)}% pnlUsdt=${pnlUsdt}`,
+      `[SignalQueue] ${sigKey} COMPLETED (${reason}) — exitPrice=${exitPrice} pnl=${pnlPercent.toFixed(2)}% netPnlUsdt=${netPnlUsdt} (hedge: ${hedgeTotalUsdt.toFixed(2)})`,
     );
   }
 
