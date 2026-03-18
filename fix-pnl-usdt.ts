@@ -15,7 +15,7 @@ async function main() {
   const client = new MongoClient(MONGODB_URI);
   await client.connect();
   const db = client.db();
-  const signals = db.collection("aisignals");
+  const signals = db.collection("ai_signals");
 
   const completed = await signals.find({ status: "COMPLETED" }).toArray();
   console.log(`Found ${completed.length} COMPLETED signals`);
