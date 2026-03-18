@@ -482,7 +482,7 @@ export class StrategyAutoTunerService {
       const signals = await this.aiSignalModel.find({
         status: "COMPLETED",
         createdAt: { $gte: lookbackDate },
-        strategy: { $not: /^EXTERNAL_/ }, // don't evaluate external signals
+        source: { $ne: "hedge" }, // exclude hedge records from evaluation
       }).lean();
 
       if (signals.length < 5) {

@@ -34,7 +34,8 @@ export interface TradingConfig {
   // ── Strategy Gates ───────────────────────────────────────────────────────
   gateEMAPullback: number;    // Min confidence for EMA_PULLBACK (default 75)
   gateTrendEMA: number;       // Min confidence for TREND_EMA (default 70)
-  gateStochEMAKDJ: number;    // Min confidence for STOCH_EMA_KDJ (default 78)
+  gateStochEMAKDJ: number;    // Min confidence for STOCH_EMA_KDJ (default 82)
+  gateRSICross: number;       // Min confidence for RSI_CROSS (default 75)
 
   // ── Funding ──────────────────────────────────────────────────────────────
   fundingDirectionalBlock: number;  // Block directional if |funding| > this % (default 0.1)
@@ -127,7 +128,7 @@ export const DEFAULT_TRADING_CONFIG: TradingConfig = {
   regimeCaps: { SIDEWAYS: 70, RANGE_BOUND: 70, MIXED: 68, VOLATILE: 70, BTC_CORRELATION: 68, STRONG_BULL: 80, STRONG_BEAR: 72 },
 
   // Strategy gates
-  gateEMAPullback: 78, gateTrendEMA: 70, gateStochEMAKDJ: 78,
+  gateEMAPullback: 78, gateTrendEMA: 70, gateStochEMAKDJ: 82, gateRSICross: 75,
 
   // Funding
   fundingDirectionalBlock: 0.1, fundingExtremeBlock: 0.3,
