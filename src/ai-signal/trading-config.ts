@@ -145,7 +145,7 @@ export const DEFAULT_TRADING_CONFIG: TradingConfig = {
   timeStopHours: 24, timeStopPnlRange: 0.5,
 
   // DCA Grid
-  gridLevelCount: 5, gridFillCooldownMin: 5,
+  gridLevelCount: 3, gridFillCooldownMin: 5,
   gridRsiLong: 45, gridRsiShort: 55,
 
   // Market Guard
@@ -161,7 +161,7 @@ export const DEFAULT_TRADING_CONFIG: TradingConfig = {
   tunerReEnablePnl: 10, tunerReEnableWR: 60,
 
   // Auto-Hedge
-  hedgeEnabled: false,
+  hedgeEnabled: true,
   hedgeSafetySlPct: 8.0,
   hedgePartialTriggerPct: 3.0,
   hedgeFullTriggerPct: 5.0,
