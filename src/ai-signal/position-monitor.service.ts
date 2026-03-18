@@ -644,7 +644,7 @@ export class PositionMonitorService implements OnModuleInit {
         }
       } else {
         // Hedge is active — check for exit
-        const exitAction = this.hedgeManager.checkHedgeExit(signal, price);
+        const exitAction = this.hedgeManager.checkHedgeExit(signal, price, pnlPct);
         if (exitAction && exitAction.action === "CLOSE_HEDGE") {
           await this.handleHedgeClose(signal, exitAction, price);
         }

@@ -154,9 +154,10 @@ export class HedgeManagerService {
 
   /**
    * Check if hedge side should be closed.
-   * Supports: TP hit, trailing stop, hedge own SL, safety SL.
+   * NO hedge SL — hedge only closes on: TP, trail, or main recovery.
+   * When hedge is losing, main is recovering → no need to cut hedge.
    */
-  checkHedgeExit(signal: any, currentPrice: number): HedgeAction | null {
+  checkHedgeExit(signal: any, currentPrice: number, mainPnlPct?: number): HedgeAction | null {
     try {
       const cfg = this.tradingConfig.get();
       const signalId = signal._id?.toString();
@@ -173,31 +174,30 @@ export class HedgeManagerService {
         : ((hedgeEntry - currentPrice) / hedgeEntry) * 100;
       const hedgePnlUsdt = (hedgePnlPct / 100) * hedgeNotional;
 
-      // ── 1. Hedge own SL (tight: -1.5%) — cut quickly on reversal ──
-      if (hedgePnlPct <= -cfg.hedgeOwnSlPct) {
+      // ── 1. Recovery Close: main recovered past -1% → close hedge (no longer needed) ──
+      if (mainPnlPct !== undefined && mainPnlPct > -1.0) {
         this.cleanupPeakTracking(signalId);
-        // Track consecutive loss
-        const consLosses = (this.consecutiveLossMap.get(signalId) || 0) + 1;
-        this.consecutiveLossMap.set(signalId, consLosses);
+        const banked = this.bankedProfitMap.get(signalId) || 0;
 
-        this.logger.warn(
-          `[${signal.coin}] Hedge OWN SL | Loss: ${hedgePnlPct.toFixed(2)}% ($${hedgePnlUsdt.toFixed(2)}) | ` +
-          `ConsecutiveLosses: ${consLosses}/${cfg.hedgeMaxConsecutiveLosses}`,
+        this.logger.log(
+          `[${signal.coin}] Hedge RECOVERY CLOSE | Main recovered to ${mainPnlPct.toFixed(2)}% | ` +
+          `Hedge PnL: ${hedgePnlPct.toFixed(2)}% ($${hedgePnlUsdt.toFixed(2)}) | Banked: $${banked.toFixed(2)}`,
         );
 
-        // Tighten safety SL on loss
-        const newSafetySlPrice = this.adjustSafetySlOnLoss(signal, cfg);
+        // If hedge is profitable, bank it
+        if (hedgePnlUsdt > 0) {
+          return this.closeHedgeWithProfit(signal, signalId, hedgePnlPct, hedgePnlUsdt, cfg,
+            `Recovery close: main ${mainPnlPct.toFixed(2)}%`);
+        }
 
         return {
           action: 'CLOSE_HEDGE',
           hedgePnlPct,
           hedgePnlUsdt,
-          newSlPrice: undefined,
-          newSafetySlPrice,
-          bankedProfit: this.bankedProfitMap.get(signalId) || 0,
-          consecutiveLosses: consLosses,
+          bankedProfit: banked,
+          consecutiveLosses: 0,
           hedgePhase: signal.hedgePhase,
-          reason: `Hedge SL hit: ${hedgePnlPct.toFixed(2)}% (consLoss: ${consLosses})`,
+          reason: `Recovery close: main ${mainPnlPct.toFixed(2)}%, hedge ${hedgePnlPct.toFixed(2)}%`,
         };
       }
 
@@ -213,7 +213,7 @@ export class HedgeManagerService {
         }
       }
 
-      // ── 3. Trailing stop on hedge side ──
+      // ── 3. Trailing stop on hedge side (only when profitable) ──
       const currentPeak = this.hedgePeakMap.get(signalId) || 0;
       if (hedgePnlPct > currentPeak) {
         this.hedgePeakMap.set(signalId, hedgePnlPct);
@@ -227,6 +227,8 @@ export class HedgeManagerService {
             `Hedge trail: peak ${peak.toFixed(2)}% → ${hedgePnlPct.toFixed(2)}%`);
         }
       }
+
+      // ── NO hedge SL — when hedge loses, main is recovering. Let it ride. ──
 
       return null;
     } catch (err) {
