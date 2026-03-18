@@ -180,8 +180,18 @@ export class SignalQueueService {
         : ((entryForPnl - exitPrice) / entryForPnl) * 100;
 
     // Calculate USDT PnL from grid volumes (per-grid for accuracy)
+    // Deduct Binance Futures fees: entry (taker/maker) + exit (taker) + funding
+    const cfg = this.tradingConfig.get();
+    const takerFeePct = cfg.simTakerFeePct / 100;
+    const makerFeePct = cfg.simMakerFeePct / 100;
+    const fundingRate = Math.abs((active as any).fundingRate || 0);
+    const hoursHeld = (active as any).executedAt
+      ? (Date.now() - new Date((active as any).executedAt).getTime()) / 3600000 : 0;
+    const fundingIntervals = Math.floor(hoursHeld / 8);
+
     const grids: any[] = (active as any).gridLevels || [];
     let pnlUsdt: number | undefined;
+    let totalFees = 0;
     if (grids.length > 0) {
       let totalUsdt = 0;
       for (const g of grids) {
@@ -191,13 +201,19 @@ export class SignalQueueService {
             ? ((exitPrice - g.fillPrice) / g.fillPrice) * 100
             : ((g.fillPrice - exitPrice) / g.fillPrice) * 100;
           totalUsdt += (gPnl / 100) * vol;
+          // Fees: entry (L0=taker, DCA=maker) + exit (taker) + funding
+          const entryFee = g.level === 0 ? vol * takerFeePct : vol * makerFeePct;
+          const exitFee = vol * takerFeePct;
+          const fundFee = cfg.simFundingEnabled ? vol * fundingRate * fundingIntervals : 0;
+          totalFees += entryFee + exitFee + fundFee;
         }
       }
-      pnlUsdt = Math.round(totalUsdt * 100) / 100;
+      pnlUsdt = Math.round((totalUsdt - totalFees) * 100) / 100;
     } else {
-      // No grids = L0 only = 40% of simNotional
       const filledVol = ((active as any).simNotional || 1000) * 0.4;
-      pnlUsdt = Math.round((pnlPercent / 100) * filledVol * 100) / 100;
+      const rawPnl = (pnlPercent / 100) * filledVol;
+      const fees = filledVol * takerFeePct * 2 + (cfg.simFundingEnabled ? filledVol * fundingRate * fundingIntervals : 0);
+      pnlUsdt = Math.round((rawPnl - fees) * 100) / 100;
     }
 
     // Close grid levels
@@ -214,7 +230,11 @@ export class SignalQueueService {
           const gPnl = active.direction === "LONG"
             ? ((exitPrice - g.fillPrice) / g.fillPrice) * 100
             : ((g.fillPrice - exitPrice) / g.fillPrice) * 100;
-          return Math.round((gPnl / 100) * vol * 100) / 100;
+          const rawPnl = (gPnl / 100) * vol;
+          const entryFee = g.level === 0 ? vol * takerFeePct : vol * makerFeePct;
+          const exitFee = vol * takerFeePct;
+          const fundFee = cfg.simFundingEnabled ? vol * fundingRate * fundingIntervals : 0;
+          return Math.round((rawPnl - entryFee - exitFee - fundFee) * 100) / 100;
         })(),
       } : {}),
       ...(g.status === "PENDING" ? { status: "CANCELLED" } : {}),

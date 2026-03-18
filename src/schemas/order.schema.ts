@@ -38,6 +38,15 @@ export class Order {
   @Prop()
   pnlUsdt: number;
 
+  @Prop({ default: 0 })
+  entryFeeUsdt: number;
+
+  @Prop({ default: 0 })
+  exitFeeUsdt: number;
+
+  @Prop({ default: 0 })
+  fundingFeeUsdt: number;
+
   @Prop()
   closeReason: string;
 

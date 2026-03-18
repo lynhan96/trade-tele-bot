@@ -112,6 +112,11 @@ export interface TradingConfig {
   hedgeReEntryPullbackPct: number;   // Wait for X% pullback before re-entry (default 0.3)
   hedgeReEntryRsiLong: number;       // RSI threshold for LONG hedge re-entry (default 55)
   hedgeReEntryRsiShort: number;      // RSI threshold for SHORT hedge re-entry (default 45)
+
+  // ── Sim Trading Fees ─────────────────────────────────────────────────
+  simTakerFeePct: number;            // Taker fee % per side (default 0.05 = 0.05%)
+  simMakerFeePct: number;            // Maker fee % per side (default 0.02 = 0.02%)
+  simFundingEnabled: boolean;        // Apply funding fee in sim (default true)
 }
 
 export const DEFAULT_TRADING_CONFIG: TradingConfig = {
@@ -190,6 +195,11 @@ export const DEFAULT_TRADING_CONFIG: TradingConfig = {
   hedgeReEntryPullbackPct: 0.3,
   hedgeReEntryRsiLong: 55,
   hedgeReEntryRsiShort: 45,
+
+  // Sim Trading Fees
+  simTakerFeePct: 0.05,   // 0.05% per side (market orders)
+  simMakerFeePct: 0.02,   // 0.02% per side (limit orders)
+  simFundingEnabled: true, // Apply funding fee from Binance API
 };
 
 const TRADING_CONFIG_KEY = "cache:ai:trading-config";

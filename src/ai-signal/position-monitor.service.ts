@@ -116,6 +116,28 @@ export class PositionMonitorService implements OnModuleInit {
     }
   }
 
+  // ─── Fee Helpers (Binance Futures sim) ────────────────────────────────────
+
+  /** Calculate taker fee in USDT (market order — open/close) */
+  private calcTakerFee(notional: number): number {
+    const cfg = this.tradingConfig.get();
+    return +(notional * cfg.simTakerFeePct / 100).toFixed(4);
+  }
+
+  /** Calculate maker fee in USDT (limit order — grid DCA fills) */
+  private calcMakerFee(notional: number): number {
+    const cfg = this.tradingConfig.get();
+    return +(notional * cfg.simMakerFeePct / 100).toFixed(4);
+  }
+
+  /** Calculate funding fee for a position held N hours */
+  private calcFundingFee(notional: number, fundingRate: number, hoursHeld: number): number {
+    // Binance charges funding every 8h. fundingRate is per-interval (e.g. 0.0001 = 0.01%)
+    const intervals = Math.floor(hoursHeld / 8);
+    if (intervals <= 0) return 0;
+    return +(notional * fundingRate * intervals).toFixed(4);
+  }
+
   // ─── Lifecycle ─────────────────────────────────────────────────────────────
 
   async onModuleInit(): Promise<void> {
@@ -316,8 +338,9 @@ export class PositionMonitorService implements OnModuleInit {
         `[PositionMonitor] Grid DCA init ${sigKey}: ${GRID_LEVEL_COUNT} levels, step=${gridStep.toFixed(2)}%, SL=${stopLossPrice.toFixed(4)}, TP=${takeProfitPrice?.toFixed(4)}`,
       );
 
-      // Create MAIN order for L0
+      // Create MAIN order for L0 (taker fee — market order)
       const gridNotionalL0 = simNotional * (DCA_WEIGHTS[0] / 100);
+      const l0EntryFee = this.calcTakerFee(gridNotionalL0);
       await this.orderModel.create({
         signalId: (signal as any)._id,
         symbol: signal.symbol,
@@ -327,6 +350,7 @@ export class PositionMonitorService implements OnModuleInit {
         entryPrice: origEntry,
         notional: gridNotionalL0,
         quantity: gridNotionalL0 / origEntry,
+        entryFeeUsdt: l0EntryFee,
         openedAt: new Date(),
         cycleNumber: 0,
       });
@@ -416,7 +440,8 @@ export class PositionMonitorService implements OnModuleInit {
           grid.simNotional = gridNotional;
           grid.simQuantity = gridNotional / price;
 
-          // Create DCA order
+          // Create DCA order (maker fee — limit order fill)
+          const dcaEntryFee = this.calcMakerFee(gridNotional);
           await this.orderModel.create({
             signalId: (signal as any)._id,
             symbol: signal.symbol,
@@ -426,6 +451,7 @@ export class PositionMonitorService implements OnModuleInit {
             entryPrice: price,
             notional: gridNotional,
             quantity: gridNotional / price,
+            entryFeeUsdt: dcaEntryFee,
             openedAt: new Date(),
             cycleNumber: grid.level,
           });
@@ -884,11 +910,20 @@ export class PositionMonitorService implements OnModuleInit {
         reason,
       );
 
-      // Close all open orders for this signal
-      await this.orderModel.updateMany(
-        { signalId: (signal as any)._id, status: 'OPEN' },
-        { status: 'CLOSED', exitPrice: exitPrice, closedAt: new Date(), closeReason: reason },
-      );
+      // Close all open orders for this signal — apply exit fees + funding
+      const openOrders = await this.orderModel.find({ signalId: (signal as any)._id, status: 'OPEN' });
+      const fundingRate = (signal as any).fundingRate || 0;
+      for (const order of openOrders) {
+        const exitFee = this.calcTakerFee(order.notional);
+        const hoursHeld = order.openedAt ? (Date.now() - new Date(order.openedAt).getTime()) / 3600000 : 0;
+        const fundingFee = this.tradingConfig.get().simFundingEnabled
+          ? this.calcFundingFee(order.notional, Math.abs(fundingRate), hoursHeld)
+          : 0;
+        await this.orderModel.findByIdAndUpdate(order._id, {
+          status: 'CLOSED', exitPrice, closedAt: new Date(), closeReason: reason,
+          exitFeeUsdt: exitFee, fundingFeeUsdt: fundingFee,
+        });
+      }
 
       if (resolved) {
         let promoted = await this.signalQueueService.activateQueuedSignal(
@@ -1209,7 +1244,8 @@ export class PositionMonitorService implements OnModuleInit {
       hedgeOpenedAt: new Date(),
     });
 
-    // Create HEDGE order record
+    // Create HEDGE order record (taker fee — market order)
+    const hedgeEntryFee = this.calcTakerFee(action.hedgeNotional);
     await this.orderModel.create({
       signalId: (signal as any)._id,
       symbol: signal.symbol,
@@ -1219,6 +1255,7 @@ export class PositionMonitorService implements OnModuleInit {
       entryPrice: currentPrice,
       notional: action.hedgeNotional,
       quantity: action.hedgeNotional / currentPrice,
+      entryFeeUsdt: hedgeEntryFee,
       openedAt: new Date(),
       cycleNumber: ((signal as any).hedgeCycleCount || 0) + 1,
       metadata: { phase: action.hedgePhase, reason: action.reason },
@@ -1306,7 +1343,7 @@ export class PositionMonitorService implements OnModuleInit {
       ...updates,
     });
 
-    // Close the HEDGE order
+    // Close the HEDGE order — apply exit fee + funding
     {
       const hedgeEntry = historyEntry.entryPrice;
       const hedgeExit = currentPrice;
@@ -1314,7 +1351,15 @@ export class PositionMonitorService implements OnModuleInit {
       const hedgePnlPctCalc = historyEntry.direction === "LONG"
         ? ((hedgeExit - hedgeEntry) / hedgeEntry) * 100
         : ((hedgeEntry - hedgeExit) / hedgeEntry) * 100;
-      const hedgePnlUsdtCalc = Math.round((hedgePnlPctCalc / 100) * hedgeNotional * 100) / 100;
+      const hedgePnlUsdtRaw = (hedgePnlPctCalc / 100) * hedgeNotional;
+      const hedgeExitFee = this.calcTakerFee(hedgeNotional);
+      const hedgeHoursHeld = historyEntry.openedAt
+        ? (Date.now() - new Date(historyEntry.openedAt).getTime()) / 3600000 : 0;
+      const fundingRate = (signal as any).fundingRate || 0;
+      const hedgeFundingFee = this.tradingConfig.get().simFundingEnabled
+        ? this.calcFundingFee(hedgeNotional, Math.abs(fundingRate), hedgeHoursHeld) : 0;
+      const hedgePnlUsdtCalc = Math.round((hedgePnlUsdtRaw - hedgeExitFee - hedgeFundingFee) * 100) / 100;
+
       let closeReasonOrder = "HEDGE_CLOSE";
       if (action.reason?.includes("Recovery")) closeReasonOrder = "HEDGE_RECOVERY";
       else if (action.reason?.includes("trail")) closeReasonOrder = "HEDGE_TRAIL";
@@ -1328,6 +1373,8 @@ export class PositionMonitorService implements OnModuleInit {
           exitPrice: currentPrice,
           pnlPercent: hedgePnlPctCalc,
           pnlUsdt: hedgePnlUsdtCalc,
+          exitFeeUsdt: hedgeExitFee,
+          fundingFeeUsdt: hedgeFundingFee,
           closedAt: new Date(),
           closeReason: closeReasonOrder,
         },
