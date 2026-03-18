@@ -71,6 +71,9 @@ export class HedgeManagerService {
         }
       }
 
+      // Track banked profit for logging
+      const banked = this.bankedProfitMap.get(signalId) || 0;
+
       // PnL not bad enough to hedge
       if (pnlPct > -cfg.hedgePartialTriggerPct) return null;
 
