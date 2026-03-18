@@ -17,6 +17,7 @@ export interface ResolvedSignalInfo {
   pnlPercent: number;
   pnlUsdt?: number; // simulated USDT PnL (test mode grid)
   simNotional?: number; // simulated notional volume
+  filledVol?: number; // actual filled volume (grid L0 only = 40%, all grids = 100%)
   closeReason: string;
   queuedSignalActivated: boolean;
 }
@@ -681,6 +682,13 @@ export class PositionMonitorService implements OnModuleInit {
             pnlUsdt = (pnlPercent / 100) * ((signal as any).simNotional || 1000);
           }
 
+          // Calculate filled volume from grids
+          const resolveGrids: any[] = (signal as any).gridLevels || [];
+          const filledVol = resolveGrids.length > 0
+            ? resolveGrids.filter((g: any) => g.status === "FILLED" || g.status === "TP_CLOSED" || g.status === "SL_CLOSED")
+                .reduce((s: number, g: any) => s + (g.simNotional || ((signal as any).simNotional || 1000) * (g.volumePct / 100)), 0)
+            : (signal as any).simNotional || 1000;
+
           await this.resolveCallback({
             symbol,
             signalKey: sigKey,
@@ -690,6 +698,7 @@ export class PositionMonitorService implements OnModuleInit {
             pnlPercent,
             pnlUsdt,
             simNotional: (signal as any).simNotional,
+            filledVol: Math.round(filledVol),
             closeReason: reason,
             queuedSignalActivated: !!promoted,
           }).catch((err) =>

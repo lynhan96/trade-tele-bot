@@ -1376,12 +1376,19 @@ export class AiSignalService implements OnModuleInit {
       const pnlSign = pnl >= 0 ? "+" : "";
       const usdSign = simPnlUsdt >= 0 ? "+" : "";
       const fmtP = this.fmtPrice;
+      // Calculate filled volume (sum of FILLED grid notionals, or full simNotional if no grids)
+      const closedGrids: any[] = (signal as any).gridLevels || [];
+      const filledVol = closedGrids.length > 0
+        ? closedGrids.filter((g: any) => g.status === "FILLED" || g.status === "TP_CLOSED" || g.status === "SL_CLOSED")
+            .reduce((s: number, g: any) => s + (g.simNotional || ((signal as any).simNotional || 1000) * (g.volumePct / 100)), 0)
+        : (signal as any).simNotional || 1000;
+
       const text =
         `${emoji} *${signal.symbol} ${signal.direction} da dong* 🧪\n` +
         `━━━━━━━━━━━━━━━━━━\n\n` +
         `${dirEmoji} ${fmtP(signal.entryPrice)} → ${fmtP(currentPrice)}\n` +
         `PnL: *${pnlSign}${pnl.toFixed(2)}% (${usdSign}${simPnlUsdt.toFixed(2)} USDT)*\n` +
-        `Vol: *$${((signal as any).simNotional || 1000).toLocaleString()}*\n\n` +
+        `Vol: *$${Math.round(filledVol).toLocaleString()}*\n\n` +
         `_${reason} • Test mode_`;
 
       const subscribers = await this.subscriptionService.findSignalOnlySubscribers();
@@ -1560,7 +1567,7 @@ export class AiSignalService implements OnModuleInit {
         `━━━━━━━━━━━━━━━━━━\n\n` +
         `${dirEmoji} ${fmtP(info.entryPrice)} → ${fmtP(info.exitPrice)}\n` +
         `PnL: *${pnlSign}${info.pnlPercent.toFixed(2)}% (${usdSign}${info.pnlUsdt.toFixed(2)} USDT)*\n` +
-        `Vol: *$${info.simNotional.toLocaleString()}*\n\n` +
+        `Vol: *$${(info.filledVol ?? info.simNotional).toLocaleString()}*\n\n` +
         `_${info.closeReason} • Test mode_`;
 
       // Test mode: only notify admin
