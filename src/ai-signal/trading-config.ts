@@ -171,7 +171,7 @@ export const DEFAULT_TRADING_CONFIG: TradingConfig = {
   hedgeTpPctVolatile: 2.5,
   hedgeTpPctDefault: 1.5,
   hedgeSlImprovementRatio: 0.8,
-  hedgeMaxCycles: 7,
+  hedgeMaxCycles: 999,
   hedgeCooldownMin: 5,
   hedgeTrailTrigger: 1.0,
   hedgeTrailKeepRatio: 0.70,

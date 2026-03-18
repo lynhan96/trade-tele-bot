@@ -10,6 +10,7 @@ import { AiSignal, AiSignalDocument } from "../schemas/ai-signal.schema";
 import { UserRealTradingService } from "./user-real-trading.service";
 import { TradingConfigService } from "./trading-config";
 import { HedgeManagerService, HedgeAction } from "./hedge-manager.service";
+import { Order, OrderDocument } from "../schemas/order.schema";
 
 export interface ResolvedSignalInfo {
   symbol: string;
@@ -95,6 +96,8 @@ export class PositionMonitorService implements OnModuleInit {
     private readonly hedgeManager: HedgeManagerService,
     @InjectModel(AiSignal.name)
     private readonly aiSignalModel: Model<AiSignalDocument>,
+    @InjectModel(Order.name)
+    private readonly orderModel: Model<OrderDocument>,
   ) {
     this.monitorApiKey = configService.get<string>(
       "AI_MONITOR_BINANCE_API_KEY",
@@ -312,6 +315,21 @@ export class PositionMonitorService implements OnModuleInit {
       this.logger.log(
         `[PositionMonitor] Grid DCA init ${sigKey}: ${GRID_LEVEL_COUNT} levels, step=${gridStep.toFixed(2)}%, SL=${stopLossPrice.toFixed(4)}, TP=${takeProfitPrice?.toFixed(4)}`,
       );
+
+      // Create MAIN order for L0
+      const gridNotionalL0 = simNotional * (DCA_WEIGHTS[0] / 100);
+      await this.orderModel.create({
+        signalId: (signal as any)._id,
+        symbol: signal.symbol,
+        direction: signal.direction,
+        type: 'MAIN',
+        status: 'OPEN',
+        entryPrice: origEntry,
+        notional: gridNotionalL0,
+        quantity: gridNotionalL0 / origEntry,
+        openedAt: new Date(),
+        cycleNumber: 0,
+      });
     }
 
     // Process grid events
@@ -397,6 +415,21 @@ export class PositionMonitorService implements OnModuleInit {
           grid.filledAt = new Date();
           grid.simNotional = gridNotional;
           grid.simQuantity = gridNotional / price;
+
+          // Create DCA order
+          await this.orderModel.create({
+            signalId: (signal as any)._id,
+            symbol: signal.symbol,
+            direction: signal.direction,
+            type: 'DCA',
+            status: 'OPEN',
+            entryPrice: price,
+            notional: gridNotional,
+            quantity: gridNotional / price,
+            openedAt: new Date(),
+            cycleNumber: grid.level,
+          });
+
           filledCount++;
           gridChanged = true;
 
@@ -661,6 +694,8 @@ export class PositionMonitorService implements OnModuleInit {
         }
       } else {
         // Hedge is active — check for exit
+        let closeReason: string | null = null;
+        let exitPrice: number | null = null;
         const exitAction = this.hedgeManager.checkHedgeExit(signal, price, pnlPct);
         if (exitAction && exitAction.action === "CLOSE_HEDGE") {
           await this.handleHedgeClose(signal, exitAction, price);
@@ -673,15 +708,56 @@ export class PositionMonitorService implements OnModuleInit {
           ? ((price - currentEntry) / currentEntry) * 100
           : ((currentEntry - price) / currentEntry) * 100;
 
-        if (catastrophicPct > -25) return; // Skip all SL/TP — hedge manages, keep rỉa
-
-        // Catastrophic -25% — force close everything
-        this.logger.warn(
-          `[PositionMonitor] ${sigKey} CATASTROPHIC STOP at ${price} (${catastrophicPct.toFixed(1)}%) while hedge active — force closing both`,
-        );
-
-        // Create completed record for the open hedge before closing
+        // ── Net Positive Exit: banked hedge profit + main unrealized > 0 → close all ──
+        const bankedProfit = (signal.hedgeHistory || []).reduce((sum: number, h: any) => sum + (h.pnlUsdt || 0), 0);
+        const grids: any[] = (signal as any).gridLevels || [];
+        const filledVol = grids.length > 0
+          ? grids.filter((g: any) => g.status === "FILLED" || g.status === "TP_CLOSED" || g.status === "SL_CLOSED").reduce((s: number, g: any) => s + (g.simNotional || 0), 0) || ((signal as any).simNotional || 1000) * 0.4
+          : ((signal as any).simNotional || 1000) * 0.4;
+        const mainUnrealizedUsdt = (pnlPct / 100) * filledVol;
+        // Include current open hedge PnL
+        let currentHedgePnlUsdt = 0;
         if ((signal as any).hedgeEntryPrice && (signal as any).hedgeDirection) {
+          const hDir = (signal as any).hedgeDirection;
+          const hEntry = (signal as any).hedgeEntryPrice;
+          const hNotional = (signal as any).hedgeSimNotional || 0;
+          const hPnlPct = hDir === "LONG"
+            ? ((price - hEntry) / hEntry) * 100
+            : ((hEntry - price) / hEntry) * 100;
+          currentHedgePnlUsdt = (hPnlPct / 100) * hNotional;
+        }
+        const netPnlUsdt = mainUnrealizedUsdt + bankedProfit + currentHedgePnlUsdt;
+
+        if (netPnlUsdt > 0) {
+          this.logger.log(
+            `[PositionMonitor] ${sigKey} NET POSITIVE EXIT | main=$${mainUnrealizedUsdt.toFixed(2)} banked=$${bankedProfit.toFixed(2)} hedge=$${currentHedgePnlUsdt.toFixed(2)} → net=$${netPnlUsdt.toFixed(2)}`,
+          );
+          // Close hedge first, then close main via normal flow
+          if ((signal as any).hedgeEntryPrice && (signal as any).hedgeDirection) {
+            await this.handleHedgeClose(signal, {
+              action: "CLOSE_HEDGE", hedgePnlPct: 0, hedgePnlUsdt: currentHedgePnlUsdt,
+              bankedProfit: bankedProfit, consecutiveLosses: 0, hedgePhase: "NET_POSITIVE_EXIT",
+              reason: `Net positive exit: $${netPnlUsdt.toFixed(2)}`,
+            }, price);
+          }
+          // Fall through to resolve main signal as NET_POSITIVE
+          closeReason = "NET_POSITIVE";
+          exitPrice = price;
+        }
+
+        if (!closeReason && catastrophicPct > -25) return; // Skip all SL/TP — hedge manages, keep rỉa
+
+        if (!closeReason) {
+          closeReason = "CATASTROPHIC_STOP";
+          exitPrice = price;
+          // Catastrophic -25% — force close everything
+          this.logger.warn(
+            `[PositionMonitor] ${sigKey} CATASTROPHIC STOP at ${price} (${catastrophicPct.toFixed(1)}%) while hedge active — force closing both`,
+          );
+        }
+
+        // Create completed record for the open hedge before closing (skip if NET_POSITIVE already handled)
+        if (closeReason !== "NET_POSITIVE" && (signal as any).hedgeEntryPrice && (signal as any).hedgeDirection) {
           const hDir = (signal as any).hedgeDirection;
           const hEntry = (signal as any).hedgeEntryPrice;
           const hNotional = (signal as any).hedgeSimNotional || 0;
@@ -758,6 +834,12 @@ export class PositionMonitorService implements OnModuleInit {
         sigKey,
         exitPrice,
         reason,
+      );
+
+      // Close all open orders for this signal
+      await this.orderModel.updateMany(
+        { signalId: (signal as any)._id, status: 'OPEN' },
+        { status: 'CLOSED', exitPrice: exitPrice, closedAt: new Date(), closeReason: reason },
       );
 
       if (resolved) {
@@ -1079,6 +1161,21 @@ export class PositionMonitorService implements OnModuleInit {
       hedgeOpenedAt: new Date(),
     });
 
+    // Create HEDGE order record
+    await this.orderModel.create({
+      signalId: (signal as any)._id,
+      symbol: signal.symbol,
+      direction: action.hedgeDirection,
+      type: 'HEDGE',
+      status: 'OPEN',
+      entryPrice: currentPrice,
+      notional: action.hedgeNotional,
+      quantity: action.hedgeNotional / currentPrice,
+      openedAt: new Date(),
+      cycleNumber: ((signal as any).hedgeCycleCount || 0) + 1,
+      metadata: { phase: action.hedgePhase, reason: action.reason },
+    });
+
     this.logger.log(
       `[PositionMonitor] ${sigKey} HEDGE ${action.action} | ${action.hedgeDirection} | ` +
       `Entry: ${currentPrice} | Notional: $${action.hedgeNotional?.toFixed(2)} | TP: ${action.hedgeTpPrice} | ` +
@@ -1156,6 +1253,34 @@ export class PositionMonitorService implements OnModuleInit {
       $push: { hedgeHistory: historyEntry },
       ...updates,
     });
+
+    // Close the HEDGE order
+    {
+      const hedgeEntry = historyEntry.entryPrice;
+      const hedgeExit = currentPrice;
+      const hedgeNotional = historyEntry.notional || 0;
+      const hedgePnlPctCalc = historyEntry.direction === "LONG"
+        ? ((hedgeExit - hedgeEntry) / hedgeEntry) * 100
+        : ((hedgeEntry - hedgeExit) / hedgeEntry) * 100;
+      const hedgePnlUsdtCalc = Math.round((hedgePnlPctCalc / 100) * hedgeNotional * 100) / 100;
+      let closeReasonOrder = "HEDGE_CLOSE";
+      if (action.reason?.includes("Recovery")) closeReasonOrder = "HEDGE_RECOVERY";
+      else if (action.reason?.includes("trail")) closeReasonOrder = "HEDGE_TRAIL";
+      else if (action.reason?.includes("TP")) closeReasonOrder = "HEDGE_TP";
+      else if (hedgePnlUsdtCalc >= 0) closeReasonOrder = "HEDGE_TP";
+
+      await this.orderModel.findOneAndUpdate(
+        { signalId: (signal as any)._id, type: 'HEDGE', status: 'OPEN' },
+        {
+          status: 'CLOSED',
+          exitPrice: currentPrice,
+          pnlPercent: hedgePnlPctCalc,
+          pnlUsdt: hedgePnlUsdtCalc,
+          closedAt: new Date(),
+          closeReason: closeReasonOrder,
+        },
+      );
+    }
 
     // Create separate COMPLETED record for hedge cycle (standalone trade record)
     try {

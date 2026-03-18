@@ -44,6 +44,7 @@ import {
   AiSignalValidation,
   AiSignalValidationSchema,
 } from "../schemas/ai-signal-validation.schema";
+import { Order, OrderSchema } from "../schemas/order.schema";
 
 @Module({
   imports: [
@@ -67,6 +68,7 @@ import {
       { name: DailyLimitHistory.name, schema: DailyLimitHistorySchema },
       { name: AiReview.name, schema: AiReviewSchema },
       { name: AiSignalValidation.name, schema: AiSignalValidationSchema },
+      { name: Order.name, schema: OrderSchema },
     ]),
   ],
   providers: [

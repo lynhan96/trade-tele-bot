@@ -1,6 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
 import { RedisService } from '../redis/redis.service';
 import { TradingConfigService } from './trading-config';
+import { Order, OrderDocument } from '../schemas/order.schema';
 
 export interface HedgeAction {
   action: 'OPEN_PARTIAL' | 'UPGRADE_FULL' | 'CLOSE_HEDGE' | 'ADJUST_SAFETY_SL' | 'NONE';
@@ -33,6 +36,7 @@ export class HedgeManagerService {
   constructor(
     private readonly redisService: RedisService,
     private readonly tradingConfig: TradingConfigService,
+    @InjectModel(Order.name) private orderModel: Model<OrderDocument>,
   ) {}
 
   /**
@@ -59,13 +63,6 @@ export class HedgeManagerService {
 
       // --- Only cooldown + max cycles check ---
       // Hedge is our primary risk management, must always be available
-
-      // Max cycles check
-      const cycleCount = signal.hedgeCycleCount || 0;
-      if (cycleCount >= cfg.hedgeMaxCycles) {
-        this.logger.debug(`[${signal.coin}] Max hedge cycles reached (${cycleCount}/${cfg.hedgeMaxCycles})`);
-        return null;
-      }
 
       // Cooldown check between hedge cycles (prevent rapid re-entry whipsaw)
       if (signal.hedgeHistory?.length > 0) {
@@ -179,6 +176,26 @@ export class HedgeManagerService {
         ? ((currentPrice - hedgeEntry) / hedgeEntry) * 100
         : ((hedgeEntry - currentPrice) / hedgeEntry) * 100;
       const hedgePnlUsdt = (hedgePnlPct / 100) * hedgeNotional;
+
+      // ── 0. Net Positive Exit: hedgeBanked + currentHedgePnl + mainPnl > 0 → close ALL ──
+      if (mainPnlPct !== undefined) {
+        const banked = (signal.hedgeHistory || []).reduce((sum: number, h: any) => sum + (h.pnlUsdt || 0), 0);
+        const netPnl = banked + hedgePnlUsdt + (mainPnlPct / 100) * (signal.simNotional || 1000);
+        if (netPnl > 0) {
+          this.logger.log(
+            `[${signal.coin}] NET POSITIVE EXIT | Main: ${mainPnlPct.toFixed(2)}% | Hedge: $${hedgePnlUsdt.toFixed(2)} | Banked: $${banked.toFixed(2)} | Net: $${netPnl.toFixed(2)}`,
+          );
+          return {
+            action: 'CLOSE_HEDGE',
+            hedgePnlPct,
+            hedgePnlUsdt,
+            bankedProfit: banked,
+            consecutiveLosses: 0,
+            hedgePhase: 'NET_POSITIVE_EXIT',
+            reason: `Net positive: main $${(mainPnlPct / 100 * (signal.simNotional || 1000)).toFixed(2)} + hedge $${hedgePnlUsdt.toFixed(2)} + banked $${banked.toFixed(2)} = $${netPnl.toFixed(2)}`,
+          };
+        }
+      }
 
       // ── 1. Recovery Close: main recovered past -1% → close hedge (no longer needed) ──
       if (mainPnlPct !== undefined && mainPnlPct > -1.0) {
