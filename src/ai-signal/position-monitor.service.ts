@@ -665,10 +665,48 @@ export class PositionMonitorService implements OnModuleInit {
 
         if (!safetySLHit) return; // Skip normal TP/SL — hedge manages the position
 
-        // Safety SL hit — fall through to normal resolution below
+        // Safety SL hit — close hedge first, then fall through to close main
         this.logger.warn(
-          `[PositionMonitor] ${sigKey} SAFETY SL hit at ${price} (safety=${safetySlPrice}) while hedge active — force closing`,
+          `[PositionMonitor] ${sigKey} SAFETY SL hit at ${price} (safety=${safetySlPrice}) while hedge active — force closing both`,
         );
+
+        // Create completed record for the open hedge before closing
+        if ((signal as any).hedgeEntryPrice && (signal as any).hedgeDirection) {
+          const hDir = (signal as any).hedgeDirection;
+          const hEntry = (signal as any).hedgeEntryPrice;
+          const hNotional = (signal as any).hedgeSimNotional || 0;
+          const hPnlPct = hDir === "LONG"
+            ? ((price - hEntry) / hEntry) * 100
+            : ((hEntry - price) / hEntry) * 100;
+          const hPnlUsdt = Math.round((hPnlPct / 100) * hNotional * 100) / 100;
+
+          try {
+            await this.aiSignalModel.create({
+              symbol: signal.symbol, coin: (signal as any).coin, currency: "usdt",
+              direction: hDir, entryPrice: hEntry, exitPrice: price,
+              stopLossPrice: 0, stopLossPercent: 0, takeProfitPrice: 0, takeProfitPercent: 0,
+              strategy: `HEDGE_${(signal as any).strategy || ""}`, regime: (signal as any).regime,
+              status: "COMPLETED", closeReason: "HEDGE_SAFETY_SL",
+              pnlPercent: Math.round(hPnlPct * 100) / 100, pnlUsdt: hPnlUsdt,
+              simNotional: hNotional, isTestMode: (signal as any).isTestMode ?? true,
+              source: "hedge", executedAt: (signal as any).hedgeOpenedAt, positionClosedAt: new Date(),
+              gridLevels: [], primaryKline: (signal as any).primaryKline, timeframeProfile: (signal as any).timeframeProfile,
+              indicatorSnapshot: { reason: `Hedge force-closed: main safety SL hit` },
+            });
+          } catch {}
+
+          // Add to hedge history for net PnL calculation
+          const hedgeHistory = (signal as any).hedgeHistory || [];
+          hedgeHistory.push({
+            phase: (signal as any).hedgePhase, direction: hDir,
+            entryPrice: hEntry, exitPrice: price, notional: hNotional,
+            pnlPct: hPnlPct, pnlUsdt: hPnlUsdt,
+            openedAt: (signal as any).hedgeOpenedAt, closedAt: new Date(),
+            reason: "Main safety SL hit",
+          });
+          (signal as any).hedgeHistory = hedgeHistory;
+        }
+
         // Clean up hedge state
         await this.hedgeManager.cleanupSignal((signal as any)._id?.toString());
       }
@@ -1111,13 +1149,29 @@ export class PositionMonitorService implements OnModuleInit {
 
     // Create separate COMPLETED record for hedge cycle (standalone trade record)
     try {
+      // Recalculate PnL to ensure accuracy
+      const hedgeEntry = historyEntry.entryPrice;
+      const hedgeExit = currentPrice;
+      const hedgeNotional = historyEntry.notional || 0;
+      const hedgePnlPct = historyEntry.direction === "LONG"
+        ? ((hedgeExit - hedgeEntry) / hedgeEntry) * 100
+        : ((hedgeEntry - hedgeExit) / hedgeEntry) * 100;
+      const hedgePnlUsdt = Math.round((hedgePnlPct / 100) * hedgeNotional * 100) / 100;
+
+      // Determine close reason based on what triggered the close
+      let closeReason = "HEDGE_CLOSE";
+      if (action.reason?.includes("Recovery")) closeReason = "HEDGE_RECOVERY";
+      else if (action.reason?.includes("trail")) closeReason = "HEDGE_TRAIL";
+      else if (action.reason?.includes("TP")) closeReason = "HEDGE_TP";
+      else if (hedgePnlUsdt >= 0) closeReason = "HEDGE_TP";
+
       await this.aiSignalModel.create({
         symbol: signal.symbol,
         coin: (signal as any).coin,
         currency: (signal as any).currency || "usdt",
         direction: historyEntry.direction,
-        entryPrice: historyEntry.entryPrice,
-        exitPrice: currentPrice,
+        entryPrice: hedgeEntry,
+        exitPrice: hedgeExit,
         stopLossPrice: 0,
         stopLossPercent: 0,
         takeProfitPrice: 0,
@@ -1125,10 +1179,10 @@ export class PositionMonitorService implements OnModuleInit {
         strategy: `HEDGE_${(signal as any).strategy || ""}`,
         regime: (signal as any).regime,
         status: "COMPLETED",
-        closeReason: (action.hedgePnlPct ?? 0) >= 0 ? "HEDGE_TP" : "HEDGE_SL",
-        pnlPercent: action.hedgePnlPct,
-        pnlUsdt: action.hedgePnlUsdt,
-        simNotional: historyEntry.notional,
+        closeReason,
+        pnlPercent: Math.round(hedgePnlPct * 100) / 100,
+        pnlUsdt: hedgePnlUsdt,
+        simNotional: hedgeNotional,
         isTestMode: (signal as any).isTestMode ?? true,
         source: "hedge",
         executedAt: historyEntry.openedAt,
@@ -1138,6 +1192,10 @@ export class PositionMonitorService implements OnModuleInit {
         timeframeProfile: (signal as any).timeframeProfile,
         indicatorSnapshot: { reason: `Hedge cycle #${cycleCount} for ${signal.symbol} ${signal.direction}` },
       });
+
+      this.logger.log(
+        `[PositionMonitor] Hedge record created: ${signal.symbol} ${historyEntry.direction} | ${hedgePnlPct.toFixed(2)}% $${hedgePnlUsdt} | ${closeReason}`,
+      );
     } catch (err) {
       this.logger.warn(`[PositionMonitor] Failed to create hedge trade record: ${err?.message}`);
     }
