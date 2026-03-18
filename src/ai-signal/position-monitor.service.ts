@@ -1100,6 +1100,39 @@ export class PositionMonitorService implements OnModuleInit {
       ...updates,
     });
 
+    // Create separate COMPLETED record for hedge cycle (standalone trade record)
+    try {
+      await this.aiSignalModel.create({
+        symbol: signal.symbol,
+        coin: (signal as any).coin,
+        currency: (signal as any).currency || "usdt",
+        direction: historyEntry.direction,
+        entryPrice: historyEntry.entryPrice,
+        exitPrice: currentPrice,
+        stopLossPrice: 0,
+        stopLossPercent: 0,
+        takeProfitPrice: 0,
+        takeProfitPercent: 0,
+        strategy: `HEDGE_${(signal as any).strategy || ""}`,
+        regime: (signal as any).regime,
+        status: "COMPLETED",
+        closeReason: (action.hedgePnlPct ?? 0) >= 0 ? "HEDGE_TP" : "HEDGE_SL",
+        pnlPercent: action.hedgePnlPct,
+        pnlUsdt: action.hedgePnlUsdt,
+        simNotional: historyEntry.notional,
+        isTestMode: (signal as any).isTestMode ?? true,
+        source: "hedge",
+        executedAt: historyEntry.openedAt,
+        positionClosedAt: new Date(),
+        gridLevels: [],
+        primaryKline: (signal as any).primaryKline,
+        timeframeProfile: (signal as any).timeframeProfile,
+        indicatorSnapshot: { reason: `Hedge cycle #${cycleCount} for ${signal.symbol} ${signal.direction}` },
+      });
+    } catch (err) {
+      this.logger.warn(`[PositionMonitor] Failed to create hedge trade record: ${err?.message}`);
+    }
+
     this.logger.log(
       `[PositionMonitor] ${sigKey} HEDGE CLOSED | PnL: ${action.hedgePnlPct?.toFixed(2)}% ($${action.hedgePnlUsdt?.toFixed(2)}) | ` +
       `SL: ${newSlPrice} | Cycle: ${cycleCount} | Reason: ${action.reason}`,
