@@ -1,15 +1,26 @@
 /**
  * Migration script: Fix pnlUsdt for all COMPLETED signals
  *
- * Problem: pnlUsdt was calculated from full simNotional instead of actual filled grid volume
- * Fix: recalculate pnlUsdt = sum of (per-grid PnL% × grid simNotional) for filled grids
+ * Rule: pnlUsdt = pnlPercent × actual filled volume
+ *   - With grids: sum of filled grid simNotionals
+ *   - Without grids: L0 = 40% of simNotional (default $1000 × 40% = $400)
  *
- * Usage: npx ts-node fix-pnl-usdt.ts
+ * Usage: MONGODB_URI=... npx ts-node fix-pnl-usdt.ts
  */
 
 import { MongoClient } from "mongodb";
 
 const MONGODB_URI = process.env.MONGODB_URI || "mongodb://admin:admin123@localhost:27017/binance-tele-bot?authSource=admin";
+
+function getFilledVol(signal: any): number {
+  const total = signal.simNotional || 1000;
+  const grids: any[] = signal.gridLevels || [];
+  if (!grids.length) return total * 0.4; // L0 = 40%
+  const filled = grids.reduce((s: number, g: any) =>
+    s + ((g.status === "FILLED" || g.status === "TP_CLOSED" || g.status === "SL_CLOSED")
+      ? (g.simNotional || total * (g.volumePct / 100)) : 0), 0);
+  return filled > 0 ? filled : total * 0.4;
+}
 
 async function main() {
   const client = new MongoClient(MONGODB_URI);
@@ -24,30 +35,11 @@ async function main() {
   let skipped = 0;
 
   for (const signal of completed) {
-    const { direction, exitPrice, pnlPercent, pnlUsdt: oldPnlUsdt } = signal;
-    if (pnlPercent == null || !exitPrice) { skipped++; continue; }
+    const { pnlPercent, pnlUsdt: oldPnlUsdt } = signal;
+    if (pnlPercent == null) { skipped++; continue; }
 
-    const grids: any[] = signal.gridLevels || [];
-    const simNotional = signal.simNotional || 1000;
-    let newPnlUsdt: number;
-
-    if (grids.length > 0) {
-      // Sum per-grid PnL from filled grids
-      let totalUsdt = 0;
-      for (const g of grids) {
-        if (g.status === "FILLED" || g.status === "TP_CLOSED" || g.status === "SL_CLOSED") {
-          const vol = g.simNotional || simNotional * (g.volumePct / 100);
-          const gPnl = direction === "LONG"
-            ? ((exitPrice - g.fillPrice) / g.fillPrice) * 100
-            : ((g.fillPrice - exitPrice) / g.fillPrice) * 100;
-          totalUsdt += (gPnl / 100) * vol;
-        }
-      }
-      newPnlUsdt = Math.round(totalUsdt * 100) / 100;
-    } else {
-      // No grids — use full simNotional (legacy signals)
-      newPnlUsdt = Math.round((pnlPercent / 100) * simNotional * 100) / 100;
-    }
+    const filledVol = getFilledVol(signal);
+    const newPnlUsdt = Math.round((pnlPercent / 100) * filledVol * 100) / 100;
 
     if (Math.abs((oldPnlUsdt ?? 0) - newPnlUsdt) > 0.01) {
       await signals.updateOne(
@@ -55,7 +47,7 @@ async function main() {
         { $set: { pnlUsdt: newPnlUsdt } },
       );
       console.log(
-        `  ${signal.symbol} ${direction} ${signal.closeReason}: old=${oldPnlUsdt?.toFixed(2)} → new=${newPnlUsdt.toFixed(2)} (pnl%=${pnlPercent.toFixed(2)}, grids=${grids.length}, filled=${grids.filter((g: any) => g.status === "FILLED" || g.status === "TP_CLOSED" || g.status === "SL_CLOSED").length})`,
+        `  ${signal.symbol} ${signal.direction} ${signal.closeReason}: old=${oldPnlUsdt?.toFixed(2)} → new=${newPnlUsdt.toFixed(2)} (pnl%=${pnlPercent.toFixed(2)}, vol=${Math.round(filledVol)})`,
       );
       fixed++;
     } else {
@@ -63,7 +55,7 @@ async function main() {
     }
   }
 
-  console.log(`\nDone: ${fixed} fixed, ${skipped} skipped (already correct)`);
+  console.log(`\nDone: ${fixed} fixed, ${skipped} skipped`);
   await client.close();
 }
 

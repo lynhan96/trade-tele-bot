@@ -679,7 +679,7 @@ export class PositionMonitorService implements OnModuleInit {
             }
             pnlUsdt = totalUsdt;
           } else {
-            pnlUsdt = (pnlPercent / 100) * ((signal as any).simNotional || 1000);
+            pnlUsdt = (pnlPercent / 100) * ((signal as any).simNotional || 1000) * 0.4; // L0 only
           }
 
           // Calculate filled volume from grids

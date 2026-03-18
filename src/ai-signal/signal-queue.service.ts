@@ -195,7 +195,9 @@ export class SignalQueueService {
       }
       pnlUsdt = Math.round(totalUsdt * 100) / 100;
     } else {
-      pnlUsdt = Math.round((pnlPercent / 100) * ((active as any).simNotional || 1000) * 100) / 100;
+      // No grids = L0 only = 40% of simNotional
+      const filledVol = ((active as any).simNotional || 1000) * 0.4;
+      pnlUsdt = Math.round((pnlPercent / 100) * filledVol * 100) / 100;
     }
 
     // Close grid levels

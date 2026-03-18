@@ -1329,7 +1329,9 @@ export class AiSignalService implements OnModuleInit {
       }
       simPnlUsdt = Math.round(totalUsdt * 100) / 100;
     } else {
-      simPnlUsdt = Math.round((pnl / 100) * ((signal as any).simNotional || 1000) * 100) / 100;
+      // No grids = L0 only = 40% of simNotional
+      const filledVol = ((signal as any).simNotional || 1000) * 0.4;
+      simPnlUsdt = Math.round((pnl / 100) * filledVol * 100) / 100;
     }
 
     // Mark COMPLETED directly in MongoDB (don't rely on Redis key existing)
