@@ -1587,32 +1587,73 @@ export class AiSignalService implements OnModuleInit {
       const sym = signal.symbol;
       const dir = signal.direction;
       const hedgeDir = action.hedgeDirection || (dir === "LONG" ? "SHORT" : "LONG");
+      const cfg = this.tradingConfig.get();
+      const isTest = await this.isTestModeEnabled();
+      const modeLabel = isTest ? "Test mode" : "Live";
+      const cycle = (signal.hedgeCycleCount || 0) + 1;
 
       if (action.action === "OPEN_PARTIAL" || action.action === "UPGRADE_FULL") {
-        const phase = action.action === "OPEN_PARTIAL" ? "50%" : "100%";
-        const emoji = action.action === "OPEN_PARTIAL" ? "🛡️" : "🔒";
+        const phaseLabel = action.hedgePhase === "FULL" ? "FULL 100%" : "PARTIAL 50%";
+        const banked = action.bankedProfit ?? 0;
         const text =
-          `${emoji} *${sym} HEDGE ${phase}* 🧪\n` +
+          `🔄 *Auto-Hedge #${cycle}*\n` +
           `━━━━━━━━━━━━━━━━━━\n\n` +
-          `Main: ${dir} | Hedge: *${hedgeDir}*\n` +
-          `Entry: ${fmtP(price)} | TP: ${fmtP(action.hedgeTpPrice)}\n` +
+          `${sym} — Hedge *${hedgeDir}*\n` +
+          `Entry: *${fmtP(price)}*\n` +
+          `TP: *${fmtP(action.hedgeTpPrice)}*\n` +
           `Vol: *$${action.hedgeNotional?.toFixed(0)}*\n` +
-          `Reason: ${action.reason}\n\n` +
-          `_Auto-Hedge • Test mode_`;
+          `Phase: ${phaseLabel}\n\n` +
+          `💰 Đã tích lũy: *$${banked.toFixed(2)} USDT*\n` +
+          `_Cycle ${cycle}/${cfg.hedgeMaxCycles} • ${modeLabel}_`;
         await this.notifyAdminOnly(text);
       } else if (action.action === "CLOSE_HEDGE") {
-        const pnlSign = (action.hedgePnlPct ?? 0) >= 0 ? "+" : "";
-        const usdSign = (action.hedgePnlUsdt ?? 0) >= 0 ? "+" : "";
-        const emoji = (action.hedgePnlPct ?? 0) >= 0 ? "✅" : "❌";
-        const text =
-          `${emoji} *${sym} HEDGE CLOSED* 🧪\n` +
-          `━━━━━━━━━━━━━━━━━━\n\n` +
-          `PnL: *${pnlSign}${(action.hedgePnlPct ?? 0).toFixed(2)}% (${usdSign}${(action.hedgePnlUsdt ?? 0).toFixed(2)} USDT)*\n` +
-          `SL improved: ${fmtP(action.newSlPrice)}\n` +
-          `Cycle: ${(signal.hedgeCycleCount || 0) + 1}\n` +
-          `Reason: ${action.reason}\n\n` +
-          `_Auto-Hedge • Test mode_`;
-        await this.notifyAdminOnly(text);
+        const pnlPct = action.hedgePnlPct ?? 0;
+        const pnlUsdt = action.hedgePnlUsdt ?? 0;
+        const isProfit = pnlPct >= 0;
+
+        if (isProfit) {
+          // --- Hedge close with profit ---
+          const oldSl = signal.stopLossPrice;
+          const newSl = action.newSlPrice;
+          const totalBanked = action.bankedProfit ?? 0;
+          const cooldown = cfg.hedgeReEntryCooldownMin || cfg.hedgeCooldownMin || 5;
+
+          let text =
+            `✅ *Hedge #${cycle} Đóng Lời*\n` +
+            `━━━━━━━━━━━━━━━━━━\n\n` +
+            `${sym} — PnL: *+${pnlPct.toFixed(2)}% (+${pnlUsdt.toFixed(2)} USDT)*\n` +
+            `💰 Tổng tích lũy: *$${totalBanked.toFixed(2)} USDT*\n` +
+            `📈 SL cải thiện: ${fmtP(oldSl)} → ${fmtP(newSl)}`;
+
+          if (action.newSafetySlPrice) {
+            text += `\n🔓 Safety SL mở rộng → ${fmtP(action.newSafetySlPrice)}`;
+          }
+
+          text += `\n\n_Chờ ${cooldown}p rồi vào lại... • ${modeLabel}_`;
+          await this.notifyAdminOnly(text);
+        } else {
+          // --- Hedge close with loss ---
+          const consLosses = action.consecutiveLosses ?? 0;
+          const maxConsLosses = cfg.hedgeMaxConsecutiveLosses || 2;
+          const hitMax = consLosses >= maxConsLosses;
+
+          let text =
+            `❌ *Hedge #${cycle} Thua*\n` +
+            `━━━━━━━━━━━━━━━━━━\n\n` +
+            `${sym} — PnL: *${pnlPct.toFixed(2)}% (${pnlUsdt.toFixed(2)} USDT)*\n` +
+            `⚠️ Thua liên tiếp: ${consLosses}/${maxConsLosses}`;
+
+          if (action.newSafetySlPrice) {
+            text += `\n🔒 Safety SL thu hẹp → ${fmtP(action.newSafetySlPrice)}`;
+          }
+
+          if (hitMax) {
+            text += `\n🛑 Dừng hedge — quá nhiều lần thua`;
+          }
+
+          text += `\n\n_${modeLabel}_`;
+          await this.notifyAdminOnly(text);
+        }
       }
     } catch (err) {
       this.logger.warn(`[AiSignal] Hedge notification error: ${err?.message}`);

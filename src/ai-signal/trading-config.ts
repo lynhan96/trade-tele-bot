@@ -92,12 +92,25 @@ export interface TradingConfig {
   hedgeTpPctVolatile: number;         // TP for volatile regime (default 2.5)
   hedgeTpPctDefault: number;          // TP default (default 1.5)
   hedgeSlImprovementRatio: number;    // Fraction of profit → SL improvement (default 0.8)
-  hedgeMaxCycles: number;             // Max cycles per signal (default 3)
-  hedgeCooldownMin: number;           // Min minutes between cycles (default 10)
-  hedgeTrailTrigger: number;          // Trail hedge TP trigger % (default 1.5)
-  hedgeTrailKeepRatio: number;        // Keep this fraction of hedge peak (default 0.8)
+  hedgeMaxCycles: number;             // Max cycles per signal (default 7)
+  hedgeCooldownMin: number;           // Min minutes between cycles (default 5)
+  hedgeTrailTrigger: number;          // Trail hedge TP trigger % (default 1.0)
+  hedgeTrailKeepRatio: number;        // Keep this fraction of hedge peak (default 0.70)
   hedgeBlockRegimes: string[];        // Don't hedge in these regimes
   hedgeMaxFundingPct: number;         // Block hedge if |funding| > this % (default 0.03)
+  // ── Adaptive Hedge SL ──
+  hedgeSlWidenPerWin: number;         // Widen safety SL by X% per winning cycle (default 2.0)
+  hedgeSlTightenPerLoss: number;      // Tighten safety SL by X% per losing cycle (default 3.0)
+  hedgeSlMaxPct: number;              // Max safety SL % (default 15.0)
+  hedgeSlMinPct: number;              // Min safety SL % (default 5.0)
+  hedgeMaxEffectiveLoss: number;      // Max effective loss in USDT after hedge profits (default 35)
+  // ── Hedge Re-entry ──
+  hedgeReEntryCooldownMin: number;    // Cooldown between cycles (default 5)
+  hedgeMaxConsecutiveLosses: number;  // Stop after N consecutive losses (default 2)
+  hedgeOwnSlPct: number;             // Hedge's own SL % (default 1.5)
+  hedgeReEntryPullbackPct: number;   // Wait for X% pullback before re-entry (default 0.3)
+  hedgeReEntryRsiLong: number;       // RSI threshold for LONG hedge re-entry (default 55)
+  hedgeReEntryRsiShort: number;      // RSI threshold for SHORT hedge re-entry (default 45)
 }
 
 export const DEFAULT_TRADING_CONFIG: TradingConfig = {
@@ -157,12 +170,25 @@ export const DEFAULT_TRADING_CONFIG: TradingConfig = {
   hedgeTpPctVolatile: 2.5,
   hedgeTpPctDefault: 1.5,
   hedgeSlImprovementRatio: 0.8,
-  hedgeMaxCycles: 3,
-  hedgeCooldownMin: 10,
-  hedgeTrailTrigger: 1.5,
-  hedgeTrailKeepRatio: 0.8,
-  hedgeBlockRegimes: ["RANGE_BOUND", "SIDEWAYS"],
+  hedgeMaxCycles: 7,
+  hedgeCooldownMin: 5,
+  hedgeTrailTrigger: 1.0,
+  hedgeTrailKeepRatio: 0.70,
+  hedgeBlockRegimes: ["SIDEWAYS"],
   hedgeMaxFundingPct: 0.03,
+  // Adaptive Hedge SL
+  hedgeSlWidenPerWin: 2.0,
+  hedgeSlTightenPerLoss: 3.0,
+  hedgeSlMaxPct: 15.0,
+  hedgeSlMinPct: 5.0,
+  hedgeMaxEffectiveLoss: 35,
+  // Hedge Re-entry
+  hedgeReEntryCooldownMin: 5,
+  hedgeMaxConsecutiveLosses: 2,
+  hedgeOwnSlPct: 1.5,
+  hedgeReEntryPullbackPct: 0.3,
+  hedgeReEntryRsiLong: 55,
+  hedgeReEntryRsiShort: 45,
 };
 
 const TRADING_CONFIG_KEY = "cache:ai:trading-config";

@@ -958,8 +958,10 @@ export class PositionMonitorService implements OnModuleInit {
     const { direction, entryPrice } = signal;
     const currentSl = (signal as any).stopLossPrice;
 
-    // Save original SL
-    (signal as any).originalSlPrice = currentSl;
+    // Save original SL for DCA grid spacing (grid uses originalSlPrice, not widened safety SL)
+    if (!(signal as any).originalSlPrice) {
+      (signal as any).originalSlPrice = currentSl;
+    }
 
     // Calculate wide safety net SL
     const safetySlPrice = direction === "LONG"
@@ -970,13 +972,16 @@ export class PositionMonitorService implements OnModuleInit {
     (signal as any).stopLossPrice = safetySlPrice;
     (signal as any).slMovedToEntry = false; // Reset — SL is now below entry, not a profit lock
 
-    // Persist to DB
-    await this.aiSignalModel.findByIdAndUpdate((signal as any)._id, {
-      originalSlPrice: currentSl,
+    // Persist to DB (only set originalSlPrice if not already saved from a previous cycle)
+    const widenUpdates: Record<string, any> = {
       hedgeSafetySlPrice: safetySlPrice,
       stopLossPrice: safetySlPrice,
       slMovedToEntry: false,
-    });
+    };
+    if ((signal as any).originalSlPrice === currentSl) {
+      widenUpdates.originalSlPrice = currentSl;
+    }
+    await this.aiSignalModel.findByIdAndUpdate((signal as any)._id, widenUpdates);
 
     this.logger.log(
       `[PositionMonitor] ${sigKey} SL widened for hedge: ${currentSl} → ${safetySlPrice} (safety net -${cfg.hedgeSafetySlPct}%)`,
@@ -1062,6 +1067,15 @@ export class PositionMonitorService implements OnModuleInit {
     // Determine new SL: use improved SL from hedge profit, or keep current safety SL
     const newSlPrice = action.newSlPrice || (signal as any).hedgeSafetySlPrice || (signal as any).stopLossPrice;
 
+    // If hedge manager provided a tighter safety SL, update it too
+    const updates: Record<string, any> = {};
+    if (action.newSafetySlPrice) {
+      (signal as any).hedgeSafetySlPrice = action.newSafetySlPrice;
+      (signal as any).stopLossPrice = action.newSafetySlPrice;
+      updates.hedgeSafetySlPrice = action.newSafetySlPrice;
+      updates.stopLossPrice = action.newSafetySlPrice;
+    }
+
     // Update in-memory signal
     (signal as any).hedgeActive = false;
     (signal as any).hedgePhase = undefined;
@@ -1073,6 +1087,9 @@ export class PositionMonitorService implements OnModuleInit {
     (signal as any).hedgeCycleCount = cycleCount;
     (signal as any).stopLossPrice = newSlPrice;
 
+    // Don't resume trail SL — let next checkHedge cycle decide if re-entry needed
+    // Trail resumes naturally when main PnL > 0 (profitable)
+
     // Persist to DB
     await this.aiSignalModel.findByIdAndUpdate(signalId, {
       hedgeActive: false,
@@ -1080,6 +1097,7 @@ export class PositionMonitorService implements OnModuleInit {
       hedgeCycleCount: cycleCount,
       stopLossPrice: newSlPrice,
       $push: { hedgeHistory: historyEntry },
+      ...updates,
     });
 
     this.logger.log(
