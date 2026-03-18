@@ -182,7 +182,7 @@ export const DEFAULT_TRADING_CONFIG: TradingConfig = {
   hedgeSlTightenPerLoss: 3.0,
   hedgeSlMaxPct: 15.0,
   hedgeSlMinPct: 5.0,
-  hedgeMaxEffectiveLoss: 35,
+  hedgeMaxEffectiveLoss: 80,
   // Hedge Re-entry
   hedgeReEntryCooldownMin: 5,
   hedgeMaxConsecutiveLosses: 2,

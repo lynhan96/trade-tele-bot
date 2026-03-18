@@ -19,7 +19,7 @@ export interface HedgeAction {
 
 const LOCK_TTL_SECONDS = 30;
 const HEDGE_LOCK_PREFIX = 'cache:hedge:lock:';
-const MAX_SIGNAL_AGE_HOURS = 20;
+const MAX_SIGNAL_AGE_HOURS = 48;
 
 @Injectable()
 export class HedgeManagerService {
