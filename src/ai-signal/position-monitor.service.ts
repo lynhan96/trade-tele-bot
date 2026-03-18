@@ -668,7 +668,7 @@ export class PositionMonitorService implements OnModuleInit {
 
         // Catastrophic -25% — force close everything
         this.logger.warn(
-          `[PositionMonitor] ${sigKey} SAFETY SL hit at ${price} (safety=${safetySlPrice}) while hedge active — force closing both`,
+          `[PositionMonitor] ${sigKey} CATASTROPHIC STOP at ${price} (${catastrophicPct.toFixed(1)}%) while hedge active — force closing both`,
         );
 
         // Create completed record for the open hedge before closing
