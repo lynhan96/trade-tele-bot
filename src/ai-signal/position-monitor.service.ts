@@ -738,7 +738,8 @@ export class PositionMonitorService implements OnModuleInit {
     const emoji = tpHit ? "🎯" : "🛑";
     // Use SL/TP price as exit when hit — prevents gap/slippage from inflating PnL
     // (e.g., CHZ gapped from 0.037→0.038 past SL=0.0374, recorded -5.65% instead of -3%)
-    const exitPrice = slHit ? stopLossPrice : (tpHit ? (effectiveTpPrice ?? price) : price);
+    // Use SL/TP price as exit when hit, but fallback to current price if SL=0 (hedge mode)
+    const exitPrice = slHit ? (stopLossPrice > 0 ? stopLossPrice : price) : (tpHit ? (effectiveTpPrice ?? price) : price);
     this.logger.log(
       `[PositionMonitor] ${emoji} ${sigKey} price=${price} exit=${exitPrice} hit ${reason} (${direction} SL=${stopLossPrice} TP=${takeProfitPrice ?? "none"})`,
     );
