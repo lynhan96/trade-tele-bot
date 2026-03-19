@@ -12,6 +12,7 @@ import { UserSettings, UserSettingsDocument } from '../schemas/user-settings.sch
 import { AiSignalValidation, AiSignalValidationDocument } from '../schemas/ai-signal-validation.schema';
 import { DailyLimitHistory, DailyLimitHistoryDocument } from '../schemas/daily-limit-history.schema';
 import { AiReview, AiReviewDocument } from '../schemas/ai-review.schema';
+import { Order, OrderDocument } from '../schemas/order.schema';
 import { UserRealTradingService } from '../ai-signal/user-real-trading.service';
 
 /** Must match the key in SignalQueueService. */
@@ -35,9 +36,41 @@ export class AdminService {
     @InjectModel(AiSignalValidation.name) private validationModel: Model<AiSignalValidationDocument>,
     @InjectModel(DailyLimitHistory.name) private dailyLimitHistoryModel: Model<DailyLimitHistoryDocument>,
     @InjectModel(AiReview.name) private aiReviewModel: Model<AiReviewDocument>,
+    @InjectModel(Order.name) private orderModel: Model<OrderDocument>,
     private readonly redisService: RedisService,
     private readonly userRealTradingService: UserRealTradingService,
   ) {}
+
+  async getOrders(query: {
+    status?: string; type?: string; symbol?: string;
+    page?: number; limit?: number; sortBy?: string;
+    closedFrom?: string; closedTo?: string;
+  }) {
+    const filter: any = {};
+    if (query.status) filter.status = query.status;
+    if (query.type) filter.type = query.type;
+    if (query.symbol) filter.symbol = { $regex: query.symbol, $options: 'i' };
+    if (query.closedFrom || query.closedTo) {
+      filter.closedAt = {};
+      if (query.closedFrom) filter.closedAt.$gte = new Date(query.closedFrom);
+      if (query.closedTo) filter.closedAt.$lte = new Date(query.closedTo);
+    }
+
+    const page = query.page || 1;
+    const limit = query.limit || 50;
+    const sortBy = query.sortBy || 'createdAt';
+
+    const [data, total] = await Promise.all([
+      this.orderModel.find(filter)
+        .sort({ [sortBy]: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean(),
+      this.orderModel.countDocuments(filter),
+    ]);
+
+    return { data, total, page, limit, pages: Math.ceil(total / limit) };
+  }
 
   async getDashboardStats() {
     const todayStart = new Date();

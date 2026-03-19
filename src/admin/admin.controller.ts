@@ -239,6 +239,12 @@ export class AdminController {
   }
 
   @UseGuards(AdminGuard)
+  @Get("orders")
+  getOrders(@Query() query: any) {
+    return this.adminService.getOrders(query);
+  }
+
+  @UseGuards(AdminGuard)
   @Get("account-pnl")
   getAccountPnl() {
     return this.userRealTradingService.getAllAccountPnl();
