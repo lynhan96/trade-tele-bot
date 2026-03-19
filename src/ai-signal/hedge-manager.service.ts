@@ -254,12 +254,12 @@ export class HedgeManagerService {
     const newBanked = prevBanked + Math.max(0, hedgePnlUsdt);
     this.bankedProfitMap.set(signalId, newBanked); // keep in-memory cache in sync
 
-    // Calculate SL improvement
+    // Calculate SL improvement — use gridAvgEntry (post-DCA) not original entry
     const originalNotional = signal.simNotional || signal.notional || 0;
-    const originalEntry = signal.entryPrice;
+    const avgEntry = signal.gridAvgEntry || signal.entryPrice;
     const currentSl = signal.hedgeSafetySlPrice || signal.stopLossPrice;
     const newSlPrice = this.calculateSlImprovement(
-      hedgePnlUsdt, originalNotional, originalEntry, currentSl, signal.direction,
+      hedgePnlUsdt, originalNotional, avgEntry, currentSl, signal.direction,
     );
 
     // Widen safety SL on win (adaptive)
