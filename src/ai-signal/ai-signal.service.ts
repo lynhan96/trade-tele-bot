@@ -149,6 +149,10 @@ export class AiSignalService implements OnModuleInit {
 
     this.positionMonitorService.setHedgeCallback(async (signal, action, price) => {
       await this.notifyHedgeEvent(signal, action, price);
+      // Track hedge as UserTrade for real users (sim record only, no real Binance order)
+      await this.userRealTradingService.onHedgeEvent(signal, action, price).catch((err) =>
+        this.logger.warn(`[AiSignal] hedge UserTrade tracking error: ${err?.message}`),
+      );
     });
 
     // Cleanup orphaned actives + duplicate completed signals on startup

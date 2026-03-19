@@ -2371,4 +2371,102 @@ export class UserRealTradingService implements OnModuleInit {
     }
     return results;
   }
+
+  // ─── Hedge Event Tracking ──────────────────────────────────────────────
+
+  /**
+   * Track hedge open/close as UserTrade records for all subscribed real users.
+   * This creates sim-only tracking records (no real Binance orders for hedge).
+   */
+  async onHedgeEvent(signal: any, action: any, price: number): Promise<void> {
+    if (!action || action.action === 'NONE') return;
+
+    const signalId = signal._id?.toString();
+    if (!signalId) return;
+
+    if (action.action === 'OPEN_PARTIAL' || action.action === 'UPGRADE_FULL') {
+      // Create OPEN hedge trade for each real subscriber
+      const subscribers = await this.subscriptionService.findRealModeSubscribers();
+      for (const sub of subscribers) {
+        // Find parent trade for this signal
+        const parentTrade = await this.userTradeModel.findOne({
+          telegramId: sub.telegramId,
+          aiSignalId: signalId,
+          status: 'OPEN',
+          isHedge: { $ne: true },
+        });
+        if (!parentTrade) continue;
+
+        // Check if hedge trade already exists
+        const existingHedge = await this.userTradeModel.findOne({
+          telegramId: sub.telegramId,
+          aiSignalId: signalId,
+          isHedge: true,
+          status: 'OPEN',
+        });
+        if (existingHedge) continue;
+
+        const hedgeDir = action.hedgeDirection || (signal.direction === 'LONG' ? 'SHORT' : 'LONG');
+        const hedgeNotional = action.hedgeNotional || 0;
+        const hedgeQty = hedgeNotional / price;
+
+        await this.userTradeModel.create({
+          telegramId: sub.telegramId,
+          chatId: sub.chatId,
+          symbol: signal.symbol,
+          direction: hedgeDir,
+          entryPrice: price,
+          quantity: hedgeQty,
+          leverage: parentTrade.leverage || 1,
+          notionalUsdt: hedgeNotional,
+          slPrice: 0,
+          tpPrice: action.hedgeTpPrice || 0,
+          status: 'OPEN',
+          openedAt: new Date(),
+          aiSignalId: signalId,
+          isHedge: true,
+          parentTradeId: parentTrade._id,
+          hedgeCycle: (signal.hedgeCycleCount || 0) + 1,
+          hedgePhase: action.hedgePhase || 'PARTIAL',
+        });
+
+        this.logger.log(
+          `[UserRealTrading] Hedge trade created for ${sub.telegramId} | ${signal.symbol} ${hedgeDir} $${hedgeNotional.toFixed(0)} @ ${price}`,
+        );
+      }
+    } else if (action.action === 'CLOSE_HEDGE') {
+      // Close all open hedge trades for this signal
+      const openHedges = await this.userTradeModel.find({
+        aiSignalId: signalId,
+        isHedge: true,
+        status: 'OPEN',
+      });
+
+      for (const hedge of openHedges) {
+        const pnlPct = hedge.direction === 'LONG'
+          ? ((price - hedge.entryPrice) / hedge.entryPrice) * 100
+          : ((hedge.entryPrice - price) / hedge.entryPrice) * 100;
+        const pnlUsdt = Math.round((pnlPct / 100) * hedge.notionalUsdt * 100) / 100;
+
+        let closeReason = 'HEDGE_CLOSE';
+        if (action.reason?.includes('Recovery')) closeReason = 'HEDGE_RECOVERY';
+        else if (action.reason?.includes('trail')) closeReason = 'HEDGE_TRAIL';
+        else if (action.reason?.includes('TP')) closeReason = 'HEDGE_TP';
+        else if (pnlUsdt >= 0) closeReason = 'HEDGE_TP';
+
+        await this.userTradeModel.findByIdAndUpdate(hedge._id, {
+          status: 'CLOSED',
+          exitPrice: price,
+          pnlPercent: Math.round(pnlPct * 100) / 100,
+          pnlUsdt,
+          closeReason,
+          closedAt: new Date(),
+        });
+
+        this.logger.log(
+          `[UserRealTrading] Hedge trade closed for ${hedge.telegramId} | ${signal.symbol} PnL: ${pnlPct.toFixed(2)}% ($${pnlUsdt})`,
+        );
+      }
+    }
+  }
 }
