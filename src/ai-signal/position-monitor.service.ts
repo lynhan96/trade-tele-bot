@@ -454,21 +454,22 @@ export class PositionMonitorService implements OnModuleInit {
           grid.simNotional = gridNotional;
           grid.simQuantity = gridNotional / price;
 
-          // Create DCA order (maker fee — limit order fill)
+          // DCA fills update the MAIN order (add notional, recalculate avg price)
           const dcaEntryFee = this.calcMakerFee(gridNotional);
-          await this.orderModel.create({
-            signalId: (signal as any)._id,
-            symbol: signal.symbol,
-            direction: signal.direction,
-            type: 'DCA',
-            status: 'OPEN',
-            entryPrice: price,
-            notional: gridNotional,
-            quantity: gridNotional / price,
-            entryFeeUsdt: dcaEntryFee,
-            openedAt: new Date(),
-            cycleNumber: grid.level,
+          const mainOrder = await this.orderModel.findOne({
+            signalId: (signal as any)._id, type: 'MAIN', status: 'OPEN',
           });
+          if (mainOrder) {
+            const newNotional = mainOrder.notional + gridNotional;
+            const newQty = mainOrder.quantity + gridNotional / price;
+            const newAvgEntry = (mainOrder.entryPrice * mainOrder.notional + price * gridNotional) / newNotional;
+            await this.orderModel.findByIdAndUpdate(mainOrder._id, {
+              entryPrice: newAvgEntry,
+              notional: newNotional,
+              quantity: newQty,
+              entryFeeUsdt: (mainOrder.entryFeeUsdt || 0) + dcaEntryFee,
+            });
+          }
 
           filledCount++;
           gridChanged = true;
