@@ -220,7 +220,7 @@ export class PositionMonitorService implements OnModuleInit {
         originalSlPrice: (signal as any).originalSlPrice,
         stopLossPrice: safetySlPrice, stopLossPercent: safetySlPct,
         hedgeSafetySlPrice: safetySlPrice,
-      }).catch(() => {});
+      }).exec().catch((err) => this.logger.error(`[PositionMonitor] Failed to update hedge SL: ${err?.message}`));
 
       this.logger.log(
         `[PositionMonitor] ${sigKey} hedge SL: ${origSl} → ${safetySlPrice} (${safetySlPct}% safety net)`,
@@ -295,8 +295,9 @@ export class PositionMonitorService implements OnModuleInit {
     // Initialize grid on first tick (base grid = level 0)
     if (!isGridSignal) {
       const origEntry = entryPrice;
-      const stopLossPrice = (signal as any).originalSlPrice || (signal as any).stopLossPrice;
-      const signalSlPct = Math.abs((stopLossPrice - origEntry) / origEntry) * 100;
+      // Use original SL for grid spacing (not widened safety SL)
+      const originalSlForGrid = (signal as any).originalSlPrice || (signal as any).stopLossPrice;
+      const signalSlPct = Math.abs((originalSlForGrid - origEntry) / origEntry) * 100;
       // Dynamic grid step: L4 at 80% of SL range, 20% buffer before SL
       const gridStep = signalSlPct / GRID_LEVEL_COUNT;
 
@@ -329,7 +330,9 @@ export class PositionMonitorService implements OnModuleInit {
 
       (signal as any).gridLevels = grids;
       (signal as any).originalEntryPrice = origEntry;
-      (signal as any).gridGlobalSlPrice = stopLossPrice; // signal's own SL
+      // gridGlobalSlPrice = effective SL (safety SL when hedge enabled, original otherwise)
+      const effectiveSl = (signal as any).hedgeSafetySlPrice || originalSlForGrid;
+      (signal as any).gridGlobalSlPrice = effectiveSl;
       (signal as any).gridFilledCount = 1;
       (signal as any).gridClosedCount = 0;
       (signal as any).gridAvgEntry = avgEntry;
@@ -340,13 +343,13 @@ export class PositionMonitorService implements OnModuleInit {
         (signal as any)._id.toString(), grids, 1, 0,
       );
       await this.signalQueueService.initGridSignal(
-        (signal as any)._id.toString(), origEntry, stopLossPrice, avgEntry,
+        (signal as any)._id.toString(), origEntry, effectiveSl, avgEntry,
       );
       await this.signalQueueService.updateSimVolume(
         (signal as any)._id.toString(), simNotional, simQuantity,
       );
       this.logger.log(
-        `[PositionMonitor] Grid DCA init ${sigKey}: ${GRID_LEVEL_COUNT} levels, step=${gridStep.toFixed(2)}%, SL=${stopLossPrice.toFixed(4)}, TP=${takeProfitPrice?.toFixed(4)}`,
+        `[PositionMonitor] Grid DCA init ${sigKey}: ${GRID_LEVEL_COUNT} levels, step=${gridStep.toFixed(2)}%, SL=${effectiveSl.toFixed(4)} (orig=${originalSlForGrid.toFixed(4)}), TP=${takeProfitPrice?.toFixed(4)}`,
       );
 
       // Create MAIN order for L0 (taker fee — market order)
