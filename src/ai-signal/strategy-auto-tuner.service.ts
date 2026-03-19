@@ -195,7 +195,7 @@ export class StrategyAutoTunerService {
         } else if (change4h <= -2.5 || (belowEma200 && btcCtx && btcCtx.rsi < 42)) {
           // Bear: -2.5% in 4h OR structurally below EMA200 with RSI weak
           blockLong = true;
-          confidenceFloor = 70;
+          confidenceFloor = 68;
           reasons.push(`BTC bear: 4h=${change4h.toFixed(1)}% belowEMA200=${belowEma200} RSI=${btcCtx?.rsi ?? '?'}`);
         } else if (change4h >= 1.5 && btcCtx && btcCtx.priceVsEma9 > 0.2) {
           // Bull momentum: +1.5% in 4h + above EMA9
@@ -206,7 +206,7 @@ export class StrategyAutoTunerService {
         const belowEma200 = (btcCtx.priceVsEma200 ?? 1) < 0;
         if (belowEma200 && btcCtx.rsi < 40 && (btcCtx.rsi4h ?? 50) < 40) {
           blockLong = true;
-          confidenceFloor = 70;
+          confidenceFloor = 68;
           reasons.push(`BTC structural bear: below EMA200, RSI=${btcCtx.rsi}, RSI4h=${btcCtx.rsi4h}`);
         }
       }
@@ -238,12 +238,12 @@ export class StrategyAutoTunerService {
           reasons.push(`${regime} + bullish score ${bullScore}/6`);
         } else if (bearScore >= 3) {
           // Softer block: raise confidence floor instead
-          confidenceFloor = 70;
-          reasons.push(`${regime} + mild bear score ${bearScore}/6 → floor +7`);
+          confidenceFloor = 68;
+          reasons.push(`${regime} + mild bear score ${bearScore}/6 → floor 68`);
         } else {
-          // Unclear direction: raise floor in ranging regimes
-          confidenceFloor = 70;
-          reasons.push(`${regime} → confidence floor 70 (no clear direction)`);
+          // Unclear direction: slight floor raise in ranging regimes
+          confidenceFloor = 65;
+          reasons.push(`${regime} → confidence floor 65 (no clear direction)`);
         }
       }
 
@@ -273,18 +273,18 @@ export class StrategyAutoTunerService {
         // Keep the regime-based block, drop the recent-perf block
         if (reasons.some(r => r.includes("recent LONG SLs"))) {
           blockLong = false; // regime says bullish → allow LONG despite recent SLs
-          confidenceFloor = Math.max(confidenceFloor, 72); // but raise bar
-          reasons.push("deadlock resolved: allow LONG with higher floor");
+          confidenceFloor = Math.max(confidenceFloor, 68); // raise bar slightly
+          reasons.push("deadlock resolved: allow LONG with floor 68");
         } else if (reasons.some(r => r.includes("recent SHORT SLs"))) {
           blockShort = false;
-          confidenceFloor = Math.max(confidenceFloor, 72);
-          reasons.push("deadlock resolved: allow SHORT with higher floor");
+          confidenceFloor = Math.max(confidenceFloor, 68);
+          reasons.push("deadlock resolved: allow SHORT with floor 68");
         } else {
-          // Both from regime scoring — shouldn't happen, but fallback: allow both with high floor
+          // Both from regime scoring — fallback: allow both with moderate floor
           blockLong = false;
           blockShort = false;
-          confidenceFloor = 75;
-          reasons.push("deadlock resolved: both open with floor 75");
+          confidenceFloor = 70;
+          reasons.push("deadlock resolved: both open with floor 70");
         }
       }
 
