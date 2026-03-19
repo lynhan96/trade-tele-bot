@@ -958,6 +958,35 @@ export class PositionMonitorService implements OnModuleInit {
       // Close all open orders for this signal — apply exit fees + funding
       const openOrders = await this.orderModel.find({ signalId: (signal as any)._id, status: 'OPEN' });
       const fundingRate = (signal as any).fundingRate || 0;
+
+      // Safety net: if no orders exist (signal created before order system), create MAIN order
+      if (openOrders.length === 0) {
+        const allOrders = await this.orderModel.countDocuments({ signalId: (signal as any)._id });
+        if (allOrders === 0) {
+          const entryForOrder = (signal as any).gridAvgEntry || signal.entryPrice;
+          const vol = (signal as any).simNotional ? (signal as any).simNotional * 0.4 : 400;
+          const entryFee = this.calcTakerFee(vol);
+          const exitFee = this.calcTakerFee(vol);
+          const hoursHeld = signal.executedAt ? (Date.now() - new Date(signal.executedAt).getTime()) / 3600000 : 0;
+          const fundFee = this.tradingConfig.get().simFundingEnabled
+            ? this.calcFundingFee(vol, Math.abs(fundingRate), hoursHeld) : 0;
+          const ordPnlPct = signal.direction === 'LONG'
+            ? ((exitPrice - entryForOrder) / entryForOrder) * 100
+            : ((entryForOrder - exitPrice) / entryForOrder) * 100;
+          const ordPnlUsdt = Math.round(((ordPnlPct / 100) * vol - entryFee - exitFee - fundFee) * 100) / 100;
+          await new this.orderModel({
+            signalId: (signal as any)._id, symbol: signal.symbol, direction: signal.direction,
+            type: 'MAIN', status: 'CLOSED',
+            entryPrice: entryForOrder, exitPrice, notional: vol, quantity: vol / entryForOrder,
+            pnlPercent: ordPnlPct, pnlUsdt: ordPnlUsdt, closeReason: reason,
+            openedAt: signal.executedAt, closedAt: new Date(), cycleNumber: 0,
+            entryFeeUsdt: entryFee, exitFeeUsdt: exitFee, fundingFeeUsdt: fundFee,
+            metadata: { fallbackCreated: true },
+          }).save();
+          this.logger.warn(`[PositionMonitor] Safety net: created MAIN order for ${signal.symbol} (no orders existed)`);
+        }
+      }
+
       for (const order of openOrders) {
         const ordPnlPct = order.direction === 'LONG'
           ? ((exitPrice - order.entryPrice) / order.entryPrice) * 100
