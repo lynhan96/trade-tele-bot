@@ -109,22 +109,23 @@ export class AdminService {
       this.signalModel.countDocuments({ createdAt: { $gte: todayStart } }),
       this.signalModel.countDocuments({ direction: 'LONG' }),
       this.signalModel.countDocuments({ direction: 'SHORT' }),
-      this.signalModel.find({ status: 'COMPLETED', pnlPercent: { $exists: true } }).select('pnlPercent pnlUsdt').lean(),
+      this.signalModel.find({ status: 'COMPLETED', pnlPercent: { $exists: true }, source: { $ne: 'hedge' } }).select('pnlPercent pnlUsdt').lean(),
       this.signalModel.aggregate([
+        { $match: { status: 'COMPLETED', pnlPercent: { $exists: true }, source: { $ne: 'hedge' } } },
         {
           $group: {
             _id: '$strategy',
             count: { $sum: 1 },
-            wins: { $sum: { $cond: [{ $and: [{ $eq: ['$status', 'COMPLETED'] }, { $gt: ['$pnlPercent', 0] }] }, 1, 0] } },
-            losses: { $sum: { $cond: [{ $and: [{ $eq: ['$status', 'COMPLETED'] }, { $lte: ['$pnlPercent', 0] }, { $ne: [{ $type: '$pnlPercent' }, 'missing'] }] }, 1, 0] } },
-            totalPnl: { $sum: { $cond: [{ $ne: [{ $type: '$pnlPercent' }, 'missing'] }, '$pnlPercent', 0] } },
+            wins: { $sum: { $cond: [{ $gt: ['$pnlPercent', 0] }, 1, 0] } },
+            losses: { $sum: { $cond: [{ $lte: ['$pnlPercent', 0] }, 1, 0] } },
+            totalPnl: { $sum: '$pnlPercent' },
           },
         },
       ]),
       this.signalModel.aggregate([{ $group: { _id: '$regime', count: { $sum: 1 } } }]),
       this.signalModel.find().sort({ createdAt: -1 }).limit(10).lean(),
       this.signalModel.aggregate([
-        { $match: { status: 'COMPLETED', pnlPercent: { $exists: true }, positionClosedAt: { $exists: true } } },
+        { $match: { status: 'COMPLETED', pnlPercent: { $exists: true }, positionClosedAt: { $exists: true }, source: { $ne: 'hedge' } } },
         {
           $addFields: {
             dateStr: { $dateToString: { format: '%Y-%m-%d', date: '$positionClosedAt' } },
