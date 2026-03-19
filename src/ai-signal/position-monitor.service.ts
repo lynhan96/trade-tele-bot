@@ -1340,7 +1340,19 @@ export class PositionMonitorService implements OnModuleInit {
 
     const cycleCount = ((signal as any).hedgeCycleCount || 0) + 1;
 
-    // Build hedge history entry
+    // Calculate hedge fees first (needed for accurate historyEntry PnL)
+    const hedgeNotionalForFees = (signal as any).hedgeSimNotional || 0;
+    const hedgeEntryFeeCalc = this.calcTakerFee(hedgeNotionalForFees);
+    const hedgeExitFeeCalc = this.calcTakerFee(hedgeNotionalForFees);
+    const hedgeHoursHeldCalc = (signal as any).hedgeOpenedAt
+      ? (Date.now() - new Date((signal as any).hedgeOpenedAt).getTime()) / 3600000 : 0;
+    const hedgeFundingRateCalc = (signal as any).fundingRate || 0;
+    const hedgeFundingFeeCalc = this.tradingConfig.get().simFundingEnabled
+      ? this.calcFundingFee(hedgeNotionalForFees, Math.abs(hedgeFundingRateCalc), hedgeHoursHeldCalc) : 0;
+    const hedgeTotalFees = hedgeEntryFeeCalc + hedgeExitFeeCalc + hedgeFundingFeeCalc;
+    const hedgePnlUsdtNet = Math.round(((action.hedgePnlUsdt || 0) - hedgeTotalFees) * 100) / 100;
+
+    // Build hedge history entry (with fee-deducted PnL)
     const historyEntry = {
       phase: (signal as any).hedgePhase,
       direction: (signal as any).hedgeDirection,
@@ -1348,7 +1360,7 @@ export class PositionMonitorService implements OnModuleInit {
       exitPrice: currentPrice,
       notional: (signal as any).hedgeSimNotional,
       pnlPct: action.hedgePnlPct,
-      pnlUsdt: action.hedgePnlUsdt,
+      pnlUsdt: hedgePnlUsdtNet,
       openedAt: (signal as any).hedgeOpenedAt,
       closedAt: new Date(),
       reason: action.reason,
@@ -1419,7 +1431,7 @@ export class PositionMonitorService implements OnModuleInit {
       else if (hedgePnlUsdtCalc >= 0) closeReasonOrder = "HEDGE_TP";
 
       await this.orderModel.findOneAndUpdate(
-        { signalId: (signal as any)._id, type: 'HEDGE', status: 'OPEN' },
+        { signalId: (signal as any)._id, type: 'HEDGE', status: 'OPEN', cycleNumber: cycleCount },
         {
           status: 'CLOSED',
           exitPrice: currentPrice,
