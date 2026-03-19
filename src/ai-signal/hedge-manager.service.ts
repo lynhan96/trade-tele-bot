@@ -77,6 +77,19 @@ export class HedgeManagerService {
         }
       }
 
+      // After first cycle: require PnL still worsening (not bouncing back)
+      // Prevents re-entry into whipsaw — only hedge if price confirms continuation
+      if (signal.hedgeHistory?.length > 0) {
+        const lastHedge = signal.hedgeHistory[signal.hedgeHistory.length - 1];
+        const lastPnlAtClose = lastHedge?.pnlPct ?? 0;
+        // If main PnL is BETTER than when last hedge closed, market may be recovering
+        // Only re-enter if PnL is still bad (worse than -partialTrigger)
+        if (pnlPct > -cfg.hedgePartialTriggerPct * 1.2) {
+          this.logger.debug(`[${signal.coin}] Hedge re-entry skipped: PnL ${pnlPct.toFixed(2)}% improving (need < -${(cfg.hedgePartialTriggerPct * 1.2).toFixed(1)}%)`);
+          return null;
+        }
+      }
+
       // Calculate banked profit from hedgeHistory (survives restart)
       const banked = (signal.hedgeHistory || []).reduce((sum: number, h: any) => sum + (h.pnlUsdt || 0), 0);
 
@@ -215,21 +228,7 @@ export class HedgeManagerService {
         }
       }
 
-      // ── 3. Trailing stop on hedge side (only when profitable) ──
-      const currentPeak = this.hedgePeakMap.get(signalId) || 0;
-      if (hedgePnlPct > currentPeak) {
-        this.hedgePeakMap.set(signalId, hedgePnlPct);
-      }
-      const peak = this.hedgePeakMap.get(signalId) || 0;
-
-      if (peak >= cfg.hedgeTrailTrigger) {
-        const trailLevel = peak * cfg.hedgeTrailKeepRatio;
-        if (hedgePnlPct <= trailLevel && hedgePnlPct > 0) {
-          return this.closeHedgeWithProfit(signal, signalId, hedgePnlPct, hedgePnlUsdt, cfg,
-            `Hedge trail: peak ${peak.toFixed(2)}% → ${hedgePnlPct.toFixed(2)}%`);
-        }
-      }
-
+      // ── NO trail for hedge — hedge is protection, only close on TP or recovery ──
       // ── NO hedge SL — when hedge loses, main is recovering. Let it ride. ──
 
       return null;
