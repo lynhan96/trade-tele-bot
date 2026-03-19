@@ -80,12 +80,10 @@ export class HedgeManagerService {
       // After first cycle: require PnL still worsening (not bouncing back)
       // Prevents re-entry into whipsaw — only hedge if price confirms continuation
       if (signal.hedgeHistory?.length > 0) {
-        const lastHedge = signal.hedgeHistory[signal.hedgeHistory.length - 1];
-        const lastPnlAtClose = lastHedge?.pnlPct ?? 0;
         // If main PnL is BETTER than when last hedge closed, market may be recovering
         // Only re-enter if PnL is still bad (worse than -partialTrigger)
-        if (pnlPct > -cfg.hedgePartialTriggerPct * 1.2) {
-          this.logger.debug(`[${signal.coin}] Hedge re-entry skipped: PnL ${pnlPct.toFixed(2)}% improving (need < -${(cfg.hedgePartialTriggerPct * 1.2).toFixed(1)}%)`);
+        if (pnlPct > -cfg.hedgePartialTriggerPct * 1.5) {
+          this.logger.debug(`[${signal.coin}] Hedge re-entry skipped: PnL ${pnlPct.toFixed(2)}% improving (need < -${(cfg.hedgePartialTriggerPct * 1.5).toFixed(1)}%)`);
           return null;
         }
       }
