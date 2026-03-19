@@ -90,7 +90,7 @@ export class AdminService {
       todaySignals,
       longSignals,
       shortSignals,
-      completedSignalDocs,
+      _completedSignalDocs,
       strategyAgg,
       regimeAgg,
       recentSignals,
@@ -124,23 +124,24 @@ export class AdminService {
       ]),
       this.signalModel.aggregate([{ $group: { _id: '$regime', count: { $sum: 1 } } }]),
       this.signalModel.find().sort({ createdAt: -1 }).limit(10).lean(),
-      this.signalModel.aggregate([
-        { $match: { status: 'COMPLETED', pnlPercent: { $exists: true }, positionClosedAt: { $exists: true }, source: { $ne: 'hedge' } } },
+      // PnL by day — from orders (includes MAIN + DCA + HEDGE)
+      this.orderModel.aggregate([
+        { $match: { status: 'CLOSED', closedAt: { $exists: true } } },
         {
           $addFields: {
-            dateStr: { $dateToString: { format: '%Y-%m-%d', date: '$positionClosedAt' } },
+            dateStr: { $dateToString: { format: '%Y-%m-%d', date: '$closedAt' } },
           },
         },
-        { $sort: { positionClosedAt: -1 as 1 | -1 } },
+        { $sort: { closedAt: -1 as 1 | -1 } },
         { $limit: 10000 },
         {
           $group: {
             _id: '$dateStr',
-            totalPnl: { $sum: '$pnlPercent' },
+            totalPnl: { $sum: { $ifNull: ['$pnlPercent', 0] } },
             totalPnlUsdt: { $sum: { $ifNull: ['$pnlUsdt', 0] } },
             count: { $sum: 1 },
-            wins: { $sum: { $cond: [{ $gt: ['$pnlPercent', 0] }, 1, 0] } },
-            losses: { $sum: { $cond: [{ $lte: ['$pnlPercent', 0] }, 1, 0] } },
+            wins: { $sum: { $cond: [{ $gt: [{ $ifNull: ['$pnlUsdt', 0] }, 0] }, 1, 0] } },
+            losses: { $sum: { $cond: [{ $lte: [{ $ifNull: ['$pnlUsdt', 0] }, 0] }, 1, 0] } },
           },
         },
         { $sort: { _id: -1 as 1 | -1 } },
@@ -148,17 +149,14 @@ export class AdminService {
       ]),
     ]);
 
-    const wins = completedSignalDocs.filter((s) => s.pnlPercent > 0).length;
-    const winRate = completedSignalDocs.length > 0 ? (wins / completedSignalDocs.length) * 100 : 0;
-    const avgPnl =
-      completedSignalDocs.length > 0
-        ? completedSignalDocs.reduce((sum, s) => sum + s.pnlPercent, 0) / completedSignalDocs.length
-        : 0;
-    const totalPnl =
-      completedSignalDocs.length > 0
-        ? completedSignalDocs.reduce((sum, s) => sum + s.pnlPercent, 0)
-        : 0;
-    const totalPnlUsdt = completedSignalDocs.reduce((sum, s) => sum + ((s as any).pnlUsdt ?? 0), 0);
+    // Use orders for PnL stats (includes hedge PnL)
+    const closedOrders = await this.orderModel.find({ status: 'CLOSED' }).select('pnlUsdt pnlPercent').lean();
+    const wins = closedOrders.filter((o) => (o.pnlUsdt ?? 0) > 0).length;
+    const losses = closedOrders.filter((o) => (o.pnlUsdt ?? 0) <= 0).length;
+    const winRate = closedOrders.length > 0 ? (wins / closedOrders.length) * 100 : 0;
+    const totalPnlUsdt = closedOrders.reduce((sum, o) => sum + ((o as any).pnlUsdt ?? 0), 0);
+    const totalPnl = closedOrders.reduce((sum, o) => sum + ((o as any).pnlPercent ?? 0), 0);
+    const avgPnl = closedOrders.length > 0 ? totalPnl / closedOrders.length : 0;
 
     const signalsByStrategy: Record<string, { count: number; wins: number; losses: number; totalPnl: number }> = {};
     for (const s of strategyAgg) {
