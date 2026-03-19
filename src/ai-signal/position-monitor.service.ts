@@ -834,7 +834,7 @@ export class PositionMonitorService implements OnModuleInit {
               status: 'CLOSED', exitPrice: price, closedAt: new Date(),
               closeReason: forceCloseReason,
               pnlPercent: ordPnlPct,
-              pnlUsdt: Math.round((ordPnlUsdt - exitFee - fundingFee) * 100) / 100,
+              pnlUsdt: Math.round((ordPnlUsdt - (ord.entryFeeUsdt || 0) - exitFee - fundingFee) * 100) / 100,
               exitFeeUsdt: exitFee, fundingFeeUsdt: fundingFee,
             });
           }
@@ -954,13 +954,19 @@ export class PositionMonitorService implements OnModuleInit {
       const openOrders = await this.orderModel.find({ signalId: (signal as any)._id, status: 'OPEN' });
       const fundingRate = (signal as any).fundingRate || 0;
       for (const order of openOrders) {
+        const ordPnlPct = order.direction === 'LONG'
+          ? ((exitPrice - order.entryPrice) / order.entryPrice) * 100
+          : ((order.entryPrice - exitPrice) / order.entryPrice) * 100;
+        const ordPnlUsdtRaw = (ordPnlPct / 100) * order.notional;
         const exitFee = this.calcTakerFee(order.notional);
         const hoursHeld = order.openedAt ? (Date.now() - new Date(order.openedAt).getTime()) / 3600000 : 0;
         const fundingFee = this.tradingConfig.get().simFundingEnabled
           ? this.calcFundingFee(order.notional, Math.abs(fundingRate), hoursHeld)
           : 0;
+        const ordPnlUsdt = Math.round((ordPnlUsdtRaw - (order.entryFeeUsdt || 0) - exitFee - fundingFee) * 100) / 100;
         await this.orderModel.findByIdAndUpdate(order._id, {
           status: 'CLOSED', exitPrice, closedAt: new Date(), closeReason: reason,
+          pnlPercent: ordPnlPct, pnlUsdt: ordPnlUsdt,
           exitFeeUsdt: exitFee, fundingFeeUsdt: fundingFee,
         });
       }
