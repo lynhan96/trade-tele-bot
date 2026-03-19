@@ -194,21 +194,13 @@ export class HedgeManagerService {
           `Hedge PnL: ${hedgePnlPct.toFixed(2)}% ($${hedgePnlUsdt.toFixed(2)}) | Banked: $${banked.toFixed(2)}`,
         );
 
-        // If hedge is profitable, bank it
+        // Close hedge — profitable or not (main recovered, hedge no longer needed)
         if (hedgePnlUsdt > 0) {
           return this.closeHedgeWithProfit(signal, signalId, hedgePnlPct, hedgePnlUsdt, cfg,
             `Recovery close: main ${mainPnlPct.toFixed(2)}%`);
         }
-
-        return {
-          action: 'CLOSE_HEDGE',
-          hedgePnlPct,
-          hedgePnlUsdt,
-          bankedProfit: banked,
-          consecutiveLosses: 0,
-          hedgePhase: signal.hedgePhase,
-          reason: `Recovery close: main ${mainPnlPct.toFixed(2)}%, hedge ${hedgePnlPct.toFixed(2)}%`,
-        };
+        return this.closeHedgeWithLoss(signal, signalId, hedgePnlPct, hedgePnlUsdt, cfg,
+          `Recovery close: main ${mainPnlPct.toFixed(2)}%, hedge ${hedgePnlPct.toFixed(2)}%`);
       }
 
       // ── 2. Check TP hit ──
@@ -290,6 +282,44 @@ export class HedgeManagerService {
       newSafetySlPrice,
       bankedProfit: newBanked,
       consecutiveLosses: 0,
+      hedgePhase: signal.hedgePhase,
+      reason,
+    };
+  }
+
+  /**
+   * Close hedge with loss → increment consecutive losses → tighten safety SL.
+   */
+  private closeHedgeWithLoss(
+    signal: any, signalId: string,
+    hedgePnlPct: number, hedgePnlUsdt: number,
+    cfg: any, reason: string,
+  ): HedgeAction {
+    this.cleanupPeakTracking(signalId);
+
+    // Increment consecutive losses
+    const prevLosses = this.consecutiveLossMap.get(signalId) || 0;
+    const newLosses = prevLosses + 1;
+    this.consecutiveLossMap.set(signalId, newLosses);
+
+    const banked = (signal.hedgeHistory || []).reduce((sum: number, h: any) => sum + (h.pnlUsdt || 0), 0);
+
+    // Tighten safety SL on loss (adaptive)
+    const newSafetySlPrice = this.adjustSafetySlOnLoss(signal, cfg);
+
+    this.logger.warn(
+      `[${signal.coin}] Hedge CLOSED LOSS | ${reason} | PnL: ${hedgePnlPct.toFixed(2)}% ($${hedgePnlUsdt.toFixed(2)}) | ` +
+      `Consecutive losses: ${newLosses} | Banked: $${banked.toFixed(2)}` +
+      (newSafetySlPrice ? ` | Safety SL tightened → ${newSafetySlPrice}` : ''),
+    );
+
+    return {
+      action: 'CLOSE_HEDGE',
+      hedgePnlPct,
+      hedgePnlUsdt,
+      newSafetySlPrice,
+      bankedProfit: banked,
+      consecutiveLosses: newLosses,
       hedgePhase: signal.hedgePhase,
       reason,
     };

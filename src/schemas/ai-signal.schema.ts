@@ -17,7 +17,12 @@ export type SignalCloseReason =
   | "AUTO_TAKE_PROFIT"
   | "TTL_EXPIRED"
   | "REPLACED_BY_NEW"
-  | "MANUAL";
+  | "MANUAL"
+  | "NET_POSITIVE"
+  | "CATASTROPHIC_STOP"
+  | "HEDGE_TP"
+  | "HEDGE_RECOVERY"
+  | "HEDGE_TRAIL";
 
 @Schema({ collection: "ai_signals", timestamps: true })
 export class AiSignal {
@@ -76,6 +81,11 @@ export class AiSignal {
       "TTL_EXPIRED",
       "REPLACED_BY_NEW",
       "MANUAL",
+      "NET_POSITIVE",
+      "CATASTROPHIC_STOP",
+      "HEDGE_TP",
+      "HEDGE_RECOVERY",
+      "HEDGE_TRAIL",
     ],
   })
   closeReason?: SignalCloseReason;

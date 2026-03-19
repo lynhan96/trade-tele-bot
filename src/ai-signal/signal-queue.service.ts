@@ -568,6 +568,29 @@ export class SignalQueueService {
     }));
     const gridClosedCount = updatedGrids.filter((g: any) => g.status === "SL_CLOSED" || g.status === "TP_CLOSED").length;
 
+    // Deduct fees (taker entry + exit + funding)
+    const cfg = this.tradingConfig.get();
+    const takerPct = cfg.simTakerFeePct / 100;
+    const makerPct = cfg.simMakerFeePct / 100;
+    const hoursHeld = doc.executedAt ? (Date.now() - new Date(doc.executedAt).getTime()) / 3600000 : 0;
+    const fundingRate = Math.abs((doc as any).fundingRate || 0);
+    const fundingIntervals = Math.floor(hoursHeld / 8);
+    let totalFees = 0;
+    for (const g of grids) {
+      if (g.status === "FILLED" || g.status === "SL_CLOSED" || g.status === "TP_CLOSED") {
+        const vol = g.simNotional || ((doc as any).simNotional || 1000) * (g.volumePct / 100);
+        const entryFee = g.level === 0 ? vol * takerPct : vol * makerPct;
+        const exitFee = vol * takerPct;
+        const fundFee = cfg.simFundingEnabled ? vol * fundingRate * fundingIntervals : 0;
+        totalFees += entryFee + exitFee + fundFee;
+      }
+    }
+    if (grids.length === 0) {
+      const vol = (doc as any).simNotional || 1000;
+      totalFees = vol * takerPct * 2 + (cfg.simFundingEnabled ? vol * fundingRate * fundingIntervals : 0);
+    }
+    pnlUsdt = Math.round((pnlUsdt - totalFees) * 100) / 100;
+
     // Include hedge history PnL in total
     const hedgeHist: any[] = (doc as any).hedgeHistory || [];
     const hedgeTotalUsdt = hedgeHist.reduce((sum: number, h: any) => sum + (h.pnlUsdt || 0), 0);

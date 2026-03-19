@@ -481,9 +481,10 @@ export class PositionMonitorService implements OnModuleInit {
             : origEntry;
           (signal as any).gridAvgEntry = avgEntry;
 
-          // Recalculate SL from new avgEntry — keep same % distance as original
+          // Recalculate SL from new avgEntry — keep same % distance as original SL (not widened/trailed)
+          const origSlForRecalc = (signal as any).originalSlPrice || (signal as any).gridGlobalSlPrice || (signal as any).stopLossPrice;
           const origSlPct = origEntry > 0
-            ? Math.abs(((signal as any).gridGlobalSlPrice ?? (signal as any).stopLossPrice) - origEntry) / origEntry * 100
+            ? Math.abs(origSlForRecalc - origEntry) / origEntry * 100
             : 2.5;
           const newSl = direction === "LONG"
             ? avgEntry * (1 - origSlPct / 100)
@@ -577,7 +578,8 @@ export class PositionMonitorService implements OnModuleInit {
             const hasMomentum = await this.marketDataService.hasVolumeMomentum(symbol);
             if (hasMomentum) {
               const currentTpPct = Math.abs(signalTp - avgEntry) / avgEntry * 100;
-              const boostedTpPct = Math.min(6, Math.max(currentTpPct, pnlFromAvg + 2.0));
+              const tpBoostCap = this.tradingConfig.get().tpBoostCap || 6;
+              const boostedTpPct = Math.min(tpBoostCap, Math.max(currentTpPct, pnlFromAvg + 2.0));
               const newTpPrice = direction === "LONG"
                 ? avgEntry * (1 + boostedTpPct / 100)
                 : avgEntry * (1 - boostedTpPct / 100);
@@ -816,10 +818,26 @@ export class PositionMonitorService implements OnModuleInit {
           const resolved = await this.signalQueueService.resolveActiveSignal(sigKey, price, forceCloseReason);
 
           // Close all open orders
-          await this.orderModel.updateMany(
-            { signalId: (signal as any)._id, status: 'OPEN' },
-            { status: 'CLOSED', exitPrice: price, closedAt: new Date(), closeReason: forceCloseReason },
-          );
+          // Close all open orders with per-order PnL
+          const openOrders = await this.orderModel.find({ signalId: (signal as any)._id, status: 'OPEN' });
+          for (const ord of openOrders) {
+            const ordPnlPct = ord.direction === 'LONG'
+              ? ((price - ord.entryPrice) / ord.entryPrice) * 100
+              : ((ord.entryPrice - price) / ord.entryPrice) * 100;
+            const ordPnlUsdt = Math.round((ordPnlPct / 100) * ord.notional * 100) / 100;
+            const exitFee = this.calcTakerFee(ord.notional);
+            const hoursHeld = ord.openedAt ? (Date.now() - new Date(ord.openedAt).getTime()) / 3600000 : 0;
+            const fundingRate = (signal as any).fundingRate || 0;
+            const fundingFee = this.tradingConfig.get().simFundingEnabled
+              ? this.calcFundingFee(ord.notional, Math.abs(fundingRate), hoursHeld) : 0;
+            await this.orderModel.findByIdAndUpdate(ord._id, {
+              status: 'CLOSED', exitPrice: price, closedAt: new Date(),
+              closeReason: forceCloseReason,
+              pnlPercent: ordPnlPct,
+              pnlUsdt: Math.round((ordPnlUsdt - exitFee - fundingFee) * 100) / 100,
+              exitFeeUsdt: exitFee, fundingFeeUsdt: fundingFee,
+            });
+          }
 
           if (resolved) {
             const entryForPnl = (signal as any).gridAvgEntry || signal.entryPrice;
@@ -843,6 +861,12 @@ export class PositionMonitorService implements OnModuleInit {
               }
               if (totalUsdt !== 0) pnlUsdt = totalUsdt;
             }
+
+            // Deduct trading fees from PnL
+            const openOrders = await this.orderModel.find({ signalId: (signal as any)._id });
+            const totalFees = openOrders.reduce((sum, o) =>
+              sum + (o.entryFeeUsdt || 0) + (o.exitFeeUsdt || 0) + (o.fundingFeeUsdt || 0), 0);
+            pnlUsdt -= totalFees;
 
             // Include hedge banked profit in final PnL
             pnlUsdt += bankedProfit;
@@ -1373,13 +1397,14 @@ export class PositionMonitorService implements OnModuleInit {
         ? ((hedgeExit - hedgeEntry) / hedgeEntry) * 100
         : ((hedgeEntry - hedgeExit) / hedgeEntry) * 100;
       const hedgePnlUsdtRaw = (hedgePnlPctCalc / 100) * hedgeNotional;
+      const hedgeEntryFee = this.calcTakerFee(hedgeNotional); // entry fee (was missing)
       const hedgeExitFee = this.calcTakerFee(hedgeNotional);
       const hedgeHoursHeld = historyEntry.openedAt
         ? (Date.now() - new Date(historyEntry.openedAt).getTime()) / 3600000 : 0;
       const fundingRate = (signal as any).fundingRate || 0;
       const hedgeFundingFee = this.tradingConfig.get().simFundingEnabled
         ? this.calcFundingFee(hedgeNotional, Math.abs(fundingRate), hedgeHoursHeld) : 0;
-      const hedgePnlUsdtCalc = Math.round((hedgePnlUsdtRaw - hedgeExitFee - hedgeFundingFee) * 100) / 100;
+      const hedgePnlUsdtCalc = Math.round((hedgePnlUsdtRaw - hedgeEntryFee - hedgeExitFee - hedgeFundingFee) * 100) / 100;
 
       let closeReasonOrder = "HEDGE_CLOSE";
       if (action.reason?.includes("Recovery")) closeReasonOrder = "HEDGE_RECOVERY";
