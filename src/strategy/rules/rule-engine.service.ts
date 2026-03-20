@@ -549,10 +549,9 @@ export class RuleEngineService {
 
     const isLong = isCrossAbove;
 
-    // TREND_EMA SHORT: 25% WR, 3/4 losses, all in RANGE_BOUND with peak=0.0%
-    // Data shows this strategy only works for LONG entries — block SHORT entirely
-    if (!isLong) {
-      this.logger.debug(`[RuleEngine] ${coin} TREND_EMA SHORT blocked: data shows 25% WR, 3/4 losses — LONG only strategy`);
+    // TREND_EMA SHORT: re-enabled with regime filter (needs bearish/volatile context)
+    if (!isLong && !["STRONG_BEAR", "VOLATILE", "MIXED"].includes(params.regime)) {
+      this.logger.debug(`[RuleEngine] ${coin} TREND_EMA SHORT skipped: ${params.regime} regime not suitable for SHORT trend`);
       return null;
     }
 
@@ -855,9 +854,32 @@ export class RuleEngineService {
       };
     }
 
-    // EMA_PULLBACK SHORT removed — data: 4 trades, 50% WR, -$67 PnL
-    // LONG: 20 trades, 70% WR — pullback strategy works best for dip buying
-    return null;
+    // EMA_PULLBACK SHORT: price pulled back UP to EMA in downtrend, then resumes down
+    if (!["STRONG_BEAR", "VOLATILE"].includes(params.regime)) {
+      this.logger.debug(`[RuleEngine] ${coin} EMA_PULLBACK SHORT skipped: ${params.regime} not suitable`);
+      return null;
+    }
+    // Mirror of LONG: 2 red candles after touching EMA from below, RSI 45-70
+    const touchedEmaShort = prevPrice >= ema.last * 0.99 || currentPrice >= ema.last * 0.99;
+    const isRed = currentPrice < currentOpen;
+    const prevIsRed = prevPrice < prevOpen;
+    const consecutiveDrop = isRed && prevIsRed;
+    const belowResistance = currentPrice < emaSupport.last;
+    const rsiOkShort = rsi.last >= 45 && rsi.last <= 70;
+
+    if (!touchedEmaShort || !consecutiveDrop || !belowResistance || !rsiOkShort) {
+      this.logger.debug(
+        `[RuleEngine] ${coin} EMA_PULLBACK SHORT miss: touch=${touchedEmaShort} 2red=${consecutiveDrop} resistance=${belowResistance} rsi=${rsi.last.toFixed(1)}(45-70)`,
+      );
+      return null;
+    }
+
+    return {
+      isLong: false,
+      entryPrice: currentPrice,
+      strategy: "EMA_PULLBACK",
+      reason: `SHORT pullback to EMA(${cfg.emaPeriod}), 2-candle drop, RSI=${rsi.last.toFixed(1)}`,
+    };
   }
 
   // ─── SMC_FVG (Smart Money Concepts: Fair Value Gap + Order Block) ──────
@@ -876,8 +898,8 @@ export class RuleEngineService {
       fvgTolerance: 0.3,     // tighter: price must be within 0.3% of FVG zone
       obMinMove: 2.0,        // stronger OB: require 2% move (was 1.5%)
       rsiPeriod: 14,
-      rsiLongMax: 55,        // tighter RSI: LONG only below 55 (was 60)
-      rsiShortMin: 45,       // tighter RSI: SHORT only above 45 (was 40)
+      rsiLongMax: 55,        // LONG only below RSI 55 (not overbought)
+      rsiShortMin: 45,       // SHORT only above RSI 45 (symmetric with LONG)
       requireBos: true,
       maxFvgAge: 20,         // fresher FVGs only: 20 candles (was 30)
     };

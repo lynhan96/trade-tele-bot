@@ -169,9 +169,9 @@ export const DEFAULT_TRADING_CONFIG: TradingConfig = {
   hedgeFullTriggerPct: 3.0,        // Same as partial — always go FULL immediately
   hedgePartialSizeRatio: 1.0,      // Always 100% — partial was too weak
   hedgeFullSizeRatio: 1.0,
-  hedgeTpPctTrend: 3.0,               // Higher TP for trends (was 2.0)
-  hedgeTpPctVolatile: 3.5,            // Higher TP for volatile (was 2.5)
-  hedgeTpPctDefault: 2.5,             // Higher TP default (was 1.5)
+  hedgeTpPctTrend: 3.5,               // TP for trends
+  hedgeTpPctVolatile: 4.0,            // TP for volatile
+  hedgeTpPctDefault: 3.0,             // TP default (was 2.5, data shows room for more)
   hedgeSlImprovementRatio: 0.8,
   hedgeMaxCycles: 999,
   hedgeCooldownMin: 5,

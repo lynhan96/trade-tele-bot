@@ -30,6 +30,7 @@
     "migrate-grid-dca.ts",
     "reset-grid-signals.ts",
     "fix-pnl-usdt.ts",
+    "run-hedge-simulator.ts",
     "dist",
     "node_modules"
   ]
