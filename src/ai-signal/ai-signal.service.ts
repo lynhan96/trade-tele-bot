@@ -387,59 +387,8 @@ export class AiSignalService implements OnModuleInit {
           const ageMs = Date.now() - new Date(ageRef).getTime();
           const ageH = ageMs / 3600000;
 
-          // Time-based stop: fixed 24h for all regimes — close truly stagnant signals (PnL near zero)
-          // Only close if PnL is flat (-0.5% to +0.5%) — give directional moves more time.
-          const TIME_STOP_H = 24;
-          if (ageH >= TIME_STOP_H && pnlPercent < 0.5 && pnlPercent > -0.5) {
-            const reason = `Time-stop ${pnlPercent >= 0 ? "+" : ""}${pnlPercent.toFixed(2)}% after ${ageH.toFixed(0)}h`;
-            try {
-              await this.signalQueueService.closeActiveSignalWithPnl(
-                signal, currentPrice, reason,
-              );
-              this.logger.log(`[AiSignal] ${reason} — ${signal.symbol}`);
-              if (!isTestMode) {
-                const subscribers = await this.subscriptionService.findRealModeSubscribers();
-                for (const sub of subscribers) {
-                  await this.userRealTradingService.closeRealPosition(
-                    sub.telegramId, sub.chatId, signal.symbol, reason,
-                  ).catch(() => {});
-                }
-              }
-            } finally {
-              this.positionMonitorService.unregisterListener(signal);
-            }
-            continue;
-          }
-
-          // 48h+ and profitable >= 2% → close with descriptive reason
-          // SKIP if already close to TP (≥70% of the way) — let price action finish it
-          // Raised from 1% to 2%: don't close small profits prematurely, let them ride to TP
-          if (ageH >= 48 && pnlPercent >= 2) {
-            const tpPct = (signal as any).takeProfitPercent ?? 5;
-            if (pnlPercent >= tpPct * 0.7) {
-              this.logger.debug(
-                `[AiSignal] ${signal.symbol} 48h skip — ${pnlPercent.toFixed(1)}% ≥ 70% of TP (${tpPct}%), letting it ride`,
-              );
-              continue;
-            }
-            const reason = `Auto-closed +${pnlPercent.toFixed(2)}% after ${ageH.toFixed(0)}h`;
-            try {
-              await this.signalQueueService.closeActiveSignalWithPnl(
-                signal, currentPrice, reason,
-              );
-              this.logger.log(`[AiSignal] ${reason} — ${signal.symbol}`);
-              if (!isTestMode) {
-                const subscribers = await this.subscriptionService.findRealModeSubscribers();
-                for (const sub of subscribers) {
-                  await this.userRealTradingService.closeRealPosition(
-                    sub.telegramId, sub.chatId, signal.symbol, reason,
-                  ).catch(() => {});
-                }
-              }
-            } finally {
-              this.positionMonitorService.unregisterListener(signal);
-            }
-          }
+          // Time-stop and 48h auto-close REMOVED — hedge system manages stagnant positions.
+          // Trail SL + DCA + hedge provide proper exit mechanisms without arbitrary time limits.
         } catch (err) {
           this.logger.error(
             `[AiSignal] Auto-close check failed for ${signal.symbol}: ${err?.message}`,
