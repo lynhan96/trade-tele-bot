@@ -199,16 +199,37 @@ export class PositionMonitorService implements OnModuleInit {
     if ((signal as any).tpBoosted) (signal as any).tpBoosted = true;
     // peakPnlPct is already restored from DB via signal object
 
-    // When hedge enabled: save original SL for later (SL stays tight until hedge triggers)
+    // When hedge enabled: ensure SL > hedge trigger so hedge has room to open
     const hedgeCfg = this.tradingConfig?.get();
     if (hedgeCfg?.hedgeEnabled && (signal as any).stopLossPrice > 0) {
       if (!(signal as any).originalSlPrice) {
         (signal as any).originalSlPrice = (signal as any).stopLossPrice;
+      }
+
+      // SL must be at least hedgeTrigger + 1% buffer (e.g. trigger=3% → SL min=4%)
+      const minSlPct = (hedgeCfg.hedgePartialTriggerPct || 3) + 1.0;
+      const avgEntry = (signal as any).gridAvgEntry || signal.entryPrice;
+      const currentSlPct = Math.abs(((signal as any).stopLossPrice - avgEntry) / avgEntry * 100);
+
+      if (currentSlPct < minSlPct) {
+        const newSlPrice = signal.direction === 'LONG'
+          ? +(avgEntry * (1 - minSlPct / 100)).toFixed(6)
+          : +(avgEntry * (1 + minSlPct / 100)).toFixed(6);
+        (signal as any).stopLossPrice = newSlPrice;
+        (signal as any).stopLossPercent = minSlPct;
+        this.aiSignalModel.findByIdAndUpdate((signal as any)._id, {
+          originalSlPrice: (signal as any).originalSlPrice,
+          stopLossPrice: newSlPrice,
+          stopLossPercent: minSlPct,
+        }).exec().catch(() => {});
+        this.logger.log(
+          `[PositionMonitor] ${sigKey} SL widened to ${minSlPct}% (${newSlPrice}) — min for hedge trigger at ${hedgeCfg.hedgePartialTriggerPct}%`,
+        );
+      } else {
         this.aiSignalModel.findByIdAndUpdate((signal as any)._id, {
           originalSlPrice: (signal as any).originalSlPrice,
         }).exec().catch(() => {});
       }
-      // SL stays at original value (3-4%) — only widens to 10% when hedge actually opens
     }
 
     const cb = (price: number) => this.handlePriceTick(signal, price);
