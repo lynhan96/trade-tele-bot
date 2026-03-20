@@ -240,8 +240,13 @@ export class HedgeManagerService {
     this.consecutiveLossMap.set(signalId, 0);
 
     // Bank the profit — use DB hedgeHistory (survives restart) + current profit
+    // Note: hedgePnlUsdt here is raw (no fees). Estimate fees for accurate banked total.
+    const hedgeNotional = signal.hedgeSimNotional || 0;
+    const feePct = (this.tradingConfig.get().simTakerFeePct || 0.05) / 100;
+    const estimatedFees = hedgeNotional * feePct * 2; // entry + exit taker fees
+    const netPnlUsdt = hedgePnlUsdt - estimatedFees;
     const prevBanked = (signal.hedgeHistory || []).reduce((sum: number, h: any) => sum + (h.pnlUsdt || 0), 0);
-    const newBanked = prevBanked + Math.max(0, hedgePnlUsdt);
+    const newBanked = prevBanked + Math.max(0, netPnlUsdt);
     this.bankedProfitMap.set(signalId, newBanked); // keep in-memory cache in sync
 
     // Calculate SL improvement — use gridAvgEntry (post-DCA) not original entry

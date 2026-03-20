@@ -197,7 +197,7 @@ export class PositionMonitorService implements OnModuleInit {
     // Restore persisted flags from DB so they survive bot restarts
     if ((signal as any).slMovedToEntry) (signal as any).slMovedToEntry = true;
     if ((signal as any).tpBoosted) (signal as any).tpBoosted = true;
-    if ((signal as any).peakPnlPct) (signal as any).peakPnlPct = (signal as any).peakPnlPct;
+    // peakPnlPct is already restored from DB via signal object
 
     // When hedge enabled: widen SL to safety net (default 10%) immediately
     const hedgeCfg = this.tradingConfig?.get();
