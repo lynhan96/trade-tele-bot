@@ -3,6 +3,7 @@ import { InjectModel } from "@nestjs/mongoose";
 import { Model } from "mongoose";
 import { RedisService } from "../redis/redis.service";
 import { AiSignal, AiSignalDocument } from "../schemas/ai-signal.schema";
+import { Order, OrderDocument } from "../schemas/order.schema";
 import { AiTunedParams } from "../strategy/ai-optimizer/ai-tuned-params.interface";
 import { SignalResult } from "../strategy/rules/rule-engine.service";
 import { TradingConfigService } from "./trading-config";
@@ -32,6 +33,8 @@ export class SignalQueueService {
   constructor(
     @InjectModel(AiSignal.name)
     private readonly aiSignalModel: Model<AiSignalDocument>,
+    @InjectModel(Order.name)
+    private readonly orderModel: Model<OrderDocument>,
     private readonly redisService: RedisService,
     private readonly tradingConfig: TradingConfigService,
   ) {}
@@ -606,6 +609,30 @@ export class SignalQueueService {
       ...(grids.length > 0 ? { gridLevels: updatedGrids, gridClosedCount } : {}),
     });
     await this.redisService.delete(ACTIVE_KEY(sigKey));
+
+    // Close all open orders for this signal (prevents orphaned orders on Time-stop etc.)
+    try {
+      const openOrders = await this.orderModel.find({ signalId: doc._id, status: 'OPEN' });
+      for (const order of openOrders) {
+        const ordPnlPct = order.direction === 'LONG'
+          ? ((exitPrice - order.entryPrice) / order.entryPrice) * 100
+          : ((order.entryPrice - exitPrice) / order.entryPrice) * 100;
+        const ordPnlRaw = (ordPnlPct / 100) * order.notional;
+        const exitFee = order.notional * takerPct;
+        const ordHours = order.openedAt ? (Date.now() - new Date(order.openedAt).getTime()) / 3600000 : 0;
+        const ordFundFee = cfg.simFundingEnabled ? order.notional * fundingRate * Math.floor(ordHours / 8) : 0;
+        const ordPnlUsdt = Math.round((ordPnlRaw - (order.entryFeeUsdt || 0) - exitFee - ordFundFee) * 100) / 100;
+        await this.orderModel.findByIdAndUpdate(order._id, {
+          status: 'CLOSED', exitPrice, closedAt: new Date(), closeReason: reason,
+          pnlPercent: ordPnlPct, pnlUsdt: ordPnlUsdt,
+          exitFeeUsdt: exitFee, fundingFeeUsdt: ordFundFee,
+        });
+        this.logger.log(`[SignalQueue] Closed orphan order ${order.symbol} ${order.type} (${reason}) pnl=${ordPnlUsdt.toFixed(2)}`);
+      }
+    } catch (err) {
+      this.logger.warn(`[SignalQueue] Error closing orders for ${sigKey}: ${err?.message}`);
+    }
+
     this.logger.log(
       `[SignalQueue] ${sigKey} COMPLETED (${reason}) — exitPrice=${exitPrice} pnl=${pnlPercent.toFixed(2)}% netPnlUsdt=${netPnlUsdt} (hedge: ${hedgeTotalUsdt.toFixed(2)})`,
     );
