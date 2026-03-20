@@ -482,15 +482,23 @@ export class PositionMonitorService implements OnModuleInit {
             : origEntry;
           (signal as any).gridAvgEntry = avgEntry;
 
-          // Recalculate SL from new avgEntry — keep same % distance as original SL (not widened/trailed)
-          const origSlForRecalc = (signal as any).originalSlPrice || (signal as any).gridGlobalSlPrice || (signal as any).stopLossPrice;
-          const origSlPct = origEntry > 0
-            ? Math.abs(origSlForRecalc - origEntry) / origEntry * 100
-            : 2.5;
+          // Recalculate SL from new avgEntry
+          // If hedge enabled: keep 10% safety SL from new avgEntry
+          // If hedge disabled: keep original SL% distance
+          const hedgeCfgNow = this.tradingConfig?.get();
+          const useHedgeSafety = hedgeCfgNow?.hedgeEnabled && (signal as any).hedgeSafetySlPrice;
+          const slPctForRecalc = useHedgeSafety
+            ? (hedgeCfgNow.hedgeSafetySlPct || 10)
+            : (origEntry > 0
+              ? Math.abs(((signal as any).originalSlPrice || (signal as any).stopLossPrice) - origEntry) / origEntry * 100
+              : 2.5);
           const newSl = direction === "LONG"
-            ? avgEntry * (1 - origSlPct / 100)
-            : avgEntry * (1 + origSlPct / 100);
+            ? avgEntry * (1 - slPctForRecalc / 100)
+            : avgEntry * (1 + slPctForRecalc / 100);
           (signal as any).stopLossPrice = newSl;
+          if (useHedgeSafety) {
+            (signal as any).hedgeSafetySlPrice = newSl;
+          }
 
           // DCA TP: 3% from new avgEntry
           const DCA_TP_PCT = 3.0;
@@ -501,7 +509,7 @@ export class PositionMonitorService implements OnModuleInit {
           (signal as any).takeProfitPercent = DCA_TP_PCT;
 
           this.logger.log(
-            `[PositionMonitor] Grid ${sigKey} L${grid.level} FILLED at ${price.toFixed(4)}, avgEntry=${avgEntry.toFixed(4)}, SL=${newSl.toFixed(4)} (${origSlPct.toFixed(1)}%), TP=${newTp.toFixed(4)}, filled=${filledCount}/${GRID_LEVEL_COUNT}`,
+            `[PositionMonitor] Grid ${sigKey} L${grid.level} FILLED at ${price.toFixed(4)}, avgEntry=${avgEntry.toFixed(4)}, SL=${newSl.toFixed(4)} (${slPctForRecalc.toFixed(1)}%), TP=${newTp.toFixed(4)}, filled=${filledCount}/${GRID_LEVEL_COUNT}`,
           );
         }
       }
