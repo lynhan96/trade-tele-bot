@@ -60,16 +60,33 @@ export class AdminService {
     const limit = query.limit || 50;
     const sortBy = query.sortBy || 'createdAt';
 
-    const [data, total] = await Promise.all([
+    const [data, total, statsAgg] = await Promise.all([
       this.orderModel.find(filter)
         .sort({ [sortBy]: -1 })
         .skip((page - 1) * limit)
         .limit(limit)
         .lean(),
       this.orderModel.countDocuments(filter),
+      // Aggregate stats across ALL matching orders (not just current page)
+      this.orderModel.aggregate([
+        { $match: filter },
+        {
+          $group: {
+            _id: null,
+            totalPnlUsdt: { $sum: { $ifNull: ['$pnlUsdt', 0] } },
+            winPnlUsdt: { $sum: { $cond: [{ $gt: [{ $ifNull: ['$pnlUsdt', 0] }, 0] }, '$pnlUsdt', 0] } },
+            lossPnlUsdt: { $sum: { $cond: [{ $lte: [{ $ifNull: ['$pnlUsdt', 0] }, 0] }, '$pnlUsdt', 0] } },
+            wins: { $sum: { $cond: [{ $gt: [{ $ifNull: ['$pnlUsdt', 0] }, 0] }, 1, 0] } },
+            losses: { $sum: { $cond: [{ $lte: [{ $ifNull: ['$pnlUsdt', 0] }, 0] }, 1, 0] } },
+          },
+        },
+      ]),
     ]);
 
-    return { data, total, page, limit, pages: Math.ceil(total / limit) };
+    const stats = statsAgg[0] || { totalPnlUsdt: 0, winPnlUsdt: 0, lossPnlUsdt: 0, wins: 0, losses: 0 };
+    const winRate = stats.wins + stats.losses > 0 ? (stats.wins / (stats.wins + stats.losses)) * 100 : 0;
+
+    return { data, total, page, limit, pages: Math.ceil(total / limit), stats: { ...stats, winRate } };
   }
 
   async getDashboardStats() {
