@@ -6,7 +6,7 @@ import { TradingConfigService } from './trading-config';
 import { Order, OrderDocument } from '../schemas/order.schema';
 
 export interface HedgeAction {
-  action: 'OPEN_PARTIAL' | 'UPGRADE_FULL' | 'CLOSE_HEDGE' | 'ADJUST_SAFETY_SL' | 'NONE';
+  action: 'OPEN_FULL' | 'OPEN_PARTIAL' | 'UPGRADE_FULL' | 'CLOSE_HEDGE' | 'ADJUST_SAFETY_SL' | 'NONE';
   hedgeDirection?: string;
   hedgeNotional?: number;
   hedgeTpPrice?: number;
@@ -22,15 +22,11 @@ export interface HedgeAction {
 
 const LOCK_TTL_SECONDS = 30;
 const HEDGE_LOCK_PREFIX = 'cache:hedge:lock:';
-const MAX_SIGNAL_AGE_HOURS = 48;
 
 @Injectable()
 export class HedgeManagerService {
   private readonly logger = new Logger(HedgeManagerService.name);
-  private hedgePeakMap = new Map<string, number>();
-  /** Track consecutive losses per signal for auto-stop */
   private consecutiveLossMap = new Map<string, number>();
-  /** Track total banked profit per signal */
   private bankedProfitMap = new Map<string, number>();
 
   constructor(
@@ -113,7 +109,7 @@ export class HedgeManagerService {
       );
 
       return {
-        action: 'OPEN_PARTIAL',
+        action: 'OPEN_FULL',
         hedgeDirection,
         hedgeNotional,
         hedgeTpPrice,
@@ -121,8 +117,6 @@ export class HedgeManagerService {
         hedgePhase: 'FULL',
         reason: `PnL ${pnlPct.toFixed(2)}% → hedge #${(signal.hedgeCycleCount || 0) + 1}`,
       };
-
-      return null;
     } catch (err) {
       this.logger.error(`[${signal?.coin || '?'}] checkHedge error: ${err.message}`, err.stack);
       return null;
@@ -177,7 +171,7 @@ export class HedgeManagerService {
       // MOODENG lesson: recovery close after 12h holding gave back -$20
       if (mainPnlPct !== undefined && mainPnlPct > 0) {
         // Main is profitable — hedge definitely no longer needed
-        this.cleanupPeakTracking(signalId);
+
         const banked = (signal.hedgeHistory || []).reduce((sum: number, h: any) => sum + (h.pnlUsdt || 0), 0);
         this.logger.log(
           `[${signal.coin}] Hedge RECOVERY CLOSE | Main at ${mainPnlPct.toFixed(2)}% (profitable) | ` +
@@ -190,20 +184,24 @@ export class HedgeManagerService {
         return this.closeHedgeWithLoss(signal, signalId, hedgePnlPct, hedgePnlUsdt, cfg,
           `Recovery close: main ${mainPnlPct.toFixed(2)}%, hedge ${hedgePnlPct.toFixed(2)}%`);
       }
-      // Main still losing but recovering — only close hedge if hedge loss is small
-      if (mainPnlPct !== undefined && mainPnlPct > -1.0 && hedgePnlPct > -1.0) {
-        this.cleanupPeakTracking(signalId);
-        const banked = (signal.hedgeHistory || []).reduce((sum: number, h: any) => sum + (h.pnlUsdt || 0), 0);
-        this.logger.log(
-          `[${signal.coin}] Hedge SOFT RECOVERY | Main at ${mainPnlPct.toFixed(2)}% | ` +
-          `Hedge PnL: ${hedgePnlPct.toFixed(2)}% (small loss OK) | Banked: $${banked.toFixed(2)}`,
-        );
-        if (hedgePnlUsdt > 0) {
-          return this.closeHedgeWithProfit(signal, signalId, hedgePnlPct, hedgePnlUsdt, cfg,
-            `Soft recovery: main ${mainPnlPct.toFixed(2)}%`);
+      // Main recovering — only close hedge if hedge is also profitable or loss is tiny
+      if (mainPnlPct !== undefined && mainPnlPct > -1.0) {
+        // Only close if hedge PnL > -0.5% (avoid giving back large hedge losses)
+        if (hedgePnlPct > -0.5) {
+          const banked = (signal.hedgeHistory || []).reduce((sum: number, h: any) => sum + (h.pnlUsdt || 0), 0);
+          this.logger.log(
+            `[${signal.coin}] Hedge SOFT RECOVERY | Main at ${mainPnlPct.toFixed(2)}% | ` +
+            `Hedge PnL: ${hedgePnlPct.toFixed(2)}% | Banked: $${banked.toFixed(2)}`,
+          );
+          if (hedgePnlUsdt > 0) {
+            return this.closeHedgeWithProfit(signal, signalId, hedgePnlPct, hedgePnlUsdt, cfg,
+              `Soft recovery: main ${mainPnlPct.toFixed(2)}%`);
+          }
+          return this.closeHedgeWithLoss(signal, signalId, hedgePnlPct, hedgePnlUsdt, cfg,
+            `Soft recovery: main ${mainPnlPct.toFixed(2)}%, hedge ${hedgePnlPct.toFixed(2)}%`);
         }
-        return this.closeHedgeWithLoss(signal, signalId, hedgePnlPct, hedgePnlUsdt, cfg,
-          `Soft recovery: main ${mainPnlPct.toFixed(2)}%, hedge ${hedgePnlPct.toFixed(2)}%`);
+        // Hedge still losing > 0.5% — let it ride, wait for TP
+        this.logger.debug(`[${signal.coin}] Recovery skip: main at ${mainPnlPct.toFixed(2)}% but hedge at ${hedgePnlPct.toFixed(2)}% — wait for TP`);
       }
 
       // ── 2. Check TP hit ──
@@ -236,7 +234,7 @@ export class HedgeManagerService {
     hedgePnlPct: number, hedgePnlUsdt: number,
     cfg: any, reason: string,
   ): HedgeAction {
-    this.cleanupPeakTracking(signalId);
+    // Peak tracking cleaned up (no trail stop)
 
     // Reset consecutive losses on win
     this.consecutiveLossMap.set(signalId, 0);
@@ -284,7 +282,7 @@ export class HedgeManagerService {
     hedgePnlPct: number, hedgePnlUsdt: number,
     cfg: any, reason: string,
   ): HedgeAction {
-    this.cleanupPeakTracking(signalId);
+    // Peak tracking cleaned up (no trail stop)
 
     // Increment consecutive losses
     const prevLosses = this.consecutiveLossMap.get(signalId) || 0;
@@ -406,12 +404,7 @@ export class HedgeManagerService {
     return this.consecutiveLossMap.get(signalId) || 0;
   }
 
-  private cleanupPeakTracking(signalId: string): void {
-    this.hedgePeakMap.delete(signalId);
-  }
-
   async cleanupSignal(signalId: string): Promise<void> {
-    this.cleanupPeakTracking(signalId);
     this.consecutiveLossMap.delete(signalId);
     this.bankedProfitMap.delete(signalId);
     const lockKey = `${HEDGE_LOCK_PREFIX}${signalId}`;

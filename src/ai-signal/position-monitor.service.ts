@@ -397,12 +397,15 @@ export class PositionMonitorService implements OnModuleInit {
           : origEntry * (1 + grid.deviationPct / 100);
         const triggered = direction === "LONG" ? price <= triggerPrice : price >= triggerPrice;
         if (triggered) {
+          // Guard against concurrent tick processing (async RSI check window)
+          grid.status = "FILLING";
+
           // Cooldown: skip if last grid filled < 5 min ago
           const lastFill = grids
             .filter((g) => g.status === "FILLED" && g.filledAt)
             .map((g) => new Date(g.filledAt).getTime())
             .sort((a, b) => b - a)[0];
-          if (lastFill && Date.now() - lastFill < 5 * 60 * 1000) continue;
+          if (lastFill && Date.now() - lastFill < 5 * 60 * 1000) { grid.status = "PENDING"; continue; }
 
           // RSI guard for L1+ — only DCA when oversold/overbought
           // L1-L2: RSI only (small volume 6-12%, quick avg-down)
@@ -445,7 +448,7 @@ export class PositionMonitorService implements OnModuleInit {
               rsiOk = true;
             }
           }
-          if (grid.level >= 1 && rsiOk === false) continue;
+          if (grid.level >= 1 && rsiOk === false) { grid.status = "PENDING"; continue; }
           const simTotalNotional = (signal as any).simNotional || 1000;
           const gridNotional = simTotalNotional * (grid.volumePct / 100);
           grid.status = "FILLED";
@@ -875,9 +878,9 @@ export class PositionMonitorService implements OnModuleInit {
               if (totalUsdt !== 0) pnlUsdt = totalUsdt;
             }
 
-            // Deduct trading fees from PnL
-            const openOrders = await this.orderModel.find({ signalId: (signal as any)._id });
-            const totalFees = openOrders.reduce((sum, o) =>
+            // Deduct MAIN/DCA order fees only (hedge fees already in bankedProfit)
+            const mainOrders = await this.orderModel.find({ signalId: (signal as any)._id, type: { $ne: 'HEDGE' } });
+            const totalFees = mainOrders.reduce((sum, o) =>
               sum + (o.entryFeeUsdt || 0) + (o.exitFeeUsdt || 0) + (o.fundingFeeUsdt || 0), 0);
             pnlUsdt -= totalFees;
 
@@ -1338,7 +1341,7 @@ export class PositionMonitorService implements OnModuleInit {
     const signalId = (signal as any)._id?.toString();
     if (!signalId) return;
 
-    const phase = action.action === "OPEN_PARTIAL" ? "PARTIAL" : "FULL";
+    const phase = action.hedgePhase || "FULL";
 
     // Update in-memory signal
     (signal as any).hedgeActive = true;
