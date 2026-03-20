@@ -103,46 +103,24 @@ export class HedgeManagerService {
       const positionNotional = signal.simNotional || signal.notional || 0;
       if (positionNotional <= 0) return null;
 
-      // Determine phase based on PnL severity
-      if (pnlPct <= -cfg.hedgeFullTriggerPct && signal.hedgePhase !== 'FULL') {
-        const hedgeNotional = positionNotional * cfg.hedgeFullSizeRatio;
-        const hedgeTpPrice = this.getHedgeTpPrice(currentPrice, hedgeDirection, regime);
+      // Always FULL 100% — partial was too weak (data shows FULL earns 2-3x more per cycle)
+      const hedgeNotional = positionNotional * cfg.hedgeFullSizeRatio;
+      const hedgeTpPrice = this.getHedgeTpPrice(currentPrice, hedgeDirection, regime);
 
-        this.logger.log(
-          `[${signal.coin}] FULL HEDGE #${(signal.hedgeCycleCount || 0) + 1} | PnL: ${pnlPct.toFixed(2)}% | ` +
-          `${hedgeDirection} $${hedgeNotional.toFixed(0)} | TP: ${hedgeTpPrice} | Banked: $${banked.toFixed(2)}`,
-        );
+      this.logger.log(
+        `[${signal.coin}] HEDGE #${(signal.hedgeCycleCount || 0) + 1} | PnL: ${pnlPct.toFixed(2)}% | ` +
+        `${hedgeDirection} $${hedgeNotional.toFixed(0)} | TP: ${hedgeTpPrice} | Banked: $${banked.toFixed(2)}`,
+      );
 
-        return {
-          action: signal.hedgePhase === 'PARTIAL' ? 'UPGRADE_FULL' : 'OPEN_PARTIAL',
-          hedgeDirection,
-          hedgeNotional,
-          hedgeTpPrice,
-          bankedProfit: banked,
-          hedgePhase: 'FULL',
-          reason: `PnL ${pnlPct.toFixed(2)}% → full hedge #${(signal.hedgeCycleCount || 0) + 1}`,
-        };
-      }
-
-      if (pnlPct <= -cfg.hedgePartialTriggerPct) {
-        const hedgeNotional = positionNotional * cfg.hedgePartialSizeRatio;
-        const hedgeTpPrice = this.getHedgeTpPrice(currentPrice, hedgeDirection, regime);
-
-        this.logger.log(
-          `[${signal.coin}] PARTIAL HEDGE #${(signal.hedgeCycleCount || 0) + 1} | PnL: ${pnlPct.toFixed(2)}% | ` +
-          `${hedgeDirection} $${hedgeNotional.toFixed(0)} | TP: ${hedgeTpPrice} | Banked: $${banked.toFixed(2)}`,
-        );
-
-        return {
-          action: 'OPEN_PARTIAL',
-          hedgeDirection,
-          hedgeNotional,
-          hedgeTpPrice,
-          bankedProfit: banked,
-          hedgePhase: 'PARTIAL',
-          reason: `PnL ${pnlPct.toFixed(2)}% → partial hedge #${(signal.hedgeCycleCount || 0) + 1}`,
-        };
-      }
+      return {
+        action: 'OPEN_PARTIAL',
+        hedgeDirection,
+        hedgeNotional,
+        hedgeTpPrice,
+        bankedProfit: banked,
+        hedgePhase: 'FULL',
+        reason: `PnL ${pnlPct.toFixed(2)}% → hedge #${(signal.hedgeCycleCount || 0) + 1}`,
+      };
 
       return null;
     } catch (err) {
@@ -194,24 +172,38 @@ export class HedgeManagerService {
       // NOTE: Net Positive Exit is handled in PositionMonitor.handlePriceTick (closes both hedge + main)
       // Do NOT duplicate here — PositionMonitor has full context to resolve the main signal.
 
-      // ── 1. Recovery Close: main recovered past -1% → close hedge (no longer needed) ──
-      if (mainPnlPct !== undefined && mainPnlPct > -1.0) {
+      // ── 1. Recovery Close: main recovered past breakeven → close hedge ──
+      // Only recovery close if hedge loss is small (< 2%) — don't give back big hedge profits
+      // MOODENG lesson: recovery close after 12h holding gave back -$20
+      if (mainPnlPct !== undefined && mainPnlPct > 0) {
+        // Main is profitable — hedge definitely no longer needed
         this.cleanupPeakTracking(signalId);
-        // Use DB hedgeHistory for banked profit (survives restart)
         const banked = (signal.hedgeHistory || []).reduce((sum: number, h: any) => sum + (h.pnlUsdt || 0), 0);
-
         this.logger.log(
-          `[${signal.coin}] Hedge RECOVERY CLOSE | Main recovered to ${mainPnlPct.toFixed(2)}% | ` +
+          `[${signal.coin}] Hedge RECOVERY CLOSE | Main at ${mainPnlPct.toFixed(2)}% (profitable) | ` +
           `Hedge PnL: ${hedgePnlPct.toFixed(2)}% ($${hedgePnlUsdt.toFixed(2)}) | Banked: $${banked.toFixed(2)}`,
         );
-
-        // Close hedge — profitable or not (main recovered, hedge no longer needed)
         if (hedgePnlUsdt > 0) {
           return this.closeHedgeWithProfit(signal, signalId, hedgePnlPct, hedgePnlUsdt, cfg,
             `Recovery close: main ${mainPnlPct.toFixed(2)}%`);
         }
         return this.closeHedgeWithLoss(signal, signalId, hedgePnlPct, hedgePnlUsdt, cfg,
           `Recovery close: main ${mainPnlPct.toFixed(2)}%, hedge ${hedgePnlPct.toFixed(2)}%`);
+      }
+      // Main still losing but recovering — only close hedge if hedge loss is small
+      if (mainPnlPct !== undefined && mainPnlPct > -1.0 && hedgePnlPct > -1.0) {
+        this.cleanupPeakTracking(signalId);
+        const banked = (signal.hedgeHistory || []).reduce((sum: number, h: any) => sum + (h.pnlUsdt || 0), 0);
+        this.logger.log(
+          `[${signal.coin}] Hedge SOFT RECOVERY | Main at ${mainPnlPct.toFixed(2)}% | ` +
+          `Hedge PnL: ${hedgePnlPct.toFixed(2)}% (small loss OK) | Banked: $${banked.toFixed(2)}`,
+        );
+        if (hedgePnlUsdt > 0) {
+          return this.closeHedgeWithProfit(signal, signalId, hedgePnlPct, hedgePnlUsdt, cfg,
+            `Soft recovery: main ${mainPnlPct.toFixed(2)}%`);
+        }
+        return this.closeHedgeWithLoss(signal, signalId, hedgePnlPct, hedgePnlUsdt, cfg,
+          `Soft recovery: main ${mainPnlPct.toFixed(2)}%, hedge ${hedgePnlPct.toFixed(2)}%`);
       }
 
       // ── 2. Check TP hit ──
