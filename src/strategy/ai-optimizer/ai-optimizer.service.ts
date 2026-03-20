@@ -236,6 +236,25 @@ export class AiOptimizerService {
         }
       }
 
+      // Alt pulse override: BTC can be calm (RANGE_BOUND/SIDEWAYS) while alts are pumping.
+      // When >75% alts are green, upgrade to MIXED so trend strategies can fire.
+      if (regime === "RANGE_BOUND" || regime === "SIDEWAYS") {
+        try {
+          const altPulse = await this.redisService.get<any>("cache:ai:alt-pulse");
+          if (altPulse) {
+            const greenPct = altPulse.green4h ?? 0;
+            if (greenPct >= 75 || greenPct <= 25) {
+              const prevRegimeLabel = regime;
+              regime = "MIXED";
+              confidence = Math.min(confidence, 65);
+              this.logger.log(
+                `[AiOptimizer] Alt pulse override: ${prevRegimeLabel} → MIXED (${greenPct}% alts green 4h — strong directional movement despite calm BTC)`,
+              );
+            }
+          }
+        } catch {}
+      }
+
       await this.redisService.set(cacheKey, regime, AI_REGIME_TTL);
       // Store BTC price at time of regime assessment for fast invalidation
       if (indicators.price) {

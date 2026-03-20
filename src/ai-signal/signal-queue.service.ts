@@ -161,7 +161,7 @@ export class SignalQueueService {
   async resolveActiveSignal(
     symbol: string,
     exitPrice: number,
-    reason: "POSITION_CLOSED" | "TAKE_PROFIT" | "STOP_LOSS" | "AUTO_TAKE_PROFIT" | "MANUAL" | "NET_POSITIVE" | "CATASTROPHIC_STOP" = "POSITION_CLOSED",
+    reason: "POSITION_CLOSED" | "TAKE_PROFIT" | "STOP_LOSS" | "TRAIL_STOP" | "AUTO_TAKE_PROFIT" | "MANUAL" | "NET_POSITIVE" | "CATASTROPHIC_STOP" = "POSITION_CLOSED",
   ): Promise<AiSignalDocument | null> {
     const activeId = await this.redisService.get<string>(ACTIVE_KEY(symbol));
     if (!activeId) return null;

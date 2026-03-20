@@ -1307,9 +1307,15 @@ export class AiSignalService implements OnModuleInit {
 
     if (!tpHit && !slHit) return;
 
-    const reason = tpHit ? "TAKE_PROFIT" : "STOP_LOSS";
     // Use gridAvgEntry for grid signals
     const entryForPnl = (signal as any).gridAvgEntry || signal.entryPrice;
+    // Trail stop: SL hit but position is in profit (trail SL moved above entry)
+    const slPrice = (signal as any).stopLossPrice;
+    const isTrailStop = slHit && !tpHit && (
+      (isLong && slPrice > entryForPnl) ||
+      (!isLong && slPrice < entryForPnl)
+    );
+    const reason = tpHit ? "TAKE_PROFIT" : isTrailStop ? "TRAIL_STOP" : "STOP_LOSS";
     const pnl = isLong
       ? ((currentPrice - entryForPnl) / entryForPnl) * 100
       : ((entryForPnl - currentPrice) / entryForPnl) * 100;
@@ -1321,11 +1327,19 @@ export class AiSignalService implements OnModuleInit {
     // Use profile-aware signal key for dual-timeframe coins
     const sigKey = this.getSignalKey(signal);
 
-    // Per-grid USDT PnL (each grid has different fillPrice)
+    // Per-grid USDT PnL (each grid has different fillPrice) — deduct fees
+    const takerFeePct = cfg.simTakerFeePct / 100;
+    const makerFeePct = cfg.simMakerFeePct / 100;
+    const fundingRate = Math.abs((signal as any).fundingRate || 0);
+    const hoursHeld = (signal as any).executedAt
+      ? (Date.now() - new Date((signal as any).executedAt).getTime()) / 3600000 : 0;
+    const fundingIntervals = Math.floor(hoursHeld / 8);
+
     const grids: any[] = (signal as any).gridLevels || [];
     let simPnlUsdt: number;
     if (grids.length > 0) {
       let totalUsdt = 0;
+      let totalFees = 0;
       for (const g of grids) {
         if (g.status === "FILLED") {
           const vol = g.simNotional || ((signal as any).simNotional || 1000) * (g.volumePct / 100);
@@ -1333,13 +1347,19 @@ export class AiSignalService implements OnModuleInit {
             ? ((currentPrice - g.fillPrice) / g.fillPrice) * 100
             : ((g.fillPrice - currentPrice) / g.fillPrice) * 100;
           totalUsdt += (gPnl / 100) * vol;
+          const entryFee = g.level === 0 ? vol * takerFeePct : vol * makerFeePct;
+          const exitFee = vol * takerFeePct;
+          const fundFee = cfg.simFundingEnabled ? vol * fundingRate * fundingIntervals : 0;
+          totalFees += entryFee + exitFee + fundFee;
         }
       }
-      simPnlUsdt = Math.round(totalUsdt * 100) / 100;
+      simPnlUsdt = Math.round((totalUsdt - totalFees) * 100) / 100;
     } else {
       // No grids = L0 only = 40% of simNotional
       const filledVol = ((signal as any).simNotional || 1000) * 0.4;
-      simPnlUsdt = Math.round((pnl / 100) * filledVol * 100) / 100;
+      const rawPnl = (pnl / 100) * filledVol;
+      const fees = filledVol * takerFeePct * 2 + (cfg.simFundingEnabled ? filledVol * fundingRate * fundingIntervals : 0);
+      simPnlUsdt = Math.round((rawPnl - fees) * 100) / 100;
     }
 
     // Mark COMPLETED directly in MongoDB (don't rely on Redis key existing)

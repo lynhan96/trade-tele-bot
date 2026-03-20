@@ -946,8 +946,15 @@ export class PositionMonitorService implements OnModuleInit {
     // Clean up hedge tracking when signal fully closes
     await this.hedgeManager.cleanupSignal((signal as any)._id?.toString()).catch(() => {});
 
-    const reason = tpHit ? "TAKE_PROFIT" : "STOP_LOSS";
-    const emoji = tpHit ? "🎯" : "🛑";
+    // Trail stop: SL hit but price is still above entry (LONG) or below entry (SHORT)
+    // This means the trailing SL locked in profit — label as TRAIL_STOP, not STOP_LOSS
+    const entryRef = (signal as any).gridAvgEntry || signal.entryPrice;
+    const isTrailStop = slHit && !tpHit && (
+      (direction === "LONG" && stopLossPrice > entryRef) ||
+      (direction === "SHORT" && stopLossPrice < entryRef)
+    );
+    const reason = tpHit ? "TAKE_PROFIT" : isTrailStop ? "TRAIL_STOP" : "STOP_LOSS";
+    const emoji = tpHit ? "🎯" : isTrailStop ? "🔒" : "🛑";
     // Use SL/TP price as exit when hit — prevents gap/slippage from inflating PnL
     // (e.g., CHZ gapped from 0.037→0.038 past SL=0.0374, recorded -5.65% instead of -3%)
     // Use SL/TP price as exit when hit, but fallback to current price if SL=0 (hedge mode)
@@ -1043,11 +1050,20 @@ export class PositionMonitorService implements OnModuleInit {
               ? ((exitPrice - entryForPnl) / entryForPnl) * 100
               : ((entryForPnl - exitPrice) / entryForPnl) * 100;
 
-          // Per-grid USDT PnL (each grid has different fillPrice)
+          // Per-grid USDT PnL (each grid has different fillPrice) — deduct fees
+          const cfg = this.tradingConfig.get();
+          const takerFeePct = cfg.simTakerFeePct / 100;
+          const makerFeePct = cfg.simMakerFeePct / 100;
+          const fundingRate = Math.abs((signal as any).fundingRate || 0);
+          const hoursHeld = (signal as any).executedAt
+            ? (Date.now() - new Date((signal as any).executedAt).getTime()) / 3600000 : 0;
+          const fundingIntervals = Math.floor(hoursHeld / 8);
+
           let pnlUsdt: number | undefined;
           const grids: any[] = (signal as any).gridLevels || [];
           if (grids.length > 0) {
             let totalUsdt = 0;
+            let totalFees = 0;
             for (const g of grids) {
               if (g.status === "FILLED") {
                 const vol = g.simNotional || ((signal as any).simNotional || 1000) * (g.volumePct / 100);
@@ -1055,11 +1071,18 @@ export class PositionMonitorService implements OnModuleInit {
                   ? ((exitPrice - g.fillPrice) / g.fillPrice) * 100
                   : ((g.fillPrice - exitPrice) / g.fillPrice) * 100;
                 totalUsdt += (gPnl / 100) * vol;
+                const entryFee = g.level === 0 ? vol * takerFeePct : vol * makerFeePct;
+                const exitFee = vol * takerFeePct;
+                const fundFee = cfg.simFundingEnabled ? vol * fundingRate * fundingIntervals : 0;
+                totalFees += entryFee + exitFee + fundFee;
               }
             }
-            pnlUsdt = totalUsdt;
+            pnlUsdt = Math.round((totalUsdt - totalFees) * 100) / 100;
           } else {
-            pnlUsdt = (pnlPercent / 100) * ((signal as any).simNotional || 1000) * 0.4; // L0 only
+            const filledVol = ((signal as any).simNotional || 1000) * 0.4;
+            const rawPnl = (pnlPercent / 100) * filledVol;
+            const fees = filledVol * takerFeePct * 2 + (cfg.simFundingEnabled ? filledVol * fundingRate * fundingIntervals : 0);
+            pnlUsdt = Math.round((rawPnl - fees) * 100) / 100;
           }
 
           // Calculate filled volume from grids
