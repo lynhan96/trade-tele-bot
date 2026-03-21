@@ -383,7 +383,6 @@ export class PositionMonitorService implements OnModuleInit {
         },
         { upsert: true },
       ).catch((err) => this.logger.warn(`[PositionMonitor] MAIN order upsert error: ${err?.message}`));
-      });
     }
 
     // Process grid events
