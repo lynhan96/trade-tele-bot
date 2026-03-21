@@ -3,6 +3,7 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { RedisService } from '../redis/redis.service';
 import { TradingConfigService } from './trading-config';
+import { MarketDataService } from '../market-data/market-data.service';
 import { Order, OrderDocument } from '../schemas/order.schema';
 
 export interface HedgeAction {
@@ -33,6 +34,7 @@ export class HedgeManagerService {
   constructor(
     private readonly redisService: RedisService,
     private readonly tradingConfig: TradingConfigService,
+    private readonly marketDataService: MarketDataService,
     @InjectModel(Order.name) private orderModel: Model<OrderDocument>,
   ) {}
 
@@ -109,6 +111,42 @@ export class HedgeManagerService {
             this.logger.debug(`[${signal.coin}] Hedge re-entry after breakeven: need PnL < -${(cfg.hedgePartialTriggerPct * 1.5).toFixed(1)}%`);
             return null;
           }
+        }
+
+        // 4. RSI momentum confirmation — 15m + 1h HTF
+        // Main LONG → hedge SHORT: need RSI < 40 (bearish momentum continues)
+        // Main SHORT → hedge LONG: need RSI > 60 (bullish momentum continues)
+        try {
+          const coin = signal.coin || signal.symbol?.replace('USDT', '');
+          const { RSI } = require('technicalindicators');
+
+          // 15m RSI
+          const closes15m = await this.marketDataService.getClosePrices(coin, '15m');
+          if (closes15m.length >= 14) {
+            const rsiVals = RSI.calculate({ period: 14, values: closes15m });
+            const rsi15m = rsiVals[rsiVals.length - 1];
+            const rsiOk = signal.direction === 'LONG' ? rsi15m < 40 : rsi15m > 60;
+            if (!rsiOk) {
+              this.logger.debug(`[${coin}] Hedge re-entry skipped: 15m RSI=${rsi15m.toFixed(1)} (need ${signal.direction === 'LONG' ? '<40' : '>60'})`);
+              return null;
+            }
+
+            // 1h RSI confirmation
+            const closes1h = await this.marketDataService.getClosePrices(coin, '1h');
+            if (closes1h.length >= 14) {
+              const rsiVals1h = RSI.calculate({ period: 14, values: closes1h });
+              const rsi1h = rsiVals1h[rsiVals1h.length - 1];
+              const htfOk = signal.direction === 'LONG' ? rsi1h < 45 : rsi1h > 55;
+              if (!htfOk) {
+                this.logger.debug(`[${coin}] Hedge re-entry skipped: 1h RSI=${rsi1h.toFixed(1)} (need ${signal.direction === 'LONG' ? '<45' : '>55'})`);
+                return null;
+              }
+            }
+
+            this.logger.log(`[${coin}] Hedge re-entry RSI confirmed: 15m=${rsi15m.toFixed(1)} 1h OK`);
+          }
+        } catch (err) {
+          this.logger.debug(`[${signal.coin}] RSI check failed, proceeding: ${err?.message}`);
         }
       }
 
