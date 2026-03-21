@@ -193,32 +193,10 @@ export class HedgeManagerService {
         return this.closeHedgeWithLoss(signal, signalId, hedgePnlPct, hedgePnlUsdt, cfg,
           `Recovery close: main ${mainPnlPct.toFixed(2)}%, hedge ${hedgePnlPct.toFixed(2)}%`);
       }
-      // Main actually recovering (profitable or near breakeven) — hedge may be on wrong side
-      // Only cut if main is genuinely recovering (> -0.5%), not just slightly less negative
-      if (mainPnlPct !== undefined && mainPnlPct > -0.5) {
-        // If hedge is losing more than 3%, cut it — market reversed, hedge is wrong side
-        if (hedgePnlPct < -3.0) {
-          this.logger.warn(
-            `[${signal.coin}] Hedge EARLY CUT | Main recovering (${mainPnlPct.toFixed(2)}%) but hedge at ${hedgePnlPct.toFixed(2)}% — cutting loss`,
-          );
-          return this.closeHedgeWithLoss(signal, signalId, hedgePnlPct, hedgePnlUsdt, cfg,
-            `Early cut: main ${mainPnlPct.toFixed(2)}%, hedge ${hedgePnlPct.toFixed(2)}%`);
-        }
-        // Hedge loss small (> -3%) — soft recovery close
-        if (hedgePnlPct > -1.0) {
-          const banked = (signal.hedgeHistory || []).reduce((sum: number, h: any) => sum + (h.pnlUsdt || 0), 0);
-          this.logger.log(
-            `[${signal.coin}] Hedge SOFT RECOVERY | Main at ${mainPnlPct.toFixed(2)}% | ` +
-            `Hedge PnL: ${hedgePnlPct.toFixed(2)}% | Banked: $${banked.toFixed(2)}`,
-          );
-          if (hedgePnlUsdt > 0) {
-            return this.closeHedgeWithProfit(signal, signalId, hedgePnlPct, hedgePnlUsdt, cfg,
-              `Soft recovery: main ${mainPnlPct.toFixed(2)}%`);
-          }
-          return this.closeHedgeWithLoss(signal, signalId, hedgePnlPct, hedgePnlUsdt, cfg,
-            `Soft recovery: main ${mainPnlPct.toFixed(2)}%, hedge ${hedgePnlPct.toFixed(2)}%`);
-        }
-      }
+      // No early cut, no soft recovery — hedge has NO SL
+      // Hedge thua = main recover, hedge thắng = main thua
+      // Only 2 exits: TP hit or main profitable (handled above)
+      // NET_POSITIVE exit handled in PositionMonitor (closes both)
 
       // ── 2. Check TP hit ──
       if (signal.hedgeTpPrice) {
