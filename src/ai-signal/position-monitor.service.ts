@@ -357,23 +357,32 @@ export class PositionMonitorService implements OnModuleInit {
         `[PositionMonitor] Grid DCA init ${sigKey}: ${GRID_LEVEL_COUNT} levels, step=${gridStep.toFixed(2)}%, SL=${effectiveSl.toFixed(4)} (orig=${originalSlForGrid.toFixed(4)}), TP=${takeProfitPrice?.toFixed(4)}`,
       );
 
-      // Create MAIN order for L0 (taker fee — market order)
+      // Update MAIN order with grid data (order already created in signal-queue)
       const gridNotionalL0 = simNotional * (DCA_WEIGHTS[0] / 100);
       const l0EntryFee = this.calcTakerFee(gridNotionalL0);
-      await this.orderModel.create({
-        signalId: (signal as any)._id,
-        symbol: signal.symbol,
-        direction: signal.direction,
-        type: 'MAIN',
-        status: 'OPEN',
-        entryPrice: origEntry,
-        notional: gridNotionalL0,
-        quantity: gridNotionalL0 / origEntry,
-        stopLossPrice: effectiveSl,
-        takeProfitPrice: takeProfitPrice || 0,
-        entryFeeUsdt: l0EntryFee,
-        openedAt: new Date(),
-        cycleNumber: 0,
+      await this.orderModel.findOneAndUpdate(
+        { signalId: (signal as any)._id, type: 'MAIN', status: 'OPEN' },
+        {
+          $set: {
+            entryPrice: origEntry,
+            notional: gridNotionalL0,
+            quantity: gridNotionalL0 / origEntry,
+            stopLossPrice: effectiveSl,
+            takeProfitPrice: takeProfitPrice || 0,
+            entryFeeUsdt: l0EntryFee,
+          },
+          $setOnInsert: {
+            signalId: (signal as any)._id,
+            symbol: signal.symbol,
+            direction: signal.direction,
+            type: 'MAIN',
+            status: 'OPEN',
+            openedAt: new Date(),
+            cycleNumber: 0,
+          },
+        },
+        { upsert: true },
+      ).catch((err) => this.logger.warn(`[PositionMonitor] MAIN order upsert error: ${err?.message}`));
       });
     }
 
@@ -1270,6 +1279,20 @@ export class PositionMonitorService implements OnModuleInit {
       // Ensure price listeners are registered for all ACTIVE signals
       for (const signal of activeSignals) {
         this.registerListener(signal);
+
+        // Safety: ensure MAIN order exists for every active signal
+        const hasMain = await this.orderModel.countDocuments({ signalId: (signal as any)._id, type: 'MAIN' });
+        if (hasMain === 0) {
+          const entry = (signal as any).gridAvgEntry || signal.entryPrice;
+          const vol = ((signal as any).simNotional || 1000) * 0.4;
+          const fee = this.calcTakerFee(vol);
+          await this.orderModel.create({
+            signalId: (signal as any)._id, symbol: signal.symbol, direction: signal.direction,
+            type: 'MAIN', status: 'OPEN', entryPrice: entry, notional: vol, quantity: vol / entry,
+            entryFeeUsdt: fee, openedAt: signal.executedAt || new Date(), cycleNumber: 0,
+          }).catch(() => {});
+          this.logger.warn(`[PositionMonitor] Safety: created missing MAIN order for ${signal.symbol}`);
+        }
       }
 
       // Check monitor account for positions that have already closed

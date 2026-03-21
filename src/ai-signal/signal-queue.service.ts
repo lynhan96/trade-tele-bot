@@ -95,6 +95,33 @@ export class SignalQueueService {
         doc._id.toString(),
         0, // no TTL — active signals managed by age-based cron
       );
+      // Create MAIN order immediately — don't wait for first price tick
+      // Fixes: signals closing before grid init → 0 orders
+      const simNotional = 1000;
+      const entryPrice = signalResult.entryPrice;
+      const l0Vol = simNotional * 0.4; // L0 = 40%
+      const takerFeePct = this.tradingConfig?.get()?.simTakerFeePct || 0.05;
+      const entryFee = +(l0Vol * takerFeePct / 100).toFixed(4);
+      try {
+        await this.orderModel.create({
+          signalId: doc._id,
+          symbol,
+          direction: signalResult.isLong ? 'LONG' : 'SHORT',
+          type: 'MAIN',
+          status: 'OPEN',
+          entryPrice,
+          notional: l0Vol,
+          quantity: l0Vol / entryPrice,
+          stopLossPrice: doc.stopLossPrice || 0,
+          takeProfitPrice: doc.takeProfitPrice || 0,
+          entryFeeUsdt: entryFee,
+          openedAt: new Date(),
+          cycleNumber: 0,
+        });
+      } catch (err) {
+        this.logger.warn(`[SignalQueue] Failed to create MAIN order for ${symbol}: ${err?.message}`);
+      }
+
       this.logger.log(
         `[SignalQueue] ${signalKey} ${signalResult.isLong ? "LONG" : "SHORT"} → ACTIVE [${params.timeframeProfile || "INTRADAY"}] (id: ${doc._id})${isTestMode ? " [TEST]" : ""}`,
       );
