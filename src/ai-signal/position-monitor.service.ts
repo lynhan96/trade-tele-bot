@@ -1091,10 +1091,9 @@ export class PositionMonitorService implements OnModuleInit {
     );
     const reason = tpHit ? "TAKE_PROFIT" : isTrailStop ? "TRAIL_STOP" : "STOP_LOSS";
     const emoji = tpHit ? "🎯" : isTrailStop ? "🔒" : "🛑";
-    // Use SL/TP price as exit when hit — prevents gap/slippage from inflating PnL
-    // (e.g., CHZ gapped from 0.037→0.038 past SL=0.0374, recorded -5.65% instead of -3%)
-    // Use SL/TP price as exit when hit, but fallback to current price if SL=0 (hedge mode)
-    const exitPrice = slHit ? (stopLossPrice > 0 ? stopLossPrice : price) : (tpHit ? (effectiveTpPrice ?? price) : price);
+    // Use current market price for exit — sim mode has no real orders on Binance
+    // SL/TP prices are triggers, actual exit is at market price (more realistic)
+    const exitPrice = price;
     this.logger.log(
       `[PositionMonitor] ${emoji} ${sigKey} price=${price} exit=${exitPrice} hit ${reason} (${direction} SL=${stopLossPrice} TP=${takeProfitPrice ?? "none"})`,
     );
@@ -1567,9 +1566,22 @@ export class PositionMonitorService implements OnModuleInit {
     (signal as any).hedgeSlAtEntry = false;
     (signal as any).hedgeOpenedAt = undefined;
     (signal as any).hedgeCycleCount = cycleCount;
-    (signal as any).stopLossPrice = newSlPrice;
-    (signal as any).stopLossPercent = minSlPctClose;
-    (signal as any).hedgeSafetySlPrice = undefined; // Clear safety SL — back to normal mode
+
+    // Smart SL restore: don't set SL if price is ALREADY below it (would trigger instant SL)
+    // JCT lesson: hedge breakeven close at 0.002156, SL restored to 0.002408 → instant SL hit
+    const wouldInstantSl = signal.direction === 'LONG'
+      ? currentPrice <= newSlPrice * 1.005  // within 0.5% of SL
+      : currentPrice >= newSlPrice * 0.995;
+    if (wouldInstantSl && cycleCount > 0) {
+      // Price too close to or below SL — keep SL=0, let hedge re-enter
+      (signal as any).stopLossPrice = 0;
+      (signal as any).stopLossPercent = 0;
+      this.logger.log(`[PositionMonitor] ${sigKey} SL stays DISABLED after hedge close — price ${currentPrice} too close to SL ${newSlPrice}`);
+    } else {
+      (signal as any).stopLossPrice = newSlPrice;
+      (signal as any).stopLossPercent = minSlPctClose;
+    }
+    (signal as any).hedgeSafetySlPrice = undefined;
 
     // Don't resume trail SL — let next checkHedge cycle decide if re-entry needed
     // Trail resumes naturally when main PnL > 0 (profitable)
