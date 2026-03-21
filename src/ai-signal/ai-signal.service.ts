@@ -1605,26 +1605,14 @@ export class AiSignalService implements OnModuleInit {
           text += `\n\n_Chờ ${cooldown}p rồi vào lại... • ${modeLabel}_`;
           await this.notifyAdminOnly(text);
         } else {
-          // --- Hedge close with loss ---
-          const consLosses = action.consecutiveLosses ?? 0;
-          const maxConsLosses = cfg.hedgeMaxConsecutiveLosses || 2;
-          const hitMax = consLosses >= maxConsLosses;
-
+          // --- Hedge close with loss (recovery close — main recovered) ---
           let text =
-            `❌ *Hedge #${cycle} Thua*\n` +
+            `🔄 *Hedge #${cycle} Đóng*\n` +
             `━━━━━━━━━━━━━━━━━━\n\n` +
             `${sym} — PnL: *${pnlPct.toFixed(2)}% (${pnlUsdt.toFixed(2)} USDT)*\n` +
-            `⚠️ Thua liên tiếp: ${consLosses}/${maxConsLosses}`;
+            `📊 Main recovered — hedge no longer needed`;
 
-          if (action.newSafetySlPrice) {
-            text += `\n🔒 Safety SL thu hẹp → ${fmtP(action.newSafetySlPrice)}`;
-          }
-
-          if (hitMax) {
-            text += `\n🛑 Dừng hedge — quá nhiều lần thua`;
-          }
-
-          text += `\n\n_${modeLabel}_`;
+          text += `\n\n_Chờ vào lại nếu cần... • ${modeLabel}_`;
           await this.notifyAdminOnly(text);
         }
       }
