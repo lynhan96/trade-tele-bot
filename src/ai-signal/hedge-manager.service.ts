@@ -99,21 +99,18 @@ export class HedgeManagerService {
       const positionNotional = signal.simNotional || signal.notional || 0;
       if (positionNotional <= 0) return null;
 
-      // Decreasing vol per cycle — later cycles are riskier (market may reverse)
-      // Cycle 1: 100%, Cycle 2: 75%, Cycle 3: 50%, Cycle 4+: stop
+      // Fixed 75% notional — consistent hedge size across all cycles
       const cycle = (signal.hedgeCycleCount || 0) + 1;
-      const maxCycles = cfg.hedgeMaxCycles ?? 3;
+      const maxCycles = cfg.hedgeMaxCycles ?? 7;
       if (cycle > maxCycles) {
         this.logger.log(`[${signal.coin}] Hedge max cycles (${maxCycles}) reached — no more hedging`);
         return null;
       }
-      const volRatios = [1.0, 0.75, 0.5];
-      const volRatio = volRatios[Math.min(cycle - 1, volRatios.length - 1)];
-      const hedgeNotional = positionNotional * volRatio;
+      const hedgeNotional = positionNotional * 0.75;
       const hedgeTpPrice = this.getHedgeTpPrice(currentPrice, hedgeDirection, regime);
 
       this.logger.log(
-        `[${signal.coin}] HEDGE #${cycle} (${(volRatio * 100).toFixed(0)}%) | PnL: ${pnlPct.toFixed(2)}% | ` +
+        `[${signal.coin}] HEDGE #${cycle} (75%) | PnL: ${pnlPct.toFixed(2)}% | ` +
         `${hedgeDirection} $${hedgeNotional.toFixed(0)} | TP: ${hedgeTpPrice} | Banked: $${banked.toFixed(2)}`,
       );
 
@@ -124,7 +121,7 @@ export class HedgeManagerService {
         hedgeTpPrice,
         bankedProfit: banked,
         hedgePhase: 'FULL',
-        reason: `PnL ${pnlPct.toFixed(2)}% → hedge #${cycle} (${(volRatio * 100).toFixed(0)}%)`,
+        reason: `PnL ${pnlPct.toFixed(2)}% → hedge #${cycle} (75%)`,
       };
     } catch (err) {
       this.logger.error(`[${signal?.coin || '?'}] checkHedge error: ${err.message}`, err.stack);
