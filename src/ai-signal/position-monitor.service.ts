@@ -948,6 +948,129 @@ export class PositionMonitorService implements OnModuleInit {
 
     if (!slHit && !tpHit) return;
 
+    // ── FLIP LOGIC: Main TP hit while hedge active → promote hedge to new main ──
+    if (tpHit && hedgeActive && (signal as any).hedgeEntryPrice && (signal as any).hedgeDirection) {
+      if (this.resolvingSymbols.has(sigKey)) return;
+      this.logger.log(
+        `[PositionMonitor] 🔄 ${sigKey} MAIN TP HIT while hedge active → FLIPPING to ${(signal as any).hedgeDirection}`,
+      );
+
+      // 1. Close MAIN order with TP profit
+      const mainOrders = await this.orderModel.find({ signalId: (signal as any)._id, type: 'MAIN', status: 'OPEN' });
+      const mainFundingRate = (signal as any).fundingRate || 0;
+      let mainPnlTotal = 0;
+      for (const ord of mainOrders) {
+        const ordPnlPct = ord.direction === 'LONG'
+          ? ((effectiveTpPrice - ord.entryPrice) / ord.entryPrice) * 100
+          : ((ord.entryPrice - effectiveTpPrice) / ord.entryPrice) * 100;
+        const ordPnlUsdt = (ordPnlPct / 100) * ord.notional;
+        const exitFee = this.calcTakerFee(ord.notional);
+        const hoursHeld = ord.openedAt ? (Date.now() - new Date(ord.openedAt).getTime()) / 3600000 : 0;
+        const fundFee = this.tradingConfig.get().simFundingEnabled
+          ? this.calcFundingFee(ord.notional, Math.abs(mainFundingRate), hoursHeld) : 0;
+        const netPnl = Math.round((ordPnlUsdt - (ord.entryFeeUsdt || 0) - exitFee - fundFee) * 100) / 100;
+        mainPnlTotal += netPnl;
+        await this.orderModel.findByIdAndUpdate(ord._id, {
+          status: 'CLOSED', exitPrice: effectiveTpPrice, closedAt: new Date(),
+          closeReason: 'TAKE_PROFIT', pnlPercent: ordPnlPct, pnlUsdt: netPnl,
+          exitFeeUsdt: exitFee, fundingFeeUsdt: fundFee,
+        });
+      }
+
+      // 2. Flip signal: hedge becomes new main
+      const newDirection = (signal as any).hedgeDirection;
+      const newEntry = (signal as any).hedgeEntryPrice;
+      const newNotional = (signal as any).hedgeSimNotional || signal.simNotional || 1000;
+      const hedgeCfgFlip = this.tradingConfig.get();
+      const flipTpPct = 3.5; // TP for flipped position
+      const flipSlPct = (hedgeCfgFlip.hedgePartialTriggerPct || 3) + 1.0; // 4%
+      const newTp = newDirection === 'LONG'
+        ? +(newEntry * (1 + flipTpPct / 100)).toFixed(6)
+        : +(newEntry * (1 - flipTpPct / 100)).toFixed(6);
+      const newSl = newDirection === 'LONG'
+        ? +(newEntry * (1 - flipSlPct / 100)).toFixed(6)
+        : +(newEntry * (1 + flipSlPct / 100)).toFixed(6);
+
+      // Update signal in-memory
+      (signal as any).direction = newDirection;
+      (signal as any).entryPrice = newEntry;
+      (signal as any).gridAvgEntry = newEntry;
+      (signal as any).originalEntryPrice = newEntry;
+      (signal as any).stopLossPrice = newSl;
+      (signal as any).stopLossPercent = flipSlPct;
+      (signal as any).takeProfitPrice = newTp;
+      (signal as any).takeProfitPercent = flipTpPct;
+      (signal as any).originalSlPrice = newSl;
+      (signal as any).hedgeActive = false;
+      (signal as any).hedgePhase = undefined;
+      (signal as any).hedgeDirection = undefined;
+      (signal as any).hedgeEntryPrice = undefined;
+      (signal as any).hedgeSimNotional = undefined;
+      (signal as any).hedgeTpPrice = undefined;
+      (signal as any).hedgeOpenedAt = undefined;
+      (signal as any).hedgeCycleCount = 0;
+      (signal as any).slMovedToEntry = false;
+      (signal as any).tpBoosted = false;
+      (signal as any).peakPnlPct = 0;
+
+      // 3. Promote HEDGE order to new MAIN
+      const hedgeOrder = await this.orderModel.findOne({
+        signalId: (signal as any)._id, type: 'HEDGE', status: 'OPEN',
+      });
+      if (hedgeOrder) {
+        await this.orderModel.findByIdAndUpdate(hedgeOrder._id, {
+          type: 'MAIN', stopLossPrice: newSl, takeProfitPrice: newTp,
+        });
+      }
+
+      // 4. Persist to DB
+      await this.aiSignalModel.findByIdAndUpdate((signal as any)._id, {
+        direction: newDirection,
+        entryPrice: newEntry,
+        gridAvgEntry: newEntry,
+        originalEntryPrice: newEntry,
+        stopLossPrice: newSl, stopLossPercent: flipSlPct,
+        takeProfitPrice: newTp, takeProfitPercent: flipTpPct,
+        originalSlPrice: newSl,
+        hedgeActive: false, hedgeCycleCount: 0,
+        slMovedToEntry: false, tpBoosted: false, peakPnlPct: 0,
+        $unset: { hedgePhase: 1, hedgeDirection: 1, hedgeEntryPrice: 1, hedgeSimNotional: 1, hedgeTpPrice: 1, hedgeOpenedAt: 1, hedgeSafetySlPrice: 1 },
+      });
+
+      // 5. Re-init grid for new direction
+      const simNotional = newNotional;
+      const DCA_WEIGHTS_FLIP = [40, 25, 35];
+      const flipGridStep = flipSlPct / 3;
+      const newGrids: any[] = [];
+      for (let i = 0; i < 3; i++) {
+        const dev = i * flipGridStep;
+        const volPct = DCA_WEIGHTS_FLIP[i];
+        const gridNot = simNotional * (volPct / 100);
+        if (i === 0) {
+          newGrids.push({ level: 0, deviationPct: 0, fillPrice: newEntry, volumePct: volPct, status: "FILLED", filledAt: new Date(), simNotional: gridNot, simQuantity: gridNot / newEntry });
+        } else {
+          newGrids.push({ level: i, deviationPct: parseFloat(dev.toFixed(3)), fillPrice: 0, volumePct: volPct, status: "PENDING" });
+        }
+      }
+      (signal as any).gridLevels = newGrids;
+      (signal as any).gridFilledCount = 1;
+      (signal as any).gridClosedCount = 0;
+      (signal as any).simNotional = simNotional;
+
+      await this.signalQueueService.updateSignalGrid((signal as any)._id.toString(), newGrids, 1, 0);
+      await this.signalQueueService.initGridSignal((signal as any)._id.toString(), newEntry, newSl, newEntry);
+
+      this.logger.log(
+        `[PositionMonitor] 🔄 ${sigKey} FLIPPED to ${newDirection} | Entry: ${newEntry} | SL: ${newSl} (${flipSlPct}%) | TP: ${newTp} (${flipTpPct}%) | Main TP profit: $${mainPnlTotal.toFixed(2)}`,
+      );
+
+      // Notify
+      if (this.hedgeCallback) {
+        await this.hedgeCallback(signal, { action: 'CLOSE_HEDGE', hedgePnlPct: 0, hedgePnlUsdt: 0, reason: `FLIP: main TP → ${newDirection}`, hedgePhase: 'FLIP' }, price).catch(() => {});
+      }
+      return;
+    }
+
     // Prevent double-trigger: unregister first, then resolve
     if (this.resolvingSymbols.has(sigKey)) return;
     this.resolvingSymbols.add(sigKey);
