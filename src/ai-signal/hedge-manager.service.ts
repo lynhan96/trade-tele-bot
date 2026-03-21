@@ -17,6 +17,7 @@ export interface HedgeAction {
   bankedProfit?: number;
   consecutiveLosses?: number;
   hedgePhase?: string;
+  hedgeSlAtEntry?: boolean;
   reason: string;
 }
 
