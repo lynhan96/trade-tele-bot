@@ -189,6 +189,13 @@ export class MarketDataService implements OnModuleInit, OnModuleDestroy {
       this.subscribeCoin(coin).catch((err) =>
         this.logger.warn(`[MarketData] Failed to auto-subscribe ${coin}: ${err?.message}`),
       );
+      // Bootstrap: deliver initial price tick via HTTP so grid can init immediately
+      // (WS subscription takes ~1-2s to connect and deliver first tick)
+      this.getPrice(symbol).then((price) => {
+        if (price && price > 0) {
+          this.priceListeners.get(symbol)?.forEach((listener) => listener(price));
+        }
+      }).catch(() => {});
     }
   }
 

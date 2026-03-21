@@ -9,6 +9,7 @@ export interface SignalResult {
   entryPrice: number; // current close price
   strategy: string;
   reason: string; // human-readable
+  sgFilters?: string[]; // Singapore filter results
 }
 
 // Redis TTL for 2-stage pattern state
@@ -230,6 +231,7 @@ export class RuleEngineService {
         entryPrice: primary.entryPrice,
         strategy: names,
         reason: `Confluence ${names}: ${reasons}`,
+        sgFilters: sgResult.reasons,
       };
     }
 
@@ -237,7 +239,7 @@ export class RuleEngineService {
     this.logger.debug(
       `[RuleEngine] ${coin} △ ${winners[0].strategy} fired alone (1/${strategies.length}) — allowed as single`,
     );
-    return primary;
+    return { ...primary, sgFilters: sgResult.reasons };
   }
 
   /**

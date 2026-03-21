@@ -1159,6 +1159,17 @@ export class AiSignalService implements OnModuleInit {
     const simNotional = 1000;
     const simQuantity = simNotional / signal.entryPrice;
 
+    // Singapore filter info from signal metadata
+    const sgFilters: string[] = (signal as any).sgFilters || [];
+    const sgLines = sgFilters.length > 0
+      ? sgFilters.map(r => {
+          if (r.includes('OP line OK')) return `📊 OP: ${r.replace('OP line OK: ', '')}`;
+          if (r.includes('Volume:')) return `💰 ${r}`;
+          if (r.includes('S/R OK')) return `📐 ${r.replace('S/R OK: ', 'S/R: ')}`;
+          return '';
+        }).filter(Boolean).join('\n')
+      : '';
+
     const text =
       `${dirEmoji} *AI Signal — ${signal.symbol}* 🧪\n` +
       `━━━━━━━━━━━━━━━━━━\n\n` +
@@ -1166,8 +1177,9 @@ export class AiSignalService implements OnModuleInit {
       `Entry: ${fmtP(signal.entryPrice)}\n` +
       `TP: ${fmtP(signal.takeProfitPrice)}\n` +
       `SL: ${fmtP(signal.stopLossPrice)}\n\n` +
-      `Vol: *$${simNotional.toLocaleString()}* | Qty: *${simQuantity.toFixed(4)}*\n\n` +
-      `${this.getProfileTag(signal)}\n` +
+      `Vol: *$${simNotional.toLocaleString()}* | Qty: *${simQuantity.toFixed(4)}*\n` +
+      (sgLines ? `\n${sgLines}\n` : '') +
+      `\n${this.getProfileTag(signal)}\n` +
       `_${time} • Test mode_`;
 
     // Test mode: only notify admin
