@@ -180,6 +180,16 @@ export class MarketDataService implements OnModuleInit, OnModuleDestroy {
       this.priceListeners.set(symbol, new Set());
     }
     this.priceListeners.get(symbol)!.add(cb);
+
+    // Auto-subscribe WebSocket if not already (ensures price ticks are delivered)
+    const coin = symbol.replace("USDT", "").toUpperCase();
+    if (!this.subscribedCoins.has(coin)) {
+      this.logger.log(`[MarketData] Auto-subscribing ${coin} for price listener`);
+      this.subscribedCoins.add(coin);
+      this.subscribeCoin(coin).catch((err) =>
+        this.logger.warn(`[MarketData] Failed to auto-subscribe ${coin}: ${err?.message}`),
+      );
+    }
   }
 
   unregisterPriceListener(symbol: string, cb: (price: number) => void): void {

@@ -369,6 +369,8 @@ export class PositionMonitorService implements OnModuleInit {
         entryPrice: origEntry,
         notional: gridNotionalL0,
         quantity: gridNotionalL0 / origEntry,
+        stopLossPrice: effectiveSl,
+        takeProfitPrice: takeProfitPrice || 0,
         entryFeeUsdt: l0EntryFee,
         openedAt: new Date(),
         cycleNumber: 0,

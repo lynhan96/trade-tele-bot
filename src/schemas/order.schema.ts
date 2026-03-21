@@ -48,6 +48,12 @@ export class Order {
   fundingFeeUsdt: number;
 
   @Prop()
+  stopLossPrice: number;
+
+  @Prop()
+  takeProfitPrice: number;
+
+  @Prop()
   closeReason: string;
 
   @Prop()
