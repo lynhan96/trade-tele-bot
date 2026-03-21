@@ -173,7 +173,7 @@ export const DEFAULT_TRADING_CONFIG: TradingConfig = {
   hedgeTpPctVolatile: 4.0,            // TP for volatile
   hedgeTpPctDefault: 3.0,             // TP default (was 2.5, data shows room for more)
   hedgeSlImprovementRatio: 0.8,
-  hedgeMaxCycles: 3,              // Max 3 cycles (100%→75%→50%), then stop
+  hedgeMaxCycles: 7,              // Allow more cycles for sideways (vol scales: 100→75→50→50→50...)
   hedgeCooldownMin: 5,
   hedgeTrailTrigger: 1.0,
   hedgeTrailKeepRatio: 0.70,
