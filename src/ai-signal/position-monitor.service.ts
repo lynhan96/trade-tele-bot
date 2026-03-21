@@ -1455,12 +1455,15 @@ export class PositionMonitorService implements OnModuleInit {
       reason: action.reason,
     };
 
-    // Determine new SL: use improved SL from hedge profit, or restore original SL
-    // IMPORTANT: hedgeSafetySlPrice and stopLossPrice may be 0 (hedge removes SL) — fall back to originalSlPrice
-    const newSlPrice = action.newSlPrice
-      || ((signal as any).hedgeSafetySlPrice > 0 ? (signal as any).hedgeSafetySlPrice : null)
-      || ((signal as any).originalSlPrice > 0 ? (signal as any).originalSlPrice : null)
-      || (signal as any).stopLossPrice;
+    // Determine new SL: restore to min 4% (not 10% safety) after hedge closes
+    // Use improved SL if hedge was profitable, otherwise restore to hedgeTrigger+1%
+    const hedgeCfgClose = this.tradingConfig.get();
+    const minSlPctClose = (hedgeCfgClose.hedgePartialTriggerPct || 3) + 1.0; // 4%
+    const avgEntryClose = (signal as any).gridAvgEntry || signal.entryPrice;
+    const minSlPriceClose = signal.direction === 'LONG'
+      ? +(avgEntryClose * (1 - minSlPctClose / 100)).toFixed(6)
+      : +(avgEntryClose * (1 + minSlPctClose / 100)).toFixed(6);
+    const newSlPrice = action.newSlPrice || minSlPriceClose;
 
     // If hedge manager provided a tighter safety SL, update it too
     const updates: Record<string, any> = {};
@@ -1481,6 +1484,8 @@ export class PositionMonitorService implements OnModuleInit {
     (signal as any).hedgeOpenedAt = undefined;
     (signal as any).hedgeCycleCount = cycleCount;
     (signal as any).stopLossPrice = newSlPrice;
+    (signal as any).stopLossPercent = minSlPctClose;
+    (signal as any).hedgeSafetySlPrice = undefined; // Clear safety SL — back to normal mode
 
     // Don't resume trail SL — let next checkHedge cycle decide if re-entry needed
     // Trail resumes naturally when main PnL > 0 (profitable)
@@ -1488,9 +1493,10 @@ export class PositionMonitorService implements OnModuleInit {
     // Persist to DB
     await this.aiSignalModel.findByIdAndUpdate(signalId, {
       hedgeActive: false,
-      $unset: { hedgePhase: 1, hedgeDirection: 1, hedgeEntryPrice: 1, hedgeSimNotional: 1, hedgeTpPrice: 1, hedgeOpenedAt: 1 },
+      $unset: { hedgePhase: 1, hedgeDirection: 1, hedgeEntryPrice: 1, hedgeSimNotional: 1, hedgeTpPrice: 1, hedgeOpenedAt: 1, hedgeSafetySlPrice: 1 },
       hedgeCycleCount: cycleCount,
       stopLossPrice: newSlPrice,
+      stopLossPercent: minSlPctClose,
       $push: { hedgeHistory: historyEntry },
       ...updates,
     });

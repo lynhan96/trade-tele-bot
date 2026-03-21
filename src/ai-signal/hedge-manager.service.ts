@@ -193,9 +193,9 @@ export class HedgeManagerService {
         return this.closeHedgeWithLoss(signal, signalId, hedgePnlPct, hedgePnlUsdt, cfg,
           `Recovery close: main ${mainPnlPct.toFixed(2)}%, hedge ${hedgePnlPct.toFixed(2)}%`);
       }
-      // Main recovering — close hedge early to limit hedge loss
-      // KAS lesson: waited till main hit 0% → hedge lost -9.76% ($98)
-      if (mainPnlPct !== undefined && mainPnlPct > -1.5) {
+      // Main actually recovering (profitable or near breakeven) — hedge may be on wrong side
+      // Only cut if main is genuinely recovering (> -0.5%), not just slightly less negative
+      if (mainPnlPct !== undefined && mainPnlPct > -0.5) {
         // If hedge is losing more than 3%, cut it — market reversed, hedge is wrong side
         if (hedgePnlPct < -3.0) {
           this.logger.warn(
