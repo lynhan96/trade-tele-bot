@@ -114,6 +114,11 @@ export interface TradingConfig {
   simTakerFeePct: number;            // Taker fee % per side (default 0.05 = 0.05%)
   simMakerFeePct: number;            // Maker fee % per side (default 0.02 = 0.02%)
   simFundingEnabled: boolean;        // Apply funding fee in sim (default true)
+
+  // ── Singapore Strategy Filters (toggle on/off) ──────────────────────
+  opLineEnabled: boolean;            // Daily Open Price bias filter (default true)
+  volumeAnalysisEnabled: boolean;    // Smart money vs retail volume (default true)
+  srLevelEnabled: boolean;           // Support/Resistance level filter (default true)
 }
 
 export const DEFAULT_TRADING_CONFIG: TradingConfig = {
@@ -194,6 +199,11 @@ export const DEFAULT_TRADING_CONFIG: TradingConfig = {
   simTakerFeePct: 0.05,   // 0.05% per side (market orders)
   simMakerFeePct: 0.02,   // 0.02% per side (limit orders)
   simFundingEnabled: true, // Apply funding fee from Binance API
+
+  // Singapore Strategy Filters
+  opLineEnabled: true,           // Daily Open Price bias
+  volumeAnalysisEnabled: true,   // Smart money vs retail volume
+  srLevelEnabled: true,          // Support/Resistance levels
 };
 
 const TRADING_CONFIG_KEY = "cache:ai:trading-config";

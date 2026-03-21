@@ -1,6 +1,7 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { RedisService } from "../../redis/redis.service";
 import { IndicatorService } from "../indicators/indicator.service";
+import { SingaporeFiltersService } from "../filters/singapore-filters.service";
 import { AiTunedParams } from "../ai-optimizer/ai-tuned-params.interface";
 
 export interface SignalResult {
@@ -20,6 +21,7 @@ export class RuleEngineService {
   constructor(
     private readonly indicatorService: IndicatorService,
     private readonly redisService: RedisService,
+    private readonly singaporeFilters: SingaporeFiltersService,
   ) {}
 
   /**
@@ -205,12 +207,23 @@ export class RuleEngineService {
       }
     }
 
+    // ── Singapore Strategy Filters — OP Line + Volume + S/R ──
+    // Run all 3 filters (each toggleable). If any fails → block signal.
+    const sgResult = await this.singaporeFilters.checkAll(coin, isLong);
+    if (!sgResult.pass) {
+      const failReasons = sgResult.reasons.filter(r => !r.includes('OK') && !r.includes('disabled'));
+      this.logger.log(
+        `[RuleEngine] ${coin} ${isLong ? "LONG" : "SHORT"} blocked by Singapore filter: ${failReasons.join(' | ')}`,
+      );
+      return null;
+    }
+
     if (winners.length >= 2) {
       // Strong confluence: 2+ strategies agree
       const names = winners.map(w => w.strategy).join("+");
       const reasons = winners.map(w => w.result.reason).join(" | ");
       this.logger.log(
-        `[RuleEngine] ${coin} ✓ ${isLong ? "LONG" : "SHORT"} confluence (${winners.length}/${strategies.length}): ${names}`,
+        `[RuleEngine] ${coin} ✓ ${isLong ? "LONG" : "SHORT"} confluence (${winners.length}/${strategies.length}): ${names} | SG: ${sgResult.reasons.filter(r => r.includes('OK') || r.includes('SPIKE')).join(', ')}`,
       );
       return {
         isLong,
@@ -221,7 +234,6 @@ export class RuleEngineService {
     }
 
     // Single strategy fired out of multiple — still a valid signal but weaker
-    // Log that confluence wasn't achieved for monitoring
     this.logger.debug(
       `[RuleEngine] ${coin} △ ${winners[0].strategy} fired alone (1/${strategies.length}) — allowed as single`,
     );
