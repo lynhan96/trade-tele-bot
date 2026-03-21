@@ -74,22 +74,43 @@ export class HedgeManagerService {
         }
       }
 
-      // After first cycle: require PnL still worsening (not bouncing back)
-      // Prevents re-entry into whipsaw — only hedge if price confirms continuation
-      if (signal.hedgeHistory?.length > 0) {
-        // If main PnL is BETTER than when last hedge closed, market may be recovering
-        // Only re-enter if PnL is still bad (worse than -partialTrigger)
-        if (pnlPct > -cfg.hedgePartialTriggerPct * 1.5) {
-          this.logger.debug(`[${signal.coin}] Hedge re-entry skipped: PnL ${pnlPct.toFixed(2)}% improving (need < -${(cfg.hedgePartialTriggerPct * 1.5).toFixed(1)}%)`);
-          return null;
-        }
-      }
-
       // Calculate banked profit from hedgeHistory (survives restart)
       const banked = (signal.hedgeHistory || []).reduce((sum: number, h: any) => sum + (h.pnlUsdt || 0), 0);
 
-      // PnL not bad enough to hedge
+      // ── Entry conditions ──
+      // Cycle 1: PnL ≤ -3% (simple trigger)
       if (pnlPct > -cfg.hedgePartialTriggerPct) return null;
+
+      // Cycle 2+: stricter conditions — prevent blind re-entry
+      if (signal.hedgeHistory?.length > 0) {
+        const lastHedge = signal.hedgeHistory[signal.hedgeHistory.length - 1];
+
+        // 1. Price must be WORSE than last hedge exit (trend continuing)
+        const lastExitPrice = lastHedge?.exitPrice || 0;
+        if (lastExitPrice > 0) {
+          const priceWorse = signal.direction === 'LONG'
+            ? currentPrice < lastExitPrice  // LONG: price must be lower
+            : currentPrice > lastExitPrice; // SHORT: price must be higher
+          if (!priceWorse) {
+            this.logger.debug(`[${signal.coin}] Hedge re-entry skipped: price ${currentPrice} not worse than last exit ${lastExitPrice}`);
+            return null;
+          }
+        }
+
+        // 2. PnL must be worse than trigger (not just at -3%, need momentum)
+        if (pnlPct > -cfg.hedgePartialTriggerPct * 1.2) {
+          this.logger.debug(`[${signal.coin}] Hedge re-entry skipped: PnL ${pnlPct.toFixed(2)}% not bad enough (need < -${(cfg.hedgePartialTriggerPct * 1.2).toFixed(1)}%)`);
+          return null;
+        }
+
+        // 3. Last hedge was breakeven close → price bounced → need deeper trigger
+        if (lastHedge?.reason?.includes('breakeven')) {
+          if (pnlPct > -cfg.hedgePartialTriggerPct * 1.5) {
+            this.logger.debug(`[${signal.coin}] Hedge re-entry after breakeven: need PnL < -${(cfg.hedgePartialTriggerPct * 1.5).toFixed(1)}%`);
+            return null;
+          }
+        }
+      }
 
       // Acquire Redis lock
       const lockKey = `${HEDGE_LOCK_PREFIX}${signalId}`;
