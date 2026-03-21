@@ -497,11 +497,15 @@ export class PositionMonitorService implements OnModuleInit {
           // If hedge disabled: keep original SL% distance
           const hedgeCfgNow = this.tradingConfig?.get();
           const useHedgeSafety = hedgeCfgNow?.hedgeEnabled && (signal as any).hedgeSafetySlPrice;
-          const slPctForRecalc = useHedgeSafety
+          const minSlPctDca = hedgeCfgNow?.hedgeEnabled
+            ? (hedgeCfgNow.hedgePartialTriggerPct || 3) + 1.0  // min 4% for hedge room
+            : 2.5;
+          const rawSlPct = useHedgeSafety
             ? (hedgeCfgNow.hedgeSafetySlPct || 10)
             : (origEntry > 0
               ? Math.abs(((signal as any).originalSlPrice || (signal as any).stopLossPrice) - origEntry) / origEntry * 100
               : 2.5);
+          const slPctForRecalc = Math.max(rawSlPct, minSlPctDca);
           const newSl = direction === "LONG"
             ? avgEntry * (1 - slPctForRecalc / 100)
             : avgEntry * (1 + slPctForRecalc / 100);
