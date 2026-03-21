@@ -287,8 +287,27 @@ export class SignalQueueService {
     });
 
     await this.redisService.delete(ACTIVE_KEY(symbol));
+
+    // Close all open orders for this signal — single source of truth
+    const openOrders = await this.orderModel.find({ signalId: active._id, status: 'OPEN' });
+    for (const ord of openOrders) {
+      const ordPnlPct = (ord as any).direction === 'LONG'
+        ? ((exitPrice - ord.entryPrice) / ord.entryPrice) * 100
+        : ((ord.entryPrice - exitPrice) / ord.entryPrice) * 100;
+      const ordPnlRaw = (ordPnlPct / 100) * ord.notional;
+      const exitFee = ord.notional * takerFeePct;
+      const ordHours = ord.openedAt ? (Date.now() - new Date(ord.openedAt).getTime()) / 3600000 : 0;
+      const ordFundFee = cfg.simFundingEnabled ? ord.notional * fundingRate * Math.floor(ordHours / 8) : 0;
+      const ordPnlUsdt = Math.round((ordPnlRaw - (ord.entryFeeUsdt || 0) - exitFee - ordFundFee) * 100) / 100;
+      await this.orderModel.findByIdAndUpdate(ord._id, {
+        status: 'CLOSED', exitPrice, closedAt: new Date(), closeReason: reason,
+        pnlPercent: ordPnlPct, pnlUsdt: ordPnlUsdt,
+        exitFeeUsdt: +exitFee.toFixed(4), fundingFeeUsdt: +ordFundFee.toFixed(4),
+      });
+    }
+
     this.logger.log(
-      `[SignalQueue] ${symbol} COMPLETED — exitPrice=${exitPrice} pnl=${pnlPercent.toFixed(2)}%`,
+      `[SignalQueue] ${symbol} COMPLETED — exitPrice=${exitPrice} pnl=${pnlPercent.toFixed(2)}% orders=${openOrders.length}`,
     );
 
     return active;
