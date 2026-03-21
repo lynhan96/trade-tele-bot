@@ -496,22 +496,21 @@ export class PositionMonitorService implements OnModuleInit {
           // If hedge enabled: keep 10% safety SL from new avgEntry
           // If hedge disabled: keep original SL% distance
           const hedgeCfgNow = this.tradingConfig?.get();
-          const useHedgeSafety = hedgeCfgNow?.hedgeEnabled && (signal as any).hedgeSafetySlPrice;
-          const minSlPctDca = hedgeCfgNow?.hedgeEnabled
-            ? (hedgeCfgNow.hedgePartialTriggerPct || 3) + 1.0  // min 4% for hedge room
-            : 2.5;
-          const rawSlPct = useHedgeSafety
-            ? (hedgeCfgNow.hedgeSafetySlPct || 10)
-            : (origEntry > 0
+          // When hedge active: SL=0 (disabled), skip recalc
+          if ((signal as any).hedgeActive) {
+            (signal as any).stopLossPrice = 0;
+          } else {
+            const minSlPctDca = hedgeCfgNow?.hedgeEnabled
+              ? (hedgeCfgNow.hedgePartialTriggerPct || 3) + 1.0  // min 4% for hedge room
+              : 2.5;
+            const rawSlPct = origEntry > 0
               ? Math.abs(((signal as any).originalSlPrice || (signal as any).stopLossPrice) - origEntry) / origEntry * 100
-              : 2.5);
-          const slPctForRecalc = Math.max(rawSlPct, minSlPctDca);
-          const newSl = direction === "LONG"
-            ? avgEntry * (1 - slPctForRecalc / 100)
-            : avgEntry * (1 + slPctForRecalc / 100);
-          (signal as any).stopLossPrice = newSl;
-          if (useHedgeSafety) {
-            (signal as any).hedgeSafetySlPrice = newSl;
+              : 2.5;
+            const slPctForRecalc = Math.max(rawSlPct, minSlPctDca);
+            const newSl = direction === "LONG"
+              ? avgEntry * (1 - slPctForRecalc / 100)
+              : avgEntry * (1 + slPctForRecalc / 100);
+            (signal as any).stopLossPrice = newSl;
           }
 
           // DCA TP: 3% from new avgEntry
@@ -522,8 +521,9 @@ export class PositionMonitorService implements OnModuleInit {
           (signal as any).takeProfitPrice = newTp;
           (signal as any).takeProfitPercent = DCA_TP_PCT;
 
+          const currentSlForLog = (signal as any).stopLossPrice;
           this.logger.log(
-            `[PositionMonitor] Grid ${sigKey} L${grid.level} FILLED at ${price.toFixed(4)}, avgEntry=${avgEntry.toFixed(4)}, SL=${newSl.toFixed(4)} (${slPctForRecalc.toFixed(1)}%), TP=${newTp.toFixed(4)}, filled=${filledCount}/${GRID_LEVEL_COUNT}`,
+            `[PositionMonitor] Grid ${sigKey} L${grid.level} FILLED at ${price.toFixed(4)}, avgEntry=${avgEntry.toFixed(4)}, SL=${currentSlForLog || 'DISABLED'}, TP=${newTp.toFixed(4)}, filled=${filledCount}/${GRID_LEVEL_COUNT}`,
           );
         }
       }
@@ -1419,45 +1419,6 @@ export class PositionMonitorService implements OnModuleInit {
    * Widen SL to safety net on first tick when hedge is enabled.
    * Saves original SL so it can be restored after hedge closes.
    */
-  private async widenSlForHedge(signal: AiSignalDocument, cfg: any): Promise<void> {
-    const sigKey = this.getSignalKey(signal);
-    const { direction, entryPrice } = signal;
-    const currentSl = (signal as any).stopLossPrice;
-
-    // Save original SL for DCA grid spacing (grid uses originalSlPrice, not widened safety SL)
-    if (!(signal as any).originalSlPrice) {
-      (signal as any).originalSlPrice = currentSl;
-    }
-
-    // Widen SL to hedgeSafetySlPct (default 10%) — wide safety net, hedge manages risk
-    const safetySlPct = cfg.hedgeSafetySlPct || 10;
-    const avgEntry = (signal as any).gridAvgEntry || entryPrice;
-    const safetySlPrice = direction === "LONG"
-      ? +(avgEntry * (1 - safetySlPct / 100)).toFixed(6)
-      : +(avgEntry * (1 + safetySlPct / 100)).toFixed(6);
-
-    (signal as any).hedgeSafetySlPrice = safetySlPrice;
-    (signal as any).stopLossPrice = safetySlPrice;
-    (signal as any).stopLossPercent = safetySlPct;
-    (signal as any).slMovedToEntry = false;
-
-    // Persist to DB (only set originalSlPrice if not already saved from a previous cycle)
-    const widenUpdates: Record<string, any> = {
-      hedgeSafetySlPrice: safetySlPrice,
-      stopLossPrice: safetySlPrice,
-      stopLossPercent: safetySlPct,
-      slMovedToEntry: false,
-    };
-    if ((signal as any).originalSlPrice === currentSl) {
-      widenUpdates.originalSlPrice = currentSl;
-    }
-    await this.aiSignalModel.findByIdAndUpdate((signal as any)._id, widenUpdates);
-
-    this.logger.log(
-      `[PositionMonitor] ${sigKey} SL widened for hedge: ${currentSl} → ${safetySlPrice} (-${safetySlPct}% safety net)`,
-    );
-  }
-
   /**
    * Handle hedge open/upgrade action (sim mode — updates signal fields directly).
    */
@@ -1481,17 +1442,12 @@ export class PositionMonitorService implements OnModuleInit {
     (signal as any).hedgeTpPrice = action.hedgeTpPrice;
     (signal as any).hedgeOpenedAt = new Date();
 
-    // Widen SL to safety net NOW that hedge is active (was tight 3-4% before)
-    const hedgeCfg = this.tradingConfig.get();
-    const safetySlPct = hedgeCfg.hedgeSafetySlPct || 10;
-    const avgEntry = (signal as any).gridAvgEntry || signal.entryPrice;
-    const safetySlPrice = signal.direction === 'LONG'
-      ? +(avgEntry * (1 - safetySlPct / 100)).toFixed(6)
-      : +(avgEntry * (1 + safetySlPct / 100)).toFixed(6);
-    (signal as any).stopLossPrice = safetySlPrice;
-    (signal as any).stopLossPercent = safetySlPct;
-    (signal as any).hedgeSafetySlPrice = safetySlPrice;
-    this.logger.log(`[PositionMonitor] ${sigKey} SL widened to ${safetySlPct}% (${safetySlPrice}) — hedge active`);
+    // Disable SL when hedge active — hedge IS the risk management
+    // Catastrophic stop at -25% remains as absolute safety net in handlePriceTick
+    (signal as any).stopLossPrice = 0;
+    (signal as any).stopLossPercent = 0;
+    (signal as any).hedgeSafetySlPrice = 0;
+    this.logger.log(`[PositionMonitor] ${sigKey} SL DISABLED — hedge active, catastrophic stop at -25% remains`);
 
     // Persist to DB
     await this.aiSignalModel.findByIdAndUpdate(signalId, {
@@ -1502,9 +1458,9 @@ export class PositionMonitorService implements OnModuleInit {
       hedgeSimNotional: action.hedgeNotional,
       hedgeTpPrice: action.hedgeTpPrice,
       hedgeOpenedAt: new Date(),
-      stopLossPrice: safetySlPrice,
-      stopLossPercent: safetySlPct,
-      hedgeSafetySlPrice: safetySlPrice,
+      stopLossPrice: 0,
+      stopLossPercent: 0,
+      hedgeSafetySlPrice: 0,
     });
 
     // Create HEDGE order record (taker fee — market order)
