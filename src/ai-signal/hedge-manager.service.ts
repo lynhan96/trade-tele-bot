@@ -210,8 +210,32 @@ export class HedgeManagerService {
         }
       }
 
-      // ── NO trail for hedge — hedge is protection, only close on TP or recovery ──
-      // ── NO hedge SL — when hedge loses, main is recovering. Let it ride. ──
+      // ── Hedge breakeven SL: when hedge profitable > 1%, move SL to entry ──
+      // If price reverses, hedge closes at breakeven (no loss) instead of giving back profit
+      if (hedgePnlPct >= 1.0 && !signal.hedgeSlAtEntry) {
+        this.logger.log(
+          `[${signal.coin}] Hedge SL → entry (breakeven) | PnL: +${hedgePnlPct.toFixed(2)}%`,
+        );
+        return {
+          action: 'NONE' as const,
+          reason: `Hedge SL moved to entry at +${hedgePnlPct.toFixed(2)}%`,
+          hedgeSlAtEntry: true,
+        };
+      }
+
+      // ── Hedge breakeven SL hit: price came back to entry → close at ~0 ──
+      if (signal.hedgeSlAtEntry && hedgePnlPct <= 0.1) {
+        this.logger.log(
+          `[${signal.coin}] Hedge breakeven SL hit | PnL: ${hedgePnlPct.toFixed(2)}% → close at ~0`,
+        );
+        // Close with small profit/loss (near breakeven)
+        if (hedgePnlUsdt >= 0) {
+          return this.closeHedgeWithProfit(signal, signalId, hedgePnlPct, hedgePnlUsdt, cfg,
+            `Hedge breakeven SL: ${hedgePnlPct.toFixed(2)}%`);
+        }
+        return this.closeHedgeWithLoss(signal, signalId, hedgePnlPct, hedgePnlUsdt, cfg,
+          `Hedge breakeven SL: ${hedgePnlPct.toFixed(2)}%`);
+      }
 
       return null;
     } catch (err) {
