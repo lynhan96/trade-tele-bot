@@ -411,21 +411,16 @@ export class HedgeManagerService {
       hedgePnlUsdt, originalNotional, avgEntry, currentSl, signal.direction,
     );
 
-    // Widen safety SL on win (adaptive)
-    const newSafetySlPrice = this.adjustSafetySlOnWin(signal, cfg, newBanked);
-
     this.logger.log(
       `[${signal.coin}] Hedge CLOSED PROFIT | ${reason} | PnL: ${hedgePnlPct.toFixed(2)}% ($${hedgePnlUsdt.toFixed(2)}) | ` +
-      `Banked total: $${newBanked.toFixed(2)} | SL: ${currentSl} → ${newSlPrice}` +
-      (newSafetySlPrice ? ` | Safety SL widened → ${newSafetySlPrice}` : ''),
+      `Banked total: $${newBanked.toFixed(2)} | SL stays 0 (hedge manages)`,
     );
 
     return {
       action: 'CLOSE_HEDGE',
       hedgePnlPct,
       hedgePnlUsdt,
-      newSlPrice,
-      newSafetySlPrice,
+      newSlPrice: 0, // SL stays disabled
       bankedProfit: newBanked,
       consecutiveLosses: 0,
       hedgePhase: signal.hedgePhase,
@@ -454,20 +449,16 @@ export class HedgeManagerService {
 
     const banked = (signal.hedgeHistory || []).reduce((sum: number, h: any) => sum + (h.pnlUsdt || 0), 0);
 
-    // Tighten safety SL on loss (adaptive)
-    const newSafetySlPrice = this.adjustSafetySlOnLoss(signal, cfg);
-
     this.logger.warn(
       `[${signal.coin}] Hedge CLOSED LOSS | ${reason} | PnL: ${hedgePnlPct.toFixed(2)}% ($${hedgePnlUsdt.toFixed(2)}) | ` +
-      `Consecutive losses: ${newLosses} | Banked: $${banked.toFixed(2)}` +
-      (newSafetySlPrice ? ` | Safety SL tightened → ${newSafetySlPrice}` : ''),
+      `Consecutive losses: ${newLosses} | Banked: $${banked.toFixed(2)} | SL stays 0`,
     );
 
     return {
       action: 'CLOSE_HEDGE',
       hedgePnlPct,
       hedgePnlUsdt,
-      newSafetySlPrice,
+      newSlPrice: 0, // SL stays disabled
       bankedProfit: banked,
       consecutiveLosses: newLosses,
       hedgePhase: signal.hedgePhase,
