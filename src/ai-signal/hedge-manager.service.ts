@@ -97,8 +97,36 @@ export class HedgeManagerService {
       const banked = (signal.hedgeHistory || []).reduce((sum: number, h: any) => sum + (h.pnlUsdt || 0), 0);
 
       // ── Entry conditions ──
-      // Cycle 1: PnL ≤ -3% (simple trigger)
+      // PnL must be bad enough to hedge
       if (pnlPct > -cfg.hedgePartialTriggerPct) return null;
+
+      // ── Momentum check (ALL cycles) — don't hedge if price is bouncing ──
+      try {
+        const coin = signal.coin || signal.symbol?.replace('USDT', '');
+        const closes15m = await this.marketDataService.getClosePrices(coin, '15m');
+        if (closes15m.length >= 5) {
+          // Check last 3 candles — need at least 2/3 in hedge direction
+          const last3 = closes15m.slice(-3);
+          const redCandles = last3.filter((c, i) => i > 0 && c < last3[i - 1]).length;
+          const greenCandles = last3.filter((c, i) => i > 0 && c > last3[i - 1]).length;
+
+          if (signal.direction === 'LONG') {
+            // Main LONG losing → hedge SHORT → need price dropping (red candles)
+            if (greenCandles >= 2) {
+              this.logger.debug(`[${coin}] Hedge entry skipped: price bouncing (${greenCandles}/2 green candles) — may recover`);
+              return null;
+            }
+          } else {
+            // Main SHORT losing → hedge LONG → need price rising (green candles)
+            if (redCandles >= 2) {
+              this.logger.debug(`[${coin}] Hedge entry skipped: price dropping (${redCandles}/2 red candles) — may recover`);
+              return null;
+            }
+          }
+        }
+      } catch (err) {
+        // If candle data unavailable, proceed without check
+      }
 
       // Cycle 2+: stricter conditions — prevent blind re-entry
       if (signal.hedgeHistory?.length > 0) {

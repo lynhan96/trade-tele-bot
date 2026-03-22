@@ -20,11 +20,6 @@ import {
   AiSignalValidation,
   AiSignalValidationSchema,
 } from "../schemas/ai-signal-validation.schema";
-import {
-  OnChainSnapshot,
-  OnChainSnapshotSchema,
-} from "../schemas/onchain-snapshot.schema";
-
 @Module({
   imports: [
     RedisModule,
@@ -33,7 +28,6 @@ import {
       { name: AiRegimeHistory.name, schema: AiRegimeHistorySchema },
       { name: AiMarketConfig.name, schema: AiMarketConfigSchema },
       { name: AiSignalValidation.name, schema: AiSignalValidationSchema },
-      { name: OnChainSnapshot.name, schema: OnChainSnapshotSchema },
     ]),
   ],
   providers: [IndicatorService, RuleEngineService, AiOptimizerService, TradingConfigService, SingaporeFiltersService, OnChainFilterService],
