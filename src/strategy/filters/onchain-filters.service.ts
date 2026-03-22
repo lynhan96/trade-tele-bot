@@ -1,7 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
 import { TradingConfigService } from '../../ai-signal/trading-config';
 import { FuturesAnalyticsService, CoinAnalytics } from '../../market-data/futures-analytics.service';
 import { RedisService } from '../../redis/redis.service';
+import { OnChainSnapshot, OnChainSnapshotDocument } from '../../schemas/onchain-snapshot.schema';
 
 /**
  * On-Chain Filter Service — Phase 1 (Binance data, free)
@@ -21,6 +24,7 @@ export class OnChainFilterService {
     private readonly tradingConfig: TradingConfigService,
     private readonly futuresAnalytics: FuturesAnalyticsService,
     private readonly redisService: RedisService,
+    @InjectModel(OnChainSnapshot.name) private snapshotModel: Model<OnChainSnapshotDocument>,
   ) {}
 
   /**
@@ -66,10 +70,36 @@ export class OnChainFilterService {
       );
     }
 
+    // Save snapshot to DB for analysis
+    this.saveSnapshot(symbol, isLong ? 'LONG' : 'SHORT', analytics, blocked.length === 0, reasons, blocked.map((r) => r.reason));
+
     return {
       pass: blocked.length === 0,
       reasons,
     };
+  }
+
+  /** Save on-chain snapshot to MongoDB (fire and forget) */
+  private saveSnapshot(
+    symbol: string, direction: string, analytics: CoinAnalytics,
+    passed: boolean, reasons: string[], blockedBy: string[],
+  ): void {
+    this.snapshotModel.create({
+      symbol,
+      direction,
+      fundingRate: analytics.fundingRate,
+      fundingRatePct: analytics.fundingRate * 100,
+      openInterest: analytics.openInterest,
+      openInterestUsd: analytics.openInterestUsd,
+      longShortRatio: analytics.longShortRatio,
+      longPercent: analytics.longPercent,
+      shortPercent: analytics.shortPercent,
+      takerBuyRatio: analytics.takerBuyRatio,
+      filterPassed: passed,
+      filterReasons: reasons,
+      blockedBy,
+      snapshotAt: new Date(),
+    }).catch((err) => this.logger.debug(`[OnChain] Snapshot save error: ${err.message}`));
   }
 
   /**

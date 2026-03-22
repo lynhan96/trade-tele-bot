@@ -13,6 +13,7 @@ import { AiSignalValidation, AiSignalValidationDocument } from '../schemas/ai-si
 import { DailyLimitHistory, DailyLimitHistoryDocument } from '../schemas/daily-limit-history.schema';
 import { AiReview, AiReviewDocument } from '../schemas/ai-review.schema';
 import { Order, OrderDocument } from '../schemas/order.schema';
+import { OnChainSnapshot, OnChainSnapshotDocument } from '../schemas/onchain-snapshot.schema';
 import { UserRealTradingService } from '../ai-signal/user-real-trading.service';
 
 /** Must match the key in SignalQueueService. */
@@ -37,6 +38,7 @@ export class AdminService {
     @InjectModel(DailyLimitHistory.name) private dailyLimitHistoryModel: Model<DailyLimitHistoryDocument>,
     @InjectModel(AiReview.name) private aiReviewModel: Model<AiReviewDocument>,
     @InjectModel(Order.name) private orderModel: Model<OrderDocument>,
+    @InjectModel(OnChainSnapshot.name) private onChainSnapshotModel: Model<OnChainSnapshotDocument>,
     private readonly redisService: RedisService,
     private readonly userRealTradingService: UserRealTradingService,
   ) {}
@@ -1079,5 +1081,26 @@ export class AdminService {
       .limit(limit)
       .lean();
     return reviews;
+  }
+
+  async getOnChainSnapshots(query: { symbol?: string; page?: number; limit?: number; passed?: string }) {
+    const page = Number(query.page) || 1;
+    const limit = Math.min(Number(query.limit) || 50, 200);
+    const filter: any = {};
+    if (query.symbol) filter.symbol = { $regex: query.symbol, $options: 'i' };
+    if (query.passed === 'true') filter.filterPassed = true;
+    if (query.passed === 'false') filter.filterPassed = false;
+
+    const [data, total] = await Promise.all([
+      this.onChainSnapshotModel
+        .find(filter)
+        .sort({ snapshotAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean(),
+      this.onChainSnapshotModel.countDocuments(filter),
+    ]);
+
+    return { data, total, page, totalPages: Math.ceil(total / limit) };
   }
 }

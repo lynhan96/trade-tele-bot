@@ -20,6 +20,7 @@ import { AiSignalValidation, AiSignalValidationSchema } from "../schemas/ai-sign
 import { DailyLimitHistory, DailyLimitHistorySchema } from "../schemas/daily-limit-history.schema";
 import { AiReview, AiReviewSchema } from "../schemas/ai-review.schema";
 import { Order, OrderSchema } from "../schemas/order.schema";
+import { OnChainSnapshot, OnChainSnapshotSchema } from "../schemas/onchain-snapshot.schema";
 
 @Module({
   imports: [
@@ -37,6 +38,7 @@ import { Order, OrderSchema } from "../schemas/order.schema";
       { name: DailyLimitHistory.name, schema: DailyLimitHistorySchema },
       { name: AiReview.name, schema: AiReviewSchema },
       { name: Order.name, schema: OrderSchema },
+      { name: OnChainSnapshot.name, schema: OnChainSnapshotSchema },
     ]),
     RedisModule,
     AiSignalModule,

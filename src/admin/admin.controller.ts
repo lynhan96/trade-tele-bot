@@ -245,6 +245,12 @@ export class AdminController {
   }
 
   @UseGuards(AdminGuard)
+  @Get("onchain-snapshots")
+  getOnChainSnapshots(@Query() query: any) {
+    return this.adminService.getOnChainSnapshots(query);
+  }
+
+  @UseGuards(AdminGuard)
   @Get("account-pnl")
   getAccountPnl() {
     return this.userRealTradingService.getAllAccountPnl();
