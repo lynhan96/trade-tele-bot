@@ -200,36 +200,23 @@ export class PositionMonitorService implements OnModuleInit {
     // peakPnlPct is already restored from DB via signal object
 
     // When hedge enabled: ensure SL > hedge trigger so hedge has room to open
+    // When hedge enabled: SL = 0 (disabled). Hedge manages risk. Catastrophic stop at -25%.
     const hedgeCfg = this.tradingConfig?.get();
-    if (hedgeCfg?.hedgeEnabled && (signal as any).stopLossPrice > 0) {
-      if (!(signal as any).originalSlPrice) {
+    if (hedgeCfg?.hedgeEnabled) {
+      if (!(signal as any).originalSlPrice && (signal as any).stopLossPrice > 0) {
         (signal as any).originalSlPrice = (signal as any).stopLossPrice;
       }
-
-      // SL must be at least hedgeTrigger + 1% buffer (e.g. trigger=3% → SL min=4%)
-      const minSlPct = (hedgeCfg.hedgePartialTriggerPct || 3) + 1.0;
-      const avgEntry = (signal as any).gridAvgEntry || signal.entryPrice;
-      const currentSlPct = Math.abs(((signal as any).stopLossPrice - avgEntry) / avgEntry * 100);
-
-      if (currentSlPct < minSlPct) {
-        const newSlPrice = signal.direction === 'LONG'
-          ? +(avgEntry * (1 - minSlPct / 100)).toFixed(6)
-          : +(avgEntry * (1 + minSlPct / 100)).toFixed(6);
-        (signal as any).stopLossPrice = newSlPrice;
-        (signal as any).stopLossPercent = minSlPct;
-        this.aiSignalModel.findByIdAndUpdate((signal as any)._id, {
-          originalSlPrice: (signal as any).originalSlPrice,
-          stopLossPrice: newSlPrice,
-          stopLossPercent: minSlPct,
-        }).exec().catch(() => {});
-        this.logger.log(
-          `[PositionMonitor] ${sigKey} SL widened to ${minSlPct}% (${newSlPrice}) — min for hedge trigger at ${hedgeCfg.hedgePartialTriggerPct}%`,
-        );
-      } else {
-        this.aiSignalModel.findByIdAndUpdate((signal as any)._id, {
-          originalSlPrice: (signal as any).originalSlPrice,
-        }).exec().catch(() => {});
-      }
+      // Disable SL — hedge will handle
+      (signal as any).stopLossPrice = 0;
+      (signal as any).stopLossPercent = 0;
+      this.aiSignalModel.findByIdAndUpdate((signal as any)._id, {
+        originalSlPrice: (signal as any).originalSlPrice,
+        stopLossPrice: 0,
+        stopLossPercent: 0,
+      }).exec().catch(() => {});
+      this.logger.log(
+        `[PositionMonitor] ${sigKey} SL DISABLED — hedge manages risk, catastrophic stop at -25%`,
+      );
     }
 
     const cb = (price: number) => this.handlePriceTick(signal, price);
@@ -1570,15 +1557,9 @@ export class PositionMonitorService implements OnModuleInit {
       reason: action.reason,
     };
 
-    // Determine new SL: restore to min 4% (not 10% safety) after hedge closes
-    // Use improved SL if hedge was profitable, otherwise restore to hedgeTrigger+1%
-    const hedgeCfgClose = this.tradingConfig.get();
-    const minSlPctClose = (hedgeCfgClose.hedgePartialTriggerPct || 3) + 1.0; // 4%
-    const avgEntryClose = (signal as any).gridAvgEntry || signal.entryPrice;
-    const minSlPriceClose = signal.direction === 'LONG'
-      ? +(avgEntryClose * (1 - minSlPctClose / 100)).toFixed(6)
-      : +(avgEntryClose * (1 + minSlPctClose / 100)).toFixed(6);
-    const newSlPrice = action.newSlPrice || minSlPriceClose;
+    // After hedge close: keep SL = 0 (disabled). Hedge will re-enter if needed.
+    // Catastrophic stop at -25% remains as safety net.
+    const newSlPrice = 0;
 
     // If hedge manager provided a tighter safety SL, update it too
     const updates: Record<string, any> = {};
@@ -1600,32 +1581,18 @@ export class PositionMonitorService implements OnModuleInit {
     (signal as any).hedgeOpenedAt = undefined;
     (signal as any).hedgeCycleCount = cycleCount;
 
-    // Smart SL restore: don't set SL if price is ALREADY below it (would trigger instant SL)
-    // JCT lesson: hedge breakeven close at 0.002156, SL restored to 0.002408 → instant SL hit
-    const wouldInstantSl = signal.direction === 'LONG'
-      ? currentPrice <= newSlPrice * 1.005  // within 0.5% of SL
-      : currentPrice >= newSlPrice * 0.995;
-    if (wouldInstantSl && cycleCount > 0) {
-      // Price too close to or below SL — keep SL=0, let hedge re-enter
-      (signal as any).stopLossPrice = 0;
-      (signal as any).stopLossPercent = 0;
-      this.logger.log(`[PositionMonitor] ${sigKey} SL stays DISABLED after hedge close — price ${currentPrice} too close to SL ${newSlPrice}`);
-    } else {
-      (signal as any).stopLossPrice = newSlPrice;
-      (signal as any).stopLossPercent = minSlPctClose;
-    }
+    // Keep SL = 0 after hedge close — hedge will re-enter if needed. No SL restore.
+    (signal as any).stopLossPrice = 0;
+    (signal as any).stopLossPercent = 0;
     (signal as any).hedgeSafetySlPrice = undefined;
-
-    // Don't resume trail SL — let next checkHedge cycle decide if re-entry needed
-    // Trail resumes naturally when main PnL > 0 (profitable)
 
     // Persist to DB
     await this.aiSignalModel.findByIdAndUpdate(signalId, {
       hedgeActive: false,
       $unset: { hedgePhase: 1, hedgeDirection: 1, hedgeEntryPrice: 1, hedgeSimNotional: 1, hedgeTpPrice: 1, hedgeOpenedAt: 1, hedgeSafetySlPrice: 1, hedgeSlAtEntry: 1 },
       hedgeCycleCount: cycleCount,
-      stopLossPrice: newSlPrice,
-      stopLossPercent: minSlPctClose,
+      stopLossPrice: 0,
+      stopLossPercent: 0,
       $push: { hedgeHistory: historyEntry },
       ...updates,
     });

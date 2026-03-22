@@ -930,11 +930,13 @@ export class SignalQueueService {
   ): Promise<AiSignalDocument> {
     const symbol = `${coin.toUpperCase()}${currency.toUpperCase()}`;
     const cfg = this.tradingConfig.get();
-    // SL range: slMin-slMax (1.5-2.5%), BUT when hedge enabled: min = hedgeTrigger + 1% (4%)
+    // When hedge enabled: SL = 0 (disabled). Hedge manages all risk. Catastrophic stop at -25%.
+    // When hedge disabled: normal SL range slMin-slMax
     const rawSlPct = Math.min(cfg.slMax, Math.max(params.stopLossPercent, cfg.slMin));
-    const hedgeMinSlPct = cfg.hedgeEnabled ? (cfg.hedgePartialTriggerPct || 3) + 1.0 : 0;
-    const stopLossPercent = Math.max(rawSlPct, hedgeMinSlPct);
-    const rawTp = Math.max(cfg.tpMin, params.takeProfitPercent, stopLossPercent * cfg.tpRrMultiplier);
+    const stopLossPercent = cfg.hedgeEnabled ? 0 : rawSlPct;
+    // TP uses original SL for R:R calc (even when SL disabled for hedge)
+    const slForRR = cfg.hedgeEnabled ? rawSlPct : stopLossPercent;
+    const rawTp = Math.max(cfg.tpMin, params.takeProfitPercent, slForRR * cfg.tpRrMultiplier);
     const takeProfitPercent = Math.min(cfg.tpMax, rawTp);
     const entryPrice = signalResult.entryPrice;
 
