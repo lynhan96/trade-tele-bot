@@ -45,6 +45,8 @@ import {
   AiSignalValidationSchema,
 } from "../schemas/ai-signal-validation.schema";
 import { Order, OrderSchema } from "../schemas/order.schema";
+import { OnChainSnapshot, OnChainSnapshotSchema } from "../schemas/onchain-snapshot.schema";
+import { OnChainScannerService } from "./onchain-scanner.service";
 
 @Module({
   imports: [
@@ -69,6 +71,7 @@ import { Order, OrderSchema } from "../schemas/order.schema";
       { name: AiReview.name, schema: AiReviewSchema },
       { name: AiSignalValidation.name, schema: AiSignalValidationSchema },
       { name: Order.name, schema: OrderSchema },
+      { name: OnChainSnapshot.name, schema: OnChainSnapshotSchema },
     ]),
   ],
   providers: [
@@ -84,6 +87,7 @@ import { Order, OrderSchema } from "../schemas/order.schema";
     AiMarketAnalystService,
     HedgeManagerService,
     TradingConfigService,
+    OnChainScannerService,
   ],
   exports: [AiSignalService, UserSignalSubscriptionService, UserRealTradingService, SignalQueueService, PositionMonitorService, TradingConfigService, StrategyAutoTunerService, AiMarketAnalystService],
 })
