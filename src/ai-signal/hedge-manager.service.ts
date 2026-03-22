@@ -30,6 +30,8 @@ export class HedgeManagerService {
   private readonly logger = new Logger(HedgeManagerService.name);
   private consecutiveLossMap = new Map<string, number>();
   private bankedProfitMap = new Map<string, number>();
+  /** In-memory cooldown timestamps — set on hedge close to prevent instant re-entry */
+  private hedgeCooldownUntil = new Map<string, number>();
 
   constructor(
     private readonly redisService: RedisService,
@@ -58,6 +60,12 @@ export class HedgeManagerService {
       // If hedge is already active, check for exit
       if (signal.hedgeActive) {
         return this.checkHedgeExit(signal, currentPrice);
+      }
+
+      // --- In-memory cooldown (survives stale signal object) ---
+      const cooldownUntil = this.hedgeCooldownUntil.get(signalId);
+      if (cooldownUntil && Date.now() < cooldownUntil) {
+        return null;
       }
 
       // --- Regime block ---
@@ -323,6 +331,11 @@ export class HedgeManagerService {
     // Reset consecutive losses on win
     this.consecutiveLossMap.set(signalId, 0);
 
+    // Set in-memory cooldown (5 min after TP, prevents instant re-entry from stale signal)
+    const isBreakeven = reason.toLowerCase().includes('breakeven') || reason.toLowerCase().includes('protected');
+    const cooldownMin = isBreakeven ? 15 : (cfg.hedgeReEntryCooldownMin || 5);
+    this.hedgeCooldownUntil.set(signalId, Date.now() + cooldownMin * 60 * 1000);
+
     // Bank the profit — use DB hedgeHistory (survives restart) + current profit
     // Note: hedgePnlUsdt here is raw (no fees). Estimate fees for accurate banked total.
     const hedgeNotional = signal.hedgeSimNotional || 0;
@@ -372,6 +385,9 @@ export class HedgeManagerService {
     cfg: any, reason: string,
   ): HedgeAction {
     // Peak tracking cleaned up (no trail stop)
+
+    // Set in-memory cooldown (15 min after loss, prevents instant re-entry from stale signal)
+    this.hedgeCooldownUntil.set(signalId, Date.now() + 15 * 60 * 1000);
 
     // Increment consecutive losses
     const prevLosses = this.consecutiveLossMap.get(signalId) || 0;
