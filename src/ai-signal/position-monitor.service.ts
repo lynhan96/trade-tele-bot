@@ -276,9 +276,9 @@ export class PositionMonitorService implements OnModuleInit {
     // ─── Grid DCA Simulation (signal level) ─────────────────────────────────
     // True DCA: grids fit within signal's SL range. TP = signal TP price (Fibo).
     // Trailing stop uses weighted avg entry. Close ALL grids together on TP/SL.
-    const GRID_LEVEL_COUNT = 3;
+    const cfg = this.tradingConfig.get();
+    const GRID_LEVEL_COUNT = cfg.gridLevelCount || 3;
     // DCA volume weights: L0=40% base, L1=25%, L2=35% (sum=100)
-    // Reduced from 5 levels: data shows G4-5 full fill = -$335 (averaging into deep loss)
     const DCA_WEIGHTS = [40, 25, 35];
 
     const gridLevels: any[] = (signal as any).gridLevels ?? [];
@@ -407,7 +407,7 @@ export class PositionMonitorService implements OnModuleInit {
             .filter((g) => g.status === "FILLED" && g.filledAt)
             .map((g) => new Date(g.filledAt).getTime())
             .sort((a, b) => b - a)[0];
-          if (lastFill && Date.now() - lastFill < 5 * 60 * 1000) { grid.status = "PENDING"; continue; }
+          if (lastFill && Date.now() - lastFill < (cfg.gridFillCooldownMin || 5) * 60 * 1000) { grid.status = "PENDING"; continue; }
 
           // RSI guard for L1+ — only DCA when oversold/overbought
           // L1-L2: RSI only (small volume 6-12%, quick avg-down)
@@ -508,8 +508,8 @@ export class PositionMonitorService implements OnModuleInit {
             (signal as any).stopLossPrice = newSl;
           }
 
-          // DCA TP: 3% from new avgEntry
-          const DCA_TP_PCT = 3.0;
+          // DCA TP from config (default 3%)
+          const DCA_TP_PCT = cfg.dcaTpPct || 3.0;
           const newTp = direction === "LONG"
             ? avgEntry * (1 + DCA_TP_PCT / 100)
             : avgEntry * (1 - DCA_TP_PCT / 100);
@@ -1561,13 +1561,18 @@ export class PositionMonitorService implements OnModuleInit {
     // Catastrophic stop at -25% remains as safety net.
     const newSlPrice = 0;
 
-    // If hedge manager provided a tighter safety SL, update it too
+    // Determine SL after hedge close:
+    // If hedge manager provided safety SL → use it (adaptive protection)
+    // Otherwise → SL=0, hedge will re-enter if needed
     const updates: Record<string, any> = {};
-    if (action.newSafetySlPrice) {
-      (signal as any).hedgeSafetySlPrice = action.newSafetySlPrice;
-      (signal as any).stopLossPrice = action.newSafetySlPrice;
-      updates.hedgeSafetySlPrice = action.newSafetySlPrice;
-      updates.stopLossPrice = action.newSafetySlPrice;
+    let finalSlPrice = 0;
+    let finalSlPercent = 0;
+    if (action.newSafetySlPrice && action.newSafetySlPrice > 0) {
+      finalSlPrice = action.newSafetySlPrice;
+      const avgEntry = (signal as any).gridAvgEntry || signal.entryPrice;
+      finalSlPercent = Math.abs((finalSlPrice - avgEntry) / avgEntry * 100);
+      updates.hedgeSafetySlPrice = finalSlPrice;
+      this.logger.log(`[PositionMonitor] ${sigKey} Safety SL set to ${finalSlPrice} (${finalSlPercent.toFixed(1)}%) after hedge close`);
     }
 
     // Update in-memory signal
@@ -1580,19 +1585,23 @@ export class PositionMonitorService implements OnModuleInit {
     (signal as any).hedgeSlAtEntry = false;
     (signal as any).hedgeOpenedAt = undefined;
     (signal as any).hedgeCycleCount = cycleCount;
-
-    // Keep SL = 0 after hedge close — hedge will re-enter if needed. No SL restore.
-    (signal as any).stopLossPrice = 0;
-    (signal as any).stopLossPercent = 0;
-    (signal as any).hedgeSafetySlPrice = undefined;
+    (signal as any).stopLossPrice = finalSlPrice;
+    (signal as any).stopLossPercent = finalSlPercent;
+    (signal as any).hedgeSafetySlPrice = finalSlPrice || undefined;
 
     // Persist to DB
+    const unsetFields: Record<string, number> = {
+      hedgePhase: 1, hedgeDirection: 1, hedgeEntryPrice: 1,
+      hedgeSimNotional: 1, hedgeTpPrice: 1, hedgeOpenedAt: 1, hedgeSlAtEntry: 1,
+    };
+    if (!finalSlPrice) unsetFields.hedgeSafetySlPrice = 1;
+
     await this.aiSignalModel.findByIdAndUpdate(signalId, {
       hedgeActive: false,
-      $unset: { hedgePhase: 1, hedgeDirection: 1, hedgeEntryPrice: 1, hedgeSimNotional: 1, hedgeTpPrice: 1, hedgeOpenedAt: 1, hedgeSafetySlPrice: 1, hedgeSlAtEntry: 1 },
+      $unset: unsetFields,
       hedgeCycleCount: cycleCount,
-      stopLossPrice: 0,
-      stopLossPercent: 0,
+      stopLossPrice: finalSlPrice,
+      stopLossPercent: finalSlPercent,
       $push: { hedgeHistory: historyEntry },
       ...updates,
     });
