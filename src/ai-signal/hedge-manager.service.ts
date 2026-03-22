@@ -32,6 +32,8 @@ export class HedgeManagerService {
   private bankedProfitMap = new Map<string, number>();
   /** In-memory cooldown timestamps — set on hedge close to prevent instant re-entry */
   private hedgeCooldownUntil = new Map<string, number>();
+  /** Peak PnL tracking for trailing TP */
+  private hedgePeakMap = new Map<string, number>();
 
   constructor(
     private readonly redisService: RedisService,
@@ -270,18 +272,44 @@ export class HedgeManagerService {
       }
       // No early cut, no soft recovery — hedge has NO SL
       // Hedge thua = main recover, hedge thắng = main thua
-      // Only 2 exits: TP hit or main profitable (handled above)
-      // NET_POSITIVE exit handled in PositionMonitor (closes both)
+      // Only exits: trailing TP, main profitable, NET_POSITIVE (in PositionMonitor)
 
-      // ── 2. Check TP hit ──
+      // ── 2. Trailing TP — ride the trend ──
+      // When hedge reaches TP level, don't close immediately — activate trail
+      // Track peak PnL, close when pullback > 1% from peak
       if (signal.hedgeTpPrice) {
         const tpHit = hedgeDir === 'LONG'
           ? currentPrice >= signal.hedgeTpPrice
           : currentPrice <= signal.hedgeTpPrice;
 
+        // Track peak PnL for trailing
+        const currentPeak = this.hedgePeakMap.get(signalId) || 0;
+        if (hedgePnlPct > currentPeak) {
+          this.hedgePeakMap.set(signalId, hedgePnlPct);
+        }
+        const peak = this.hedgePeakMap.get(signalId) || 0;
+
         if (tpHit) {
+          // TP reached — activate trailing mode
+          if (!signal.hedgeTrailActivated) {
+            this.logger.log(
+              `[${signal.coin}] Hedge TRAIL activated | PnL: +${hedgePnlPct.toFixed(2)}% | Peak: ${peak.toFixed(2)}% | Riding trend...`,
+            );
+            return {
+              action: 'NONE' as const,
+              reason: `Hedge trail activated at +${hedgePnlPct.toFixed(2)}%`,
+              hedgeSlAtEntry: true, // also protect at +0.5%
+            };
+          }
+        }
+
+        // Trail close: pullback > 1% from peak (only after trail activated or peak > TP%)
+        if (peak >= (cfg.hedgeTpPctDefault || 3.0) && hedgePnlPct < peak - 1.0) {
+          this.logger.log(
+            `[${signal.coin}] Hedge TRAIL close | Peak: ${peak.toFixed(2)}% → Current: ${hedgePnlPct.toFixed(2)}% (pullback ${(peak - hedgePnlPct).toFixed(2)}%)`,
+          );
           return this.closeHedgeWithProfit(signal, signalId, hedgePnlPct, hedgePnlUsdt, cfg,
-            `Hedge TP hit at ${currentPrice}`);
+            `Hedge trail: peak ${peak.toFixed(2)}% → ${hedgePnlPct.toFixed(2)}%`);
         }
       }
 
@@ -331,10 +359,11 @@ export class HedgeManagerService {
     // Reset consecutive losses on win
     this.consecutiveLossMap.set(signalId, 0);
 
-    // Set in-memory cooldown (5 min after TP, prevents instant re-entry from stale signal)
+    // Set in-memory cooldown + reset peak tracking
     const isBreakeven = reason.toLowerCase().includes('breakeven') || reason.toLowerCase().includes('protected');
     const cooldownMin = isBreakeven ? 15 : (cfg.hedgeReEntryCooldownMin || 5);
     this.hedgeCooldownUntil.set(signalId, Date.now() + cooldownMin * 60 * 1000);
+    this.hedgePeakMap.delete(signalId);
 
     // Bank the profit — use DB hedgeHistory (survives restart) + current profit
     // Note: hedgePnlUsdt here is raw (no fees). Estimate fees for accurate banked total.
@@ -386,8 +415,9 @@ export class HedgeManagerService {
   ): HedgeAction {
     // Peak tracking cleaned up (no trail stop)
 
-    // Set in-memory cooldown (15 min after loss, prevents instant re-entry from stale signal)
+    // Set in-memory cooldown + reset peak tracking
     this.hedgeCooldownUntil.set(signalId, Date.now() + 15 * 60 * 1000);
+    this.hedgePeakMap.delete(signalId);
 
     // Increment consecutive losses
     const prevLosses = this.consecutiveLossMap.get(signalId) || 0;
