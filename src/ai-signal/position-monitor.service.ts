@@ -655,6 +655,11 @@ export class PositionMonitorService implements OnModuleInit {
         ? ((price - currentEntry) / currentEntry) * 100
         : ((currentEntry - price) / currentEntry) * 100;
 
+    // Hedge loss calculation (used for TP extension + trail lock skip)
+    const hedgeBanked = ((signal as any).hedgeHistory || []).reduce((s: number, h: any) => s + (h.pnlUsdt || 0), 0);
+    const hedgeLoss = hedgeBanked < 0 ? Math.abs(hedgeBanked) : 0;
+    const mainNotional = (signal as any).simNotional || 1000;
+
     // Trailing SL + TP boost for non-grid signals only
     // (grid signals handle trailing in the grid block above)
     // Skip trail SL when hedge is active — hedge manages risk
@@ -687,10 +692,12 @@ export class PositionMonitorService implements OnModuleInit {
       }
 
       // TP proximity lock: if price within 0.5% of TP → freeze trail, let TP execute
+      // Exception: when hedge has big loss, DON'T lock — let trail ride further to cover hedge
       const distanceToTp = takeProfitPrice
         ? (direction === "LONG" ? (takeProfitPrice - price) / price : (price - takeProfitPrice) / price) * 100
         : Infinity;
-      const nearTp = distanceToTp < 0.5;
+      const hasHedgeLoss = hedgeLoss > mainNotional * 0.03; // hedge lost > 3% of notional
+      const nearTp = distanceToTp < 0.5 && !hasHedgeLoss;
 
       if ((signal as any).slMovedToEntry && peak > TRAIL_TRIGGER && !nearTp) {
         const trailPct = peak * TRAIL_KEEP_RATIO;
@@ -713,14 +720,18 @@ export class PositionMonitorService implements OnModuleInit {
     }
 
     // ─── Dynamic TP boost: extend TP on strong momentum ─────────────────
+    // Base cap 4%, extend up to 8% if hedge loss is significant
+    const tpCap = hedgeLoss > mainNotional * 0.05
+      ? Math.min(8, 4 + (hedgeLoss / mainNotional) * 100 * 0.3) // scale up proportionally
+      : 4;
+
     if (pnlPct >= 2.5 && !(signal as any).tpBoosted && takeProfitPrice) {
-      (signal as any).tpBoosted = true; // mark as checked (one-time per signal)
+      (signal as any).tpBoosted = true;
       try {
         const hasMomentum = await this.marketDataService.hasVolumeMomentum(symbol);
         if (hasMomentum) {
-          // Extend TP by 2% from current position, cap at 4%
           const currentTpPct = Math.abs(takeProfitPrice - currentEntry) / currentEntry * 100;
-          const boostedTpPct = Math.min(4, Math.max(currentTpPct, pnlPct + 2.0));
+          const boostedTpPct = Math.min(tpCap, Math.max(currentTpPct, pnlPct + 2.0));
           const newTpPrice = direction === "LONG"
             ? currentEntry * (1 + boostedTpPct / 100)
             : currentEntry * (1 - boostedTpPct / 100);
