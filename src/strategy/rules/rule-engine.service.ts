@@ -69,7 +69,7 @@ export class RuleEngineService {
     // EMA_PULLBACK: direction from 1h EMA slope (not regime) + 2-candle confirmation + stricter RSI
     const allStrategies = [
       "RSI_CROSS", "TREND_EMA", "EMA_PULLBACK",
-      "STOCH_EMA_KDJ", "SMC_FVG",
+      "STOCH_EMA_KDJ", "SMC_FVG", "OP_ONCHAIN",
     ];
 
     // ── Filter out auto-disabled strategies (StrategyAutoTuner) ──
@@ -391,6 +391,7 @@ export class RuleEngineService {
       STOCH_EMA_KDJ: cfg.gateStochEMAKDJ || 82,
       RSI_CROSS: cfg.gateRSICross || 75,
       SMC_FVG: (cfg as any).gateSMCFVG || 82,
+      OP_ONCHAIN: (cfg as any).gateOpOnchain || 65, // lower gate — on-chain data does the filtering
     };
     const gate = gates[strategy];
     if (gate && params.confidence < gate) {
@@ -411,6 +412,8 @@ export class RuleEngineService {
         return this.evalEmaPullback(coin, currency, params);
       case "SMC_FVG":
         return this.evalSmcFvg(coin, currency, params);
+      case "OP_ONCHAIN":
+        return this.evalOpOnchain(coin, currency, params);
       default:
         return null;
     }
@@ -1077,6 +1080,82 @@ export class RuleEngineService {
       entryPrice: currentPrice,
       strategy: "SMC_FVG",
       reason: `${direction} at ${isLong ? "bullish" : "bearish"} FVG zone [${fvgZone}], ${obCount} OB(s) confluence, RSI=${rsi.last.toFixed(1)} on ${cfg.primaryKline}`,
+    };
+  }
+
+  // ─── OP_ONCHAIN: Pure on-chain + daily open price strategy ──────────────
+  // No traditional indicators — uses OP line direction + on-chain data
+  private async evalOpOnchain(
+    coin: string,
+    currency: string,
+    params: AiTunedParams,
+  ): Promise<SignalResult | null> {
+    const cfg = this.tradingConfig.get();
+    if (!(cfg as any).opOnchainEnabled) return null;
+
+    const symbol = `${coin}USDT`;
+
+    // 1. Get daily open price
+    const closes1d = await this.indicatorService.getCloses(coin, "1d");
+    if (!closes1d || closes1d.length < 2) return null;
+    const dailyOpen = closes1d[closes1d.length - 2]; // previous daily close = today's open
+    const currentPrice = closes1d[closes1d.length - 1];
+    const opPct = ((currentPrice - dailyOpen) / dailyOpen) * 100;
+
+    // Need meaningful move from OP (at least 0.3%)
+    if (Math.abs(opPct) < 0.3) return null;
+
+    const isLong = opPct > 0; // above OP = bullish bias
+
+    // 2. Get on-chain data from scanner cache
+    const cached = await this.redisService.get('cache:futures:analytics');
+    if (!cached || typeof cached !== 'object') return null;
+    const analytics = (cached as Record<string, any>)[symbol];
+    if (!analytics) return null;
+
+    const fr = (analytics.fundingRate || 0) * 100;
+    const longPct = analytics.longPercent || 50;
+    const taker = analytics.takerBuyRatio || 1;
+
+    // 3. On-chain confirmation score
+    let score = 0;
+    const reasons: string[] = [];
+
+    // OP direction (base signal)
+    score += isLong ? 20 : -20;
+    reasons.push(`OP: ${opPct >= 0 ? '+' : ''}${opPct.toFixed(2)}%`);
+
+    // Taker flow confirms direction
+    if (isLong && taker > 1.15) { score += 25; reasons.push(`Taker BUY ${taker.toFixed(2)}`); }
+    else if (!isLong && taker < 0.85) { score += 25; reasons.push(`Taker SELL ${taker.toFixed(2)}`); }
+    else if (isLong && taker < 0.9) { return null; } // contradicting flow
+    else if (!isLong && taker > 1.1) { return null; } // contradicting flow
+
+    // L/S ratio — contrarian (crowd wrong)
+    if (isLong && longPct < 50) { score += 15; reasons.push(`L/S contrarian ${longPct.toFixed(0)}%L`); }
+    else if (!isLong && longPct > 55) { score += 15; reasons.push(`L/S contrarian ${longPct.toFixed(0)}%L`); }
+    else if (isLong && longPct > 65) { return null; } // too crowded
+    else if (!isLong && longPct < 35) { return null; } // too crowded
+
+    // FR confirms (not extreme against direction)
+    if (isLong && fr > 0.08) { return null; } // extreme FR = dump risk
+    if (!isLong && fr < -0.08) { return null; } // extreme FR = squeeze risk
+    if (isLong && fr < -0.02) { score += 10; reasons.push(`FR negative ${fr.toFixed(3)}%`); }
+    if (!isLong && fr > 0.02) { score += 10; reasons.push(`FR positive +${fr.toFixed(3)}%`); }
+
+    // Need minimum score (at least OP + 1 confirmation)
+    if (Math.abs(score) < 35) return null;
+
+    const direction = isLong ? "LONG" : "SHORT";
+    this.logger.log(
+      `[RuleEngine] ${coin} OP_ONCHAIN ${direction} | score=${score} | ${reasons.join(', ')}`,
+    );
+
+    return {
+      isLong,
+      entryPrice: currentPrice,
+      strategy: "OP_ONCHAIN",
+      reason: `${direction} OP ${opPct >= 0 ? '+' : ''}${opPct.toFixed(2)}% + ${reasons.slice(1).join(', ')}`,
     };
   }
 }

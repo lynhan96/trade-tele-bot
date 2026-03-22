@@ -134,6 +134,10 @@ export interface TradingConfig {
   onChainOIDropThreshold: number;    // OI drop % to block entry (default -5)
   onChainMarketSentimentEnabled: boolean; // Market-wide L/S check (default true)
   onChainMarketSentimentThreshold: number; // Block when crowd > X% one side (default 63)
+
+  // ── OP + On-Chain Strategy ─────────────────────────────────────────────
+  opOnchainEnabled: boolean;         // Enable OP_ONCHAIN strategy (default true)
+  gateOpOnchain: number;             // Min confidence for OP_ONCHAIN (default 65)
 }
 
 export const DEFAULT_TRADING_CONFIG: TradingConfig = {
@@ -233,6 +237,10 @@ export const DEFAULT_TRADING_CONFIG: TradingConfig = {
   onChainOIDropThreshold: -5,      // -5% OI drop = avoid
   onChainMarketSentimentEnabled: true,
   onChainMarketSentimentThreshold: 63, // 63% crowd = extreme
+
+  // OP + On-Chain Strategy
+  opOnchainEnabled: true,
+  gateOpOnchain: 65,
 };
 
 const TRADING_CONFIG_KEY = "cache:ai:trading-config";
