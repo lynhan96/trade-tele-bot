@@ -133,15 +133,18 @@ export class OnChainScannerService {
     }
 
     // ── 2. Open Interest ──
-    if (oiChangePct > 10) {
-      alerts.push(`${coin} OI tăng mạnh +${oiChangePct.toFixed(1)}% — cá mập đang vào`);
-      if (fr > 0.03) {
-        score -= 20;
-      } else if (fr < -0.03) {
-        score += 20;
+    // Skip OI analysis if change is extreme (data error or first read)
+    if (Math.abs(oiChangePct) < 90) {
+      if (oiChangePct > 10) {
+        alerts.push(`${coin} OI tăng mạnh +${oiChangePct.toFixed(1)}% — cá mập đang vào`);
+        if (fr > 0.03) {
+          score -= 20;
+        } else if (fr < -0.03) {
+          score += 20;
+        }
+      } else if (oiChangePct < -10) {
+        alerts.push(`${coin} OI giảm ${oiChangePct.toFixed(1)}% — đóng vị thế, xu hướng có thể đảo`);
       }
-    } else if (oiChangePct < -10) {
-      alerts.push(`${coin} OI giảm ${oiChangePct.toFixed(1)}% — đóng vị thế, xu hướng có thể đảo`);
     }
 
     // ── 3. Long/Short Ratio — Nghịch đám đông ──
@@ -216,7 +219,21 @@ export class OnChainScannerService {
       'NEUTRAL': 'Trung lập',
     };
 
+    const recVi: Record<string, string> = {
+      'STRONG_LONG': '👉 Khuyến nghị: LONG mạnh',
+      'LONG_BIAS': '👉 Khuyến nghị: Ưu tiên LONG',
+      'STRONG_SHORT': '👉 Khuyến nghị: SHORT mạnh',
+      'SHORT_BIAS': '👉 Khuyến nghị: Ưu tiên SHORT',
+      'NEUTRAL': '👉 Khuyến nghị: Đứng ngoài, chờ tín hiệu rõ hơn',
+    };
+
     let msg = '📊 *Phân Tích On-Chain*\n\n';
+
+    // Market summary
+    const bullCount = toAlert.filter(a => a.score > 15).length;
+    const bearCount = toAlert.filter(a => a.score < -15).length;
+    const neutralCount = toAlert.length - bullCount - bearCount;
+    msg += `🌍 *Tổng quan:* ${bullCount} tăng | ${bearCount} giảm | ${neutralCount} trung lập\n\n`;
 
     for (const p of toAlert) {
       const coin = p.symbol.replace('USDT', '');
@@ -230,7 +247,7 @@ export class OnChainScannerService {
       for (const alert of p.alerts) {
         msg += `  ⚡ ${alert}\n`;
       }
-      msg += '\n';
+      msg += `${recVi[p.signal] || ''}\n\n`;
 
       cooldownMap[p.symbol] = now;
     }
