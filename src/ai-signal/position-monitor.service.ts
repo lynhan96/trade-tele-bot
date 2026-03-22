@@ -826,7 +826,21 @@ export class PositionMonitorService implements OnModuleInit {
           forceCloseReason = "CATASTROPHIC_STOP";
         }
 
-        if (!forceCloseReason) return; // Skip all SL/TP — hedge manages, keep rỉa
+        // Check main TP hit while hedge active → FLIP
+        const effectiveTpHedge = (signal as any).takeProfitPrice;
+        if (effectiveTpHedge && !forceCloseReason) {
+          const mainTpHit = direction === "LONG" ? price >= effectiveTpHedge : price <= effectiveTpHedge;
+          if (mainTpHit && (signal as any).hedgeEntryPrice && (signal as any).hedgeDirection) {
+            if (!this.resolvingSymbols.has(sigKey)) {
+              this.logger.log(
+                `[PositionMonitor] 🔄 ${sigKey} MAIN TP HIT while hedge active → FLIPPING to ${(signal as any).hedgeDirection}`,
+              );
+              forceCloseReason = "NET_POSITIVE"; // Use NET_POSITIVE flow to close both, FLIP handled below
+            }
+          }
+        }
+
+        if (!forceCloseReason) return; // Skip all SL/TP — hedge manages risk
 
         // ── Force close: close hedge first, then resolve main signal ──
 
