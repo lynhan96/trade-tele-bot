@@ -71,8 +71,15 @@ export class HedgeManagerService {
         const lastHedge = signal.hedgeHistory[signal.hedgeHistory.length - 1];
         if (lastHedge?.closedAt) {
           const elapsed = Date.now() - new Date(lastHedge.closedAt).getTime();
-          const cooldownMs = cfg.hedgeReEntryCooldownMin * 60 * 1000;
-          if (elapsed < cooldownMs) return null;
+          // After breakeven close: 15min cooldown (was whipsawing)
+          // After TP/other: normal 5min cooldown
+          const isBreakeven = (lastHedge.reason || '').toLowerCase().includes('breakeven');
+          const cooldownMin = isBreakeven ? 15 : cfg.hedgeReEntryCooldownMin;
+          const cooldownMs = cooldownMin * 60 * 1000;
+          if (elapsed < cooldownMs) {
+            this.logger.debug(`[${signal.coin}] Hedge cooldown: ${Math.round((cooldownMs - elapsed) / 60000)}min remaining (${isBreakeven ? 'breakeven' : 'normal'})`);
+            return null;
+          }
         }
       }
 
@@ -270,31 +277,30 @@ export class HedgeManagerService {
         }
       }
 
-      // ── Hedge breakeven SL: when hedge profitable > 1%, move SL to entry ──
-      // If price reverses, hedge closes at breakeven (no loss) instead of giving back profit
-      if (hedgePnlPct >= 1.0 && !signal.hedgeSlAtEntry) {
+      // ── Hedge breakeven SL: when hedge profitable > 1.5%, move SL to +0.5% ──
+      // Buffer: don't close at exact entry, keep 0.5% profit minimum
+      if (hedgePnlPct >= 1.5 && !signal.hedgeSlAtEntry) {
         this.logger.log(
-          `[${signal.coin}] Hedge SL → entry (breakeven) | PnL: +${hedgePnlPct.toFixed(2)}%`,
+          `[${signal.coin}] Hedge SL → +0.5% (protected) | PnL: +${hedgePnlPct.toFixed(2)}%`,
         );
         return {
           action: 'NONE' as const,
-          reason: `Hedge SL moved to entry at +${hedgePnlPct.toFixed(2)}%`,
+          reason: `Hedge SL moved to +0.5% at +${hedgePnlPct.toFixed(2)}%`,
           hedgeSlAtEntry: true,
         };
       }
 
-      // ── Hedge breakeven SL hit: price came back to entry → close at ~0 ──
-      if (signal.hedgeSlAtEntry && hedgePnlPct <= 0.1) {
+      // ── Hedge protected SL hit: price came back to +0.5% → close with small profit ──
+      if (signal.hedgeSlAtEntry && hedgePnlPct <= 0.5) {
         this.logger.log(
-          `[${signal.coin}] Hedge breakeven SL hit | PnL: ${hedgePnlPct.toFixed(2)}% → close at ~0`,
+          `[${signal.coin}] Hedge protected SL hit | PnL: ${hedgePnlPct.toFixed(2)}% → close with min profit`,
         );
-        // Close with small profit/loss (near breakeven)
         if (hedgePnlUsdt >= 0) {
           return this.closeHedgeWithProfit(signal, signalId, hedgePnlPct, hedgePnlUsdt, cfg,
-            `Hedge breakeven SL: ${hedgePnlPct.toFixed(2)}%`);
+            `Hedge protected SL: +${hedgePnlPct.toFixed(2)}%`);
         }
         return this.closeHedgeWithLoss(signal, signalId, hedgePnlPct, hedgePnlUsdt, cfg,
-          `Hedge breakeven SL: ${hedgePnlPct.toFixed(2)}%`);
+          `Hedge protected SL: ${hedgePnlPct.toFixed(2)}%`);
       }
 
       return null;
