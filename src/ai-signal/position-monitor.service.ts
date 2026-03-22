@@ -765,10 +765,20 @@ export class PositionMonitorService implements OnModuleInit {
         const exitAction = this.hedgeManager.checkHedgeExit(signal, price, pnlPct);
         if (exitAction && exitAction.action === "CLOSE_HEDGE") {
           await this.handleHedgeClose(signal, exitAction, price);
-        } else if (exitAction && (exitAction as any).hedgeSlAtEntry) {
-          // Hedge profitable > 1% — move SL to entry (breakeven lock)
-          (signal as any).hedgeSlAtEntry = true;
-          this.aiSignalModel.findByIdAndUpdate((signal as any)._id, { hedgeSlAtEntry: true }).exec().catch(() => {});
+        } else if (exitAction && exitAction.action === 'NONE') {
+          // Update flags from hedge manager (breakeven lock, trail activated)
+          const updates: Record<string, any> = {};
+          if ((exitAction as any).hedgeSlAtEntry && !(signal as any).hedgeSlAtEntry) {
+            (signal as any).hedgeSlAtEntry = true;
+            updates.hedgeSlAtEntry = true;
+          }
+          if ((exitAction as any).hedgeTrailActivated && !(signal as any).hedgeTrailActivated) {
+            (signal as any).hedgeTrailActivated = true;
+            updates.hedgeTrailActivated = true;
+          }
+          if (Object.keys(updates).length > 0) {
+            this.aiSignalModel.findByIdAndUpdate((signal as any)._id, updates).exec().catch(() => {});
+          }
         }
 
         // When hedge is active: NO SL — hedge IS the risk management

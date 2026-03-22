@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
+import { RSI } from 'technicalindicators';
 import { RedisService } from '../redis/redis.service';
 import { TradingConfigService } from './trading-config';
 import { MarketDataService } from '../market-data/market-data.service';
@@ -19,6 +20,7 @@ export interface HedgeAction {
   consecutiveLosses?: number;
   hedgePhase?: string;
   hedgeSlAtEntry?: boolean;
+  hedgeTrailActivated?: boolean;
   reason: string;
 }
 
@@ -100,40 +102,33 @@ export class HedgeManagerService {
       // PnL must be bad enough to hedge
       if (pnlPct > -cfg.hedgePartialTriggerPct) return null;
 
-      // ── Momentum check (ALL cycles) — don't hedge if price is bouncing strongly ──
-      try {
-        const coin = signal.coin || signal.symbol?.replace('USDT', '');
-        const closes15m = await this.marketDataService.getClosePrices(coin, '15m');
-        if (closes15m.length >= 5) {
-          const last5 = closes15m.slice(-5);
-          // Calculate direction of last 3 candle-to-candle moves
-          const moves = [];
-          for (let i = last5.length - 3; i < last5.length; i++) {
-            moves.push(last5[i] - last5[i - 1]);
-          }
-          const greenMoves = moves.filter(m => m > 0).length;
-          const redMoves = moves.filter(m => m < 0).length;
+      // ── Momentum check (CYCLE 2+ ONLY) — cycle 1 enters immediately for protection ──
+      const isFirstCycle = !signal.hedgeHistory?.length;
+      if (!isFirstCycle) {
+        try {
+          const coin = signal.coin || signal.symbol?.replace('USDT', '');
+          const closes15m = await this.marketDataService.getClosePrices(coin, '15m');
+          if (closes15m.length >= 5) {
+            const last5 = closes15m.slice(-5);
+            const moves: number[] = [];
+            for (let i = last5.length - 3; i < last5.length; i++) {
+              moves.push(last5[i] - last5[i - 1]);
+            }
+            const greenMoves = moves.filter(m => m > 0).length;
+            const redMoves = moves.filter(m => m < 0).length;
+            const bounceSize = Math.abs((last5[last5.length - 1] - last5[last5.length - 4]) / last5[last5.length - 4] * 100);
+            const strongBounce = bounceSize > 1.0;
 
-          // Bounce strength: total % recovered in last 3 candles
-          const bounceSize = Math.abs((last5[last5.length - 1] - last5[last5.length - 4]) / last5[last5.length - 4] * 100);
-          const strongBounce = bounceSize > 1.0; // > 1% move in 45min = strong
-
-          if (signal.direction === 'LONG') {
-            // Main LONG losing → want to hedge SHORT → skip if price bouncing strong
-            if (greenMoves >= 2 && strongBounce) {
-              this.logger.debug(`[${coin}] Hedge skipped: strong bounce +${bounceSize.toFixed(2)}% (${greenMoves}/3 green) — may recover`);
+            if (signal.direction === 'LONG' && greenMoves >= 2 && strongBounce) {
+              this.logger.debug(`[${signal.coin}] Hedge re-entry skipped: strong bounce +${bounceSize.toFixed(2)}%`);
               return null;
             }
-          } else {
-            // Main SHORT losing → want to hedge LONG → skip if price dropping strong
-            if (redMoves >= 2 && strongBounce) {
-              this.logger.debug(`[${coin}] Hedge skipped: strong drop -${bounceSize.toFixed(2)}% (${redMoves}/3 red) — may recover`);
+            if (signal.direction !== 'LONG' && redMoves >= 2 && strongBounce) {
+              this.logger.debug(`[${signal.coin}] Hedge re-entry skipped: strong drop -${bounceSize.toFixed(2)}%`);
               return null;
             }
           }
-        }
-      } catch (err) {
-        // If candle data unavailable, proceed without check
+        } catch (err) { /* proceed without check */ }
       }
 
       // Cycle 2+: stricter conditions — prevent blind re-entry
@@ -171,8 +166,6 @@ export class HedgeManagerService {
         // Main SHORT → hedge LONG: need RSI > 60 (bullish momentum continues)
         try {
           const coin = signal.coin || signal.symbol?.replace('USDT', '');
-          const { RSI } = require('technicalindicators');
-
           // 15m RSI
           const closes15m = await this.marketDataService.getClosePrices(coin, '15m');
           if (closes15m.length >= 14) {
@@ -325,18 +318,17 @@ export class HedgeManagerService {
         }
         const peak = this.hedgePeakMap.get(signalId) || 0;
 
-        if (tpHit) {
-          // TP reached — activate trailing mode
-          if (!signal.hedgeTrailActivated) {
-            this.logger.log(
-              `[${signal.coin}] Hedge TRAIL activated | PnL: +${hedgePnlPct.toFixed(2)}% | Peak: ${peak.toFixed(2)}% | Riding trend...`,
-            );
-            return {
-              action: 'NONE' as const,
-              reason: `Hedge trail activated at +${hedgePnlPct.toFixed(2)}%`,
-              hedgeSlAtEntry: true, // also protect at +0.5%
-            };
-          }
+        if (tpHit && !signal.hedgeTrailActivated) {
+          // TP reached — activate trailing mode (one-time)
+          this.logger.log(
+            `[${signal.coin}] Hedge TRAIL activated | PnL: +${hedgePnlPct.toFixed(2)}% | Peak: ${peak.toFixed(2)}% | Riding trend...`,
+          );
+          return {
+            action: 'NONE' as const,
+            reason: `Hedge trail activated at +${hedgePnlPct.toFixed(2)}%`,
+            hedgeSlAtEntry: true,
+            hedgeTrailActivated: true,
+          };
         }
 
         // Trail close: pullback > 1% from peak (only after trail activated or peak > TP%)

@@ -3,6 +3,7 @@ import { RedisService } from "../../redis/redis.service";
 import { IndicatorService } from "../indicators/indicator.service";
 import { SingaporeFiltersService } from "../filters/singapore-filters.service";
 import { OnChainFilterService } from "../filters/onchain-filters.service";
+import { TradingConfigService } from "../../ai-signal/trading-config";
 import { AiTunedParams } from "../ai-optimizer/ai-tuned-params.interface";
 
 export interface SignalResult {
@@ -26,6 +27,7 @@ export class RuleEngineService {
     private readonly redisService: RedisService,
     private readonly singaporeFilters: SingaporeFiltersService,
     private readonly onChainFilters: OnChainFilterService,
+    private readonly tradingConfig: TradingConfigService,
   ) {}
 
   /**
@@ -45,9 +47,10 @@ export class RuleEngineService {
     currency: string,
     params: AiTunedParams,
   ): Promise<SignalResult | null> {
-    // US session (12-18 UTC) = higher volatility → require +5% confidence
+    // US session (12-20 UTC) = higher volatility → require +5% confidence
+    // Data: 12-18 WR=60% PnL=-$44, 19:00 WR=0% (3L)
     const utcHour = new Date().getUTCHours();
-    const usSessionBoost = (utcHour >= 12 && utcHour < 18) ? 5 : 0;
+    const usSessionBoost = (utcHour >= 12 && utcHour < 20) ? 5 : 0;
     const effectiveThreshold = (params.minConfidenceToTrade || 60) + usSessionBoost;
 
     if (params.confidence < effectiveThreshold) {
@@ -380,6 +383,23 @@ export class RuleEngineService {
     currency: string,
     params: AiTunedParams,
   ): Promise<SignalResult | null> {
+    // Per-strategy confidence gates (from TradingConfig)
+    const cfg = this.tradingConfig.get();
+    const gates: Record<string, number> = {
+      EMA_PULLBACK: cfg.gateEMAPullback || 78,
+      TREND_EMA: cfg.gateTrendEMA || 80,
+      STOCH_EMA_KDJ: cfg.gateStochEMAKDJ || 82,
+      RSI_CROSS: cfg.gateRSICross || 75,
+      SMC_FVG: (cfg as any).gateSMCFVG || 82,
+    };
+    const gate = gates[strategy];
+    if (gate && params.confidence < gate) {
+      this.logger.debug(
+        `[RuleEngine] ${coin} ${strategy} gated: confidence ${params.confidence} < ${gate}`,
+      );
+      return null;
+    }
+
     switch (strategy) {
       case "RSI_CROSS":
         return this.evalRsiCross(coin, currency, params);
