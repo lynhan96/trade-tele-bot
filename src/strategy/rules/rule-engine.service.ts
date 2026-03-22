@@ -2,6 +2,7 @@ import { Injectable, Logger } from "@nestjs/common";
 import { RedisService } from "../../redis/redis.service";
 import { IndicatorService } from "../indicators/indicator.service";
 import { SingaporeFiltersService } from "../filters/singapore-filters.service";
+import { OnChainFilterService } from "../filters/onchain-filters.service";
 import { AiTunedParams } from "../ai-optimizer/ai-tuned-params.interface";
 
 export interface SignalResult {
@@ -10,6 +11,7 @@ export interface SignalResult {
   strategy: string;
   reason: string; // human-readable
   sgFilters?: string[]; // Singapore filter results
+  onChainFilters?: string[]; // On-chain filter results
 }
 
 // Redis TTL for 2-stage pattern state
@@ -23,6 +25,7 @@ export class RuleEngineService {
     private readonly indicatorService: IndicatorService,
     private readonly redisService: RedisService,
     private readonly singaporeFilters: SingaporeFiltersService,
+    private readonly onChainFilters: OnChainFilterService,
   ) {}
 
   /**
@@ -209,7 +212,6 @@ export class RuleEngineService {
     }
 
     // ── Singapore Strategy Filters — OP Line + Volume + S/R ──
-    // Run all 3 filters (each toggleable). If any fails → block signal.
     const sgResult = await this.singaporeFilters.checkAll(coin, isLong);
     if (!sgResult.pass) {
       const failReasons = sgResult.reasons.filter(r => !r.includes('OK') && !r.includes('disabled'));
@@ -219,12 +221,22 @@ export class RuleEngineService {
       return null;
     }
 
+    // ── On-Chain Filters — FR, L/S ratio, Taker flow, OI ──
+    const ocResult = await this.onChainFilters.checkAll(coin, isLong);
+    if (!ocResult.pass) {
+      const failReasons = ocResult.reasons.filter(r => !r.includes('OK') && !r.includes('disabled') && !r.includes('skip'));
+      this.logger.log(
+        `[RuleEngine] ${coin} ${isLong ? "LONG" : "SHORT"} blocked by on-chain filter: ${failReasons.join(' | ')}`,
+      );
+      return null;
+    }
+
     if (winners.length >= 2) {
-      // Strong confluence: 2+ strategies agree
       const names = winners.map(w => w.strategy).join("+");
       const reasons = winners.map(w => w.result.reason).join(" | ");
+      const ocInfo = ocResult.reasons.filter(r => r.includes('OK') || r.includes('SURGE') || r.includes('BUY') || r.includes('SELL')).join(', ');
       this.logger.log(
-        `[RuleEngine] ${coin} ✓ ${isLong ? "LONG" : "SHORT"} confluence (${winners.length}/${strategies.length}): ${names} | SG: ${sgResult.reasons.filter(r => r.includes('OK') || r.includes('SPIKE')).join(', ')}`,
+        `[RuleEngine] ${coin} ✓ ${isLong ? "LONG" : "SHORT"} confluence (${winners.length}/${strategies.length}): ${names} | SG: ${sgResult.reasons.filter(r => r.includes('OK') || r.includes('SPIKE')).join(', ')} | OC: ${ocInfo}`,
       );
       return {
         isLong,
@@ -232,14 +244,15 @@ export class RuleEngineService {
         strategy: names,
         reason: `Confluence ${names}: ${reasons}`,
         sgFilters: sgResult.reasons,
+        onChainFilters: ocResult.reasons,
       };
     }
 
-    // Single strategy fired out of multiple — still a valid signal but weaker
+    // Single strategy fired — still valid
     this.logger.debug(
       `[RuleEngine] ${coin} △ ${winners[0].strategy} fired alone (1/${strategies.length}) — allowed as single`,
     );
-    return { ...primary, sgFilters: sgResult.reasons };
+    return { ...primary, sgFilters: sgResult.reasons, onChainFilters: ocResult.reasons };
   }
 
   /**

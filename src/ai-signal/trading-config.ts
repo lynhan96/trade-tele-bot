@@ -119,6 +119,18 @@ export interface TradingConfig {
   opLineEnabled: boolean;            // Daily Open Price bias filter (default true)
   volumeAnalysisEnabled: boolean;    // Smart money vs retail volume (default true)
   srLevelEnabled: boolean;           // Support/Resistance level filter (default true)
+
+  // ── On-Chain Filters (Binance futures data) ────────────────────────
+  onChainFilterEnabled: boolean;     // Master switch (default true)
+  onChainFundingRateEnabled: boolean; // Funding rate filter (default true)
+  onChainFundingThreshold: number;   // FR extreme threshold % (default 0.05)
+  onChainLongShortEnabled: boolean;  // Long/Short ratio contrarian (default true)
+  onChainLongShortExtreme: number;   // Extreme L/S threshold % (default 60)
+  onChainTakerFlowEnabled: boolean;  // Taker buy/sell flow (default true)
+  onChainTakerBuyThreshold: number;  // Strong buy ratio (default 1.3)
+  onChainTakerSellThreshold: number; // Strong sell ratio (default 0.7)
+  onChainOIEnabled: boolean;         // Open Interest change (default true)
+  onChainOIDropThreshold: number;    // OI drop % to block entry (default -5)
 }
 
 export const DEFAULT_TRADING_CONFIG: TradingConfig = {
@@ -204,6 +216,18 @@ export const DEFAULT_TRADING_CONFIG: TradingConfig = {
   opLineEnabled: true,           // Daily Open Price bias
   volumeAnalysisEnabled: true,   // Smart money vs retail volume
   srLevelEnabled: true,          // Support/Resistance levels
+
+  // On-Chain Filters (Binance futures data)
+  onChainFilterEnabled: true,
+  onChainFundingRateEnabled: true,
+  onChainFundingThreshold: 0.05,   // 0.05% extreme
+  onChainLongShortEnabled: true,
+  onChainLongShortExtreme: 60,     // 60% = extreme
+  onChainTakerFlowEnabled: true,
+  onChainTakerBuyThreshold: 1.3,   // Strong buy
+  onChainTakerSellThreshold: 0.7,  // Strong sell
+  onChainOIEnabled: true,
+  onChainOIDropThreshold: -5,      // -5% OI drop = avoid
 };
 
 const TRADING_CONFIG_KEY = "cache:ai:trading-config";

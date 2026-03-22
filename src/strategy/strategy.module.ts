@@ -7,6 +7,7 @@ import { RuleEngineService } from "./rules/rule-engine.service";
 import { AiOptimizerService } from "./ai-optimizer/ai-optimizer.service";
 import { TradingConfigService } from "../ai-signal/trading-config";
 import { SingaporeFiltersService } from "./filters/singapore-filters.service";
+import { OnChainFilterService } from "./filters/onchain-filters.service";
 import {
   AiRegimeHistory,
   AiRegimeHistorySchema,
@@ -30,7 +31,7 @@ import {
       { name: AiSignalValidation.name, schema: AiSignalValidationSchema },
     ]),
   ],
-  providers: [IndicatorService, RuleEngineService, AiOptimizerService, TradingConfigService, SingaporeFiltersService],
-  exports: [IndicatorService, RuleEngineService, AiOptimizerService, TradingConfigService, SingaporeFiltersService],
+  providers: [IndicatorService, RuleEngineService, AiOptimizerService, TradingConfigService, SingaporeFiltersService, OnChainFilterService],
+  exports: [IndicatorService, RuleEngineService, AiOptimizerService, TradingConfigService, SingaporeFiltersService, OnChainFilterService],
 })
 export class StrategyModule {}
