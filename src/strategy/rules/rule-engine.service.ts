@@ -45,9 +45,14 @@ export class RuleEngineService {
     currency: string,
     params: AiTunedParams,
   ): Promise<SignalResult | null> {
-    if (params.confidence < (params.minConfidenceToTrade || 60)) {
+    // US session (12-18 UTC) = higher volatility → require +5% confidence
+    const utcHour = new Date().getUTCHours();
+    const usSessionBoost = (utcHour >= 12 && utcHour < 18) ? 5 : 0;
+    const effectiveThreshold = (params.minConfidenceToTrade || 60) + usSessionBoost;
+
+    if (params.confidence < effectiveThreshold) {
       this.logger.debug(
-        `[RuleEngine] ${coin} skipped — AI confidence ${params.confidence} < threshold ${params.minConfidenceToTrade}`,
+        `[RuleEngine] ${coin} skipped — AI confidence ${params.confidence} < threshold ${effectiveThreshold}${usSessionBoost ? ' (US session +5%)' : ''}`,
       );
       return null;
     }

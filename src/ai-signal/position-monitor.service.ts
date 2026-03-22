@@ -651,11 +651,11 @@ export class PositionMonitorService implements OnModuleInit {
     // (grid signals handle trailing in the grid block above)
     // Skip trail SL when hedge is active — hedge manages risk
     if (!isGridSignal && !(signal as any).hedgeActive) {
-      // Trail trigger: move SL to break-even at 2% profit
-      // Trail distance: keep 60% of peak profit (dynamic, not fixed)
-      // Example: peak 3% → SL at +1.8%, peak 4% → SL at +2.4%
-      const TRAIL_TRIGGER = 2.0;
-      const TRAIL_KEEP_RATIO = 0.75; // keep 75% of peak (was fixed 1.2% distance → avg win only $11)
+      // Trail trigger: move SL to break-even at 2.5% profit (was 2%, caused early trail exits)
+      // Trail distance: keep 80% of peak profit (was 75%, avg win only $9)
+      // Example: peak 3% → SL at +2.4%, peak 5% → SL at +4%
+      const TRAIL_TRIGGER = cfg.trailTrigger || 2.5;
+      const TRAIL_KEEP_RATIO = cfg.trailKeepRatio || 0.80;
 
       const prevPeak = (signal as any).peakPnlPct || 0;
       if (pnlPct > prevPeak) {
@@ -707,10 +707,10 @@ export class PositionMonitorService implements OnModuleInit {
     }
 
     // ─── Dynamic TP boost: extend TP on strong momentum ─────────────────
-    // Base cap 4%, extend up to 8% if hedge loss is significant
+    // Base cap 6% (was 4%), extend up to 10% if hedge loss is significant
     const tpCap = hedgeLoss > mainNotional * 0.05
-      ? Math.min(8, 4 + (hedgeLoss / mainNotional) * 100 * 0.3) // scale up proportionally
-      : 4;
+      ? Math.min(10, 6 + (hedgeLoss / mainNotional) * 100 * 0.3)
+      : 6;
 
     if (pnlPct >= 2.5 && !(signal as any).tpBoosted && takeProfitPrice) {
       (signal as any).tpBoosted = true;

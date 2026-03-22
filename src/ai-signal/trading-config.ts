@@ -141,7 +141,7 @@ export const DEFAULT_TRADING_CONFIG: TradingConfig = {
   tpRrMultiplier: 1.5, dcaTpPct: 3.0,
 
   // Trailing
-  trailTrigger: 2.0, trailKeepRatio: 0.75,
+  trailTrigger: 2.5, trailKeepRatio: 0.80,
   tpProximityLock: 0.5, tpBoostTrigger: 2.5, tpBoostExtend: 2.0, tpBoostCap: 4.0,
 
   // Confidence
@@ -149,7 +149,7 @@ export const DEFAULT_TRADING_CONFIG: TradingConfig = {
   regimeCaps: { SIDEWAYS: 70, RANGE_BOUND: 70, MIXED: 68, VOLATILE: 70, BTC_CORRELATION: 68, STRONG_BULL: 80, STRONG_BEAR: 72 },
 
   // Strategy gates
-  gateEMAPullback: 78, gateTrendEMA: 70, gateStochEMAKDJ: 82, gateRSICross: 75,
+  gateEMAPullback: 78, gateTrendEMA: 80, gateStochEMAKDJ: 82, gateRSICross: 75,
 
   // Funding
   fundingDirectionalBlock: 0.1, fundingExtremeBlock: 0.3,
