@@ -131,6 +131,8 @@ export interface TradingConfig {
   onChainTakerSellThreshold: number; // Strong sell ratio (default 0.7)
   onChainOIEnabled: boolean;         // Open Interest change (default true)
   onChainOIDropThreshold: number;    // OI drop % to block entry (default -5)
+  onChainMarketSentimentEnabled: boolean; // Market-wide L/S check (default true)
+  onChainMarketSentimentThreshold: number; // Block when crowd > X% one side (default 63)
 }
 
 export const DEFAULT_TRADING_CONFIG: TradingConfig = {
@@ -228,6 +230,8 @@ export const DEFAULT_TRADING_CONFIG: TradingConfig = {
   onChainTakerSellThreshold: 0.7,  // Strong sell
   onChainOIEnabled: true,
   onChainOIDropThreshold: -5,      // -5% OI drop = avoid
+  onChainMarketSentimentEnabled: true,
+  onChainMarketSentimentThreshold: 63, // 63% crowd = extreme
 };
 
 const TRADING_CONFIG_KEY = "cache:ai:trading-config";

@@ -55,6 +55,7 @@ export class OnChainFilterService {
       this.checkLongShortRatio(coin, isLong, analytics, cfg),
       this.checkTakerFlow(coin, isLong, analytics, cfg),
       this.checkOIChange(coin, isLong, symbol, cfg),
+      this.checkMarketSentiment(coin, isLong, cfg),
     ]);
 
     const blocked = results.filter((r) => !r.pass);
@@ -259,6 +260,60 @@ export class OnChainFilterService {
       };
     } catch (err) {
       return { pass: true, reason: 'OI: fetch error — skip' };
+    }
+  }
+
+  /**
+   * 5. Market Sentiment — aggregate L/S from major coins
+   * If majority of market is LONG (>65% avg) → block new LONG signals
+   * If majority of market is SHORT (>65% avg) → block new SHORT signals
+   * Uses latest on-chain scanner data from Redis cache
+   */
+  private async checkMarketSentiment(
+    coin: string,
+    isLong: boolean,
+    cfg: any,
+  ): Promise<{ pass: boolean; reason: string }> {
+    if (!cfg.onChainMarketSentimentEnabled) {
+      return { pass: true, reason: 'Sentiment: disabled' };
+    }
+
+    try {
+      // Get cached analytics from scanner (top 30 coins, refreshed every 15min)
+      const cached = await this.redisService.get('cache:futures:analytics');
+      if (!cached || typeof cached !== 'object') {
+        return { pass: true, reason: 'Sentiment: no market data' };
+      }
+
+      const coins = Object.values(cached) as CoinAnalytics[];
+      if (coins.length < 5) {
+        return { pass: true, reason: 'Sentiment: insufficient data' };
+      }
+
+      // Calculate market-wide L/S average
+      const avgLongPct = coins.reduce((s, c) => s + (c.longPercent || 50), 0) / coins.length;
+      const threshold = cfg.onChainMarketSentimentThreshold || 63; // 63% = crowd extreme
+
+      if (isLong && avgLongPct > threshold) {
+        return {
+          pass: false,
+          reason: `Sentiment: thị trường ${avgLongPct.toFixed(0)}% LONG (>${threshold}%) — đám đông LONG, tránh LONG mới`,
+        };
+      }
+
+      if (!isLong && avgLongPct < (100 - threshold)) {
+        return {
+          pass: false,
+          reason: `Sentiment: thị trường ${(100 - avgLongPct).toFixed(0)}% SHORT (>${threshold}%) — đám đông SHORT, tránh SHORT mới`,
+        };
+      }
+
+      return {
+        pass: true,
+        reason: `Sentiment: ${avgLongPct.toFixed(0)}%L OK`,
+      };
+    } catch (err) {
+      return { pass: true, reason: 'Sentiment: error — skip' };
     }
   }
 }
