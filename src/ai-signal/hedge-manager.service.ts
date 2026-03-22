@@ -100,26 +100,34 @@ export class HedgeManagerService {
       // PnL must be bad enough to hedge
       if (pnlPct > -cfg.hedgePartialTriggerPct) return null;
 
-      // ── Momentum check (ALL cycles) — don't hedge if price is bouncing ──
+      // ── Momentum check (ALL cycles) — don't hedge if price is bouncing strongly ──
       try {
         const coin = signal.coin || signal.symbol?.replace('USDT', '');
         const closes15m = await this.marketDataService.getClosePrices(coin, '15m');
         if (closes15m.length >= 5) {
-          // Check last 3 candles — need at least 2/3 in hedge direction
-          const last3 = closes15m.slice(-3);
-          const redCandles = last3.filter((c, i) => i > 0 && c < last3[i - 1]).length;
-          const greenCandles = last3.filter((c, i) => i > 0 && c > last3[i - 1]).length;
+          const last5 = closes15m.slice(-5);
+          // Calculate direction of last 3 candle-to-candle moves
+          const moves = [];
+          for (let i = last5.length - 3; i < last5.length; i++) {
+            moves.push(last5[i] - last5[i - 1]);
+          }
+          const greenMoves = moves.filter(m => m > 0).length;
+          const redMoves = moves.filter(m => m < 0).length;
+
+          // Bounce strength: total % recovered in last 3 candles
+          const bounceSize = Math.abs((last5[last5.length - 1] - last5[last5.length - 4]) / last5[last5.length - 4] * 100);
+          const strongBounce = bounceSize > 1.0; // > 1% move in 45min = strong
 
           if (signal.direction === 'LONG') {
-            // Main LONG losing → hedge SHORT → need price dropping (red candles)
-            if (greenCandles >= 2) {
-              this.logger.debug(`[${coin}] Hedge entry skipped: price bouncing (${greenCandles}/2 green candles) — may recover`);
+            // Main LONG losing → want to hedge SHORT → skip if price bouncing strong
+            if (greenMoves >= 2 && strongBounce) {
+              this.logger.debug(`[${coin}] Hedge skipped: strong bounce +${bounceSize.toFixed(2)}% (${greenMoves}/3 green) — may recover`);
               return null;
             }
           } else {
-            // Main SHORT losing → hedge LONG → need price rising (green candles)
-            if (redCandles >= 2) {
-              this.logger.debug(`[${coin}] Hedge entry skipped: price dropping (${redCandles}/2 red candles) — may recover`);
+            // Main SHORT losing → want to hedge LONG → skip if price dropping strong
+            if (redMoves >= 2 && strongBounce) {
+              this.logger.debug(`[${coin}] Hedge skipped: strong drop -${bounceSize.toFixed(2)}% (${redMoves}/3 red) — may recover`);
               return null;
             }
           }

@@ -118,71 +118,66 @@ export class OnChainScannerService {
     const longPct = data.longPercent;
     const taker = data.takerBuyRatio;
 
-    // ── 1. Funding Rate Analysis ──
+    // ── 1. Funding Rate ──
     if (fr > 0.1) {
-      // Extreme positive FR = too many longs = dump incoming
       score -= 30;
-      alerts.push(`${coin} FR EXTREME +${fr.toFixed(3)}% — squeeze/dump risk`);
+      alerts.push(`${coin} FR cực cao +${fr.toFixed(3)}% — rủi ro dump/squeeze`);
     } else if (fr > 0.05) {
       score -= 15;
-    } else if (fr < -0.05) {
-      // Negative FR = too many shorts = squeeze incoming
-      score += 15;
-      alerts.push(`${coin} FR negative ${fr.toFixed(3)}% — short squeeze possible`);
     } else if (fr < -0.1) {
       score += 30;
-      alerts.push(`${coin} FR EXTREME ${fr.toFixed(3)}% — SHORT SQUEEZE HIGH PROB`);
+      alerts.push(`${coin} FR cực thấp ${fr.toFixed(3)}% — XÁC SUẤT SHORT SQUEEZE CAO`);
+    } else if (fr < -0.05) {
+      score += 15;
+      alerts.push(`${coin} FR âm ${fr.toFixed(3)}% — có thể short squeeze`);
     }
 
-    // ── 2. Open Interest Analysis ──
+    // ── 2. Open Interest ──
     if (oiChangePct > 10) {
-      // OI surge = new positions being opened aggressively
-      alerts.push(`${coin} OI SURGE +${oiChangePct.toFixed(1)}% — smart money entering`);
-      // Direction depends on other signals
+      alerts.push(`${coin} OI tăng mạnh +${oiChangePct.toFixed(1)}% — cá mập đang vào`);
       if (fr > 0.03) {
-        score -= 20; // OI up + high FR = longs piling in = dump
+        score -= 20;
       } else if (fr < -0.03) {
-        score += 20; // OI up + negative FR = shorts piling in = squeeze
+        score += 20;
       }
     } else if (oiChangePct < -10) {
-      // OI drop = positions closing = trend exhaustion
-      alerts.push(`${coin} OI DROP ${oiChangePct.toFixed(1)}% — positions closing, trend may reverse`);
+      alerts.push(`${coin} OI giảm ${oiChangePct.toFixed(1)}% — đóng vị thế, xu hướng có thể đảo`);
     }
 
-    // ── 3. Long/Short Ratio — Contrarian ──
+    // ── 3. Long/Short Ratio — Nghịch đám đông ──
     if (longPct > 65) {
-      score -= 20; // Too many retail longs
-      alerts.push(`${coin} CROWD LONG ${longPct.toFixed(0)}% — contrarian SHORT signal`);
+      score -= 20;
+      alerts.push(`${coin} Đám đông LONG ${longPct.toFixed(0)}% — tín hiệu nghịch SHORT`);
     } else if (longPct < 35) {
-      score += 20; // Too many retail shorts
-      alerts.push(`${coin} CROWD SHORT ${(100 - longPct).toFixed(0)}% — contrarian LONG signal`);
+      score += 20;
+      alerts.push(`${coin} Đám đông SHORT ${(100 - longPct).toFixed(0)}% — tín hiệu nghịch LONG`);
     }
 
-    // ── 4. Taker Buy/Sell — Institutional Flow ──
+    // ── 4. Taker Buy/Sell — Dòng tiền tổ chức ──
     if (taker > 1.5) {
       score += 25;
-      alerts.push(`${coin} TAKER BUY SPIKE ${taker.toFixed(2)} — aggressive institutional buying`);
+      alerts.push(`${coin} Cá mập MUA mạnh ${taker.toFixed(2)} — dòng tiền tổ chức vào`);
     } else if (taker > 1.2) {
       score += 10;
     } else if (taker < 0.6) {
       score -= 25;
-      alerts.push(`${coin} TAKER SELL SPIKE ${taker.toFixed(2)} — aggressive institutional selling`);
+      alerts.push(`${coin} Cá mập BÁN mạnh ${taker.toFixed(2)} — dòng tiền tổ chức rút`);
     } else if (taker < 0.8) {
       score -= 10;
     }
 
-    // ── 5. Combo Signals (high conviction) ──
+    // ── 5. Combo (độ tin cậy cao) ──
     if (fr > 0.08 && oiChangePct > 5 && longPct > 60) {
       score -= 40;
-      alerts.push(`${coin} COMBO: FR+OI+Crowd = HIGH PROB DUMP`);
+      alerts.push(`${coin} COMBO: FR+OI+Đám đông = XÁC SUẤT DUMP CAO`);
     }
     if (fr < -0.05 && oiChangePct > 5 && longPct < 40) {
       score += 40;
-      alerts.push(`${coin} COMBO: FR+OI+Crowd = HIGH PROB SQUEEZE`);
+      alerts.push(`${coin} COMBO: FR+OI+Đám đông = XÁC SUẤT SQUEEZE CAO`);
     }
     if (taker > 1.3 && oiChangePct > 5 && fr < 0.02) {
       score += 30;
-      alerts.push(`${coin} ACCUMULATION: Taker buy + OI surge + low FR = smart money LONG`);
+      alerts.push(`${coin} TÍCH LŨY: Cá mập mua + OI tăng + FR thấp = LONG mạnh`);
     }
 
     // Clamp score
@@ -215,14 +210,20 @@ export class OnChainScannerService {
     const adminIds = (process.env.AI_ADMIN_TELEGRAM_ID || '').split(',').filter(Boolean);
     if (adminIds.length === 0) return;
 
-    let msg = '📊 *On-Chain Market Alert*\n\n';
+    const signalVi: Record<string, string> = {
+      'STRONG_LONG': 'MẠNH TĂNG', 'LONG_BIAS': 'Thiên TĂNG',
+      'STRONG_SHORT': 'MẠNH GIẢM', 'SHORT_BIAS': 'Thiên GIẢM',
+      'NEUTRAL': 'Trung lập',
+    };
+
+    let msg = '📊 *Phân Tích On-Chain*\n\n';
 
     for (const p of toAlert) {
       const coin = p.symbol.replace('USDT', '');
       const emoji = p.score > 30 ? '🟢' : p.score < -30 ? '🔴' : '🟡';
       const fr = p.analytics.fundingRate * 100;
 
-      msg += `${emoji} *${coin}* — ${p.signal} (${p.score > 0 ? '+' : ''}${p.score})\n`;
+      msg += `${emoji} *${coin}* — ${signalVi[p.signal] || p.signal} (${p.score > 0 ? '+' : ''}${p.score})\n`;
       msg += `FR: ${fr >= 0 ? '+' : ''}${fr.toFixed(4)}% | `;
       msg += `L/S: ${p.analytics.longPercent.toFixed(0)}%L | `;
       msg += `Taker: ${p.analytics.takerBuyRatio.toFixed(2)}\n`;
