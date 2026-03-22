@@ -826,24 +826,28 @@ export class PositionMonitorService implements OnModuleInit {
           forceCloseReason = "CATASTROPHIC_STOP";
         }
 
-        // Check main TP hit while hedge active → FLIP
+        // Check main TP hit while hedge active → FLIP to hedge direction
         const effectiveTpHedge = (signal as any).takeProfitPrice;
+        let mainTpHitForFlip = false;
         if (effectiveTpHedge && !forceCloseReason) {
           const mainTpHit = direction === "LONG" ? price >= effectiveTpHedge : price <= effectiveTpHedge;
           if (mainTpHit && (signal as any).hedgeEntryPrice && (signal as any).hedgeDirection) {
-            if (!this.resolvingSymbols.has(sigKey)) {
-              this.logger.log(
-                `[PositionMonitor] 🔄 ${sigKey} MAIN TP HIT while hedge active → FLIPPING to ${(signal as any).hedgeDirection}`,
-              );
-              forceCloseReason = "NET_POSITIVE"; // Use NET_POSITIVE flow to close both, FLIP handled below
-            }
+            mainTpHitForFlip = true;
+            this.logger.log(
+              `[PositionMonitor] 🔄 ${sigKey} MAIN TP HIT at ${price} while hedge active → FLIP to ${(signal as any).hedgeDirection}`,
+            );
+            // Fall through to FLIP logic below (don't return, don't force close)
           }
         }
 
-        if (!forceCloseReason) return; // Skip all SL/TP — hedge manages risk
+        if (!forceCloseReason && !mainTpHitForFlip) return; // No event → skip
 
-        // ── Force close: close hedge first, then resolve main signal ──
+        // ── Force close (NET_POSITIVE / CATASTROPHIC) — NOT for FLIP ──
+        // FLIP falls through to normal TP/SL check which has full FLIP logic
 
+        if (mainTpHitForFlip) {
+          // Skip force close — fall through to TP/SL check with FLIP logic
+        } else {
         // Close open hedge if any
         if ((signal as any).hedgeEntryPrice && (signal as any).hedgeDirection) {
           const hDir = (signal as any).hedgeDirection;
@@ -963,6 +967,7 @@ export class PositionMonitorService implements OnModuleInit {
           this.resolvingSymbols.delete(sigKey);
         }
         return; // Already resolved — don't fall through to normal SL/TP
+        } // end else (not FLIP)
       }
     }
 
