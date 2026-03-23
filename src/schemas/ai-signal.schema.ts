@@ -224,6 +224,15 @@ export class AiSignal {
   @Prop()
   hedgeSafetySlPrice?: number; // wide safety net SL (e.g. -8%)
 
+  @Prop()
+  hedgeTrailActivated?: boolean; // hedge TP reached, trailing mode active
+
+  @Prop()
+  hedgeSlAtEntry?: boolean; // hedge SL moved to entry (breakeven protection)
+
+  @Prop()
+  hedgePeakPnlPct?: number; // peak hedge PnL % for trailing
+
   @Prop({ type: Array, default: [] })
   hedgeHistory?: Array<{
     cycle: number;
