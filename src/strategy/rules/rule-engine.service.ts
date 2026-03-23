@@ -1124,26 +1124,28 @@ export class RuleEngineService {
     score += isLong ? 20 : -20;
     reasons.push(`OP: ${opPct >= 0 ? '+' : ''}${opPct.toFixed(2)}%`);
 
-    // Taker flow confirms direction
-    if (isLong && taker > 1.15) { score += 25; reasons.push(`Taker BUY ${taker.toFixed(2)}`); }
-    else if (!isLong && taker < 0.85) { score += 25; reasons.push(`Taker SELL ${taker.toFixed(2)}`); }
-    else if (isLong && taker < 0.9) { return null; } // contradicting flow
-    else if (!isLong && taker > 1.1) { return null; } // contradicting flow
+    // Taker flow — bonus (not blocking)
+    if (isLong && taker > 1.05) { score += 15; reasons.push(`Taker BUY ${taker.toFixed(2)}`); }
+    else if (!isLong && taker < 0.95) { score += 15; reasons.push(`Taker SELL ${taker.toFixed(2)}`); }
+    // Only block on strong contradicting flow
+    else if (isLong && taker < 0.8) { return null; }
+    else if (!isLong && taker > 1.2) { return null; }
 
-    // L/S ratio — contrarian (crowd wrong)
-    if (isLong && longPct < 50) { score += 15; reasons.push(`L/S contrarian ${longPct.toFixed(0)}%L`); }
-    else if (!isLong && longPct > 55) { score += 15; reasons.push(`L/S contrarian ${longPct.toFixed(0)}%L`); }
-    else if (isLong && longPct > 65) { return null; } // too crowded
-    else if (!isLong && longPct < 35) { return null; } // too crowded
+    // L/S ratio — contrarian bonus
+    if (isLong && longPct < 55) { score += 10; reasons.push(`L/S contrarian ${longPct.toFixed(0)}%L`); }
+    else if (!isLong && longPct > 50) { score += 10; reasons.push(`L/S contrarian ${longPct.toFixed(0)}%L`); }
+    // Only block on extreme crowd (>70%)
+    else if (isLong && longPct > 70) { return null; }
+    else if (!isLong && longPct < 30) { return null; }
 
-    // FR confirms (not extreme against direction)
-    if (isLong && fr > 0.08) { return null; } // extreme FR = dump risk
-    if (!isLong && fr < -0.08) { return null; } // extreme FR = squeeze risk
-    if (isLong && fr < -0.02) { score += 10; reasons.push(`FR negative ${fr.toFixed(3)}%`); }
-    if (!isLong && fr > 0.02) { score += 10; reasons.push(`FR positive +${fr.toFixed(3)}%`); }
+    // FR — bonus (not blocking unless extreme)
+    if (isLong && fr > 0.1) { return null; }
+    if (!isLong && fr < -0.1) { return null; }
+    if (isLong && fr <= 0) { score += 10; reasons.push(`FR negative ${fr.toFixed(3)}%`); }
+    if (!isLong && fr >= 0) { score += 10; reasons.push(`FR positive +${fr.toFixed(3)}%`); }
 
-    // Need minimum score (at least OP + 1 confirmation)
-    if (Math.abs(score) < 35) return null;
+    // Need minimum score: OP(20) + at least 1 small confirmation(10)
+    if (Math.abs(score) < 30) return null;
 
     const direction = isLong ? "LONG" : "SHORT";
     this.logger.log(
