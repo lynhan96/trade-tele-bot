@@ -1094,11 +1094,21 @@ export class RuleEngineService {
 
     const symbol = `${coin}USDT`;
 
-    // 1. Get daily open price
-    const closes1d = await this.indicatorService.getCloses(coin, "1d");
-    if (!closes1d || closes1d.length < 2) return null;
-    const dailyOpen = closes1d[closes1d.length - 2]; // previous daily close = today's open
-    const currentPrice = closes1d[closes1d.length - 1];
+    // 1. Get daily open price from Redis candle cache (more reliable than MongoDB)
+    const dailyOpenStr = await this.redisService.get(`cache:candle:open:${coin}:1d`);
+    const currentPriceStr = await this.redisService.get(`cache:candle:close:${coin}:1d`);
+    // Fallback: try MongoDB candle history
+    let dailyOpen = dailyOpenStr ? parseFloat(String(dailyOpenStr)) : 0;
+    let currentPrice = currentPriceStr ? parseFloat(String(currentPriceStr)) : 0;
+    if (!dailyOpen || !currentPrice) {
+      const closes1d = await this.indicatorService.getCloses(coin, "1d");
+      if (!closes1d || closes1d.length < 2) {
+        this.logger.debug(`[RuleEngine] ${coin} OP_ONCHAIN: no daily data (Redis + MongoDB empty)`);
+        return null;
+      }
+      dailyOpen = closes1d[closes1d.length - 2];
+      currentPrice = closes1d[closes1d.length - 1];
+    }
     const opPct = ((currentPrice - dailyOpen) / dailyOpen) * 100;
 
     // Need meaningful move from OP (at least 0.3%)
