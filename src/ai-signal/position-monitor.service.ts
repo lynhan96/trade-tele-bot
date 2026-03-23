@@ -219,7 +219,11 @@ export class PositionMonitorService implements OnModuleInit {
       );
     }
 
-    const cb = (price: number) => this.handlePriceTick(signal, price);
+    const cb = (price: number) => {
+      this.handlePriceTick(signal, price).catch((err) =>
+        this.logger.error(`[PositionMonitor] ${symbol} tick error: ${err?.message}`, err?.stack),
+      );
+    };
     this.listenerRefs.set(sigKey, cb);
     this.watchedSymbols.add(sigKey);
     this.marketDataService.registerPriceListener(symbol, cb);
@@ -288,8 +292,10 @@ export class PositionMonitorService implements OnModuleInit {
     if (!isGridSignal) {
       const origEntry = entryPrice;
       // Use original SL for grid spacing (not widened safety SL)
+      // When SL=0 (hedge manages risk), use default 4% for grid spacing
       const originalSlForGrid = (signal as any).originalSlPrice || (signal as any).stopLossPrice;
-      const signalSlPct = Math.abs((originalSlForGrid - origEntry) / origEntry) * 100;
+      let signalSlPct = originalSlForGrid > 0 ? Math.abs((originalSlForGrid - origEntry) / origEntry) * 100 : 0;
+      if (signalSlPct < 1) signalSlPct = 4; // Minimum grid spacing 4% when SL=0 or too tight
       // Dynamic grid step: L4 at 80% of SL range, 20% buffer before SL
       const gridStep = signalSlPct / GRID_LEVEL_COUNT;
 
