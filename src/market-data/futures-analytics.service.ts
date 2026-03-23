@@ -31,7 +31,7 @@ export interface MoneyFlowAlert {
 }
 
 const ANALYTICS_CACHE_KEY = "cache:futures:analytics";
-const ANALYTICS_TTL = 300; // 5 minutes
+const ANALYTICS_TTL = 1200; // 20 minutes (scanner runs every 15min)
 const PREV_OI_KEY = "cache:futures:prev_oi";
 
 @Injectable()
