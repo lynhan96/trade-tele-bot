@@ -224,13 +224,15 @@ export class RuleEngineService {
     }
 
     // ── On-Chain Filters — FR, L/S ratio, Taker flow, OI ──
+    // On-chain only BLOCKS for OP_ONCHAIN strategy (has its own built-in on-chain logic)
+    // For other strategies: info-only (log but don't block)
     const ocResult = await this.onChainFilters.checkAll(coin, isLong);
     if (!ocResult.pass) {
       const failReasons = ocResult.reasons.filter(r => !r.includes('OK') && !r.includes('disabled') && !r.includes('skip'));
-      this.logger.log(
-        `[RuleEngine] ${coin} ${isLong ? "LONG" : "SHORT"} blocked by on-chain filter: ${failReasons.join(' | ')}`,
+      this.logger.debug(
+        `[RuleEngine] ${coin} ${isLong ? "LONG" : "SHORT"} on-chain warning (info-only): ${failReasons.join(' | ')}`,
       );
-      return null;
+      // Don't block — on-chain is advisory for non-OP_ONCHAIN strategies
     }
 
     if (winners.length >= 2) {

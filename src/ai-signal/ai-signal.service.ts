@@ -227,9 +227,10 @@ export class AiSignalService implements OnModuleInit {
       // ── Regime reversal: close counter-regime positions ──────────────────
       await this.handleRegimeReversal(globalRegime);
 
-      // ── Extreme move filter: skip coins with >30% 24h price change ──────
-      // After a 30%+ dump/pump the move is done, high risk of reversal/dead cat bounce.
-      const EXTREME_MOVE_PCT = 30;
+      // ── Extreme move filter: skip coins with >50% 24h price change ──────
+      // After a 50%+ dump/pump the move is done, high risk of reversal/dead cat bounce.
+      // Raised from 30% to 50% — market-wide pumps (30-40%) are common in bull runs.
+      const EXTREME_MOVE_PCT = 50;
       const filtered = shortlist.filter((entry) => {
         if (Math.abs(entry.priceChangePercent) > EXTREME_MOVE_PCT) {
           this.logger.log(
