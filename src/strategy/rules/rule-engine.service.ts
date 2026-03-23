@@ -47,9 +47,8 @@ export class RuleEngineService {
     currency: string,
     params: AiTunedParams,
   ): Promise<SignalResult | null> {
-    // Cap confidence threshold to prevent AutoTuner from over-restricting
-    // AutoTuner may set minConfidenceToTrade=80+ which blocks ALL signals
-    const maxConfThreshold = 72;
+    // Cap confidence threshold — hedge manages risk, let signals flow
+    const maxConfThreshold = 68;
     const confThreshold = Math.min(params.minConfidenceToTrade || 60, maxConfThreshold);
     if (params.confidence < confThreshold) {
       this.logger.debug(
@@ -387,11 +386,11 @@ export class RuleEngineService {
     const cfg = this.tradingConfig.get();
     const gates: Record<string, number> = {
       EMA_PULLBACK: cfg.gateEMAPullback || 78,
-      TREND_EMA: Math.min(cfg.gateTrendEMA || 72, 72),
-      STOCH_EMA_KDJ: Math.min(cfg.gateStochEMAKDJ || 72, 72),
-      RSI_CROSS: Math.min(cfg.gateRSICross || 68, 72),
-      SMC_FVG: Math.min((cfg as any).gateSMCFVG || 72, 72),
-      OP_ONCHAIN: Math.min((cfg as any).gateOpOnchain || 65, 72),
+      TREND_EMA: Math.min(cfg.gateTrendEMA || 68, 68),
+      STOCH_EMA_KDJ: Math.min(cfg.gateStochEMAKDJ || 68, 68),
+      RSI_CROSS: Math.min(cfg.gateRSICross || 65, 68),
+      SMC_FVG: Math.min((cfg as any).gateSMCFVG || 68, 68),
+      OP_ONCHAIN: Math.min((cfg as any).gateOpOnchain || 60, 68),
     };
     const gate = gates[strategy];
     if (gate && params.confidence < gate) {

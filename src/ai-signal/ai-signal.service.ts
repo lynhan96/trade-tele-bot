@@ -486,8 +486,8 @@ export class AiSignalService implements OnModuleInit {
     // Uniform floor — hedge manages risk, don't over-restrict entries
     const effectiveFloor = isRanging ? Math.max(67, marketGuard.confidenceFloor) : Math.max(CONFIDENCE_FLOOR, marketGuard.confidenceFloor);
     params.minConfidenceToTrade = Math.max(params.minConfidenceToTrade ?? 0, effectiveFloor);
-    // Hard cap 72 for ALL regimes — AutoTuner cannot over-restrict
-    const MAX_CONFIDENCE_CAP = 72;
+    // Hard cap 68 for ALL regimes — hedge manages risk, let signals flow
+    const MAX_CONFIDENCE_CAP = 68;
     if (params.minConfidenceToTrade > MAX_CONFIDENCE_CAP) {
       params.minConfidenceToTrade = MAX_CONFIDENCE_CAP;
     }
