@@ -483,23 +483,13 @@ export class AiSignalService implements OnModuleInit {
     // Confidence floor: regime-aware, boosted by market guard when direction is unclear
     const CONFIDENCE_FLOOR = 63;
     const isRanging = params.regime === "RANGE_BOUND" || params.regime === "SIDEWAYS";
-    const isStrongBull = params.regime === "STRONG_BULL";
-    // RANGE_BOUND/SIDEWAYS: 67 to filter whipsaws | STRONG_BULL: 80 (43% WR, -$53 — entries at tops)
-    const effectiveFloor = isStrongBull ? 80 : isRanging ? Math.max(67, marketGuard.confidenceFloor) : Math.max(CONFIDENCE_FLOOR, marketGuard.confidenceFloor);
+    // Uniform floor — hedge manages risk, don't over-restrict entries
+    const effectiveFloor = isRanging ? Math.max(67, marketGuard.confidenceFloor) : Math.max(CONFIDENCE_FLOOR, marketGuard.confidenceFloor);
     params.minConfidenceToTrade = Math.max(params.minConfidenceToTrade ?? 0, effectiveFloor);
-    // Cap per regime — prevent AI from setting unrealistically high thresholds
-    const regimeThresholdCap: Record<string, number> = {
-      SIDEWAYS: 70,
-      RANGE_BOUND: 70,
-      MIXED: 68,
-      VOLATILE: 70,
-      BTC_CORRELATION: 68,
-      STRONG_BULL: 80, // was 72 — effectively blocks most signals (floor=80, cap=80 → only max-confidence passes)
-      STRONG_BEAR: 72,
-    };
-    const cap = regimeThresholdCap[params.regime] ?? 68;
-    if (params.minConfidenceToTrade > cap) {
-      params.minConfidenceToTrade = cap;
+    // Hard cap 72 for ALL regimes — AutoTuner cannot over-restrict
+    const MAX_CONFIDENCE_CAP = 72;
+    if (params.minConfidenceToTrade > MAX_CONFIDENCE_CAP) {
+      params.minConfidenceToTrade = MAX_CONFIDENCE_CAP;
     }
 
     const signalResult = await this.ruleEngineService.evaluate(
