@@ -47,9 +47,13 @@ export class RuleEngineService {
     currency: string,
     params: AiTunedParams,
   ): Promise<SignalResult | null> {
-    if (params.confidence < (params.minConfidenceToTrade || 60)) {
+    // Cap confidence threshold to prevent AutoTuner from over-restricting
+    // AutoTuner may set minConfidenceToTrade=80+ which blocks ALL signals
+    const maxConfThreshold = 72;
+    const confThreshold = Math.min(params.minConfidenceToTrade || 60, maxConfThreshold);
+    if (params.confidence < confThreshold) {
       this.logger.debug(
-        `[RuleEngine] ${coin} skipped — AI confidence ${params.confidence} < threshold ${params.minConfidenceToTrade || 60}`,
+        `[RuleEngine] ${coin} skipped — AI confidence ${params.confidence} < threshold ${confThreshold}`,
       );
       return null;
     }
@@ -383,11 +387,11 @@ export class RuleEngineService {
     const cfg = this.tradingConfig.get();
     const gates: Record<string, number> = {
       EMA_PULLBACK: cfg.gateEMAPullback || 78,
-      TREND_EMA: cfg.gateTrendEMA || 80,
-      STOCH_EMA_KDJ: cfg.gateStochEMAKDJ || 82,
-      RSI_CROSS: cfg.gateRSICross || 75,
-      SMC_FVG: (cfg as any).gateSMCFVG || 82,
-      OP_ONCHAIN: (cfg as any).gateOpOnchain || 65, // lower gate — on-chain data does the filtering
+      TREND_EMA: Math.min(cfg.gateTrendEMA || 72, 72),
+      STOCH_EMA_KDJ: Math.min(cfg.gateStochEMAKDJ || 72, 72),
+      RSI_CROSS: Math.min(cfg.gateRSICross || 68, 72),
+      SMC_FVG: Math.min((cfg as any).gateSMCFVG || 72, 72),
+      OP_ONCHAIN: Math.min((cfg as any).gateOpOnchain || 65, 72),
     };
     const gate = gates[strategy];
     if (gate && params.confidence < gate) {
