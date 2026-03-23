@@ -460,7 +460,7 @@ export class RuleEngineService {
       const threshold = isRanging
         ? isLong ? 40 : 60   // ranging: LONG only if RSI<40 (bouncing from oversold), SHORT only if RSI>60 (selling overbought)
         : isBull
-          ? isLong ? 65 : 40  // bull: LONG OK up to 65, SHORT needs extreme RSI < 40
+          ? isLong ? 65 : 50  // bull: LONG OK up to 65, SHORT needs RSI > 50 (relaxed from 40)
           : isBear
             ? isLong ? 40 : 65  // bear: LONG needs RSI < 40, SHORT OK up to 65
             : isMixed
@@ -804,11 +804,8 @@ export class RuleEngineService {
       await this.redisService.delete(stateKey);
       return null;
     }
-    if (!patternState.isLong && params.regime === "STRONG_BULL") {
-      this.logger.debug(`[RuleEngine] ${coin} STOCH_EMA_KDJ SHORT blocked: STRONG_BULL regime`);
-      await this.redisService.delete(stateKey);
-      return null;
-    }
+    // Allow SHORT in STRONG_BULL — hedge system manages risk
+    // Diversification: need SHORT signals to balance portfolio
 
     await this.redisService.delete(stateKey);
 
@@ -1017,10 +1014,8 @@ export class RuleEngineService {
       this.logger.debug(`[RuleEngine] ${coin} SMC_FVG LONG blocked: STRONG_BEAR`);
       return null;
     }
-    if (!isLong && params.regime === "STRONG_BULL") {
-      this.logger.debug(`[RuleEngine] ${coin} SMC_FVG SHORT blocked: STRONG_BULL`);
-      return null;
-    }
+    // Allow SHORT in STRONG_BULL for SMC_FVG — FVG structure overrides regime
+    // Hedge system manages risk if SHORT is wrong
 
     // 4. RSI filter — avoid extreme RSI entries
     const rsi = this.indicatorService.getRsi(closes, cfg.rsiPeriod);
