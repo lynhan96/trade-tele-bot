@@ -184,6 +184,7 @@ You have FULL authority to close signals and manage hedges via API.
 
 ═══ ALLOWED ACTIONS ═══
 1. CLOSE_SIGNAL: ONLY when mainPnlUsdt > 0 AND PnL > +3%
+2. CLOSE_HEDGE: ONLY when hedgePnlUsdt > 0 (API verifies, rejects if losing)
 4. UPDATE_CONFIG: Adjust strategy parameters
 3. UPDATE_CONFIG: Adjust strategy parameters
 4. LEARNING: Save observations
@@ -256,13 +257,20 @@ async function executeTradeAction(decision, db) {
       return { ok: !!result, message: `Closed signal ${decision.data?.symbol || id}` }
     }
 
-
-      return { ok: !!hresult?.success, message: `Hedge closed for ${hid}` }
+    case "CLOSE_HEDGE": {
+      const hid = decision.signalId || decision.data?.signalId
+      if (!hid) return { ok: false, message: "No signal ID" }
+      // SAFETY: verify hedge is profitable before closing
+      const sig = await db.collection("ai_signals").findOne({ _id: new (await import("mongodb")).ObjectId(hid) })
+      if (!sig?.hedgeActive) return { ok: false, message: "No active hedge" }
+      const hEntry = sig.hedgeEntryPrice || 0
+      const hPrice = (await getPrices([sig.symbol]))[sig.symbol] || 0
+      const hPnl = sig.hedgeDirection === "LONG" ? ((hPrice - hEntry) / hEntry * 100) : ((hEntry - hPrice) / hEntry * 100)
+      if (hPnl <= 0) return { ok: false, message: "BLOCKED: hedge PnL " + hPnl.toFixed(2) + "% (must be > 0)" }
+      const { forceCloseHedge } = await import("../actions/adminApi.js")
+      const hresult = await forceCloseHedge(hid)
+      return { ok: !!hresult?.success, message: "Hedge closed (PnL +" + hPnl.toFixed(2) + "%)" }
     }
-
-      return { ok: !!oresult?.success, message: `Hedge opened for ${oid}` }
-    }
-
     case "UPDATE_CONFIG": {
       const field = decision.data?.field
       const value = decision.data?.value
