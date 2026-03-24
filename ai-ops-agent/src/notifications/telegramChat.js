@@ -9,7 +9,8 @@ import { buildMemoryContext } from "../utils/memory.js"
 import * as agentLog from "../utils/agentLogger.js"
 import { logger } from "../utils/logger.js"
 
-const NVM = 'export NVM_DIR="$HOME/.nvm" && [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" && '
+const NODE_BIN = "/home/ubuntu/.nvm/versions/node/v18.20.2/bin"
+const CLAUDE_PATH = `${NODE_BIN}/claude`
 const APP_ROOT = () => process.env.APP_ROOT || "/home/ubuntu/projects/binance-tele-bot"
 const TG_TOKEN = () => process.env.AGENT_TELEGRAM_BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN
 const CHAT_ID = () => process.env.TELEGRAM_CHAT_ID
@@ -117,9 +118,9 @@ ${userMessage}`
 }
 
 async function handleMessage(chatId, text) {
-  if (String(chatId) !== String(CHAT_ID())) {
-    logger.warn(`[TgChat] Unauthorized chat: ${chatId}`)
-    return
+  const allowedIds = (process.env.AI_ADMIN_TELEGRAM_ID || CHAT_ID() || "").split(",").map(s => s.trim())
+  if (!allowedIds.includes(String(chatId))) {
+    return // Silent ignore — not admin
   }
 
   addToHistory("user", text)
@@ -128,10 +129,17 @@ async function handleMessage(chatId, text) {
 
   try {
     const prompt = await buildContext(text)
+    // Write prompt to temp file, pass via --print flag with file read
+    const tmpFile = `/tmp/agent_chat_${Date.now()}.txt`
+    const fs = await import("fs")
+    fs.writeFileSync(tmpFile, prompt, "utf8")
+    const envPath = `${NODE_BIN}:${process.env.PATH || "/usr/bin:/bin"}`
     const output = execSync(
-      `${NVM}claude --print ${JSON.stringify(prompt)}`,
-      { cwd: APP_ROOT(), encoding: "utf8", timeout: 90000, env: { ...process.env, HOME: "/home/ubuntu" } }
+      `cat "${tmpFile}" | ${CLAUDE_PATH} --print -`,
+      { cwd: APP_ROOT(), encoding: "utf8", timeout: 90000, shell: "/bin/bash",
+        env: { ...process.env, HOME: "/home/ubuntu", PATH: envPath, NODE_PATH: NODE_BIN } }
     )
+    try { fs.unlinkSync(tmpFile) } catch {}
 
     // Check for action commands in response
     const actions = output.match(/ACTION:(CLOSE_SIGNAL|OPEN_HEDGE|CLOSE_HEDGE|UPDATE_CONFIG):([^\n]+)/g) || []
@@ -175,8 +183,8 @@ export function startTelegramChat() {
         if (update.message?.text) {
           const chatId = update.message.chat.id
           const text = update.message.text
-          // Only respond to admin chat + agent-relevant messages
-          if (String(chatId) === String(CHAT_ID())) {
+          const allowed = (process.env.AI_ADMIN_TELEGRAM_ID || CHAT_ID() || "").split(",").map(s => s.trim())
+          if (allowed.includes(String(chatId))) {
             handleMessage(chatId, text).catch(err =>
               logger.error(`[TgChat] Handle error: ${err.message}`)
             )
