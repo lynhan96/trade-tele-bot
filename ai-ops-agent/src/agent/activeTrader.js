@@ -184,62 +184,26 @@ async function collectFullContext(db) {
 }
 
 function buildTraderPrompt(ctx) {
-  return `You are an AI trading ADVISOR analyzing live Binance Futures positions.
-You are an ADVISOR — you CANNOT close, open, or modify any position directly.
-The bot handles all execution: TP, trail SL, hedge open/close, NET_POSITIVE, FLIP.
+  // Compact position format (saves ~65% tokens vs JSON.stringify pretty-print)
+  const posText = ctx.activePositions.map(p =>
+    `${p.symbol} ${p.direction} entry:${p.entry} price:${p.livePrice} pnl:${p.mainPnlPct}%($${p.mainPnlUsdt}) hedge:${p.hedgeActive}${p.hedgeActive ? ` hDir:${p.hedgeDirection} hEntry:${p.hedgeEntry} hPnl:${p.hedgePnlPct}%` : ''} cycles:${p.hedgeCycles} banked:$${p.banked} total:$${p.totalPnl} conf:${p.confidence} strat:${p.strategy}`
+  ).join("\n")
 
-═══ YOUR ROLE ═══
-- Analyze positions and market conditions
-- Recommend config adjustments (UPDATE_CONFIG) to optimize bot behavior
-- Record observations and patterns (LEARNING)
-- You CANNOT and MUST NOT close signals, open hedges, or close hedges
+  return `AI trading ADVISOR. CANNOT close/open positions. Bot handles TP/SL/hedge/grid automatically.
+ALLOWED: UPDATE_CONFIG | LEARNING | NO_ACTION (max 3 actions)
+Config fields: takeProfitPercent, stopLossPercent, hedgeThreshold, trailStopPercent, maxActiveSignals, maxExposureLeverage, minConfidence, enabledStrategies
+Analyze: regime, strategy WR (<40% on 5+ → disable), hedge effectiveness, exposure, loss streaks.
 
-═══ ALLOWED ACTIONS (ONLY these 3) ═══
-1. UPDATE_CONFIG: Adjust trading parameters (TP%, SL%, hedge threshold, strategy enable/disable)
-2. LEARNING: Save observations for future reference
-3. NO_ACTION: Default — no config changes needed
+POSITIONS (${ctx.activePositions.length}):
+${posText}
 
-═══ WHAT YOU ANALYZE ═══
-- Market regime (trending/ranging/volatile) → adjust TP%/SL% via config
-- Strategy performance (WR < 40% on 5+ trades → recommend disable)
-- Hedge effectiveness (too many breakeven cycles → adjust hedgeThreshold)
-- Exposure level (leverage > 25x → recommend reducing position size)
-- Loss streaks → recommend tightening entry criteria
+STATS: ${JSON.stringify(ctx.stats)}
+RECENT CLOSED: ${JSON.stringify(ctx.recentClosed)}
+ON-CHAIN: ${JSON.stringify(ctx.onchain)}
+MARKET: ${JSON.stringify(ctx.market)}
+MEMORY: ${ctx.memory || "None"}
 
-═══ WHAT BOT HANDLES AUTOMATICALLY (DO NOT INTERFERE) ═══
-- TP hit → trail activated (1% pullback closes)
-- SL/Trail SL → automatic
-- Hedge open at -3% → automatic
-- Hedge close via TP/trail/NET_POSITIVE/FLIP → automatic
-- Grid entry/exit → automatic
-
-═══ RESPONSE (JSON only, no markdown) ═══
-{"analysis":"Vietnamese assessment of all positions + market","decisions":[{"action":"UPDATE_CONFIG|LEARNING|NO_ACTION","reason":"Vietnamese","data":{"field":"configField","value":"newValue"}}],"learnings":[{"key":"unique_key","insight":"pattern observed"}]}
-
-═══ CONFIG FIELDS YOU CAN ADJUST ═══
-- takeProfitPercent, stopLossPercent, hedgeThreshold, trailStopPercent
-- maxActiveSignals, maxExposureLeverage, minConfidence
-- Strategy enable/disable via: enabledStrategies (array)
-
-═══ LIVE POSITIONS ═══
-${JSON.stringify(ctx.activePositions, null, 2)}
-
-═══ STATS ═══
-${JSON.stringify(ctx.stats)}
-
-═══ RECENT CLOSED ═══
-${JSON.stringify(ctx.recentClosed)}
-
-═══ ON-CHAIN ═══
-${JSON.stringify(ctx.onchain)}
-
-═══ MARKET CONTEXT ═══
-${JSON.stringify(ctx.market, null, 2)}
-
-═══ MEMORY ═══
-${ctx.memory || "No history yet — first cycle"}
-
-Analyze each position and market conditions. Recommend config adjustments if needed:`
+JSON response: {"analysis":"Vietnamese","decisions":[{"action":"...","reason":"...","data":{"field":"...","value":"..."}}],"learnings":[{"key":"...","insight":"..."}]}`
 }
 
 function parseResponse(output) {

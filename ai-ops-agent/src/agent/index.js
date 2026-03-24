@@ -10,6 +10,7 @@ import { logger } from "../utils/logger.js"
 
 let lastReportHour = -1
 let consecutiveCrashes = 0
+let isFirstRun = true
 
 // ═══ Lightweight check — every 15 min (no Claude, DB only) ═══
 async function runLightCheck() {
@@ -22,9 +23,12 @@ async function runLightCheck() {
       await notifyAutoFixed(["🔧 Auto-fix dữ liệu", ...fixes.slice(0, 3)])
     }
 
-    // ── 2. Crash detection ──
+    // ── 2. Crash detection (skip first run — stale logs cause false positives) ──
     const logs = collectLogs()
-    if (hasAnomalies(logs)) {
+    if (isFirstRun) {
+      isFirstRun = false
+      logger.info("[CrashDetect] First run — skipped (baseline set)")
+    } else if (hasAnomalies(logs)) {
       consecutiveCrashes++
       restartBot()
       if (consecutiveCrashes >= 3) {
