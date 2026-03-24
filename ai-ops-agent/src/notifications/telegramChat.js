@@ -82,38 +82,27 @@ async function buildContext(userMessage) {
 
   const memory = buildMemoryContext()
 
-  return `You are an AI trading assistant. Answer the user's question using the data below.
-You can also execute actions if the user asks:
-- Close a winning signal: respond with ACTION:CLOSE_SIGNAL:signalId
-- Open hedge: respond with ACTION:OPEN_HEDGE:signalId
-- Close hedge: respond with ACTION:CLOSE_HEDGE:signalId
-- Update config: respond with ACTION:UPDATE_CONFIG:field:value
+  // Build compact text (avoid large JSON that triggers usage policy)
+  const posText = positions.map(p =>
+    `${p.symbol} ${p.direction} entry:${p.entry} price:${p.price} pnl:${p.pnlPct}% ($${p.pnlUsdt}) hedge:${p.hedge} cycles:${p.hedgeCycles} banked:$${p.banked}`
+  ).join("\n")
 
-IMPORTANT:
-- Respond in Vietnamese
-- Be concise (max 500 chars for Telegram)
+  return `You are an AI trading assistant. Answer in Vietnamese, max 300 chars.
+Actions: ACTION:CLOSE_SIGNAL:id | ACTION:OPEN_HEDGE:id | ACTION:CLOSE_HEDGE:id
+Rules: NEVER close losing positions. Only close pnl > 0.
 - If user asks to close a LOSING position, REFUSE and explain hedge will manage
 - Include signal IDs when referencing positions so user can act
 
-== POSITIONS ==
-${JSON.stringify(positions, null, 1)}
+POSITIONS:
+${posText}
 
-== STATS ==
-Wallet: $${(1000 + mainPnl + hedgePnl).toFixed(2)} | WR: ${wins + losses > 0 ? ((wins / (wins + losses)) * 100).toFixed(1) : 0}%
-Main PnL: $${mainPnl.toFixed(2)} | Hedge PnL: $${hedgePnl.toFixed(2)}
-Open: ${positions.length} signals | W: ${wins} L: ${losses}
+STATS: Wallet $${(1000 + mainPnl + hedgePnl).toFixed(2)} | WR ${wins + losses > 0 ? ((wins / (wins + losses)) * 100).toFixed(1) : 0}% | ${positions.length} open | W${wins} L${losses}
+MARKET: BTC $${market.btc?.price || "?"} | Regime: ${market.regime || "?"} | Sentiment: ${market.onchainSentiment || "?"}
 
-== MARKET ==
-${JSON.stringify(market, null, 1)}
-
-== MEMORY ==
-${memory || "Empty"}
-
-== CONVERSATION HISTORY ==
+HISTORY:
 ${getHistoryContext()}
 
-== USER MESSAGE ==
-${userMessage}`
+User: ${userMessage}`
 }
 
 async function handleMessage(chatId, text) {
@@ -158,9 +147,8 @@ async function handleMessage(chatId, text) {
     await sendTg(chatId, cleanResponse || "Không có gì để báo cáo.")
     await agentLog.decision("active_trader", `Trả lời user: ${cleanResponse.slice(0, 100)}`)
   } catch (err) {
-    const stderr = err.stderr?.slice(0, 200) || ""
-    logger.error(`[TgChat] Error: ${err.message?.slice(0, 200)} | stderr: ${stderr}`)
-    await sendTg(chatId, `❌ Lỗi: ${stderr || err.message?.slice(0, 100)}`)
+    logger.error(`[TgChat] Error: ${err.message?.slice(0, 200)}`)
+    await sendTg(chatId, `❌ Lỗi: ${err.message?.slice(0, 100)}`)
   }
 }
 
