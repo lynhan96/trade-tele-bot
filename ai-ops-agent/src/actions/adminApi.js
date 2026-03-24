@@ -64,3 +64,18 @@ export const updateTradingConfig = (data) => api("patch", "trading-config", data
 export const getSignals = (params) => api("get", `signals?${new URLSearchParams(params)}`)
 export const getOrders = (params) => api("get", `orders?${new URLSearchParams(params)}`)
 export const getDashboard = () => api("get", "dashboard")
+
+// ── Hedge Actions ──
+// Force open hedge for signal (bypass PnL threshold)
+export async function forceOpenHedge(signalId) {
+  const result = await api("post", `signals/${signalId}/hedge`)
+  if (result?.success) logger.info(`[AdminAPI] Hedge opened for ${signalId}`)
+  return result
+}
+
+// Force close hedge for signal
+export async function forceCloseHedge(signalId) {
+  const result = await api("post", `signals/${signalId}/close-hedge`)
+  if (result?.success) logger.info(`[AdminAPI] Hedge closed for ${signalId}`)
+  return result
+}

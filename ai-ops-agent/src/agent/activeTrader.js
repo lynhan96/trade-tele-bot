@@ -1,7 +1,8 @@
+import { collectMarketContext } from "../utils/marketContext.js"
 import { getPrices } from "../utils/redis.js"
 import { getDb } from "../utils/db.js"
 import { buildMemoryContext, saveDecision, saveLearning } from "../utils/memory.js"
-import { closeSignal, updateSignal, updateTradingConfig, getDashboard } from "../actions/adminApi.js"
+import { closeSignal, updateSignal, updateTradingConfig, getDashboard, forceOpenHedge, forceCloseHedge } from "../actions/adminApi.js"
 import { logger } from "../utils/logger.js"
 import * as agentLog from "../utils/agentLogger.js"
 import { execSync } from "child_process"
@@ -152,6 +153,7 @@ async function collectFullContext(db) {
 
   // ── Memory ──
   const memory = buildMemoryContext()
+  const market = await collectMarketContext()
 
   return {
     activePositions: positions,
@@ -165,7 +167,8 @@ async function collectFullContext(db) {
       totalPositions: positions.length,
       unrealizedPnl: +positions.reduce((s, p) => s + p.totalPnl, 0).toFixed(2)
     },
-    memory
+    memory,
+    market
   }
 }
 
@@ -181,7 +184,9 @@ You have FULL authority to close signals and manage hedges via API.
 
 ═══ ALLOWED ACTIONS ═══
 1. CLOSE_SIGNAL: ONLY when mainPnlUsdt > 0 AND PnL > +3%
-2. CLOSE_HEDGE: ONLY when hedgePnlUsdt > 0 AND hedge PnL > +2%
+2. OPEN_HEDGE: Force open hedge for a losing signal that has no hedge yet
+3. CLOSE_HEDGE: Close profitable hedge (hedgePnlUsdt > 0)
+4. UPDATE_CONFIG: Adjust strategy parameters
 3. UPDATE_CONFIG: Adjust strategy parameters
 4. LEARNING: Save observations
 5. NO_ACTION: Default — when no winning position to close
@@ -193,7 +198,7 @@ You have FULL authority to close signals and manage hedges via API.
 - Agent does NOT manage hedge logic
 
 ═══ RESPONSE (JSON only, no markdown) ═══
-{"analysis":"Vietnamese assessment","decisions":[{"action":"CLOSE_SIGNAL|CLOSE_HEDGE|UPDATE_CONFIG|LEARNING|NO_ACTION","signalId":"xxx","reason":"Vietnamese","data":{}}],"learnings":[{"key":"unique_key","insight":"pattern"}]}
+{"analysis":"Vietnamese assessment","decisions":[{"action":"CLOSE_SIGNAL|OPEN_HEDGE|CLOSE_HEDGE|CLOSE_HEDGE|UPDATE_CONFIG|LEARNING|NO_ACTION","signalId":"xxx","reason":"Vietnamese","data":{}}],"learnings":[{"key":"unique_key","insight":"pattern"}]}
 
 ═══ ACTIONS ═══
 - CLOSE_SIGNAL: ONLY for WINNING signals (mainPnlUsdt > 0)
@@ -213,6 +218,9 @@ ${JSON.stringify(ctx.recentClosed)}
 
 ═══ ON-CHAIN ═══
 ${JSON.stringify(ctx.onchain)}
+
+═══ MARKET CONTEXT ═══
+${JSON.stringify(ctx.market, null, 2)}
 
 ═══ MEMORY ═══
 ${ctx.memory || "No history yet — first cycle"}
@@ -251,10 +259,7 @@ async function executeTradeAction(decision, db) {
       return { ok: !!result, message: `Closed signal ${decision.data?.symbol || id}` }
     }
 
-    case "CLOSE_HEDGE": {
-      // Close hedge by updating signal to force hedge close on next tick
-      const id = decision.signalId || decision.data?.signalId
-      if (!id) return { ok: false, message: "No signal ID" }
+case "CLOSE_HEDGE": {      const id = decision.signalId || decision.data?.signalId;      if (!id) return { ok: false, message: "No signal ID" };      const result = await forceCloseHedge(id);      return { ok: !!result?.success, message: `Hedge closed for ${id}` };    }    case "OPEN_HEDGE": {      const id2 = decision.signalId || decision.data?.signalId;      if (!id2) return { ok: false, message: "No signal ID" };      const result2 = await forceOpenHedge(id2);      return { ok: !!result2?.success, message: `Hedge opened for ${id2}` };    }
       // Set hedgeTpPrice to current price to trigger TP on next tick
       const sig = await db.collection("ai_signals").findOne({ _id: new (await import("mongodb")).ObjectId(id) })
       if (!sig || !sig.hedgeActive) return { ok: false, message: "No active hedge" }
