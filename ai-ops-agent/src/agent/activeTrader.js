@@ -3,7 +3,10 @@ import { getDb } from "../utils/db.js"
 import { buildMemoryContext, saveDecision, saveLearning } from "../utils/memory.js"
 import { closeSignal, updateSignal, updateTradingConfig, getDashboard } from "../actions/adminApi.js"
 import { logger } from "../utils/logger.js"
-import { execSync } from "child_process"
+import { execSync, execFileSync } from "child_process"
+import { writeFileSync, unlinkSync } from "fs"
+import { tmpdir } from "os"
+import { join } from "path"
 
 const NVM = 'export NVM_DIR="$HOME/.nvm" && [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" && '
 const APP_ROOT = () => process.env.APP_ROOT || "/home/ubuntu/projects/binance-tele-bot"
@@ -24,13 +27,20 @@ export async function runActiveTrader() {
 
   let decisions
   try {
-    const output = execSync(
-      `${NVM}claude --print ${JSON.stringify(prompt)}`,
-      { cwd: APP_ROOT(), encoding: "utf8", timeout: 3 * 60 * 1000, env: { ...process.env, HOME: "/home/ubuntu" } }
-    )
-    decisions = parseResponse(output)
+    // Write prompt to temp file to avoid shell argument length/escaping issues
+    const tmpFile = join(tmpdir(), `trader-prompt-${Date.now()}.txt`)
+    writeFileSync(tmpFile, prompt, "utf8")
+    try {
+      const output = execSync(
+        `${NVM}cat ${tmpFile} | claude --print -`,
+        { cwd: APP_ROOT(), encoding: "utf8", timeout: 3 * 60 * 1000, env: { ...process.env, HOME: "/home/ubuntu" } }
+      )
+      decisions = parseResponse(output)
+    } finally {
+      try { unlinkSync(tmpFile) } catch {}
+    }
   } catch (err) {
-    logger.error(`[Trader] Claude failed: ${err.message?.slice(0, 200)}`)
+    logger.error(`[Trader] Claude failed: ${err.message?.slice(0, 500)}`)
     return []
   }
 
