@@ -259,16 +259,18 @@ async function executeTradeAction(decision, db) {
       return { ok: !!result, message: `Closed signal ${decision.data?.symbol || id}` }
     }
 
-case "CLOSE_HEDGE": {      const id = decision.signalId || decision.data?.signalId;      if (!id) return { ok: false, message: "No signal ID" };      const result = await forceCloseHedge(id);      return { ok: !!result?.success, message: `Hedge closed for ${id}` };    }    case "OPEN_HEDGE": {      const id2 = decision.signalId || decision.data?.signalId;      if (!id2) return { ok: false, message: "No signal ID" };      const result2 = await forceOpenHedge(id2);      return { ok: !!result2?.success, message: `Hedge opened for ${id2}` };    }
-      // Set hedgeTpPrice to current price to trigger TP on next tick
-      const sig = await db.collection("ai_signals").findOne({ _id: new (await import("mongodb")).ObjectId(id) })
-      if (!sig || !sig.hedgeActive) return { ok: false, message: "No active hedge" }
-      // Force hedge close by setting TP to current hedge price
-      await db.collection("ai_signals").updateOne(
-        { _id: sig._id },
-        { $set: { hedgeTpPrice: sig.hedgeDirection === "LONG" ? 0 : 999999 } }
-      )
-      return { ok: true, message: `Hedge close triggered for ${sig.symbol}` }
+    case "CLOSE_HEDGE": {
+      const hid = decision.signalId || decision.data?.signalId
+      if (!hid) return { ok: false, message: "No signal ID" }
+      const hresult = await forceCloseHedge(hid)
+      return { ok: !!hresult?.success, message: `Hedge closed for ${hid}` }
+    }
+
+    case "OPEN_HEDGE": {
+      const oid = decision.signalId || decision.data?.signalId
+      if (!oid) return { ok: false, message: "No signal ID" }
+      const oresult = await forceOpenHedge(oid)
+      return { ok: !!oresult?.success, message: `Hedge opened for ${oid}` }
     }
 
     case "UPDATE_CONFIG": {
