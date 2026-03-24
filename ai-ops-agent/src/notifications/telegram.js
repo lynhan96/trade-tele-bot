@@ -2,7 +2,7 @@ import axios from 'axios'
 import { logger } from '../utils/logger.js'
 
 const send = (method, data) =>
-  axios.post(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/${method}`, data)
+  axios.post(`https://api.telegram.org/bot${process.env.AGENT_TELEGRAM_BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN}/${method}`, data)
     .catch(e => logger.error(`Telegram: ${e.message}`))
 
 const esc = t => String(t || '').replace(/[_*[\]()~`>#+=|{}.!\\-]/g, '\\$&')
