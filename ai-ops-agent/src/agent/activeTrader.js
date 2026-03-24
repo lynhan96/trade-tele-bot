@@ -32,9 +32,11 @@ export async function runActiveTrader() {
   try {
     writeFileSync(tmpFile, prompt, "utf8")
     logger.info(`[Trader] Prompt written: ${tmpFile} (${prompt.length} bytes)`)
+    const env = { ...process.env, HOME: "/home/ubuntu" }
+    delete env.ANTHROPIC_API_KEY
     const output = execSync(
-      `${NVM}cat ${tmpFile} | claude --print 2>/tmp/trader-claude-stderr.txt`,
-      { cwd: APP_ROOT(), encoding: "utf8", timeout: 3 * 60 * 1000, env: { ...process.env, HOME: "/home/ubuntu" } }
+      `${NVM}cat ${tmpFile} | claude --print`,
+      { cwd: APP_ROOT(), encoding: "utf8", timeout: 3 * 60 * 1000, env }
     )
     decisions = parseResponse(output)
     try { unlinkSync(tmpFile) } catch {}

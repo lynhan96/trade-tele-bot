@@ -20,9 +20,11 @@ export async function makeDecisions(tradingReport, skillResults) {
   const tmpFile = join(tmpdir(), `decision-prompt-${Date.now()}.txt`)
   try {
     writeFileSync(tmpFile, prompt, "utf8")
+    const env = { ...process.env, HOME: "/home/ubuntu" }
+    delete env.ANTHROPIC_API_KEY
     const output = execSync(
       `${NVM}cat ${tmpFile} | claude --print`,
-      { cwd: APP_ROOT(), encoding: "utf8", timeout: 3 * 60 * 1000, env: { ...process.env, HOME: "/home/ubuntu" } }
+      { cwd: APP_ROOT(), encoding: "utf8", timeout: 3 * 60 * 1000, env }
     )
     decisions = parseDecisions(output)
   } catch (err) {

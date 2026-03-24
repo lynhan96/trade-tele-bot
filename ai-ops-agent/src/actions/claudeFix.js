@@ -14,14 +14,11 @@ export async function autoFixWithClaude(diagnosis, tradingReport) {
   const tmpFile = join(tmpdir(), `claudefix-prompt-${Date.now()}.txt`)
   try {
     writeFileSync(tmpFile, prompt, "utf8")
+    const env = { ...process.env, HOME: "/home/ubuntu" }
+    delete env.ANTHROPIC_API_KEY
     const output = execSync(
       `${NVM}cat ${tmpFile} | claude --print --allowedTools Edit,Read,Grep,Bash`,
-      {
-        cwd: APP_ROOT(),
-        encoding: "utf8",
-        timeout: 5 * 60 * 1000,
-        env: { ...process.env, HOME: "/home/ubuntu" }
-      }
+      { cwd: APP_ROOT(), encoding: "utf8", timeout: 5 * 60 * 1000, env }
     )
 
     const hasChanges = output.includes("Edit") || output.includes("fixed") || output.includes("updated")
