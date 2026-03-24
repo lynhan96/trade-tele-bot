@@ -3,10 +3,8 @@ import { getDb } from "../utils/db.js"
 import { buildMemoryContext, saveDecision, saveLearning } from "../utils/memory.js"
 import { closeSignal, updateSignal, updateTradingConfig, getDashboard } from "../actions/adminApi.js"
 import { logger } from "../utils/logger.js"
-import { execSync, execFileSync } from "child_process"
-import { writeFileSync, unlinkSync } from "fs"
-import { tmpdir } from "os"
-import { join } from "path"
+import * as agentLog from "../utils/agentLogger.js"
+import { execSync } from "child_process"
 
 const NVM = 'export NVM_DIR="$HOME/.nvm" && [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" && '
 const APP_ROOT = () => process.env.APP_ROOT || "/home/ubuntu/projects/binance-tele-bot"
@@ -24,27 +22,17 @@ export async function runActiveTrader() {
   // ═══ 2. Claude decides ═══
   const prompt = buildTraderPrompt(context)
   logger.info(`[Trader] ${context.activePositions.length} positions | Asking Claude...`)
+  await agentLog.thought("active_trader", `Phân tích ${context.activePositions.length} vị thế | Wallet: $${context.stats.wallet}`, context.stats)
 
   let decisions
   try {
-    // Write prompt to temp file to avoid shell argument length/escaping issues
-    const tmpFile = join(tmpdir(), `trader-prompt-${Date.now()}.txt`)
-    writeFileSync(tmpFile, prompt, "utf8")
-    try {
-      const output = execSync(
-        `${NVM}cat ${tmpFile} | claude --print -`,
-        { cwd: APP_ROOT(), encoding: "utf8", timeout: 3 * 60 * 1000, env: { ...process.env, HOME: "/home/ubuntu" } }
-      )
-      decisions = parseResponse(output)
-    } finally {
-      try { unlinkSync(tmpFile) } catch {}
-    }
+    const output = execSync(
+      `${NVM}claude --print ${JSON.stringify(prompt)}`,
+      { cwd: APP_ROOT(), encoding: "utf8", timeout: 3 * 60 * 1000, env: { ...process.env, HOME: "/home/ubuntu" } }
+    )
+    decisions = parseResponse(output)
   } catch (err) {
-    const stderr = err.stderr?.toString?.()?.slice(0, 500) || ""
-    const stdout = err.stdout?.toString?.()?.slice(0, 500) || ""
-    logger.error(`[Trader] Claude failed: ${err.message?.slice(0, 300)}`)
-    if (stderr) logger.error(`[Trader] stderr: ${stderr}`)
-    if (stdout) logger.error(`[Trader] stdout: ${stdout}`)
+    logger.error(`[Trader] Claude failed: ${err.message?.slice(0, 200)}`)
     return []
   }
 
@@ -61,6 +49,7 @@ export async function runActiveTrader() {
       saveDecision({ ...d, outcome: result.ok ? "success" : "failed", details: result.message })
       results.push(result)
       logger.info(`[Trader] ✅ ${d.action}: ${result.message}`)
+      await agentLog.action("active_trader", result.message, d.action, d.data?.symbol, { ok: result.ok })
     } catch (err) {
       saveDecision({ ...d, outcome: "error", details: err.message })
       logger.error(`[Trader] ❌ ${d.action}: ${err.message}`)
@@ -232,6 +221,7 @@ function parseResponse(output) {
     }
     if (parsed.analysis) {
       logger.info(`[Trader] Analysis: ${parsed.analysis.slice(0, 200)}`)
+      agentLog.decision("active_trader", parsed.analysis)
     }
     return parsed.decisions || []
   } catch (err) {

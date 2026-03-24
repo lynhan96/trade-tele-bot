@@ -14,7 +14,9 @@ import { DailyLimitHistory, DailyLimitHistoryDocument } from '../schemas/daily-l
 import { AiReview, AiReviewDocument } from '../schemas/ai-review.schema';
 import { Order, OrderDocument } from '../schemas/order.schema';
 import { OnChainSnapshot, OnChainSnapshotDocument } from '../schemas/onchain-snapshot.schema';
+import { AgentEvent, AgentEventDocument } from '../schemas/agent-event.schema';
 import { UserRealTradingService } from '../ai-signal/user-real-trading.service';
+import { AdminGateway } from './admin.gateway';
 
 /** Must match the key in SignalQueueService. */
 const ACTIVE_KEY = (signalKey: string) => `cache:ai-signal:active:${signalKey}`;
@@ -39,8 +41,10 @@ export class AdminService {
     @InjectModel(AiReview.name) private aiReviewModel: Model<AiReviewDocument>,
     @InjectModel(Order.name) private orderModel: Model<OrderDocument>,
     @InjectModel(OnChainSnapshot.name) private onChainSnapshotModel: Model<OnChainSnapshotDocument>,
+    @InjectModel(AgentEvent.name) private agentEventModel: Model<AgentEventDocument>,
     private readonly redisService: RedisService,
     private readonly userRealTradingService: UserRealTradingService,
+    private readonly adminGateway: AdminGateway,
   ) {}
 
   async getOrders(query: {
@@ -1102,5 +1106,58 @@ export class AdminService {
     ]);
 
     return { data, total, page, totalPages: Math.ceil(total / limit) };
+  }
+
+  // ─── Agent Dashboard ──────────────────────────────────────────────────────
+
+  async getAgentEvents(query: any) {
+    const { agent, type, limit = 50, page = 1 } = query;
+    const filter: any = {};
+    if (agent) filter.agent = agent;
+    if (type) filter.type = type;
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+    const [events, total] = await Promise.all([
+      this.agentEventModel.find(filter).sort({ eventAt: -1 }).skip(skip).limit(parseInt(limit)).lean(),
+      this.agentEventModel.countDocuments(filter),
+    ]);
+    return { events, total, page: parseInt(page), limit: parseInt(limit) };
+  }
+
+  async getAgentStatus() {
+    const lastEvent = await this.agentEventModel.findOne().sort({ eventAt: -1 }).lean();
+    const lastHour = new Date(Date.now() - 3600000);
+    const recentEvents = await this.agentEventModel.countDocuments({ eventAt: { $gte: lastHour } });
+    const recentActions = await this.agentEventModel.countDocuments({ type: 'ACTION', eventAt: { $gte: lastHour } });
+    const recentErrors = await this.agentEventModel.countDocuments({ type: 'ERROR', eventAt: { $gte: lastHour } });
+
+    const agents = ['market_analyzer', 'position_manager', 'bug_detector', 'strategy_tuner', 'active_trader'];
+    const agentStatus = {};
+    for (const a of agents) {
+      const last = await this.agentEventModel.findOne({ agent: a }).sort({ eventAt: -1 }).lean();
+      agentStatus[a] = {
+        lastSeen: last?.eventAt,
+        lastStatus: last?.status,
+        lastMessage: last?.message,
+      };
+    }
+
+    return {
+      online: lastEvent && (Date.now() - new Date(lastEvent.eventAt).getTime()) < 10 * 60 * 1000,
+      lastEvent: lastEvent?.eventAt,
+      recentEvents,
+      recentActions,
+      recentErrors,
+      agents: agentStatus,
+    };
+  }
+
+  async getAgentLearnings() {
+    return this.agentEventModel.find({ type: 'LEARNING' }).sort({ eventAt: -1 }).limit(50).lean();
+  }
+
+  async createAgentEvent(dto: any) {
+    const event = await this.agentEventModel.create({ ...dto, eventAt: new Date() });
+    this.adminGateway.emitAgentEvent(event);
+    return event;
   }
 }

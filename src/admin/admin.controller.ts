@@ -262,4 +262,30 @@ export class AdminController {
     const config = await this.tradingConfig.reset();
     return { config };
   }
+
+  // ─── Agent Dashboard ──────────────────────────────────────────────────────
+
+  @UseGuards(AdminGuard)
+  @Get("agent/events")
+  getAgentEvents(@Query() query: any) {
+    return this.adminService.getAgentEvents(query);
+  }
+
+  @UseGuards(AdminGuard)
+  @Get("agent/status")
+  getAgentStatus() {
+    return this.adminService.getAgentStatus();
+  }
+
+  @UseGuards(AdminGuard)
+  @Get("agent/learnings")
+  getAgentLearnings() {
+    return this.adminService.getAgentLearnings();
+  }
+
+  @Post("agent/events")
+  createAgentEvent(@Body() dto: any) {
+    // No auth required — agent calls this internally
+    return this.adminService.createAgentEvent(dto);
+  }
 }

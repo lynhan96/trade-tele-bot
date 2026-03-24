@@ -1,5 +1,6 @@
 import { getDb } from "../utils/db.js"
 import { logger } from "../utils/logger.js"
+import * as agentLog from "../utils/agentLogger.js"
 
 // ══════════════════════════════════════════════════════════
 // SKILL 1: DATA VALIDATOR — auto-fix corrupted data
@@ -97,7 +98,10 @@ export async function runDataValidator() {
     }
   }
 
-  if (fixes.length) logger.info(`[DataValidator] ${fixes.length} fixes: ${fixes.join(" | ")}`)
+  if (fixes.length) {
+    logger.info(`[DataValidator] ${fixes.length} fixes: ${fixes.join(" | ")}`)
+    for (const f of fixes) await agentLog.action("bug_detector", f, "DATA_FIX")
+  }
   return fixes
 }
 
@@ -133,7 +137,10 @@ export async function runHedgeManager() {
     }
   }
 
-  if (actions.length) logger.info(`[HedgeManager] ${actions.join(" | ")}`)
+  if (actions.length) {
+    logger.info(`[HedgeManager] ${actions.join(" | ")}`)
+    for (const a of actions) await agentLog.thought("position_manager", a)
+  }
   return actions
 }
 
@@ -171,7 +178,10 @@ export async function runStrategyTuner() {
     if (recent5WR < 20 && s.count >= 8) actions.push(`🔴 ${name}: recent 5 WR ${recent5WR.toFixed(0)}% PnL $${recent5Pnl.toFixed(2)} — declining`)
   }
 
-  if (actions.length) logger.info(`[StrategyTuner] ${actions.join(" | ")}`)
+  if (actions.length) {
+    logger.info(`[StrategyTuner] ${actions.join(" | ")}`)
+    for (const a of actions) await agentLog.thought("strategy_tuner", a)
+  }
   return actions
 }
 
@@ -197,7 +207,10 @@ export async function runExposureManager() {
     actions.push(`⚠️ All ${longs} signals LONG, 0 SHORT — no diversification`)
   }
 
-  if (actions.length) logger.info(`[ExposureManager] ${actions.join(" | ")}`)
+  if (actions.length) {
+    logger.info(`[ExposureManager] ${actions.join(" | ")}`)
+    for (const a of actions) await agentLog.thought("market_analyzer", a)
+  }
   return actions
 }
 
@@ -228,7 +241,10 @@ export async function runProfitProtector() {
     }
   }
 
-  if (actions.length) logger.info(`[ProfitProtector] ${actions.join(" | ")}`)
+  if (actions.length) {
+    logger.info(`[ProfitProtector] ${actions.join(" | ")}`)
+    for (const a of actions) await agentLog.thought("position_manager", a)
+  }
   return actions
 }
 
