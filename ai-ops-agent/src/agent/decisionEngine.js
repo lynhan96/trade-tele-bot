@@ -26,7 +26,8 @@ export async function makeDecisions(tradingReport, skillResults) {
     )
     decisions = parseDecisions(output)
   } catch (err) {
-    logger.error(`[Decision] Claude failed: ${err.stderr?.slice(0, 500) || err.message?.slice(0, 500)}`)
+    const stderr = err.stderr ? (typeof err.stderr === 'string' ? err.stderr : err.stderr.toString()) : ''
+    logger.error(`[Decision] Claude failed: ${stderr.slice(0, 500) || err.message?.slice(0, 500)}`)
     return []
   } finally {
     try { unlinkSync(tmpFile) } catch {}

@@ -28,7 +28,8 @@ export async function autoFixWithClaude(diagnosis, tradingReport) {
     logger.info(`[ClaudeFix] Done | Changes: ${hasChanges}`)
     return { ok: true, output: output.slice(0, 500), hasChanges }
   } catch (err) {
-    logger.error(`[ClaudeFix] Failed: ${err.stderr?.slice(0, 500) || err.message?.slice(0, 500)}`)
+    const stderr = err.stderr ? (typeof err.stderr === 'string' ? err.stderr : err.stderr.toString()) : ''
+    logger.error(`[ClaudeFix] Failed: ${stderr.slice(0, 500) || err.message?.slice(0, 500)}`)
     return { ok: false, reason: err.message.slice(0, 500) }
   } finally {
     try { unlinkSync(tmpFile) } catch {}
