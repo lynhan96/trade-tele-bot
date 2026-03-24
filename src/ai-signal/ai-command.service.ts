@@ -1881,6 +1881,8 @@ export class AiCommandService implements OnModuleInit {
 
     let totalPnlUsdt = 0;
     let totalNotional = 0;
+    let mainNotional = 0;
+    let hedgeNotional = 0;
     let winning = 0;
     let losing = 0;
 
@@ -1896,6 +1898,8 @@ export class AiCommandService implements OnModuleInit {
       const pnlUsdt = (pnlPct / 100) * trade.notionalUsdt;
       totalPnlUsdt += pnlUsdt;
       totalNotional += trade.notionalUsdt;
+      if ((trade as any).isHedge) hedgeNotional += trade.notionalUsdt;
+      else mainNotional += trade.notionalUsdt;
       if (pnlPct >= 0) winning++; else losing++;
       tradeData.push({ trade, currentPrice, pnlPct, pnlUsdt });
     }
@@ -1908,6 +1912,9 @@ export class AiCommandService implements OnModuleInit {
     const totalSign = totalPnlUsdt >= 0 ? "+" : "";
     text += `\n${totalIcon} Tong PnL: *${totalSign}${totalPnlPct.toFixed(2)}%* (*${totalSign}${totalPnlUsdt.toFixed(2)} USDT*)`;
     text += ` · ✅ ${winning} 🟢  ❌ ${losing} 🔴\n`;
+    text += `💰 Vol: *$${totalNotional.toFixed(0)}*`;
+    if (hedgeNotional > 0) text += ` (Main $${mainNotional.toFixed(0)} · Hedge $${hedgeNotional.toFixed(0)})`;
+    text += `\n`;
 
     for (const { trade, currentPrice, pnlPct, pnlUsdt } of tradeData) {
       const dirIcon = trade.direction === "LONG" ? "🟢" : "🔴";
@@ -1922,7 +1929,8 @@ export class AiCommandService implements OnModuleInit {
       const pnlSign = pnlPct >= 0 ? "+" : "";
       const usdSign = pnlUsdt >= 0 ? "+" : "";
 
-      text += `\n┌ ${dirIcon} *${trade.symbol}* ${trade.direction} · ${heldStr} · _x${trade.leverage}_\n`;
+      const hedgeTag = (trade as any).isHedge ? ' 🔄HEDGE' : '';
+      text += `\n┌ ${dirIcon} *${trade.symbol}* ${trade.direction}${hedgeTag} · ${heldStr} · _x${trade.leverage}_\n`;
       text += `│ ${pnlIcon} *${pnlSign}${pnlPct.toFixed(2)}%* (*${usdSign}${pnlUsdt.toFixed(2)} USDT*)`;
       if (currentPrice > 0) text += ` · Now ${fmtPrice(currentPrice)}`;
       text += `\n`;
