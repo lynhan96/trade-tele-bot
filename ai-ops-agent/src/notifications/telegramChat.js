@@ -9,8 +9,7 @@ import { buildMemoryContext } from "../utils/memory.js"
 import * as agentLog from "../utils/agentLogger.js"
 import { logger } from "../utils/logger.js"
 
-const NODE_BIN = "/home/ubuntu/.nvm/versions/node/v18.20.2/bin"
-const CLAUDE_PATH = `${NODE_BIN}/claude`
+const CLAUDE_WRAPPER = "/home/ubuntu/ai-ops-agent/run-claude.sh"
 const APP_ROOT = () => process.env.APP_ROOT || "/home/ubuntu/projects/binance-tele-bot"
 const TG_TOKEN = () => process.env.AGENT_TELEGRAM_BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN
 const CHAT_ID = () => process.env.TELEGRAM_CHAT_ID
@@ -133,11 +132,9 @@ async function handleMessage(chatId, text) {
     const tmpFile = `/tmp/agent_chat_${Date.now()}.txt`
     const fs = await import("fs")
     fs.writeFileSync(tmpFile, prompt, "utf8")
-    const envPath = `${NODE_BIN}:${process.env.PATH || "/usr/bin:/bin"}`
     const output = execSync(
-      `cat "${tmpFile}" | ${CLAUDE_PATH} --print -`,
-      { cwd: APP_ROOT(), encoding: "utf8", timeout: 90000, shell: "/bin/bash",
-        env: { ...process.env, HOME: "/home/ubuntu", PATH: envPath, NODE_PATH: NODE_BIN } }
+      `${CLAUDE_WRAPPER} "${tmpFile}"`,
+      { cwd: APP_ROOT(), encoding: "utf8", timeout: 90000 }
     )
     try { fs.unlinkSync(tmpFile) } catch {}
 
