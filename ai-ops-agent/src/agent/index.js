@@ -13,14 +13,15 @@ let consecutiveCrashes = 0
 let isFirstRun = true
 
 // ═══ Lightweight check — every 15 min (no Claude, DB only) ═══
-async function runLightCheck() {
+// silent=true on startup: logs to file only, no dashboard events (prevents spam on restart)
+async function runLightCheck(silent = false) {
   try {
     // ── 1. Auto-fix data issues (DB queries only, no tokens) ──
-    const skillResults = await runAllSkills()
+    const skillResults = await runAllSkills(silent)
     const fixes = skillResults.dataFixes || []
     if (fixes.length) {
       logger.info(`[Skills] Fixed ${fixes.length} issues`)
-      await notifyAutoFixed(["🔧 Auto-fix dữ liệu", ...fixes.slice(0, 3)])
+      if (!silent) await notifyAutoFixed(["🔧 Auto-fix dữ liệu", ...fixes.slice(0, 3)])
     }
 
     // ── 2. Crash detection (skip first run — stale logs cause false positives) ──
@@ -76,8 +77,9 @@ async function start() {
   logger.info("Role: ADVISOR only — config tuning + learnings")
   logger.info("=".repeat(50))
 
-  // Run light check on start (no tokens), skip analysis to save tokens
-  await runLightCheck()
+  // Run light check on start — silent mode (log to file only, no dashboard events)
+  // This prevents dashboard spam on every restart
+  await runLightCheck(true)
 
   // Skills + crash detection: every 15 min (cheap — no Claude)
   cron.schedule("*/15 * * * *", runLightCheck)

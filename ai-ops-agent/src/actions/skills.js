@@ -2,6 +2,9 @@ import { getDb } from "../utils/db.js"
 import { logger } from "../utils/logger.js"
 import * as agentLog from "../utils/agentLogger.js"
 
+// Silent mode: log to file only, no dashboard events (used on startup)
+let _silent = false
+
 // Dedup: only log findings that are NEW (not seen in previous cycle)
 const lastFindings = new Map() // skill → Set of finding keys
 function filterNewFindings(skill, findings) {
@@ -107,7 +110,7 @@ export async function runDataValidator() {
 
   if (fixes.length) {
     logger.info(`[DataValidator] ${fixes.length} fixes: ${fixes.join(" | ")}`)
-    for (const f of fixes) await agentLog.action("bug_detector", f, "DATA_FIX")
+    if (!_silent) for (const f of fixes) await agentLog.action("bug_detector", f, "DATA_FIX")
   }
   return fixes
 }
@@ -147,7 +150,7 @@ export async function runHedgeManager() {
   const newActions = filterNewFindings("hedge", actions)
   if (newActions.length) {
     logger.info(`[HedgeManager] ${newActions.join(" | ")}`)
-    for (const a of newActions) await agentLog.thought("position_manager", a)
+    if (!_silent) for (const a of newActions) await agentLog.thought("position_manager", a)
   }
   return actions
 }
@@ -189,7 +192,7 @@ export async function runStrategyTuner() {
   const newActions = filterNewFindings("strategy", actions)
   if (newActions.length) {
     logger.info(`[StrategyTuner] ${newActions.join(" | ")}`)
-    for (const a of newActions) await agentLog.thought("strategy_tuner", a)
+    if (!_silent) for (const a of newActions) await agentLog.thought("strategy_tuner", a)
   }
   return actions
 }
@@ -219,7 +222,7 @@ export async function runExposureManager() {
   const newActions = filterNewFindings("exposure", actions)
   if (newActions.length) {
     logger.info(`[ExposureManager] ${newActions.join(" | ")}`)
-    for (const a of newActions) await agentLog.thought("market_analyzer", a)
+    if (!_silent) for (const a of newActions) await agentLog.thought("market_analyzer", a)
   }
   return actions
 }
@@ -254,7 +257,7 @@ export async function runProfitProtector() {
   const newActions = filterNewFindings("profit", actions)
   if (newActions.length) {
     logger.info(`[ProfitProtector] ${newActions.join(" | ")}`)
-    for (const a of newActions) await agentLog.thought("position_manager", a)
+    if (!_silent) for (const a of newActions) await agentLog.thought("position_manager", a)
   }
   return actions
 }
@@ -262,7 +265,9 @@ export async function runProfitProtector() {
 // ══════════════════════════════════════════════════════════
 // RUN ALL SKILLS
 // ══════════════════════════════════════════════════════════
-export async function runAllSkills() {
+export async function runAllSkills(silent = false) {
+  const prevSilent = _silent
+  _silent = silent
   const results = {
     dataFixes: await runDataValidator(),
     hedgeActions: await runHedgeManager(),
@@ -270,6 +275,7 @@ export async function runAllSkills() {
     exposureAlerts: await runExposureManager(),
     profitAlerts: await runProfitProtector()
   }
+  _silent = prevSilent
 
   const totalActions = Object.values(results).flat().length
   logger.info(`[Skills] Ran 5 skills — ${totalActions} total findings`)
