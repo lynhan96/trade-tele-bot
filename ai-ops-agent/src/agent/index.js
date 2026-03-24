@@ -73,7 +73,7 @@ async function start() {
   logger.info("=".repeat(50))
   logger.info("🤖 AI Trading Advisor v7")
   logger.info(`Commit: ${JSON.stringify(getCurrentCommit())}`)
-  logger.info("Skills/crash: 15min | Claude analysis: 2h | Report: 4h")
+  logger.info("Skills/crash: 15min | Claude analysis: daily 0:00 UTC | Report: 4h")
   logger.info("Role: ADVISOR only — config tuning + learnings")
   logger.info("=".repeat(50))
 
@@ -84,8 +84,8 @@ async function start() {
   // Skills + crash detection: every 15 min (cheap — no Claude)
   cron.schedule("*/15 * * * *", runLightCheck)
 
-  // Claude analysis: every 2h (saves tokens)
-  cron.schedule("0 */2 * * *", runAnalysis)
+  // Claude analysis: once daily at 0:00 UTC (7:00 AM Vietnam) — 1 token call/day
+  cron.schedule("0 0 * * *", runAnalysis)
 
   logger.info("Agent running.")
 }

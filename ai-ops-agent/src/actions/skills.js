@@ -156,7 +156,8 @@ export async function runHedgeManager() {
 }
 
 // ══════════════════════════════════════════════════════════
-// SKILL 3: STRATEGY TUNER — auto-enable/disable strategies
+// SKILL 3: STRATEGY REPORTER — info only, no disable recommendations
+// Strategies are enabled/disabled based on market regime, not WR alone
 // ══════════════════════════════════════════════════════════
 export async function runStrategyTuner() {
   const db = await getDb()
@@ -167,31 +168,23 @@ export async function runStrategyTuner() {
 
   for (const s of completed) {
     const st = s.strategy || "unknown"
-    const base = st.split("+")[0] // handle confluence like "EMA_PULLBACK+SMC_FVG"
-    if (!stratPerf[base]) stratPerf[base] = { count: 0, wins: 0, pnl: 0, recent: [] }
+    const base = st.split("+")[0]
+    if (!stratPerf[base]) stratPerf[base] = { count: 0, wins: 0, pnl: 0 }
     stratPerf[base].count++
     if ((s.pnlUsdt || 0) > 0) stratPerf[base].wins++
     stratPerf[base].pnl += s.pnlUsdt || 0
-    stratPerf[base].recent.push({ pnl: s.pnlUsdt || 0, date: s.positionClosedAt })
   }
 
   for (const [name, s] of Object.entries(stratPerf)) {
-    if (s.count < 5) continue
+    if (s.count < 3) continue
     const wr = (s.wins / s.count * 100)
-
-    // Recent 5 trades performance
-    const recent5 = s.recent.sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, 5)
-    const recent5Pnl = recent5.reduce((sum, t) => sum + t.pnl, 0)
-    const recent5WR = recent5.filter(t => t.pnl > 0).length / recent5.length * 100
-
-    if (wr < 40) actions.push(`⚠️ ${name}: WR ${wr.toFixed(0)}% (${s.wins}/${s.count}) PnL $${s.pnl.toFixed(2)} — recommend DISABLE`)
-    else if (wr >= 70) actions.push(`✅ ${name}: WR ${wr.toFixed(0)}% (${s.wins}/${s.count}) PnL $${s.pnl.toFixed(2)} — performing well`)
-    if (recent5WR < 20 && s.count >= 8) actions.push(`🔴 ${name}: recent 5 WR ${recent5WR.toFixed(0)}% PnL $${recent5Pnl.toFixed(2)} — declining`)
+    // Info only — report stats without recommending disable
+    actions.push(`${name}: WR ${wr.toFixed(0)}% (${s.wins}/${s.count}) PnL $${s.pnl.toFixed(2)}`)
   }
 
   const newActions = filterNewFindings("strategy", actions)
   if (newActions.length) {
-    logger.info(`[StrategyTuner] ${newActions.join(" | ")}`)
+    logger.info(`[StrategyReporter] ${newActions.join(" | ")}`)
     if (!_silent) for (const a of newActions) await agentLog.thought("strategy_tuner", a)
   }
   return actions
