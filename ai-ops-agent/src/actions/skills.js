@@ -2,6 +2,15 @@ import { getDb } from "../utils/db.js"
 import { logger } from "../utils/logger.js"
 import * as agentLog from "../utils/agentLogger.js"
 
+// Dedup: only log findings that are NEW (not seen in previous cycle)
+const lastFindings = new Map() // skill → Set of finding keys
+function filterNewFindings(skill, findings) {
+  const prev = lastFindings.get(skill) || new Set()
+  const newOnes = findings.filter(f => !prev.has(f))
+  lastFindings.set(skill, new Set(findings))
+  return newOnes
+}
+
 // ══════════════════════════════════════════════════════════
 // SKILL 1: DATA VALIDATOR — auto-fix corrupted data
 // ══════════════════════════════════════════════════════════
@@ -135,9 +144,10 @@ export async function runHedgeManager() {
     }
   }
 
-  if (actions.length) {
-    logger.info(`[HedgeManager] ${actions.join(" | ")}`)
-    for (const a of actions) await agentLog.thought("position_manager", a)
+  const newActions = filterNewFindings("hedge", actions)
+  if (newActions.length) {
+    logger.info(`[HedgeManager] ${newActions.join(" | ")}`)
+    for (const a of newActions) await agentLog.thought("position_manager", a)
   }
   return actions
 }
@@ -176,9 +186,10 @@ export async function runStrategyTuner() {
     if (recent5WR < 20 && s.count >= 8) actions.push(`🔴 ${name}: recent 5 WR ${recent5WR.toFixed(0)}% PnL $${recent5Pnl.toFixed(2)} — declining`)
   }
 
-  if (actions.length) {
-    logger.info(`[StrategyTuner] ${actions.join(" | ")}`)
-    for (const a of actions) await agentLog.thought("strategy_tuner", a)
+  const newActions = filterNewFindings("strategy", actions)
+  if (newActions.length) {
+    logger.info(`[StrategyTuner] ${newActions.join(" | ")}`)
+    for (const a of newActions) await agentLog.thought("strategy_tuner", a)
   }
   return actions
 }
@@ -205,9 +216,10 @@ export async function runExposureManager() {
     actions.push(`⚠️ All ${longs} signals LONG, 0 SHORT — no diversification`)
   }
 
-  if (actions.length) {
-    logger.info(`[ExposureManager] ${actions.join(" | ")}`)
-    for (const a of actions) await agentLog.thought("market_analyzer", a)
+  const newActions = filterNewFindings("exposure", actions)
+  if (newActions.length) {
+    logger.info(`[ExposureManager] ${newActions.join(" | ")}`)
+    for (const a of newActions) await agentLog.thought("market_analyzer", a)
   }
   return actions
 }
@@ -239,9 +251,10 @@ export async function runProfitProtector() {
     }
   }
 
-  if (actions.length) {
-    logger.info(`[ProfitProtector] ${actions.join(" | ")}`)
-    for (const a of actions) await agentLog.thought("position_manager", a)
+  const newActions = filterNewFindings("profit", actions)
+  if (newActions.length) {
+    logger.info(`[ProfitProtector] ${newActions.join(" | ")}`)
+    for (const a of newActions) await agentLog.thought("position_manager", a)
   }
   return actions
 }
