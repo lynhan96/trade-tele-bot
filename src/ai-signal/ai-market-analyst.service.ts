@@ -105,8 +105,7 @@ export class AiMarketAnalystService {
   @Cron("30 */15 * * * *") // every 15min at :30s (offset from old Market Guard)
   async runMarketAnalysis(): Promise<void> {
     if (!this.anthropic) {
-      this.logger.warn("[AIAnalyst] No ANTHROPIC_API_KEY — skipping");
-      return;
+      return; // disabled — AI Ops Agent handles market analysis
     }
 
     try {

@@ -120,11 +120,11 @@ export class HedgeManagerService {
             const strongBounce = bounceSize > 1.0;
 
             if (signal.direction === 'LONG' && greenMoves >= 2 && strongBounce) {
-              this.logger.debug(`[${signal.coin}] Hedge re-entry skipped: strong bounce +${bounceSize.toFixed(2)}%`);
+              // silent skip — fires every tick
               return null;
             }
             if (signal.direction !== 'LONG' && redMoves >= 2 && strongBounce) {
-              this.logger.debug(`[${signal.coin}] Hedge re-entry skipped: strong drop -${bounceSize.toFixed(2)}%`);
+              // silent skip — fires every tick
               return null;
             }
           }
@@ -142,14 +142,12 @@ export class HedgeManagerService {
             ? currentPrice < lastExitPrice  // LONG: price must be lower
             : currentPrice > lastExitPrice; // SHORT: price must be higher
           if (!priceWorse) {
-            this.logger.debug(`[${signal.coin}] Hedge re-entry skipped: price ${currentPrice} not worse than last exit ${lastExitPrice}`);
             return null;
           }
         }
 
         // 2. PnL must be worse than trigger (not just at -3%, need momentum)
         if (pnlPct > -cfg.hedgePartialTriggerPct * 1.2) {
-          this.logger.debug(`[${signal.coin}] Hedge re-entry skipped: PnL ${pnlPct.toFixed(2)}% not bad enough (need < -${(cfg.hedgePartialTriggerPct * 1.2).toFixed(1)}%)`);
           return null;
         }
 
@@ -173,7 +171,6 @@ export class HedgeManagerService {
             const rsi15m = rsiVals[rsiVals.length - 1];
             const rsiOk = signal.direction === 'LONG' ? rsi15m < 40 : rsi15m > 60;
             if (!rsiOk) {
-              this.logger.debug(`[${coin}] Hedge re-entry skipped: 15m RSI=${rsi15m.toFixed(1)} (need ${signal.direction === 'LONG' ? '<40' : '>60'})`);
               return null;
             }
 
@@ -184,7 +181,6 @@ export class HedgeManagerService {
               const rsi1h = rsiVals1h[rsiVals1h.length - 1];
               const htfOk = signal.direction === 'LONG' ? rsi1h < 45 : rsi1h > 55;
               if (!htfOk) {
-                this.logger.debug(`[${coin}] Hedge re-entry skipped: 1h RSI=${rsi1h.toFixed(1)} (need ${signal.direction === 'LONG' ? '<45' : '>55'})`);
                 return null;
               }
             }
