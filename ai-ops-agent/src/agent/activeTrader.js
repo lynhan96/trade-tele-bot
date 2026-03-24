@@ -31,7 +31,7 @@ export async function runActiveTrader() {
   const tmpFile = join(tmpdir(), `trader-prompt-${Date.now()}.txt`)
   try {
     writeFileSync(tmpFile, prompt, "utf8")
-    logger.info(`[Trader] Prompt written: ${tmpFile} (${prompt.length} bytes)`)
+    writeFileSync(tmpFile, prompt, "utf8")
     const env = { ...process.env, HOME: "/home/ubuntu" }
     delete env.ANTHROPIC_API_KEY
     const output = execSync(
@@ -39,14 +39,13 @@ export async function runActiveTrader() {
       { cwd: APP_ROOT(), encoding: "utf8", timeout: 3 * 60 * 1000, env }
     )
     decisions = parseResponse(output)
-    try { unlinkSync(tmpFile) } catch {}
   } catch (err) {
     const stderr = err.stderr ? (typeof err.stderr === 'string' ? err.stderr : err.stderr.toString()) : ''
     const stdout = err.stdout ? (typeof err.stdout === 'string' ? err.stdout : err.stdout.toString()) : ''
-    logger.error(`[Trader] Claude failed (exit ${err.status}): stderr=${stderr.slice(0, 300)} | stdout=${stdout.slice(0, 300)}`)
-    logger.error(`[Trader] Prompt file kept at: ${tmpFile}`)
-    // Don't delete tmpFile on error — keep for debugging
+    logger.error(`[Trader] Claude failed (exit ${err.status}): ${stderr.slice(0, 300) || stdout.slice(0, 300) || err.message?.slice(0, 300)}`)
     return []
+  } finally {
+    try { unlinkSync(tmpFile) } catch {}
   }
 
   // ═══ 3. Execute decisions ═══
