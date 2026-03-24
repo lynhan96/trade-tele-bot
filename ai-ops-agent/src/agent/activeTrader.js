@@ -26,13 +26,20 @@ export async function runActiveTrader() {
 
   let decisions
   try {
+    // Remove ANTHROPIC_API_KEY from env so Claude CLI uses OAuth (Pro plan) instead of expired API key
+    const cleanEnv = { ...process.env, HOME: "/home/ubuntu" }
+    delete cleanEnv.ANTHROPIC_API_KEY
     const output = execSync(
       `${NVM}claude --print ${JSON.stringify(prompt)}`,
-      { cwd: APP_ROOT(), encoding: "utf8", timeout: 3 * 60 * 1000, env: { ...process.env, HOME: "/home/ubuntu" } }
+      { cwd: APP_ROOT(), encoding: "utf8", timeout: 3 * 60 * 1000, env: cleanEnv }
     )
     decisions = parseResponse(output)
   } catch (err) {
+    const stderr = err.stderr?.toString?.()?.slice(0, 300) || ""
+    const stdout = err.stdout?.toString?.()?.slice(0, 300) || ""
     logger.error(`[Trader] Claude failed: ${err.message?.slice(0, 200)}`)
+    if (stderr) logger.error(`[Trader] stderr: ${stderr}`)
+    if (stdout) logger.error(`[Trader] stdout: ${stdout}`)
     return []
   }
 
