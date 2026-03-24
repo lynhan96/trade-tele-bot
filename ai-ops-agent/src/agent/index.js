@@ -11,7 +11,7 @@ import { logger } from "../utils/logger.js"
 let lastReportHour = -1
 let consecutiveCrashes = 0
 
-// ═══ Lightweight check — every 5 min (no Claude, DB only) ═══
+// ═══ Lightweight check — every 15 min (no Claude, DB only) ═══
 async function runLightCheck() {
   try {
     // ── 1. Auto-fix data issues (DB queries only, no tokens) ──
@@ -48,7 +48,7 @@ async function runLightCheck() {
   }
 }
 
-// ═══ Claude analysis — every 30 min (uses Claude tokens) ═══
+// ═══ Claude analysis — every 2h (uses Claude tokens) ═══
 async function runAnalysis() {
   try {
     const results = await runActiveTrader()
@@ -68,7 +68,7 @@ async function start() {
   logger.info("=".repeat(50))
   logger.info("🤖 AI Trading Advisor v7")
   logger.info(`Commit: ${JSON.stringify(getCurrentCommit())}`)
-  logger.info("Skills/crash: 5min | Claude analysis: 2h | Report: 4h")
+  logger.info("Skills/crash: 15min | Claude analysis: 2h | Report: 4h")
   logger.info("Role: ADVISOR only — config tuning + learnings")
   logger.info("=".repeat(50))
 
