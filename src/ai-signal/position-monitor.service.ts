@@ -1029,6 +1029,12 @@ export class PositionMonitorService implements OnModuleInit {
         });
       }
 
+      // Calculate main PnL% for history tracking
+      const avgEntry = (signal as any).gridAvgEntry || signal.entryPrice;
+      const mainPnlPct = direction === 'LONG'
+        ? ((effectiveTpPrice - avgEntry) / avgEntry) * 100
+        : ((avgEntry - effectiveTpPrice) / avgEntry) * 100;
+
       // 2. Flip signal: hedge becomes new main
       const newDirection = (signal as any).hedgeDirection;
       const newEntry = (signal as any).hedgeEntryPrice;
@@ -1042,6 +1048,33 @@ export class PositionMonitorService implements OnModuleInit {
       const newSl = newDirection === 'LONG'
         ? +(newEntry * (1 - flipSlPct / 100)).toFixed(6)
         : +(newEntry * (1 + flipSlPct / 100)).toFixed(6);
+
+      // 3. Promote HEDGE order to new MAIN
+      const hedgeOrder = await this.orderModel.findOne({
+        signalId: (signal as any)._id, type: 'HEDGE', status: 'OPEN',
+      });
+      if (hedgeOrder) {
+        await this.orderModel.findByIdAndUpdate(hedgeOrder._id, {
+          type: 'MAIN', stopLossPrice: newSl, takeProfitPrice: newTp,
+        });
+      }
+
+      // 3b. Bank main TP profit into hedgeHistory — tracks cumulative profit across FLIPs
+      const existingHistory = (signal as any).hedgeHistory || [];
+      const flipHistory = [
+        ...existingHistory,
+        {
+          cycle: existingHistory.length + 1,
+          direction: direction, // original main direction that TP'd
+          entryPrice: avgEntry,
+          exitPrice: effectiveTpPrice,
+          pnlPct: mainPnlPct,
+          pnlUsdt: mainPnlTotal,
+          openedAt: (signal as any).executedAt || new Date(),
+          closedAt: new Date(),
+          reason: 'FLIP_TP',
+        },
+      ];
 
       // Update signal in-memory
       (signal as any).direction = newDirection;
@@ -1061,19 +1094,10 @@ export class PositionMonitorService implements OnModuleInit {
       (signal as any).hedgeTpPrice = undefined;
       (signal as any).hedgeOpenedAt = undefined;
       (signal as any).hedgeCycleCount = 0;
+      (signal as any).hedgeHistory = flipHistory;
       (signal as any).slMovedToEntry = false;
       (signal as any).tpBoosted = false;
       (signal as any).peakPnlPct = 0;
-
-      // 3. Promote HEDGE order to new MAIN
-      const hedgeOrder = await this.orderModel.findOne({
-        signalId: (signal as any)._id, type: 'HEDGE', status: 'OPEN',
-      });
-      if (hedgeOrder) {
-        await this.orderModel.findByIdAndUpdate(hedgeOrder._id, {
-          type: 'MAIN', stopLossPrice: newSl, takeProfitPrice: newTp,
-        });
-      }
 
       // 4. Persist to DB
       await this.aiSignalModel.findByIdAndUpdate((signal as any)._id, {
@@ -1085,7 +1109,7 @@ export class PositionMonitorService implements OnModuleInit {
         takeProfitPrice: newTp, takeProfitPercent: flipTpPct,
         originalSlPrice: newSl,
         hedgeActive: false, hedgeCycleCount: 0,
-        hedgeHistory: [], // Clear — FLIP = new trade, fresh NET_POSITIVE tracking
+        hedgeHistory: flipHistory, // preserved + main TP profit banked
         slMovedToEntry: false, tpBoosted: false, peakPnlPct: 0,
         $unset: { hedgePhase: 1, hedgeDirection: 1, hedgeEntryPrice: 1, hedgeSimNotional: 1, hedgeTpPrice: 1, hedgeOpenedAt: 1, hedgeSafetySlPrice: 1, hedgeSlAtEntry: 1, hedgeTrailActivated: 1, hedgePeakPnlPct: 1 },
       });

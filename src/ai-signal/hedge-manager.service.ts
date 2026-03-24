@@ -277,7 +277,9 @@ export class HedgeManagerService {
       // ── 1. Recovery Close: ONLY when hedge has meaningful profit (>= 1.5%) ──
       // NEVER close hedge at a loss or tiny profit — let it ride to TP/trail/FLIP
       // ONDO lesson: repeated recovery-close cycles with small profits accumulated net losses
-      if (mainPnlPct !== undefined && mainPnlPct > 0 && hedgePnlPct >= 1.5) {
+      // Stricter recovery: main must be > 1% (not just > 0) to avoid closing hedge on tiny recovery
+      // OR hedge must be very profitable (> 2.5%) to justify closing regardless
+      if (mainPnlPct !== undefined && ((mainPnlPct > 1.0 && hedgePnlPct >= 1.5) || hedgePnlPct >= 2.5) && mainPnlPct > 0) {
         const banked = (signal.hedgeHistory || []).reduce((sum: number, h: any) => sum + (h.pnlUsdt || 0), 0);
         this.logger.log(
           `[${signal.coin}] Hedge RECOVERY CLOSE (profitable) | Main at +${mainPnlPct.toFixed(2)}% | ` +
@@ -287,7 +289,7 @@ export class HedgeManagerService {
           `Recovery close: main +${mainPnlPct.toFixed(2)}%`);
       }
       if (mainPnlPct !== undefined && mainPnlPct > 0) {
-        this.logger.debug(`[${signal.coin}] Recovery skip: main +${mainPnlPct.toFixed(2)}% but hedge ${hedgePnlPct.toFixed(2)}% losing — hold for TP/FLIP`);
+        this.logger.debug(`[${signal.coin}] Recovery skip: main +${mainPnlPct.toFixed(2)}% hedge +${hedgePnlPct.toFixed(2)}% — need main>1%+hedge≥1.5% or hedge≥2.5%`);
       }
       // Hedge losing → hold. Exits: trailing TP, NET_POSITIVE, FLIP (in PositionMonitor)
 
