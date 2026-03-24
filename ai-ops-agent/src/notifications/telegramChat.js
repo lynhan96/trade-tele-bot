@@ -158,8 +158,9 @@ async function handleMessage(chatId, text) {
     await sendTg(chatId, cleanResponse || "Không có gì để báo cáo.")
     await agentLog.decision("active_trader", `Trả lời user: ${cleanResponse.slice(0, 100)}`)
   } catch (err) {
-    logger.error(`[TgChat] Error: ${err.message?.slice(0, 200)}`)
-    await sendTg(chatId, `❌ Lỗi: ${err.message?.slice(0, 100)}`)
+    const stderr = err.stderr?.slice(0, 200) || ""
+    logger.error(`[TgChat] Error: ${err.message?.slice(0, 200)} | stderr: ${stderr}`)
+    await sendTg(chatId, `❌ Lỗi: ${stderr || err.message?.slice(0, 100)}`)
   }
 }
 
