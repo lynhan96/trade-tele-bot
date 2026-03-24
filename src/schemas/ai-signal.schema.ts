@@ -108,6 +108,7 @@ export class AiSignal {
   @Prop()
   peakPnlPct?: number; // highest PnL% reached (for trailing SL calculation)
 
+
   @Prop({ default: false })
   tpBoosted?: boolean; // true = TP extended on volume momentum (one-time per signal)
 
