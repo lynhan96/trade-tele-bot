@@ -93,10 +93,9 @@ export class AiMarketAnalystService {
     private readonly configService: ConfigService,
     private readonly tradingConfig: TradingConfigService,
   ) {
-    const apiKey = this.configService.get<string>("ANTHROPIC_API_KEY");
-    if (apiKey) this.anthropic = new Anthropic({ apiKey });
-    // Run on startup with delay
-    setTimeout(() => this.runMarketAnalysis().catch(() => {}), 45_000);
+    // DISABLED — AI Ops Agent handles market analysis now (saves $6+/day API cost)
+    // const apiKey = this.configService.get<string>("ANTHROPIC_API_KEY");
+    // if (apiKey) this.anthropic = new Anthropic({ apiKey });
   }
 
   // ═══════════════════════════════════════════════════════════════════════════

@@ -82,8 +82,9 @@ export class StrategyAutoTunerService {
     private readonly configService: ConfigService,
     private readonly tradingConfig: TradingConfigService,
   ) {
-    const apiKey = this.configService.get<string>("ANTHROPIC_API_KEY");
-    if (apiKey) this.anthropic = new Anthropic({ apiKey });
+    // DISABLED — AI Ops Agent handles strategy tuning (saves API cost)
+    // const apiKey = this.configService.get<string>("ANTHROPIC_API_KEY");
+    // if (apiKey) this.anthropic = new Anthropic({ apiKey });
     // Run on startup after 30s delay
     setTimeout(() => {
       this.evaluateStrategies().catch(() => {});

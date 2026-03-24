@@ -53,14 +53,10 @@ export class AiOptimizerService {
     private readonly validationModel: Model<AiSignalValidationDocument>,
     private readonly tradingConfig: TradingConfigService,
   ) {
-    const apiKey = this.configService.get<string>("ANTHROPIC_API_KEY");
-    if (apiKey) {
-      this.anthropic = new Anthropic({ apiKey });
-      this.logger.log("[AiOptimizer] Claude Haiku signal validation enabled");
-    } else {
-      this.logger.warn("[AiOptimizer] No ANTHROPIC_API_KEY — AI validation disabled (rule-based only)");
-    }
-    this.logger.log("[AiOptimizer] SMC/Fibonacci + ATR param tuning");
+    // DISABLED — AI Ops Agent handles optimization (saves API cost)
+    // const apiKey = this.configService.get<string>("ANTHROPIC_API_KEY");
+    // if (apiKey) this.anthropic = new Anthropic({ apiKey });
+    this.logger.log("[AiOptimizer] SMC/Fibonacci + ATR param tuning (rule-based, no API)");
   }
 
   // ─── Flush all coin param caches (e.g. on startup or regime change) ────────
