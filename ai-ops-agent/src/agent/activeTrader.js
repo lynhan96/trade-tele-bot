@@ -9,7 +9,7 @@ import { writeFileSync, unlinkSync } from "fs"
 import { tmpdir } from "os"
 import { join } from "path"
 
-const NVM = 'export NVM_DIR="$HOME/.nvm" && [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" && '
+const NVM = 'export NVM_DIR="/home/ubuntu/.nvm" && [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" && '
 const APP_ROOT = () => process.env.APP_ROOT || "/home/ubuntu/projects/binance-tele-bot"
 
 export async function runActiveTrader() {
@@ -40,7 +40,8 @@ export async function runActiveTrader() {
     try { unlinkSync(tmpFile) } catch {}
   } catch (err) {
     const stderr = err.stderr ? (typeof err.stderr === 'string' ? err.stderr : err.stderr.toString()) : ''
-    logger.error(`[Trader] Claude failed (exit ${err.status}): ${stderr.slice(0, 500) || err.message?.slice(0, 500)}`)
+    const stdout = err.stdout ? (typeof err.stdout === 'string' ? err.stdout : err.stdout.toString()) : ''
+    logger.error(`[Trader] Claude failed (exit ${err.status}): stderr=${stderr.slice(0, 300)} | stdout=${stdout.slice(0, 300)}`)
     logger.error(`[Trader] Prompt file kept at: ${tmpFile}`)
     // Don't delete tmpFile on error — keep for debugging
     return []

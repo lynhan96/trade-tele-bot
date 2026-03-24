@@ -7,7 +7,7 @@ import { buildMemoryContext, saveDecision, saveLearning } from "../utils/memory.
 import { closeSignal, updateTradingConfig } from "../actions/adminApi.js"
 import { logger } from "../utils/logger.js"
 
-const NVM = 'export NVM_DIR="$HOME/.nvm" && [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" && '
+const NVM = 'export NVM_DIR="/home/ubuntu/.nvm" && [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" && '
 const APP_ROOT = () => process.env.APP_ROOT || "/home/ubuntu/projects/binance-tele-bot"
 
 export async function makeDecisions(tradingReport, skillResults) {
