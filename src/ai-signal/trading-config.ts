@@ -278,8 +278,9 @@ export class TradingConfigService {
     try {
       const stored = await this.redisService.get<Partial<TradingConfig>>(TRADING_CONFIG_KEY);
       if (stored) {
-        // Merge stored over defaults (allows partial overrides)
-        this.cached = { ...DEFAULT_TRADING_CONFIG, ...stored };
+        // Merge stored over defaults — filter undefined to preserve defaults
+        const clean = Object.fromEntries(Object.entries(stored).filter(([, v]) => v !== undefined));
+        this.cached = { ...DEFAULT_TRADING_CONFIG, ...clean };
         this.logger.log(`[TradingConfig] Loaded from Redis (${Object.keys(stored).length} overrides)`);
       } else {
         this.cached = { ...DEFAULT_TRADING_CONFIG };
@@ -294,9 +295,13 @@ export class TradingConfigService {
   /** Save partial config update to Redis. Only saves changed fields. */
   async update(partial: Partial<TradingConfig>): Promise<TradingConfig> {
     const current = await this.redisService.get<Partial<TradingConfig>>(TRADING_CONFIG_KEY) || {};
-    const merged = { ...current, ...partial };
+    // Filter out undefined values to prevent overriding defaults
+    const cleanPartial = Object.fromEntries(Object.entries(partial).filter(([, v]) => v !== undefined));
+    const merged = { ...current, ...cleanPartial };
     await this.redisService.set(TRADING_CONFIG_KEY, merged, TRADING_CONFIG_TTL);
-    this.cached = { ...DEFAULT_TRADING_CONFIG, ...merged };
+    // Merge: defaults ← Redis ← clean (undefined doesn't override defaults)
+    const cleanMerged = Object.fromEntries(Object.entries(merged).filter(([, v]) => v !== undefined));
+    this.cached = { ...DEFAULT_TRADING_CONFIG, ...cleanMerged };
     this.lastLoad = Date.now();
     this.logger.log(`[TradingConfig] Updated: ${Object.keys(partial).join(", ")}`);
     return this.cached;
