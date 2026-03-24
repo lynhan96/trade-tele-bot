@@ -779,21 +779,29 @@ export class SignalQueueService {
     const slPct = signal.stopLossPercent;
     const tpPct = signal.takeProfitPercent;
 
-    const newSl = isLong
-      ? currentPrice * (1 - slPct / 100)
-      : currentPrice * (1 + slPct / 100);
+    // When hedge enabled, stopLossPercent = 0 → SL price must stay 0 (disabled)
+    // Bug fix: previously calculated currentPrice * (1 - 0/100) = currentPrice → instant STOP_LOSS
+    const newSl = slPct > 0
+      ? (isLong ? currentPrice * (1 - slPct / 100) : currentPrice * (1 + slPct / 100))
+      : 0;
     const newTp = isLong
       ? currentPrice * (1 + tpPct / 100)
       : currentPrice * (1 - tpPct / 100);
 
     await this.aiSignalModel.findByIdAndUpdate((signal as any)._id, {
       entryPrice: currentPrice,
-      stopLossPrice: parseFloat(newSl.toFixed(8)),
+      stopLossPrice: newSl > 0 ? parseFloat(newSl.toFixed(8)) : 0,
       takeProfitPrice: parseFloat(newTp.toFixed(8)),
     });
 
+    // Also update MAIN order entry price to stay in sync (prevents stale order entry → wrong PnL)
+    await this.orderModel.updateMany(
+      { signalId: (signal as any)._id, type: 'MAIN', status: 'OPEN' },
+      { entryPrice: currentPrice },
+    );
+
     this.logger.log(
-      `[SignalQueue] ${signal.symbol} entry refreshed: $${oldEntry.toFixed(4)} → $${currentPrice.toFixed(4)} (SL/TP recalculated)`,
+      `[SignalQueue] ${signal.symbol} entry refreshed: $${oldEntry.toFixed(4)} → $${currentPrice.toFixed(4)} (SL/TP + MAIN order recalculated)`,
     );
 
     return this.aiSignalModel.findById((signal as any)._id);
