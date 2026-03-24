@@ -940,9 +940,10 @@ export class SignalQueueService {
     const takeProfitPercent = Math.min(cfg.tpMax, rawTp);
     const entryPrice = signalResult.entryPrice;
 
-    const stopLossPrice = signalResult.isLong
-      ? entryPrice * (1 - stopLossPercent / 100)
-      : entryPrice * (1 + stopLossPercent / 100);
+    // When hedge enabled (stopLossPercent=0): SL price = 0 (disabled, hedge manages risk)
+    const stopLossPrice = stopLossPercent > 0
+      ? (signalResult.isLong ? entryPrice * (1 - stopLossPercent / 100) : entryPrice * (1 + stopLossPercent / 100))
+      : 0;
 
     const takeProfitPrice = signalResult.isLong
       ? entryPrice * (1 + takeProfitPercent / 100)
