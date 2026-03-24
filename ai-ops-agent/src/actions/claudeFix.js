@@ -1,4 +1,7 @@
 import { execSync } from "child_process"
+import { writeFileSync, unlinkSync } from "fs"
+import { tmpdir } from "os"
+import { join } from "path"
 import { logger } from "../utils/logger.js"
 
 const NVM = 'export NVM_DIR="$HOME/.nvm" && [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" && '
@@ -8,9 +11,11 @@ export async function autoFixWithClaude(diagnosis, tradingReport) {
   const prompt = buildPrompt(diagnosis, tradingReport)
   logger.info(`[ClaudeFix] Triggering Claude Code...`)
 
+  const tmpFile = join(tmpdir(), `claudefix-prompt-${Date.now()}.txt`)
   try {
+    writeFileSync(tmpFile, prompt, "utf8")
     const output = execSync(
-      `${NVM}claude --print ${JSON.stringify(prompt)} --allowedTools Edit,Read,Grep,Bash`,
+      `${NVM}cat ${tmpFile} | claude --print --allowedTools Edit,Read,Grep,Bash`,
       {
         cwd: APP_ROOT(),
         encoding: "utf8",
@@ -23,8 +28,10 @@ export async function autoFixWithClaude(diagnosis, tradingReport) {
     logger.info(`[ClaudeFix] Done | Changes: ${hasChanges}`)
     return { ok: true, output: output.slice(0, 500), hasChanges }
   } catch (err) {
-    logger.error(`[ClaudeFix] Failed: ${err.message.slice(0, 200)}`)
-    return { ok: false, reason: err.message.slice(0, 200) }
+    logger.error(`[ClaudeFix] Failed: ${err.stderr?.slice(0, 500) || err.message?.slice(0, 500)}`)
+    return { ok: false, reason: err.message.slice(0, 500) }
+  } finally {
+    try { unlinkSync(tmpFile) } catch {}
   }
 }
 

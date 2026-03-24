@@ -1,4 +1,7 @@
 import { execSync } from "child_process"
+import { writeFileSync, unlinkSync } from "fs"
+import { tmpdir } from "os"
+import { join } from "path"
 import { getDb } from "../utils/db.js"
 import { buildMemoryContext, saveDecision, saveLearning } from "../utils/memory.js"
 import { closeSignal, updateTradingConfig } from "../actions/adminApi.js"
@@ -14,15 +17,19 @@ export async function makeDecisions(tradingReport, skillResults) {
   logger.info("[Decision] Asking Claude...")
 
   let decisions
+  const tmpFile = join(tmpdir(), `decision-prompt-${Date.now()}.txt`)
   try {
+    writeFileSync(tmpFile, prompt, "utf8")
     const output = execSync(
-      `${NVM}claude --print ${JSON.stringify(prompt)}`,
+      `${NVM}cat ${tmpFile} | claude --print`,
       { cwd: APP_ROOT(), encoding: "utf8", timeout: 3 * 60 * 1000, env: { ...process.env, HOME: "/home/ubuntu" } }
     )
     decisions = parseDecisions(output)
   } catch (err) {
-    logger.error(`[Decision] Claude failed: ${err.message?.slice(0, 200)}`)
+    logger.error(`[Decision] Claude failed: ${err.stderr?.slice(0, 500) || err.message?.slice(0, 500)}`)
     return []
+  } finally {
+    try { unlinkSync(tmpFile) } catch {}
   }
 
   if (!decisions?.length) { logger.info("[Decision] No actions"); return [] }

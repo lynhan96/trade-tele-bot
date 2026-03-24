@@ -5,6 +5,9 @@ import { closeSignal, updateSignal, updateTradingConfig, getDashboard } from "..
 import { logger } from "../utils/logger.js"
 import * as agentLog from "../utils/agentLogger.js"
 import { execSync } from "child_process"
+import { writeFileSync, unlinkSync } from "fs"
+import { tmpdir } from "os"
+import { join } from "path"
 
 const NVM = 'export NVM_DIR="$HOME/.nvm" && [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" && '
 const APP_ROOT = () => process.env.APP_ROOT || "/home/ubuntu/projects/binance-tele-bot"
@@ -25,15 +28,19 @@ export async function runActiveTrader() {
   await agentLog.thought("active_trader", `Phân tích ${context.activePositions.length} vị thế | Wallet: $${context.stats.wallet}`, context.stats)
 
   let decisions
+  const tmpFile = join(tmpdir(), `trader-prompt-${Date.now()}.txt`)
   try {
+    writeFileSync(tmpFile, prompt, "utf8")
     const output = execSync(
-      `${NVM}claude --print ${JSON.stringify(prompt)}`,
+      `${NVM}cat ${tmpFile} | claude --print`,
       { cwd: APP_ROOT(), encoding: "utf8", timeout: 3 * 60 * 1000, env: { ...process.env, HOME: "/home/ubuntu" } }
     )
     decisions = parseResponse(output)
   } catch (err) {
-    logger.error(`[Trader] Claude failed: ${err.message?.slice(0, 200)}`)
+    logger.error(`[Trader] Claude failed: ${err.stderr?.slice(0, 500) || err.message?.slice(0, 500)}`)
     return []
+  } finally {
+    try { unlinkSync(tmpFile) } catch {}
   }
 
   // ═══ 3. Execute decisions ═══
