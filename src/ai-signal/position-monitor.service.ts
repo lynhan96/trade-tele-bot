@@ -1624,23 +1624,23 @@ export class PositionMonitorService implements OnModuleInit {
       reason: action.reason,
     };
 
-    // After hedge close: keep SL = 0 (disabled). Hedge will re-enter if needed.
-    // Catastrophic stop at -25% remains as safety net.
-    const newSlPrice = 0;
-
-    // Determine SL after hedge close:
-    // If hedge manager provided safety SL → use it (adaptive protection)
-    // Otherwise → SL=0, hedge will re-enter if needed
+    // After hedge close: restore SL = 40% safety net
+    // Hedge will re-enter at -3% if needed, but SL protects against catastrophic moves
+    const avgEntryForSl = (signal as any).gridAvgEntry || signal.entryPrice;
+    const defaultSlPct = 40;
     const updates: Record<string, any> = {};
-    let finalSlPrice = 0;
-    let finalSlPercent = 0;
+    let finalSlPrice = signal.direction === 'LONG'
+      ? +(avgEntryForSl * (1 - defaultSlPct / 100)).toFixed(6)
+      : +(avgEntryForSl * (1 + defaultSlPct / 100)).toFixed(6);
+    let finalSlPercent = defaultSlPct;
+
+    // If hedge manager provided tighter safety SL → use it instead
     if (action.newSafetySlPrice && action.newSafetySlPrice > 0) {
       finalSlPrice = action.newSafetySlPrice;
-      const avgEntry = (signal as any).gridAvgEntry || signal.entryPrice;
-      finalSlPercent = Math.abs((finalSlPrice - avgEntry) / avgEntry * 100);
+      finalSlPercent = Math.abs((finalSlPrice - avgEntryForSl) / avgEntryForSl * 100);
       updates.hedgeSafetySlPrice = finalSlPrice;
-      this.logger.log(`[PositionMonitor] ${sigKey} Safety SL set to ${finalSlPrice} (${finalSlPercent.toFixed(1)}%) after hedge close`);
     }
+    this.logger.log(`[PositionMonitor] ${sigKey} SL restored to ${finalSlPrice} (${finalSlPercent.toFixed(1)}%) after hedge close`);
 
     // Update in-memory signal
     (signal as any).hedgeActive = false;
@@ -1716,7 +1716,7 @@ export class PositionMonitorService implements OnModuleInit {
 
     this.logger.log(
       `[PositionMonitor] ${sigKey} HEDGE CLOSED | PnL: ${action.hedgePnlPct?.toFixed(2)}% ($${action.hedgePnlUsdt?.toFixed(2)}) | ` +
-      `SL: ${newSlPrice} | Cycle: ${cycleCount} | Reason: ${action.reason}`,
+      `SL: ${finalSlPrice} (${finalSlPercent.toFixed(1)}%) | Cycle: ${cycleCount} | Reason: ${action.reason}`,
     );
 
     // Notify via callback

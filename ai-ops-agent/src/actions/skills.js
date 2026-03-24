@@ -20,11 +20,9 @@ export async function runDataValidator() {
         fixes.push(`${s.symbol}: SL=entry fixed → 0 (was instant-close bug)`)
       }
     }
-    // 1b. SL > 0 when hedge should manage
-    if (s.stopLossPrice > 0 && !s.hedgeActive) {
-      await db.collection("ai_signals").updateOne({ _id: s._id }, { $set: { stopLossPrice: 0, stopLossPercent: 0 } })
-      fixes.push(`${s.symbol}: SL=${s.stopLossPrice} → 0 (hedge manages)`)
-    }
+    // 1b. REMOVED — SL=40% is the default safety net for ALL signals
+    // Hedge system manages risk via hedge positions, NOT by removing SL
+    // SL=0 only happens when hedge is actively open (set by hedge-manager)
   }
 
   // 2. Orders with entry price mismatch > 15%
