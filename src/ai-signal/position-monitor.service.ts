@@ -756,8 +756,19 @@ export class PositionMonitorService implements OnModuleInit {
 
     if (hedgeEnabled) {
       if (!hedgeActive) {
+        // Force open hedge (triggered by admin API)
+        if ((signal as any).hedgeForceOpen) {
+          this.logger.log(`[PositionMonitor] ${symbol} FORCE HEDGE OPEN (admin API)`);
+          await this.aiSignalModel.findByIdAndUpdate((signal as any)._id, { $unset: { hedgeForceOpen: 1 } }).exec();
+          (signal as any).hedgeForceOpen = false;
+          const regime = (signal as any).regime || "MIXED";
+          const action = await this.hedgeManager.checkHedge(signal, price, -999, regime); // -999 bypasses PnL threshold
+          if (action && action.action !== "NONE") {
+            await this.handleHedgeAction(signal, action, price);
+          }
+        }
         // Check if PnL crosses hedge trigger
-        if (pnlPct <= -hedgeCfg.hedgePartialTriggerPct) {
+        else if (pnlPct <= -hedgeCfg.hedgePartialTriggerPct) {
           const regime = (signal as any).regime || "MIXED";
           const action = await this.hedgeManager.checkHedge(signal, price, pnlPct, regime);
           if (action && action.action !== "NONE") {

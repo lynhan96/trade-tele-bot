@@ -1160,4 +1160,45 @@ export class AdminService {
     this.adminGateway.emitAgentEvent(event);
     return event;
   }
+
+  /**
+   * Force open hedge for an active signal.
+   * Sets flags so PositionMonitor triggers hedge on next tick.
+   */
+  async forceOpenHedge(id: string): Promise<{ success: boolean; error?: string }> {
+    const signal = await this.signalModel.findById(id);
+    if (!signal) return { success: false, error: 'Signal not found' };
+    if (signal.status !== 'ACTIVE') return { success: false, error: `Signal is ${signal.status}` };
+    if ((signal as any).hedgeActive) return { success: false, error: 'Hedge already active' };
+
+    // Set hedgeForceOpen flag — PositionMonitor will open hedge on next tick
+    await this.signalModel.findByIdAndUpdate(id, {
+      $set: { hedgeForceOpen: true },
+    });
+
+    this.logger.log(`[Admin] Force hedge requested for ${signal.symbol} (${id})`);
+    return { success: true };
+  }
+
+  /**
+   * Force close hedge for an active signal.
+   * Sets hedgeTpPrice to trigger immediate TP on next tick.
+   */
+  async forceCloseHedge(id: string): Promise<{ success: boolean; error?: string }> {
+    const signal = await this.signalModel.findById(id);
+    if (!signal) return { success: false, error: 'Signal not found' };
+    if (signal.status !== 'ACTIVE') return { success: false, error: `Signal is ${signal.status}` };
+    if (!(signal as any).hedgeActive) return { success: false, error: 'No active hedge' };
+
+    // Force hedge TP by setting price to immediate trigger
+    // SHORT hedge: set TP very high (any price triggers)
+    // LONG hedge: set TP very low (any price triggers)
+    const forceTP = (signal as any).hedgeDirection === 'LONG' ? 0.0001 : 999999;
+    await this.signalModel.findByIdAndUpdate(id, {
+      $set: { hedgeTpPrice: forceTP, hedgeForceClose: true },
+    });
+
+    this.logger.log(`[Admin] Force hedge close requested for ${signal.symbol} (${id})`);
+    return { success: true };
+  }
 }

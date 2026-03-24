@@ -96,6 +96,18 @@ export class AdminController {
   }
 
   @UseGuards(AdminGuard)
+  @Post("signals/:id/hedge")
+  forceOpenHedge(@Param("id") id: string) {
+    return this.adminService.forceOpenHedge(id);
+  }
+
+  @UseGuards(AdminGuard)
+  @Post("signals/:id/close-hedge")
+  forceCloseHedge(@Param("id") id: string) {
+    return this.adminService.forceCloseHedge(id);
+  }
+
+  @UseGuards(AdminGuard)
   @Get("users/ranking")
   getUserRanking(@Query() query: Record<string, string>) {
     return this.adminService.getUserRanking(query);
