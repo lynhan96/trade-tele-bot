@@ -552,7 +552,9 @@ export class PositionMonitorService implements OnModuleInit {
           (signal as any).stopLossPrice = avgEntry;
           (signal as any).slMovedToEntry = true;
           (signal as any).gridGlobalSlPrice = avgEntry;
-          await this.signalQueueService.moveStopLossToEntry((signal as any)._id.toString());
+          await this.aiSignalModel.findByIdAndUpdate((signal as any)._id, {
+            stopLossPrice: avgEntry, slMovedToEntry: true, peakPnlPct: peak,
+          }).exec();
           gridChanged = true;
           this.logger.log(
             `[PositionMonitor] 🛡️ Grid ${sigKey} SL → avg entry ${avgEntry.toFixed(4)} (BE, peak=${peak.toFixed(2)}%)`,
