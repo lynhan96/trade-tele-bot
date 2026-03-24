@@ -203,20 +203,27 @@ export class PositionMonitorService implements OnModuleInit {
     // When hedge enabled: SL = 0 (disabled). Hedge manages risk. Catastrophic stop at -25%.
     const hedgeCfg = this.tradingConfig?.get();
     if (hedgeCfg?.hedgeEnabled) {
-      if (!(signal as any).originalSlPrice && (signal as any).stopLossPrice > 0) {
-        (signal as any).originalSlPrice = (signal as any).stopLossPrice;
+      // Don't override trail SL if already moved to entry/trailing
+      if ((signal as any).slMovedToEntry && (signal as any).stopLossPrice > 0) {
+        this.logger.log(
+          `[PositionMonitor] ${sigKey} keeping trail SL ${(signal as any).stopLossPrice} (already trailing)`,
+        );
+      } else {
+        if (!(signal as any).originalSlPrice && (signal as any).stopLossPrice > 0) {
+          (signal as any).originalSlPrice = (signal as any).stopLossPrice;
+        }
+        // Disable SL — hedge will handle. Trail will re-enable when profitable
+        (signal as any).stopLossPrice = 0;
+        (signal as any).stopLossPercent = 0;
+        this.aiSignalModel.findByIdAndUpdate((signal as any)._id, {
+          originalSlPrice: (signal as any).originalSlPrice,
+          stopLossPrice: 0,
+          stopLossPercent: 0,
+        }).exec().catch(() => {});
+        this.logger.log(
+          `[PositionMonitor] ${sigKey} SL DISABLED — hedge manages risk, catastrophic stop at -25%`,
+        );
       }
-      // Disable SL — hedge will handle
-      (signal as any).stopLossPrice = 0;
-      (signal as any).stopLossPercent = 0;
-      this.aiSignalModel.findByIdAndUpdate((signal as any)._id, {
-        originalSlPrice: (signal as any).originalSlPrice,
-        stopLossPrice: 0,
-        stopLossPercent: 0,
-      }).exec().catch(() => {});
-      this.logger.log(
-        `[PositionMonitor] ${sigKey} SL DISABLED — hedge manages risk, catastrophic stop at -25%`,
-      );
     }
 
     const cb = (price: number) => {
