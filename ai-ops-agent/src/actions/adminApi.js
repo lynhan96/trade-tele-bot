@@ -13,7 +13,7 @@ async function getToken() {
       password: process.env.ADMIN_PASS || "admin123"
     })
     token = data.token
-    tokenExpiry = Date.now() + 23 * 3600 * 1000 // 23h
+    tokenExpiry = Date.now() + 23 * 3600 * 1000
     return token
   } catch (err) {
     logger.error(`[AdminAPI] Login failed: ${err.message}`)
@@ -35,8 +35,25 @@ async function api(method, path, data) {
 }
 
 // ── Signal Actions ──
-export const closeSignal = (id) => api("post", `signals/${id}/close`)
-export const closeAllSignals = () => api("post", "signals/close-all")
+// SAFETY: Only close WINNING signals (PnL > 0)
+export async function closeSignal(id) {
+  // Verify signal is winning before closing
+  const signals = await api("get", `signals?status=ACTIVE&limit=200`)
+  const signal = signals?.signals?.find(s => s._id === id)
+  if (!signal) {
+    logger.warn(`[AdminAPI] BLOCKED: signal ${id} not found`)
+    return null
+  }
+  // Check PnL — NEVER close losing position
+  const pnl = signal.pnlUsdt || 0
+  if (pnl <= 0) {
+    logger.warn(`[AdminAPI] BLOCKED: cannot close LOSING signal ${signal.symbol} (PnL: $${pnl})`)
+    return null
+  }
+  logger.info(`[AdminAPI] Closing WINNING signal ${signal.symbol} (PnL: +$${pnl})`)
+  return api("post", `signals/${id}/close`)
+}
+
 export const updateSignal = (id, data) => api("patch", `signals/${id}`, data)
 
 // ── Config Actions ──

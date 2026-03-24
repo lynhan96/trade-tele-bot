@@ -26,20 +26,13 @@ export async function runActiveTrader() {
 
   let decisions
   try {
-    // Remove ANTHROPIC_API_KEY from env so Claude CLI uses OAuth (Pro plan) instead of expired API key
-    const cleanEnv = { ...process.env, HOME: "/home/ubuntu" }
-    delete cleanEnv.ANTHROPIC_API_KEY
     const output = execSync(
       `${NVM}claude --print ${JSON.stringify(prompt)}`,
-      { cwd: APP_ROOT(), encoding: "utf8", timeout: 3 * 60 * 1000, env: cleanEnv }
+      { cwd: APP_ROOT(), encoding: "utf8", timeout: 3 * 60 * 1000, env: { ...process.env, HOME: "/home/ubuntu" } }
     )
     decisions = parseResponse(output)
   } catch (err) {
-    const stderr = err.stderr?.toString?.()?.slice(0, 300) || ""
-    const stdout = err.stdout?.toString?.()?.slice(0, 300) || ""
     logger.error(`[Trader] Claude failed: ${err.message?.slice(0, 200)}`)
-    if (stderr) logger.error(`[Trader] stderr: ${stderr}`)
-    if (stdout) logger.error(`[Trader] stdout: ${stdout}`)
     return []
   }
 
@@ -168,30 +161,30 @@ function buildTraderPrompt(ctx) {
   return `You are an autonomous AI trader managing live Binance Futures positions.
 You have FULL authority to close signals and manage hedges via API.
 
-═══ RULES ═══
-1. TAKE PROFIT: Close winning positions when:
-   - PnL > +3% and on-chain shows reversal (opposing taker flow, extreme L/S)
-   - PnL > +5% regardless (lock in profit)
-   - Hedge is winning but main is recovering → close hedge to bank profit
+═══ ABSOLUTE RULES (CANNOT BE OVERRIDDEN) ═══
+⛔ NEVER close a position with mainPnlUsdt <= 0. The API REJECTS losing closes.
+⛔ NEVER invent new rules like "escalation" or "buffer threshold" to justify closing losses.
+⛔ NEVER close hedge with hedgePnlUsdt <= 0.
+⛔ If ALL positions are losing → NO_ACTION. Period.
 
-2. MANAGE HEDGE:
-   - If main losing > -3% and no hedge → hedge should auto-trigger (system handles)
-   - If hedge profitable > +2% and main recovering → recommend close hedge via API
-   - If banked > main loss → NET_POSITIVE, close all
+═══ ALLOWED ACTIONS ═══
+1. CLOSE_SIGNAL: ONLY when mainPnlUsdt > 0 AND PnL > +3%
+2. CLOSE_HEDGE: ONLY when hedgePnlUsdt > 0 AND hedge PnL > +2%
+3. UPDATE_CONFIG: Adjust strategy parameters
+4. LEARNING: Save observations
+5. NO_ACTION: Default — when no winning position to close
 
-3. FLIP DECISION:
-   - If main near TP and hedge active → let system FLIP automatically
-   - If market reversed strongly → recommend closing main, keeping hedge
-
-4. DO NOT CLOSE losing positions — hedge system manages those
-5. Max 3 actions per cycle. Be conservative.
-6. Learn from past decisions in memory.
+═══ HEDGE SYSTEM (managed by bot, NOT agent) ═══
+- Hedge entry/exit: automatic at -3%
+- NET_POSITIVE: automatic when banked > loss
+- FLIP: automatic when main TP + hedge active
+- Agent does NOT manage hedge logic
 
 ═══ RESPONSE (JSON only, no markdown) ═══
-{"analysis":"Vietnamese market assessment","decisions":[{"action":"CLOSE_SIGNAL|CLOSE_HEDGE|UPDATE_CONFIG|LEARNING|NO_ACTION","signalId":"xxx","reason":"Vietnamese explanation","data":{}}],"learnings":[{"key":"unique_key","insight":"pattern observed"}]}
+{"analysis":"Vietnamese assessment","decisions":[{"action":"CLOSE_SIGNAL|CLOSE_HEDGE|UPDATE_CONFIG|LEARNING|NO_ACTION","signalId":"xxx","reason":"Vietnamese","data":{}}],"learnings":[{"key":"unique_key","insight":"pattern"}]}
 
 ═══ ACTIONS ═══
-- CLOSE_SIGNAL: Close signal by ID (takes profit or cuts position)
+- CLOSE_SIGNAL: ONLY for WINNING signals (mainPnlUsdt > 0)
 - CLOSE_HEDGE: Close hedge for signal (bank hedge profit, keep main)
 - UPDATE_CONFIG: Change trading config parameter
 - LEARNING: Save insight for future reference
