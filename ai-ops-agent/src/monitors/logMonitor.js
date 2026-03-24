@@ -29,14 +29,16 @@ export function collectLogs() {
   }
 }
 
+// Only detect truly fatal crashes — not normal operational errors
 export function hasAnomalies(logs) {
-  const patterns = [
-    /uncaughtexception/i, /unhandledrejection/i,
-    /ECONNREFUSED/i, /EADDRINUSE/i, /out of memory/i,
-    /crashed/i, /killed/i, /fatal/i, /SIGKILL/i,
-    /Cannot find module/i, /TypeError.*undefined/i,
-    /MongoServerError/i, /ETIMEOUT/i
+  const fatalPatterns = [
+    /uncaughtexception/i,
+    /unhandledrejection/i,
+    /out of memory/i,
+    /SIGKILL/i,
+    /JavaScript heap out of memory/i,
   ]
-  const text = (logs.stderr || '') + (logs.stdout || '')
-  return patterns.some(r => r.test(text))
+  const text = (logs.stderr || '')
+  // Only check stderr, not stdout — normal errors in stdout are not crashes
+  return fatalPatterns.some(r => r.test(text))
 }
