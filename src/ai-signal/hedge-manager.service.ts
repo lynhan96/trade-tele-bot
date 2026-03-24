@@ -329,6 +329,27 @@ export class HedgeManagerService {
         }
       }
 
+      // ── Early trail: similar to main trail — activate at +2%, keep 70% of peak ──
+      // Supplements TP trail (which rides trends further past TP level)
+      if (hedgePnlPct >= 2.0 && !signal.hedgeTrailActivated) {
+        const earlyPeak = this.hedgePeakMap.get(signalId) || 0;
+        if (hedgePnlPct > earlyPeak) {
+          this.hedgePeakMap.set(signalId, hedgePnlPct);
+        }
+        const peak = this.hedgePeakMap.get(signalId) || hedgePnlPct;
+        const keepRatio = cfg.hedgeTrailKeepRatio || 0.70;
+        const trailSl = peak * keepRatio;
+
+        // Close when pullback drops below 70% of peak (min +1.0% profit)
+        if (peak >= 2.5 && hedgePnlPct <= trailSl && hedgePnlPct >= 1.0) {
+          this.logger.log(
+            `[${signal.coin}] Hedge EARLY TRAIL close | Peak: ${peak.toFixed(2)}% → Current: ${hedgePnlPct.toFixed(2)}% (trail SL: ${trailSl.toFixed(2)}%)`,
+          );
+          return this.closeHedgeWithProfit(signal, signalId, hedgePnlPct, hedgePnlUsdt, cfg,
+            `Early trail: peak ${peak.toFixed(2)}% → ${hedgePnlPct.toFixed(2)}%`);
+        }
+      }
+
       // ── Hedge breakeven SL: when hedge profitable > 1.5%, move SL to +0.5% ──
       // Buffer: don't close at exact entry, keep 0.5% profit minimum
       if (hedgePnlPct >= 1.5 && !signal.hedgeSlAtEntry) {

@@ -1035,7 +1035,7 @@ export class PositionMonitorService implements OnModuleInit {
       const newNotional = (signal as any).hedgeSimNotional || signal.simNotional || 1000;
       const hedgeCfgFlip = this.tradingConfig.get();
       const flipTpPct = 3.5; // TP for flipped position
-      const flipSlPct = (hedgeCfgFlip.hedgePartialTriggerPct || 3) + 1.0; // 4%
+      const flipSlPct = 40; // Safety net — hedge manages risk, not SL (same as original signal)
       const newTp = newDirection === 'LONG'
         ? +(newEntry * (1 + flipTpPct / 100)).toFixed(6)
         : +(newEntry * (1 - flipTpPct / 100)).toFixed(6);
@@ -1085,14 +1085,15 @@ export class PositionMonitorService implements OnModuleInit {
         takeProfitPrice: newTp, takeProfitPercent: flipTpPct,
         originalSlPrice: newSl,
         hedgeActive: false, hedgeCycleCount: 0,
+        hedgeHistory: [], // Clear — FLIP = new trade, fresh NET_POSITIVE tracking
         slMovedToEntry: false, tpBoosted: false, peakPnlPct: 0,
-        $unset: { hedgePhase: 1, hedgeDirection: 1, hedgeEntryPrice: 1, hedgeSimNotional: 1, hedgeTpPrice: 1, hedgeOpenedAt: 1, hedgeSafetySlPrice: 1, hedgeSlAtEntry: 1 },
+        $unset: { hedgePhase: 1, hedgeDirection: 1, hedgeEntryPrice: 1, hedgeSimNotional: 1, hedgeTpPrice: 1, hedgeOpenedAt: 1, hedgeSafetySlPrice: 1, hedgeSlAtEntry: 1, hedgeTrailActivated: 1, hedgePeakPnlPct: 1 },
       });
 
       // 5. Re-init grid for new direction
       const simNotional = newNotional;
       const DCA_WEIGHTS_FLIP = [40, 25, 35];
-      const flipGridStep = flipSlPct / 3;
+      const flipGridStep = Math.max(4, flipSlPct / 3); // Min 4% grid spacing
       const newGrids: any[] = [];
       for (let i = 0; i < 3; i++) {
         const dev = i * flipGridStep;
