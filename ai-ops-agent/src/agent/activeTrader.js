@@ -2,7 +2,7 @@ import { collectMarketContext } from "../utils/marketContext.js"
 import { getPrices } from "../utils/redis.js"
 import { getDb } from "../utils/db.js"
 import { buildMemoryContext, saveDecision, saveLearning } from "../utils/memory.js"
-import { closeSignal, updateSignal, updateTradingConfig, getDashboard } from "../actions/adminApi.js"
+import { updateTradingConfig } from "../actions/adminApi.js"
 import { logger } from "../utils/logger.js"
 import * as agentLog from "../utils/agentLogger.js"
 import { execSync } from "child_process"
@@ -12,6 +12,9 @@ import { join } from "path"
 
 const NVM = 'export NVM_DIR="/home/ubuntu/.nvm" && [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" && '
 const APP_ROOT = () => process.env.APP_ROOT || "/home/ubuntu/projects/binance-tele-bot"
+
+// ═══ ALLOWED ACTIONS — agent is ADVISOR only, no position execution ═══
+const ALLOWED_ACTIONS = new Set(["UPDATE_CONFIG", "LEARNING", "NO_ACTION"])
 
 export async function runActiveTrader() {
   const db = await getDb()
@@ -23,7 +26,7 @@ export async function runActiveTrader() {
     return []
   }
 
-  // ═══ 2. Claude decides ═══
+  // ═══ 2. Claude analyzes ═══
   const prompt = buildTraderPrompt(context)
   logger.info(`[Trader] ${context.activePositions.length} positions | Asking Claude...`)
   await agentLog.thought("active_trader", `Phân tích ${context.activePositions.length} vị thế | Wallet: $${context.stats.wallet}`, context.stats)
@@ -31,7 +34,6 @@ export async function runActiveTrader() {
   let decisions
   const tmpFile = join(tmpdir(), `trader-prompt-${Date.now()}.txt`)
   try {
-    writeFileSync(tmpFile, prompt, "utf8")
     writeFileSync(tmpFile, prompt, "utf8")
     const env = { ...process.env, HOME: "/home/ubuntu" }
     delete env.ANTHROPIC_API_KEY
@@ -49,16 +51,25 @@ export async function runActiveTrader() {
     try { unlinkSync(tmpFile) } catch {}
   }
 
-  // ═══ 3. Execute decisions ═══
+  // ═══ 3. Execute decisions (config + learning ONLY) ═══
   const results = []
-  for (const d of (decisions || [])) {
+  for (const d of (decisions || []).slice(0, 3)) {
+    // STRICT WHITELIST — reject any position execution attempts
+    if (!ALLOWED_ACTIONS.has(d.action)) {
+      logger.warn(`[Trader] REJECTED action: ${d.action} (not in whitelist)`)
+      saveDecision({ ...d, outcome: "rejected", details: `Action ${d.action} not allowed` })
+      await agentLog.action("active_trader", `REJECTED: ${d.action} — agent cannot execute trades`, "REJECTED", d.data?.symbol, { ok: false })
+      continue
+    }
+
     if (d.action === "NO_ACTION") {
       logger.info(`[Trader] Hold: ${d.reason}`)
       saveDecision({ ...d, outcome: "hold" })
       continue
     }
+
     try {
-      const result = await executeTradeAction(d, db)
+      const result = await executeAction(d)
       saveDecision({ ...d, outcome: result.ok ? "success" : "failed", details: result.message })
       results.push(result)
       logger.info(`[Trader] ✅ ${d.action}: ${result.message}`)
@@ -173,38 +184,42 @@ async function collectFullContext(db) {
 }
 
 function buildTraderPrompt(ctx) {
-  return `You are an autonomous AI trader managing live Binance Futures positions.
-You have FULL authority to close signals and manage hedges via API.
+  return `You are an AI trading ADVISOR analyzing live Binance Futures positions.
+You are an ADVISOR — you CANNOT close, open, or modify any position directly.
+The bot handles all execution: TP, trail SL, hedge open/close, NET_POSITIVE, FLIP.
 
-═══ ABSOLUTE RULES (CANNOT BE OVERRIDDEN) ═══
-⛔ NEVER close a position with mainPnlUsdt <= 0. The API REJECTS losing closes.
-⛔ NEVER invent new rules like "escalation" or "buffer threshold" to justify closing losses.
-⛔ NEVER close hedge with hedgePnl < +1.5%. Let small profits ride to TP/trail.
-⛔ If ALL positions are losing → NO_ACTION. Period.
+═══ YOUR ROLE ═══
+- Analyze positions and market conditions
+- Recommend config adjustments (UPDATE_CONFIG) to optimize bot behavior
+- Record observations and patterns (LEARNING)
+- You CANNOT and MUST NOT close signals, open hedges, or close hedges
 
-═══ ALLOWED ACTIONS ═══
-1. CLOSE_SIGNAL: ONLY when mainPnlUsdt > 0 AND PnL > +3%
-2. OPEN_HEDGE: ONLY when mainPnl < -3% AND no hedge AND 30min cooldown
-3. CLOSE_HEDGE: ONLY when hedgePnl >= +1.5% (small profits ride to TP/trail)
-4. UPDATE_CONFIG: Adjust strategy parameters
-3. UPDATE_CONFIG: Adjust strategy parameters
-4. LEARNING: Save observations
-5. NO_ACTION: Default — when no winning position to close
+═══ ALLOWED ACTIONS (ONLY these 3) ═══
+1. UPDATE_CONFIG: Adjust trading parameters (TP%, SL%, hedge threshold, strategy enable/disable)
+2. LEARNING: Save observations for future reference
+3. NO_ACTION: Default — no config changes needed
 
-═══ HEDGE SYSTEM (managed by bot, NOT agent) ═══
-- Hedge entry/exit: automatic at -3%
-- NET_POSITIVE: automatic when banked > loss
-- FLIP: automatic when main TP + hedge active
-- Agent does NOT manage hedge logic
+═══ WHAT YOU ANALYZE ═══
+- Market regime (trending/ranging/volatile) → adjust TP%/SL% via config
+- Strategy performance (WR < 40% on 5+ trades → recommend disable)
+- Hedge effectiveness (too many breakeven cycles → adjust hedgeThreshold)
+- Exposure level (leverage > 25x → recommend reducing position size)
+- Loss streaks → recommend tightening entry criteria
+
+═══ WHAT BOT HANDLES AUTOMATICALLY (DO NOT INTERFERE) ═══
+- TP hit → trail activated (1% pullback closes)
+- SL/Trail SL → automatic
+- Hedge open at -3% → automatic
+- Hedge close via TP/trail/NET_POSITIVE/FLIP → automatic
+- Grid entry/exit → automatic
 
 ═══ RESPONSE (JSON only, no markdown) ═══
-{"analysis":"Vietnamese assessment","decisions":[{"action":"CLOSE_SIGNAL|UPDATE_CONFIG|LEARNING|NO_ACTION","signalId":"xxx","reason":"Vietnamese","data":{}}],"learnings":[{"key":"unique_key","insight":"pattern"}]}
+{"analysis":"Vietnamese assessment of all positions + market","decisions":[{"action":"UPDATE_CONFIG|LEARNING|NO_ACTION","reason":"Vietnamese","data":{"field":"configField","value":"newValue"}}],"learnings":[{"key":"unique_key","insight":"pattern observed"}]}
 
-═══ ACTIONS ═══
-- CLOSE_SIGNAL: ONLY for WINNING signals (mainPnlUsdt > 0)
-- UPDATE_CONFIG: Change trading config parameter
-- LEARNING: Save insight for future reference
-- NO_ACTION: Hold all positions, explain why
+═══ CONFIG FIELDS YOU CAN ADJUST ═══
+- takeProfitPercent, stopLossPercent, hedgeThreshold, trailStopPercent
+- maxActiveSignals, maxExposureLeverage, minConfidence
+- Strategy enable/disable via: enabledStrategies (array)
 
 ═══ LIVE POSITIONS ═══
 ${JSON.stringify(ctx.activePositions, null, 2)}
@@ -224,7 +239,7 @@ ${JSON.stringify(ctx.market, null, 2)}
 ═══ MEMORY ═══
 ${ctx.memory || "No history yet — first cycle"}
 
-Analyze each position and decide:`
+Analyze each position and market conditions. Recommend config adjustments if needed:`
 }
 
 function parseResponse(output) {
@@ -242,59 +257,25 @@ function parseResponse(output) {
       logger.info(`[Trader] Analysis: ${parsed.analysis.slice(0, 200)}`)
       agentLog.decision("active_trader", parsed.analysis)
     }
-    return parsed.decisions || []
+    // STRICT: only allow whitelisted actions
+    const decisions = (parsed.decisions || []).filter(d => ALLOWED_ACTIONS.has(d.action))
+    if (decisions.length < (parsed.decisions || []).length) {
+      const rejected = (parsed.decisions || []).filter(d => !ALLOWED_ACTIONS.has(d.action))
+      logger.warn(`[Trader] Filtered ${rejected.length} disallowed actions: ${rejected.map(d => d.action).join(", ")}`)
+    }
+    return decisions
   } catch (err) {
     logger.error(`[Trader] Parse failed: ${err.message}`)
     return []
   }
 }
 
-async function executeTradeAction(decision, db) {
+async function executeAction(decision) {
   switch (decision.action) {
-    case "CLOSE_SIGNAL": {
-      const id = decision.signalId || decision.data?.signalId
-      if (!id) return { ok: false, message: "No signal ID" }
-      const result = await closeSignal(id)
-      return { ok: !!result, message: `Closed signal ${decision.data?.symbol || id}` }
-    }
-
-    case "OPEN_HEDGE": {
-      const oid = decision.signalId || decision.data?.signalId
-      if (!oid) return { ok: false, message: "No signal ID" }
-      const osig = await db.collection("ai_signals").findOne({ _id: new (await import("mongodb")).ObjectId(oid) })
-      if (!osig) return { ok: false, message: "Signal not found" }
-      if (osig.hedgeActive) return { ok: false, message: "BLOCKED: hedge already active" }
-      const oEntry = osig.gridAvgEntry || osig.entryPrice
-      const oPrice = (await getPrices([osig.symbol]))[osig.symbol] || 0
-      const oPnl = osig.direction === "LONG" ? ((oPrice - oEntry) / oEntry * 100) : ((oEntry - oPrice) / oEntry * 100)
-      if (oPnl > -3) return { ok: false, message: "BLOCKED: PnL " + oPnl.toFixed(2) + "% (need < -3%)" }
-      const lastH = (osig.hedgeHistory || []).slice(-1)[0]
-      if (lastH?.closedAt && (Date.now() - new Date(lastH.closedAt).getTime()) < 30 * 60 * 1000) {
-        return { ok: false, message: "BLOCKED: cooldown 30min" }
-      }
-      const { forceOpenHedge } = await import("../actions/adminApi.js")
-      const oresult = await forceOpenHedge(oid)
-      return { ok: !!oresult?.success, message: "Hedge opened " + osig.symbol + " (PnL " + oPnl.toFixed(2) + "%)" }
-    }
-
-    case "CLOSE_HEDGE": {
-      const hid = decision.signalId || decision.data?.signalId
-      if (!hid) return { ok: false, message: "No signal ID" }
-      // SAFETY: verify hedge is profitable before closing
-      const sig = await db.collection("ai_signals").findOne({ _id: new (await import("mongodb")).ObjectId(hid) })
-      if (!sig?.hedgeActive) return { ok: false, message: "No active hedge" }
-      const hEntry = sig.hedgeEntryPrice || 0
-      const hPrice = (await getPrices([sig.symbol]))[sig.symbol] || 0
-      const hPnl = sig.hedgeDirection === "LONG" ? ((hPrice - hEntry) / hEntry * 100) : ((hEntry - hPrice) / hEntry * 100)
-      if (hPnl < 1.5) return { ok: false, message: "BLOCKED: hedge PnL +" + hPnl.toFixed(2) + "% (need >= 1.5%)" }
-      const { forceCloseHedge } = await import("../actions/adminApi.js")
-      const hresult = await forceCloseHedge(hid)
-      return { ok: !!hresult?.success, message: "Hedge closed (PnL +" + hPnl.toFixed(2) + "%)" }
-    }
     case "UPDATE_CONFIG": {
       const field = decision.data?.field
       const value = decision.data?.value
-      if (!field) return { ok: false, message: "No field" }
+      if (!field) return { ok: false, message: "No field specified" }
       const result = await updateTradingConfig({ [field]: value })
       return { ok: !!result, message: `Config ${field}=${value}` }
     }
@@ -306,6 +287,6 @@ async function executeTradeAction(decision, db) {
       return { ok: true, message: `Hold: ${decision.reason}` }
 
     default:
-      return { ok: false, message: `Unknown action: ${decision.action}` }
+      return { ok: false, message: `REJECTED: ${decision.action}` }
   }
 }

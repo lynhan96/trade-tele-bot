@@ -17,7 +17,7 @@ export async function autoFixWithClaude(diagnosis, tradingReport) {
     const env = { ...process.env, HOME: "/home/ubuntu" }
     delete env.ANTHROPIC_API_KEY
     const output = execSync(
-      `${NVM}cat ${tmpFile} | claude --print --allowedTools Edit,Read,Grep,Bash`,
+      `${NVM}cat ${tmpFile} | claude --print --allowedTools Read,Grep,Bash`,
       { cwd: APP_ROOT(), encoding: "utf8", timeout: 5 * 60 * 1000, env }
     )
 
@@ -48,9 +48,9 @@ export async function buildAndDeploy() {
 
 function buildPrompt(diagnosis, report) {
   return [
-    "You are fixing a NestJS trading bot. Fix ONLY the specific issue below.",
-    "Do NOT refactor. Do NOT add features. Minimal fix only.",
-    "Run `npm run build` after fixing to verify.",
+    "You are DIAGNOSING a NestJS trading bot issue. Output analysis and fix suggestion ONLY.",
+    "Do NOT edit any files. Do NOT modify code. Read and analyze only.",
+    "NEVER edit files in ai-ops-agent/ or safety-related code.",
     "",
     `== ISSUE ==`,
     `Severity: ${diagnosis.severity}`,

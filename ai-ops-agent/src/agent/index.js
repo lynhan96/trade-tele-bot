@@ -11,10 +11,10 @@ import { logger } from "../utils/logger.js"
 let lastReportHour = -1
 let consecutiveCrashes = 0
 
-// ═══ Main check cycle — every 5 min ═══
-async function runCheck() {
+// ═══ Lightweight check — every 5 min (no Claude, DB only) ═══
+async function runLightCheck() {
   try {
-    // ── 1. Auto-fix data issues (silent unless fixed something) ──
+    // ── 1. Auto-fix data issues (DB queries only, no tokens) ──
     const skillResults = await runAllSkills()
     const fixes = skillResults.dataFixes || []
     if (fixes.length) {
@@ -35,17 +35,7 @@ async function runCheck() {
     }
     consecutiveCrashes = 0
 
-    // ── 3. Active Trader — Claude analyzes + decides ──
-    const results = await runActiveTrader()
-    const actions = results.filter(r => r.ok && !r.message.includes("Hold") && !r.message.includes("Learned"))
-    if (actions.length) {
-      await notifyAutoFixed([
-        "🧠 AI Trader Decision",
-        ...actions.map(r => `✅ ${r.message}`)
-      ])
-    }
-
-    // ── 4. Trading report every 4h ──
+    // ── 3. Trading report every 4h ──
     const hour = new Date().getUTCHours()
     if (hour % 4 === 0 && hour !== lastReportHour) {
       lastReportHour = hour
@@ -54,21 +44,44 @@ async function runCheck() {
       logger.info(`📊 Report | $${report.wallet} | WR: ${report.winRate}%`)
     }
   } catch (err) {
-    logger.error(`Check failed: ${err.message}`)
+    logger.error(`Light check failed: ${err.message}`)
+  }
+}
+
+// ═══ Claude analysis — every 30 min (uses Claude tokens) ═══
+async function runAnalysis() {
+  try {
+    const results = await runActiveTrader()
+    const actions = results.filter(r => r.ok && !r.message.includes("Hold") && !r.message.includes("Learned"))
+    if (actions.length) {
+      await notifyAutoFixed([
+        "🧠 AI Advisor",
+        ...actions.map(r => `✅ ${r.message}`)
+      ])
+    }
+  } catch (err) {
+    logger.error(`Analysis failed: ${err.message}`)
   }
 }
 
 async function start() {
   logger.info("=".repeat(50))
-  logger.info("🤖 AI Active Trader v6")
+  logger.info("🤖 AI Trading Advisor v7")
   logger.info(`Commit: ${JSON.stringify(getCurrentCommit())}`)
-  logger.info("Trading: 5min | Skills: 5min | Report: 4h")
-  logger.info("Claude Pro: decisions + close + hedge + flip")
+  logger.info("Skills/crash: 5min | Claude analysis: 30min | Report: 4h")
+  logger.info("Role: ADVISOR only — config tuning + learnings")
   logger.info("=".repeat(50))
 
-  await runCheck()
-  // Every 5 minutes
-  cron.schedule("*/5 * * * *", runCheck)
+  // Run immediately on start
+  await runLightCheck()
+  await runAnalysis()
+
+  // Skills + crash detection: every 5 min (cheap — no Claude)
+  cron.schedule("*/5 * * * *", runLightCheck)
+
+  // Claude analysis: every 30 min (saves ~80% tokens vs 5min)
+  cron.schedule("*/30 * * * *", runAnalysis)
+
   logger.info("Agent running.")
 }
 

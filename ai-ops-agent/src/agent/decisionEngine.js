@@ -4,11 +4,14 @@ import { tmpdir } from "os"
 import { join } from "path"
 import { getDb } from "../utils/db.js"
 import { buildMemoryContext, saveDecision, saveLearning } from "../utils/memory.js"
-import { closeSignal, updateTradingConfig } from "../actions/adminApi.js"
+import { updateTradingConfig } from "../actions/adminApi.js"
 import { logger } from "../utils/logger.js"
 
 const NVM = 'export NVM_DIR="/home/ubuntu/.nvm" && [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" && '
 const APP_ROOT = () => process.env.APP_ROOT || "/home/ubuntu/projects/binance-tele-bot"
+
+// ═══ ALLOWED ACTIONS — advisor only, no position execution ═══
+const ALLOWED_ACTIONS = new Set(["UPDATE_CONFIG", "LEARNING", "NO_ACTION"])
 
 export async function makeDecisions(tradingReport, skillResults) {
   const db = await getDb()
@@ -38,9 +41,9 @@ export async function makeDecisions(tradingReport, skillResults) {
   if (!decisions?.length) { logger.info("[Decision] No actions"); return [] }
 
   const results = []
-  for (const d of decisions) {
+  for (const d of decisions.slice(0, 3)) {
     try {
-      const result = await executeDecision(d, db)
+      const result = await executeDecision(d)
       saveDecision({ ...d, outcome: result.ok ? "success" : "failed", details: result.message })
       results.push(result)
       logger.info(`[Decision] ${d.action}: ${result.message}`)
@@ -91,19 +94,30 @@ async function buildFullContext(db, report, skills) {
 }
 
 function buildDecisionPrompt(ctx) {
-  return `You are an AI trading agent managing a Binance Futures bot.
+  return `You are an AI trading ADVISOR for a Binance Futures bot.
+You are an ADVISOR — you CANNOT close, open, or modify any position directly.
+The bot handles all execution automatically.
 
-== RULES ==
-1. Close WINNING signals (PnL > 0) when reversal risk detected
-2. Do NOT close losing signals — hedge system manages those
+== YOUR ROLE ==
+1. Analyze trading performance and market conditions
+2. Adjust config parameters when performance degrades (UPDATE_CONFIG)
 3. Enable/disable strategies based on WR (disable if WR < 35% on 5+ trades)
-4. Adjust config when performance degrades
-5. Learn from past decisions in memory
-6. Be conservative — strong evidence only
-7. Max 3 actions per cycle
+4. Record observations and patterns (LEARNING)
+5. Be conservative — strong evidence only
+6. Max 3 actions per cycle
+
+== ALLOWED ACTIONS (ONLY these 3) ==
+- UPDATE_CONFIG: Change trading config parameter
+- LEARNING: Save insight for future reference
+- NO_ACTION: No changes needed
+
+== WHAT BOT HANDLES (DO NOT INTERFERE) ==
+- Close signals (TP/trail/SL — automatic)
+- Hedge open/close (automatic at -3%, TP/trail/NET_POSITIVE/FLIP)
+- Grid entry/exit (automatic)
 
 == RESPONSE (JSON only, no markdown fences) ==
-{"analysis":"Vietnamese assessment","decisions":[{"action":"CLOSE_SIGNAL|UPDATE_CONFIG|LEARNING|NO_ACTION","target":"id_or_field","reason":"Vietnamese","data":{}}],"learnings":[{"key":"unique","insight":"what learned"}]}
+{"analysis":"Vietnamese assessment","decisions":[{"action":"UPDATE_CONFIG|LEARNING|NO_ACTION","reason":"Vietnamese","data":{"field":"configField","value":"newValue"}}],"learnings":[{"key":"unique","insight":"what learned"}]}
 
 == TRADING DATA ==
 ${JSON.stringify(ctx.report, null, 2)}
@@ -123,7 +137,7 @@ ${JSON.stringify(ctx.skills, null, 2)}
 == MEMORY ==
 ${ctx.memory || "No history"}
 
-Decide:`
+Analyze and recommend config adjustments if needed:`
 }
 
 function parseDecisions(output) {
@@ -133,7 +147,13 @@ function parseDecisions(output) {
     const parsed = JSON.parse(jsonMatch[0])
     if (parsed.learnings?.length) parsed.learnings.forEach(l => saveLearning(l))
     logger.info(`[Decision] ${parsed.analysis?.slice(0, 150)}`)
-    return parsed.decisions || []
+    // STRICT: only allow whitelisted actions
+    const decisions = (parsed.decisions || []).filter(d => ALLOWED_ACTIONS.has(d.action))
+    if (decisions.length < (parsed.decisions || []).length) {
+      const rejected = (parsed.decisions || []).filter(d => !ALLOWED_ACTIONS.has(d.action))
+      logger.warn(`[Decision] Filtered ${rejected.length} disallowed actions: ${rejected.map(d => d.action).join(", ")}`)
+    }
+    return decisions
   } catch (err) {
     logger.error(`[Decision] Parse: ${err.message}`)
     return []
@@ -141,13 +161,11 @@ function parseDecisions(output) {
 }
 
 async function executeDecision(decision) {
+  if (!ALLOWED_ACTIONS.has(decision.action)) {
+    return { ok: false, message: `REJECTED: ${decision.action}` }
+  }
+
   switch (decision.action) {
-    case "CLOSE_SIGNAL": {
-      const id = decision.data?.signalId || decision.target
-      if (!id) return { ok: false, message: "No signal ID" }
-      const result = await closeSignal(id)
-      return { ok: !!result, message: `Closed ${id}` }
-    }
     case "UPDATE_CONFIG": {
       const field = decision.data?.field || decision.target
       const value = decision.data?.value
@@ -160,6 +178,6 @@ async function executeDecision(decision) {
     case "NO_ACTION":
       return { ok: true, message: `Skip: ${decision.reason}` }
     default:
-      return { ok: false, message: `Unknown: ${decision.action}` }
+      return { ok: false, message: `REJECTED: ${decision.action}` }
   }
 }

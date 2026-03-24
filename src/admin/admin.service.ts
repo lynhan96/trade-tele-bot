@@ -778,7 +778,7 @@ export class AdminService {
    * - Removes Redis active key so PositionMonitorService detects the close
    *   and handles real Binance position closes + Telegram notifications
    */
-  async closeSignal(id: string): Promise<{ success: boolean; pnlPercent?: number; error?: string }> {
+  async closeSignal(id: string, source?: string): Promise<{ success: boolean; pnlPercent?: number; error?: string }> {
     const signal = await this.signalModel.findById(id);
     if (!signal) return { success: false, error: 'Signal not found' };
     if (signal.status !== 'ACTIVE' && signal.status !== 'QUEUED') {
@@ -807,6 +807,14 @@ export class AdminService {
     const pnlPercent = signal.direction === 'LONG'
       ? ((exitPrice - entryForPnl) / entryForPnl) * 100
       : ((entryForPnl - exitPrice) / entryForPnl) * 100;
+
+    // SAFETY GATE: agent cannot close losing positions
+    if (source === 'agent' && pnlPercent <= 0) {
+      this.logger.warn(
+        `[Admin] BLOCKED agent close: ${signal.symbol} PnL=${pnlPercent.toFixed(2)}% — only bot or admin can close losing positions`,
+      );
+      return { success: false, error: `BLOCKED: cannot close losing position (PnL: ${pnlPercent.toFixed(2)}%)` };
+    }
 
     // Calculate USDT PnL from grid volumes
     const grids: any[] = (signal as any).gridLevels || [];
@@ -1184,11 +1192,31 @@ export class AdminService {
    * Force close hedge for an active signal.
    * Sets hedgeTpPrice to trigger immediate TP on next tick.
    */
-  async forceCloseHedge(id: string): Promise<{ success: boolean; error?: string }> {
+  async forceCloseHedge(id: string, source?: string): Promise<{ success: boolean; error?: string }> {
     const signal = await this.signalModel.findById(id);
     if (!signal) return { success: false, error: 'Signal not found' };
     if (signal.status !== 'ACTIVE') return { success: false, error: `Signal is ${signal.status}` };
     if (!(signal as any).hedgeActive) return { success: false, error: 'No active hedge' };
+
+    // SAFETY GATE: agent cannot close hedge with low PnL
+    if (source === 'agent') {
+      const hedgeEntry = (signal as any).hedgeEntryPrice;
+      const hedgeDir = (signal as any).hedgeDirection;
+      if (hedgeEntry) {
+        const livePrice = await this.fetchBinancePrice(signal.symbol);
+        if (livePrice) {
+          const hedgePnlPct = hedgeDir === 'LONG'
+            ? ((livePrice - hedgeEntry) / hedgeEntry) * 100
+            : ((hedgeEntry - livePrice) / hedgeEntry) * 100;
+          if (hedgePnlPct < 1.5) {
+            this.logger.warn(
+              `[Admin] BLOCKED agent hedge close: ${signal.symbol} hedgePnl=${hedgePnlPct.toFixed(2)}% (need >= 1.5%)`,
+            );
+            return { success: false, error: `BLOCKED: hedge PnL ${hedgePnlPct.toFixed(2)}% < 1.5%` };
+          }
+        }
+      }
+    }
 
     // Force hedge TP by setting price to immediate trigger
     // SHORT hedge: set TP very high (any price triggers)

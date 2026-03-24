@@ -26,7 +26,7 @@ async function api(method, path, data) {
   if (!t) return null
   try {
     const res = await axios({ method, url: `${BASE}/admin/${path}`, data,
-      headers: { Authorization: `Bearer ${t}` }, timeout: 10000 })
+      headers: { Authorization: `Bearer ${t}`, 'x-source': 'agent' }, timeout: 10000 })
     return res.data
   } catch (err) {
     logger.error(`[AdminAPI] ${method} ${path}: ${err.message}`)
