@@ -184,7 +184,8 @@ You have FULL authority to close signals and manage hedges via API.
 
 ═══ ALLOWED ACTIONS ═══
 1. CLOSE_SIGNAL: ONLY when mainPnlUsdt > 0 AND PnL > +3%
-2. CLOSE_HEDGE: ONLY when hedgePnlUsdt > 0 (API verifies, rejects if losing)
+2. OPEN_HEDGE: ONLY when mainPnl < -3% AND no hedge AND 30min cooldown
+3. CLOSE_HEDGE: ONLY when hedgePnlUsdt > 0 (API verifies, rejects if losing)
 4. UPDATE_CONFIG: Adjust strategy parameters
 3. UPDATE_CONFIG: Adjust strategy parameters
 4. LEARNING: Save observations
@@ -255,6 +256,25 @@ async function executeTradeAction(decision, db) {
       if (!id) return { ok: false, message: "No signal ID" }
       const result = await closeSignal(id)
       return { ok: !!result, message: `Closed signal ${decision.data?.symbol || id}` }
+    }
+
+    case "OPEN_HEDGE": {
+      const oid = decision.signalId || decision.data?.signalId
+      if (!oid) return { ok: false, message: "No signal ID" }
+      const osig = await db.collection("ai_signals").findOne({ _id: new (await import("mongodb")).ObjectId(oid) })
+      if (!osig) return { ok: false, message: "Signal not found" }
+      if (osig.hedgeActive) return { ok: false, message: "BLOCKED: hedge already active" }
+      const oEntry = osig.gridAvgEntry || osig.entryPrice
+      const oPrice = (await getPrices([osig.symbol]))[osig.symbol] || 0
+      const oPnl = osig.direction === "LONG" ? ((oPrice - oEntry) / oEntry * 100) : ((oEntry - oPrice) / oEntry * 100)
+      if (oPnl > -3) return { ok: false, message: "BLOCKED: PnL " + oPnl.toFixed(2) + "% (need < -3%)" }
+      const lastH = (osig.hedgeHistory || []).slice(-1)[0]
+      if (lastH?.closedAt && (Date.now() - new Date(lastH.closedAt).getTime()) < 30 * 60 * 1000) {
+        return { ok: false, message: "BLOCKED: cooldown 30min" }
+      }
+      const { forceOpenHedge } = await import("../actions/adminApi.js")
+      const oresult = await forceOpenHedge(oid)
+      return { ok: !!oresult?.success, message: "Hedge opened " + osig.symbol + " (PnL " + oPnl.toFixed(2) + "%)" }
     }
 
     case "CLOSE_HEDGE": {
