@@ -40,7 +40,11 @@ export async function runActiveTrader() {
       try { unlinkSync(tmpFile) } catch {}
     }
   } catch (err) {
-    logger.error(`[Trader] Claude failed: ${err.message?.slice(0, 500)}`)
+    const stderr = err.stderr?.toString?.()?.slice(0, 500) || ""
+    const stdout = err.stdout?.toString?.()?.slice(0, 500) || ""
+    logger.error(`[Trader] Claude failed: ${err.message?.slice(0, 300)}`)
+    if (stderr) logger.error(`[Trader] stderr: ${stderr}`)
+    if (stdout) logger.error(`[Trader] stdout: ${stdout}`)
     return []
   }
 
