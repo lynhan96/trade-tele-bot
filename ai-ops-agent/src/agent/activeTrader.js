@@ -2,7 +2,7 @@ import { collectMarketContext } from "../utils/marketContext.js"
 import { getPrices } from "../utils/redis.js"
 import { getDb } from "../utils/db.js"
 import { buildMemoryContext, saveDecision, saveLearning } from "../utils/memory.js"
-import { closeSignal, updateSignal, updateTradingConfig, getDashboard, forceOpenHedge, forceCloseHedge } from "../actions/adminApi.js"
+import { closeSignal, updateSignal, updateTradingConfig, getDashboard } from "../actions/adminApi.js"
 import { logger } from "../utils/logger.js"
 import * as agentLog from "../utils/agentLogger.js"
 import { execSync } from "child_process"
@@ -184,8 +184,6 @@ You have FULL authority to close signals and manage hedges via API.
 
 ═══ ALLOWED ACTIONS ═══
 1. CLOSE_SIGNAL: ONLY when mainPnlUsdt > 0 AND PnL > +3%
-2. OPEN_HEDGE: Force open hedge for a losing signal that has no hedge yet
-3. CLOSE_HEDGE: Close profitable hedge (hedgePnlUsdt > 0)
 4. UPDATE_CONFIG: Adjust strategy parameters
 3. UPDATE_CONFIG: Adjust strategy parameters
 4. LEARNING: Save observations
@@ -198,11 +196,10 @@ You have FULL authority to close signals and manage hedges via API.
 - Agent does NOT manage hedge logic
 
 ═══ RESPONSE (JSON only, no markdown) ═══
-{"analysis":"Vietnamese assessment","decisions":[{"action":"CLOSE_SIGNAL|OPEN_HEDGE|CLOSE_HEDGE|CLOSE_HEDGE|UPDATE_CONFIG|LEARNING|NO_ACTION","signalId":"xxx","reason":"Vietnamese","data":{}}],"learnings":[{"key":"unique_key","insight":"pattern"}]}
+{"analysis":"Vietnamese assessment","decisions":[{"action":"CLOSE_SIGNAL|UPDATE_CONFIG|LEARNING|NO_ACTION","signalId":"xxx","reason":"Vietnamese","data":{}}],"learnings":[{"key":"unique_key","insight":"pattern"}]}
 
 ═══ ACTIONS ═══
 - CLOSE_SIGNAL: ONLY for WINNING signals (mainPnlUsdt > 0)
-- CLOSE_HEDGE: Close hedge for signal (bank hedge profit, keep main)
 - UPDATE_CONFIG: Change trading config parameter
 - LEARNING: Save insight for future reference
 - NO_ACTION: Hold all positions, explain why
@@ -259,17 +256,10 @@ async function executeTradeAction(decision, db) {
       return { ok: !!result, message: `Closed signal ${decision.data?.symbol || id}` }
     }
 
-    case "CLOSE_HEDGE": {
-      const hid = decision.signalId || decision.data?.signalId
-      if (!hid) return { ok: false, message: "No signal ID" }
-      const hresult = await forceCloseHedge(hid)
+
       return { ok: !!hresult?.success, message: `Hedge closed for ${hid}` }
     }
 
-    case "OPEN_HEDGE": {
-      const oid = decision.signalId || decision.data?.signalId
-      if (!oid) return { ok: false, message: "No signal ID" }
-      const oresult = await forceOpenHedge(oid)
       return { ok: !!oresult?.success, message: `Hedge opened for ${oid}` }
     }
 
