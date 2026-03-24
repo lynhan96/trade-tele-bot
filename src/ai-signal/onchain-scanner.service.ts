@@ -254,13 +254,8 @@ export class OnChainScannerService {
 
     msg += `_${new Date().toISOString().slice(11, 16)} UTC • On-Chain Scanner_`;
 
-    for (const adminId of adminIds) {
-      try {
-        await this.telegramBot.sendTelegramMessage(Number(adminId), msg, { parse_mode: 'Markdown' });
-      } catch (err) {
-        this.logger.debug(`[OnChainScanner] Failed to send alert to ${adminId}: ${err.message}`);
-      }
-    }
+    // On-chain alerts disabled — AI Ops Agent handles notifications now
+    // Data still saved to MongoDB for agent analysis
 
     await this.redisService.set(ALERT_COOLDOWN_KEY, cooldownMap, 7200);
     this.logger.log(`[OnChainScanner] Sent ${toAlert.length} alerts`);
