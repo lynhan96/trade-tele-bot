@@ -68,19 +68,18 @@ async function start() {
   logger.info("=".repeat(50))
   logger.info("🤖 AI Trading Advisor v7")
   logger.info(`Commit: ${JSON.stringify(getCurrentCommit())}`)
-  logger.info("Skills/crash: 5min | Claude analysis: 30min | Report: 4h")
+  logger.info("Skills/crash: 5min | Claude analysis: 2h | Report: 4h")
   logger.info("Role: ADVISOR only — config tuning + learnings")
   logger.info("=".repeat(50))
 
-  // Run immediately on start
+  // Run light check on start (no tokens), skip analysis to save tokens
   await runLightCheck()
-  await runAnalysis()
 
-  // Skills + crash detection: every 5 min (cheap — no Claude)
-  cron.schedule("*/5 * * * *", runLightCheck)
+  // Skills + crash detection: every 15 min (cheap — no Claude)
+  cron.schedule("*/15 * * * *", runLightCheck)
 
-  // Claude analysis: every 30 min (saves ~80% tokens vs 5min)
-  cron.schedule("*/30 * * * *", runAnalysis)
+  // Claude analysis: every 2h (saves tokens)
+  cron.schedule("0 */2 * * *", runAnalysis)
 
   logger.info("Agent running.")
 }
