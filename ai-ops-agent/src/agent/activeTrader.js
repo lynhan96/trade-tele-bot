@@ -31,17 +31,19 @@ export async function runActiveTrader() {
   const tmpFile = join(tmpdir(), `trader-prompt-${Date.now()}.txt`)
   try {
     writeFileSync(tmpFile, prompt, "utf8")
+    logger.info(`[Trader] Prompt written: ${tmpFile} (${prompt.length} bytes)`)
     const output = execSync(
-      `${NVM}cat ${tmpFile} | claude --print`,
+      `${NVM}cat ${tmpFile} | claude --print 2>/tmp/trader-claude-stderr.txt`,
       { cwd: APP_ROOT(), encoding: "utf8", timeout: 3 * 60 * 1000, env: { ...process.env, HOME: "/home/ubuntu" } }
     )
     decisions = parseResponse(output)
+    try { unlinkSync(tmpFile) } catch {}
   } catch (err) {
     const stderr = err.stderr ? (typeof err.stderr === 'string' ? err.stderr : err.stderr.toString()) : ''
-    logger.error(`[Trader] Claude failed: ${stderr.slice(0, 500) || err.message?.slice(0, 500)}`)
+    logger.error(`[Trader] Claude failed (exit ${err.status}): ${stderr.slice(0, 500) || err.message?.slice(0, 500)}`)
+    logger.error(`[Trader] Prompt file kept at: ${tmpFile}`)
+    // Don't delete tmpFile on error — keep for debugging
     return []
-  } finally {
-    try { unlinkSync(tmpFile) } catch {}
   }
 
   // ═══ 3. Execute decisions ═══
