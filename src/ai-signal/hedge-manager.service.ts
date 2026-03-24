@@ -274,30 +274,22 @@ export class HedgeManagerService {
       // NOTE: Net Positive Exit is handled in PositionMonitor.handlePriceTick (closes both hedge + main)
       // Do NOT duplicate here — PositionMonitor has full context to resolve the main signal.
 
-      // ── 1. Recovery Close: main profitable AND hedge profitable or small loss ──
-      // Don't close hedge if it's losing more than main is gaining
-      // PHA lesson: main +0.07% but hedge -3.17% → lost $24.55 unnecessarily
-      if (mainPnlPct !== undefined && mainPnlPct > 0) {
-        // Only close if hedge is also profitable, OR hedge loss < 1%
-        if (hedgePnlUsdt >= 0 || hedgePnlPct > -1.0) {
-          const banked = (signal.hedgeHistory || []).reduce((sum: number, h: any) => sum + (h.pnlUsdt || 0), 0);
-          this.logger.log(
-            `[${signal.coin}] Hedge RECOVERY CLOSE | Main at ${mainPnlPct.toFixed(2)}% | ` +
-            `Hedge PnL: ${hedgePnlPct.toFixed(2)}% ($${hedgePnlUsdt.toFixed(2)}) | Banked: $${banked.toFixed(2)}`,
-          );
-          if (hedgePnlUsdt > 0) {
-            return this.closeHedgeWithProfit(signal, signalId, hedgePnlPct, hedgePnlUsdt, cfg,
-              `Recovery close: main ${mainPnlPct.toFixed(2)}%`);
-          }
-          return this.closeHedgeWithLoss(signal, signalId, hedgePnlPct, hedgePnlUsdt, cfg,
-            `Recovery close: main ${mainPnlPct.toFixed(2)}%, hedge ${hedgePnlPct.toFixed(2)}%`);
-        }
-        // Hedge losing > 1% while main barely profitable — let hedge ride, wait for TP or NET_POSITIVE
-        this.logger.debug(`[${signal.coin}] Recovery skip: main +${mainPnlPct.toFixed(2)}% but hedge ${hedgePnlPct.toFixed(2)}% — wait`);
+      // ── 1. Recovery Close: ONLY when hedge is profitable ──
+      // NEVER close hedge at a loss — wait for TP, trail, NET_POSITIVE, or FLIP
+      // ONDO lesson: repeated recovery-close-at-loss cycles accumulated -$70 in hedge losses
+      if (mainPnlPct !== undefined && mainPnlPct > 0 && hedgePnlUsdt > 0) {
+        const banked = (signal.hedgeHistory || []).reduce((sum: number, h: any) => sum + (h.pnlUsdt || 0), 0);
+        this.logger.log(
+          `[${signal.coin}] Hedge RECOVERY CLOSE (profitable) | Main at +${mainPnlPct.toFixed(2)}% | ` +
+          `Hedge PnL: +${hedgePnlPct.toFixed(2)}% (+$${hedgePnlUsdt.toFixed(2)}) | Banked: $${banked.toFixed(2)}`,
+        );
+        return this.closeHedgeWithProfit(signal, signalId, hedgePnlPct, hedgePnlUsdt, cfg,
+          `Recovery close: main +${mainPnlPct.toFixed(2)}%`);
       }
-      // No early cut, no soft recovery — hedge has NO SL
-      // Hedge thua = main recover, hedge thắng = main thua
-      // Only exits: trailing TP, main profitable, NET_POSITIVE (in PositionMonitor)
+      if (mainPnlPct !== undefined && mainPnlPct > 0) {
+        this.logger.debug(`[${signal.coin}] Recovery skip: main +${mainPnlPct.toFixed(2)}% but hedge ${hedgePnlPct.toFixed(2)}% losing — hold for TP/FLIP`);
+      }
+      // Hedge losing → hold. Exits: trailing TP, NET_POSITIVE, FLIP (in PositionMonitor)
 
       // ── 2. Trailing TP — ride the trend ──
       // When hedge reaches TP level, don't close immediately — activate trail
@@ -350,17 +342,24 @@ export class HedgeManagerService {
         };
       }
 
-      // ── Hedge protected SL hit: price came back to +0.5% → close with small profit ──
-      if (signal.hedgeSlAtEntry && hedgePnlPct <= 0.5) {
+      // ── Hedge protected SL hit: price came back to +0.5% → close only if still profitable ──
+      if (signal.hedgeSlAtEntry && hedgePnlPct <= 0.5 && hedgePnlUsdt >= 0) {
         this.logger.log(
-          `[${signal.coin}] Hedge protected SL hit | PnL: ${hedgePnlPct.toFixed(2)}% → close with min profit`,
+          `[${signal.coin}] Hedge protected SL hit | PnL: +${hedgePnlPct.toFixed(2)}% → close with min profit`,
         );
-        if (hedgePnlUsdt >= 0) {
-          return this.closeHedgeWithProfit(signal, signalId, hedgePnlPct, hedgePnlUsdt, cfg,
-            `Hedge protected SL: +${hedgePnlPct.toFixed(2)}%`);
-        }
-        return this.closeHedgeWithLoss(signal, signalId, hedgePnlPct, hedgePnlUsdt, cfg,
-          `Hedge protected SL: ${hedgePnlPct.toFixed(2)}%`);
+        return this.closeHedgeWithProfit(signal, signalId, hedgePnlPct, hedgePnlUsdt, cfg,
+          `Hedge protected SL: +${hedgePnlPct.toFixed(2)}%`);
+      }
+      // If protected SL hit but hedge is losing → reset protection, let it ride
+      if (signal.hedgeSlAtEntry && hedgePnlPct < 0) {
+        this.logger.log(
+          `[${signal.coin}] Hedge protected SL skip — PnL ${hedgePnlPct.toFixed(2)}% losing → hold for TP/FLIP`,
+        );
+        return {
+          action: 'NONE' as const,
+          reason: `Hedge SL reset — PnL ${hedgePnlPct.toFixed(2)}% losing, hold`,
+          hedgeSlAtEntry: false, // reset so it can re-activate later
+        };
       }
 
       return null;
