@@ -938,20 +938,20 @@ export class SignalQueueService {
   ): Promise<AiSignalDocument> {
     const symbol = `${coin.toUpperCase()}${currency.toUpperCase()}`;
     const cfg = this.tradingConfig.get();
-    // When hedge enabled: SL = 0 (disabled). Hedge manages all risk. Catastrophic stop at -25%.
-    // When hedge disabled: normal SL range slMin-slMax
+    // SL: when hedge enabled, use wide 40% safety net (not 0 — prevents instant close bugs)
+    // Hedge triggers at -3%, trail activates at +2%, catastrophic at -25%
+    const HEDGE_SAFETY_SL_PCT = 40;
     const rawSlPct = Math.min(cfg.slMax, Math.max(params.stopLossPercent, cfg.slMin));
-    const stopLossPercent = cfg.hedgeEnabled ? 0 : rawSlPct;
-    // TP uses original SL for R:R calc (even when SL disabled for hedge)
-    const slForRR = cfg.hedgeEnabled ? rawSlPct : stopLossPercent;
+    const stopLossPercent = cfg.hedgeEnabled ? HEDGE_SAFETY_SL_PCT : rawSlPct;
+    // TP uses original SL for R:R calc
+    const slForRR = rawSlPct;
     const rawTp = Math.max(cfg.tpMin, params.takeProfitPercent, slForRR * cfg.tpRrMultiplier);
     const takeProfitPercent = Math.min(cfg.tpMax, rawTp);
     const entryPrice = signalResult.entryPrice;
 
-    // When hedge enabled (stopLossPercent=0): SL price = 0 (disabled, hedge manages risk)
-    const stopLossPrice = stopLossPercent > 0
-      ? (signalResult.isLong ? entryPrice * (1 - stopLossPercent / 100) : entryPrice * (1 + stopLossPercent / 100))
-      : 0;
+    const stopLossPrice = signalResult.isLong
+      ? entryPrice * (1 - stopLossPercent / 100)
+      : entryPrice * (1 + stopLossPercent / 100);
 
     const takeProfitPrice = signalResult.isLong
       ? entryPrice * (1 + takeProfitPercent / 100)

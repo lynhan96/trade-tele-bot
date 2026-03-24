@@ -274,10 +274,10 @@ export class HedgeManagerService {
       // NOTE: Net Positive Exit is handled in PositionMonitor.handlePriceTick (closes both hedge + main)
       // Do NOT duplicate here — PositionMonitor has full context to resolve the main signal.
 
-      // ── 1. Recovery Close: ONLY when hedge is profitable ──
-      // NEVER close hedge at a loss — wait for TP, trail, NET_POSITIVE, or FLIP
-      // ONDO lesson: repeated recovery-close-at-loss cycles accumulated -$70 in hedge losses
-      if (mainPnlPct !== undefined && mainPnlPct > 0 && hedgePnlUsdt > 0) {
+      // ── 1. Recovery Close: ONLY when hedge has meaningful profit (>= 1.5%) ──
+      // NEVER close hedge at a loss or tiny profit — let it ride to TP/trail/FLIP
+      // ONDO lesson: repeated recovery-close cycles with small profits accumulated net losses
+      if (mainPnlPct !== undefined && mainPnlPct > 0 && hedgePnlPct >= 1.5) {
         const banked = (signal.hedgeHistory || []).reduce((sum: number, h: any) => sum + (h.pnlUsdt || 0), 0);
         this.logger.log(
           `[${signal.coin}] Hedge RECOVERY CLOSE (profitable) | Main at +${mainPnlPct.toFixed(2)}% | ` +

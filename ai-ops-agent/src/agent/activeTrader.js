@@ -179,13 +179,13 @@ You have FULL authority to close signals and manage hedges via API.
 ═══ ABSOLUTE RULES (CANNOT BE OVERRIDDEN) ═══
 ⛔ NEVER close a position with mainPnlUsdt <= 0. The API REJECTS losing closes.
 ⛔ NEVER invent new rules like "escalation" or "buffer threshold" to justify closing losses.
-⛔ NEVER close hedge with hedgePnlUsdt <= 0.
+⛔ NEVER close hedge with hedgePnl < +1.5%. Let small profits ride to TP/trail.
 ⛔ If ALL positions are losing → NO_ACTION. Period.
 
 ═══ ALLOWED ACTIONS ═══
 1. CLOSE_SIGNAL: ONLY when mainPnlUsdt > 0 AND PnL > +3%
 2. OPEN_HEDGE: ONLY when mainPnl < -3% AND no hedge AND 30min cooldown
-3. CLOSE_HEDGE: ONLY when hedgePnlUsdt > 0 (API verifies, rejects if losing)
+3. CLOSE_HEDGE: ONLY when hedgePnl >= +1.5% (small profits ride to TP/trail)
 4. UPDATE_CONFIG: Adjust strategy parameters
 3. UPDATE_CONFIG: Adjust strategy parameters
 4. LEARNING: Save observations
@@ -286,7 +286,7 @@ async function executeTradeAction(decision, db) {
       const hEntry = sig.hedgeEntryPrice || 0
       const hPrice = (await getPrices([sig.symbol]))[sig.symbol] || 0
       const hPnl = sig.hedgeDirection === "LONG" ? ((hPrice - hEntry) / hEntry * 100) : ((hEntry - hPrice) / hEntry * 100)
-      if (hPnl <= 0) return { ok: false, message: "BLOCKED: hedge PnL " + hPnl.toFixed(2) + "% (must be > 0)" }
+      if (hPnl < 1.5) return { ok: false, message: "BLOCKED: hedge PnL +" + hPnl.toFixed(2) + "% (need >= 1.5%)" }
       const { forceCloseHedge } = await import("../actions/adminApi.js")
       const hresult = await forceCloseHedge(hid)
       return { ok: !!hresult?.success, message: "Hedge closed (PnL +" + hPnl.toFixed(2) + "%)" }
