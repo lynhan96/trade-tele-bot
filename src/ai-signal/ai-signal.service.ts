@@ -443,8 +443,11 @@ export class AiSignalService implements OnModuleInit {
     if (hasActive) return;
 
     // Cap total active signals to reduce correlated risk
+    // Use dynamic config (agent can adjust) with hardcoded max as upper bound
+    const cfg = this.tradingConfig.get();
+    const maxSignals = Math.min(cfg.maxActiveSignals || MAX_ACTIVE_SIGNALS, MAX_ACTIVE_SIGNALS);
     const allActives = await this.signalQueueService.getAllActiveSignals();
-    if (allActives.length >= MAX_ACTIVE_SIGNALS) return;
+    if (allActives.length >= maxSignals) return;
 
     // For dual-timeframe coins: also check if the OTHER profile already has an active signal
     // This prevents duplicate signals for the same symbol (e.g. ETH INTRADAY + SWING both SHORT)
