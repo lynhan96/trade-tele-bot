@@ -1133,24 +1133,24 @@ export class PositionMonitorService implements OnModuleInit {
       });
 
       // 5. Re-init grid for new direction
-      const simNotional = newNotional;
-      const DCA_WEIGHTS_FLIP = [40, 25, 35];
+      // Keep original signal's simNotional (not hedge notional) — L0 = full hedge vol
+      const origSimNotional = signal.simNotional || 1000;
+      const hedgeVol = newNotional; // actual hedge volume (e.g. 750)
+      const hedgeVolPct = Math.round((hedgeVol / origSimNotional) * 100);
+      const remainingPct = 100 - hedgeVolPct;
       const flipGridStep = Math.max(4, flipSlPct / 3); // Min 4% grid spacing
-      const newGrids: any[] = [];
-      for (let i = 0; i < 3; i++) {
-        const dev = i * flipGridStep;
-        const volPct = DCA_WEIGHTS_FLIP[i];
-        const gridNot = simNotional * (volPct / 100);
-        if (i === 0) {
-          newGrids.push({ level: 0, deviationPct: 0, fillPrice: newEntry, volumePct: volPct, status: "FILLED", filledAt: new Date(), simNotional: gridNot, simQuantity: gridNot / newEntry });
-        } else {
-          newGrids.push({ level: i, deviationPct: parseFloat(dev.toFixed(3)), fillPrice: 0, volumePct: volPct, status: "PENDING" });
-        }
+      const newGrids: any[] = [
+        // L0 = full hedge volume, already filled
+        { level: 0, deviationPct: 0, fillPrice: newEntry, volumePct: hedgeVolPct, status: "FILLED", filledAt: new Date(), simNotional: hedgeVol, simQuantity: hedgeVol / newEntry },
+      ];
+      // Remaining volume split into DCA levels (if any remaining)
+      if (remainingPct > 0) {
+        newGrids.push({ level: 1, deviationPct: parseFloat(flipGridStep.toFixed(3)), fillPrice: 0, volumePct: remainingPct, status: "PENDING" });
       }
       (signal as any).gridLevels = newGrids;
       (signal as any).gridFilledCount = 1;
       (signal as any).gridClosedCount = 0;
-      (signal as any).simNotional = simNotional;
+      (signal as any).simNotional = origSimNotional;
 
       await this.signalQueueService.updateSignalGrid((signal as any)._id.toString(), newGrids, 1, 0);
       await this.signalQueueService.initGridSignal((signal as any)._id.toString(), newEntry, newSl, newEntry);
