@@ -1639,6 +1639,12 @@ export class PositionMonitorService implements OnModuleInit {
     const hedgeTotalFees = hedgeEntryFeeCalc + hedgeExitFeeCalc + hedgeFundingFeeCalc;
     const hedgePnlUsdtNet = Math.round(((action.hedgePnlUsdt || 0) - hedgeTotalFees) * 100) / 100;
 
+    // Get entry reason from HEDGE order metadata (saved when hedge opened)
+    const hedgeOrderForEntry = await this.orderModel.findOne({
+      signalId: (signal as any)._id, type: 'HEDGE', status: 'OPEN',
+    }).lean().catch(() => null);
+    const entryReason = (hedgeOrderForEntry as any)?.metadata?.reason || '';
+
     // Build hedge history entry (with fee-deducted PnL)
     const historyEntry = {
       phase: (signal as any).hedgePhase,
@@ -1651,6 +1657,7 @@ export class PositionMonitorService implements OnModuleInit {
       openedAt: (signal as any).hedgeOpenedAt,
       closedAt: new Date(),
       reason: action.reason,
+      entryReason, // e.g. "PnL -19.52% | Cycle 1 (immediate) | regime: MIXED | banked: $147.36"
     };
 
     // After hedge close: restore SL = 40% safety net

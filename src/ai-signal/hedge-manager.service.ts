@@ -189,6 +189,8 @@ export class HedgeManagerService {
               }
             }
 
+            // Store RSI values for entry note
+            (signal as any)._lastRsi15m = rsi15m;
             this.logger.log(`[${coin}] Hedge re-entry RSI confirmed: 15m=${rsi15m.toFixed(1)} 1h OK`);
           }
         } catch (err) {
@@ -215,9 +217,14 @@ export class HedgeManagerService {
       const hedgeNotional = positionNotional * 0.75;
       const hedgeTpPrice = this.getHedgeTpPrice(currentPrice, hedgeDirection, regime);
 
+      // Build entry note with conditions
+      const rsiNote = (signal as any)._lastRsi15m ? ` RSI15m=${(signal as any)._lastRsi15m.toFixed(1)}` : '';
+      const entryNote = isFirstCycle ? 'Cycle 1 (immediate)' : `Cycle ${cycle} (RSI+price confirmed${rsiNote})`;
+      const reasonDetail = `PnL ${pnlPct.toFixed(2)}% | ${entryNote} | regime: ${regime} | banked: $${banked.toFixed(2)}`;
+
       this.logger.log(
         `[${signal.coin}] HEDGE #${cycle} (75%) | PnL: ${pnlPct.toFixed(2)}% | ` +
-        `${hedgeDirection} $${hedgeNotional.toFixed(0)} | TP: ${hedgeTpPrice} | Banked: $${banked.toFixed(2)}`,
+        `${hedgeDirection} $${hedgeNotional.toFixed(0)} | TP: ${hedgeTpPrice} | ${entryNote} | Banked: $${banked.toFixed(2)}`,
       );
 
       return {
@@ -227,7 +234,7 @@ export class HedgeManagerService {
         hedgeTpPrice,
         bankedProfit: banked,
         hedgePhase: 'FULL',
-        reason: `PnL ${pnlPct.toFixed(2)}% → hedge #${cycle} (75%)`,
+        reason: reasonDetail,
       };
     } catch (err) {
       this.logger.error(`[${signal?.coin || '?'}] checkHedge error: ${err.message}`, err.stack);
