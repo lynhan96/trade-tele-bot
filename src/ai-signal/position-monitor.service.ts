@@ -803,9 +803,11 @@ export class PositionMonitorService implements OnModuleInit {
 
         // ── Net Positive Exit: banked hedge profit + main unrealized > 0 → close all ──
         // Use closed HEDGE orders for accurate banked profit (fees already deducted)
-        const closedHedgeOrders = await this.orderModel.find({
-          signalId: (signal as any)._id, type: 'HEDGE', status: 'CLOSED',
-        });
+        // After FLIP: only count hedges closed AFTER the flip (pre-flip profits already banked in FLIP_TP)
+        const lastFlipAt = (signal as any).lastFlipAt;
+        const hedgeQuery: any = { signalId: (signal as any)._id, type: 'HEDGE', status: 'CLOSED' };
+        if (lastFlipAt) hedgeQuery.closedAt = { $gt: new Date(lastFlipAt) };
+        const closedHedgeOrders = await this.orderModel.find(hedgeQuery);
         const bankedProfit = closedHedgeOrders.reduce((sum, o) => sum + (o.pnlUsdt || 0), 0);
         const npGrids: any[] = (signal as any).gridLevels || [];
         const filledVol = npGrids.length > 0
@@ -1119,6 +1121,7 @@ export class PositionMonitorService implements OnModuleInit {
       (signal as any).tpBoosted = false;
       (signal as any).peakPnlPct = 0;
       (signal as any).executedAt = flipTime; // Reset for correct funding fee calc
+      (signal as any).lastFlipAt = flipTime; // NET_POSITIVE only counts post-flip hedges
       (signal as any).hedgeTrailActivated = false; // Reset so new hedge trail works correctly
       (signal as any).hedgeSlAtEntry = false; // Reset so new hedge SL logic works correctly
 
@@ -1135,6 +1138,7 @@ export class PositionMonitorService implements OnModuleInit {
         hedgeHistory: flipHistory, // preserved + main TP profit banked
         slMovedToEntry: false, tpBoosted: false, peakPnlPct: 0,
         executedAt: flipTime, // Funding fees calculated from FLIP time, not original signal time
+        lastFlipAt: flipTime, // NET_POSITIVE only counts hedge PnL after this timestamp
         $unset: { hedgePhase: 1, hedgeDirection: 1, hedgeEntryPrice: 1, hedgeSimNotional: 1, hedgeTpPrice: 1, hedgeOpenedAt: 1, hedgeSafetySlPrice: 1, hedgeSlAtEntry: 1, hedgeTrailActivated: 1, hedgePeakPnlPct: 1 },
       });
 
