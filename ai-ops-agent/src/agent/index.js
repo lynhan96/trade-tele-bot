@@ -97,11 +97,12 @@ async function start() {
   await runLightCheck(true)
 
   // 9 skills + crash detection + smart alerts: every 15 min (cheap — no Claude)
-  cron.schedule("*/15 * * * *", runLightCheck)
+  // Wrap in arrow fn to prevent cron passing Date as silent arg
+  cron.schedule("*/15 * * * *", () => runLightCheck())
 
   // Claude analysis: every 4h (0:00, 4:00, 8:00, 12:00, 16:00, 20:00 UTC)
   // ~6 calls/day using Sonnet 4.6 — fits within Max plan quota
-  cron.schedule("0 */4 * * *", runAnalysis)
+  cron.schedule("0 */4 * * *", () => runAnalysis())
 
   logger.info("Agent running.")
 }
