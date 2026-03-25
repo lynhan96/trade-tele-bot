@@ -579,6 +579,8 @@ export class HedgeManagerService {
   async cleanupSignal(signalId: string): Promise<void> {
     this.consecutiveLossMap.delete(signalId);
     this.bankedProfitMap.delete(signalId);
+    this.hedgeCooldownUntil.delete(signalId);
+    this.hedgePeakMap.delete(signalId);
     const lockKey = `${HEDGE_LOCK_PREFIX}${signalId}`;
     try { await this.redisService.delete(lockKey); } catch {}
   }

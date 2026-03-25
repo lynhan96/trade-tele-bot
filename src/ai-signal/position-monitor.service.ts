@@ -372,8 +372,8 @@ export class PositionMonitorService implements OnModuleInit {
       ).catch((err) => this.logger.warn(`[PositionMonitor] MAIN order upsert error: ${err?.message}`));
     }
 
-    // Process grid events
-    if ((signal as any).gridLevels?.length > 0) {
+    // Process grid events (skip if FLIP/resolve in progress to prevent grid corruption)
+    if ((signal as any).gridLevels?.length > 0 && !this.resolvingSymbols.has(sigKey)) {
       const grids: any[] = (signal as any).gridLevels;
       const origEntry = (signal as any).originalEntryPrice ?? entryPrice;
       const globalSl = (signal as any).gridGlobalSlPrice;
@@ -1073,7 +1073,7 @@ export class PositionMonitorService implements OnModuleInit {
       });
       if (hedgeOrder) {
         await this.orderModel.findByIdAndUpdate(hedgeOrder._id, {
-          type: 'MAIN', stopLossPrice: newSl, takeProfitPrice: newTp,
+          type: 'MAIN', stopLossPrice: newSl, takeProfitPrice: newTp, cycleNumber: 0,
         });
       }
 
@@ -1096,6 +1096,7 @@ export class PositionMonitorService implements OnModuleInit {
       ];
 
       // Update signal in-memory
+      const flipTime = new Date();
       (signal as any).direction = newDirection;
       (signal as any).entryPrice = newEntry;
       (signal as any).gridAvgEntry = newEntry;
@@ -1117,6 +1118,9 @@ export class PositionMonitorService implements OnModuleInit {
       (signal as any).slMovedToEntry = false;
       (signal as any).tpBoosted = false;
       (signal as any).peakPnlPct = 0;
+      (signal as any).executedAt = flipTime; // Reset for correct funding fee calc
+      (signal as any).hedgeTrailActivated = false; // Reset so new hedge trail works correctly
+      (signal as any).hedgeSlAtEntry = false; // Reset so new hedge SL logic works correctly
 
       // 4. Persist to DB
       await this.aiSignalModel.findByIdAndUpdate((signal as any)._id, {
@@ -1130,8 +1134,13 @@ export class PositionMonitorService implements OnModuleInit {
         hedgeActive: false, hedgeCycleCount: 0,
         hedgeHistory: flipHistory, // preserved + main TP profit banked
         slMovedToEntry: false, tpBoosted: false, peakPnlPct: 0,
+        executedAt: flipTime, // Funding fees calculated from FLIP time, not original signal time
         $unset: { hedgePhase: 1, hedgeDirection: 1, hedgeEntryPrice: 1, hedgeSimNotional: 1, hedgeTpPrice: 1, hedgeOpenedAt: 1, hedgeSafetySlPrice: 1, hedgeSlAtEntry: 1, hedgeTrailActivated: 1, hedgePeakPnlPct: 1 },
       });
+
+      // Clean up hedge manager in-memory maps (cooldown, peak, banked profit)
+      // so flipped signal starts fresh — prevents stale cooldown blocking new hedges
+      await this.hedgeManager.cleanupSignal((signal as any)._id?.toString()).catch(() => {});
 
       // 5. Re-init grid for new direction
       // Keep original signal's simNotional (not hedge notional) — L0 = full hedge vol
@@ -1717,8 +1726,9 @@ export class PositionMonitorService implements OnModuleInit {
       else if (action.reason?.includes("TP")) closeReasonOrder = "HEDGE_TP";
       else if (hedgePnlUsdtCalc >= 0) closeReasonOrder = "HEDGE_TP";
 
+      // Use loose query (no cycleNumber) to avoid desync — sort by openedAt desc to get latest
       await this.orderModel.findOneAndUpdate(
-        { signalId: (signal as any)._id, type: 'HEDGE', status: 'OPEN', cycleNumber: cycleCount },
+        { signalId: (signal as any)._id, type: 'HEDGE', status: 'OPEN' },
         {
           status: 'CLOSED',
           exitPrice: currentPrice,
