@@ -275,16 +275,19 @@ export async function runStrategyTuner() {
   }
 
   // #1 Auto-disable weak strategies (WR <35% on 6+ trades)
+  // Config format: "disable:STRAT1,STRAT2" (blacklist string)
   if (weakStrategies.length) {
     try {
       const config = await getTradingConfig()
-      const current = config?.enabledStrategies || []
-      if (Array.isArray(current) && current.length > 1) {
-        const updated = current.filter(s => !weakStrategies.includes(s))
-        if (updated.length < current.length && updated.length >= 1) {
-          await autoConfig("enabledStrategies", updated, `Disabled weak: ${weakStrategies.join(",")} (WR<35% on 6+ trades)`)
-          actions.push(`🔧 AUTO: Disabled ${weakStrategies.join(",")}`)
-        }
+      const currentVal = config?.config?.enabledStrategies || config?.enabledStrategies || ""
+      const currentDisabled = typeof currentVal === "string" && currentVal.startsWith("disable:")
+        ? currentVal.replace("disable:", "").split(",").filter(Boolean)
+        : []
+      const newDisabled = [...new Set([...currentDisabled, ...weakStrategies])]
+      const newVal = `disable:${newDisabled.join(",")}`
+      if (newVal !== currentVal) {
+        await autoConfig("enabledStrategies", newVal, `Disabled weak: ${weakStrategies.join(",")} (WR<35% on 6+ trades)`)
+        actions.push(`🔧 AUTO: Disabled ${weakStrategies.join(",")}`)
       }
     } catch (e) { logger.error(`[StrategyRotation] ${e.message}`) }
   }
