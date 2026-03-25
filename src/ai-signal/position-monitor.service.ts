@@ -796,6 +796,7 @@ export class PositionMonitorService implements OnModuleInit {
 
         // When hedge is active: NO SL — hedge IS the risk management
         // Only catastrophic stop at -25% (exchange issues, depeg, extreme events)
+        if (this.resolvingSymbols.has(sigKey)) return; // Prevent concurrent hedge/FLIP/NET_POSITIVE
         const currentEntry = (signal as any).gridAvgEntry || entryPrice;
         const catastrophicPct = direction === "LONG"
           ? ((price - currentEntry) / currentEntry) * 100
@@ -841,17 +842,17 @@ export class PositionMonitorService implements OnModuleInit {
           forceCloseReason = "CATASTROPHIC_STOP";
         }
 
-        // Check main TP hit while hedge active → FLIP to hedge direction
+        // Check main TP hit while hedge active → FLIP takes priority over NET_POSITIVE
         const effectiveTpHedge = (signal as any).takeProfitPrice;
         let mainTpHitForFlip = false;
-        if (effectiveTpHedge && !forceCloseReason) {
+        if (effectiveTpHedge) {
           const mainTpHit = direction === "LONG" ? price >= effectiveTpHedge : price <= effectiveTpHedge;
           if (mainTpHit && (signal as any).hedgeEntryPrice && (signal as any).hedgeDirection) {
             mainTpHitForFlip = true;
+            forceCloseReason = null; // FLIP overrides NET_POSITIVE
             this.logger.log(
               `[PositionMonitor] 🔄 ${sigKey} MAIN TP HIT at ${price} while hedge active → FLIP to ${(signal as any).hedgeDirection}`,
             );
-            // Fall through to FLIP logic below (don't return, don't force close)
           }
         }
 
