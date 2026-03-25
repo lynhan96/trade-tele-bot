@@ -1138,7 +1138,7 @@ export class AdminService {
     const recentActions = await this.agentEventModel.countDocuments({ type: 'ACTION', eventAt: { $gte: lastHour } });
     const recentErrors = await this.agentEventModel.countDocuments({ type: 'ERROR', eventAt: { $gte: lastHour } });
 
-    const agents = ['market_analyzer', 'position_manager', 'bug_detector', 'strategy_tuner', 'active_trader'];
+    const agents = ['market_analyzer', 'position_manager', 'bug_detector', 'strategy_tuner', 'active_trader', 'signal_filter', 'portfolio_risk', 'post_trade', 'smart_alert'];
     const agentStatus = {};
     for (const a of agents) {
       const last = await this.agentEventModel.findOne({ agent: a }).sort({ eventAt: -1 }).lean();
@@ -1150,7 +1150,7 @@ export class AdminService {
     }
 
     return {
-      online: lastEvent && (Date.now() - new Date(lastEvent.eventAt).getTime()) < 10 * 60 * 1000,
+      online: lastEvent && (Date.now() - new Date(lastEvent.eventAt).getTime()) < 20 * 60 * 1000,
       lastEvent: lastEvent?.eventAt,
       recentEvents,
       recentActions,
@@ -1164,6 +1164,15 @@ export class AdminService {
   }
 
   async createAgentEvent(dto: any) {
+    // Server-side dedup: skip if same agent+message within 14 min (skills run every 15 min)
+    const since = new Date(Date.now() - 14 * 60 * 1000);
+    const dup = await this.agentEventModel.findOne({
+      agent: dto.agent,
+      message: dto.message,
+      eventAt: { $gte: since },
+    }).lean();
+    if (dup) return dup; // already exists, return existing
+
     const event = await this.agentEventModel.create({ ...dto, eventAt: new Date() });
     this.adminGateway.emitAgentEvent(event);
     return event;
