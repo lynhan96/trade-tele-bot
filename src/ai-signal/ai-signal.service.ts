@@ -828,6 +828,17 @@ export class AiSignalService implements OnModuleInit {
         }
       } catch {}
 
+      // ── Agent strategy blacklist (enabledStrategies = "disable:X,Y") ──
+      const enabledStrats = cfg.enabledStrategies || '';
+      if (enabledStrats.startsWith('disable:')) {
+        const disabled = enabledStrats.replace('disable:', '').split(',').map(s => s.trim()).filter(Boolean);
+        const sigStrat = signalResult.strategy.split('+')[0]; // handle confluence "A+B" → check first
+        if (disabled.some(d => signalResult.strategy.includes(d))) {
+          this.logger.debug(`[AiSignal] ${signalKey} BLOCKED — strategy ${signalResult.strategy} disabled by agent (${enabledStrats})`);
+          return;
+        }
+      }
+
       // ── Strategy weight check (Tier 4) ──
       try {
         const weight = await this.aiMarketAnalyst.getStrategyWeight(signalResult.strategy);

@@ -43,6 +43,7 @@ export interface TradingConfig {
   fundingExtremeBlock: number;      // Block entirely if |funding| > this % (default 0.3)
 
   // ── Filters ──────────────────────────────────────────────────────────────
+  enabledStrategies: string;        // "disable:STRAT1,STRAT2" blacklist format (agent-managed)
   maxDailySignals: number;          // Daily cap (default 35)
   maxActiveSignals: number;         // Max concurrent positions (default 25)
   marketMomentumPnl: number;        // Block direction if avg PnL < this % (default -0.7)
@@ -160,7 +161,7 @@ export const DEFAULT_TRADING_CONFIG: TradingConfig = {
   fundingDirectionalBlock: 0.1, fundingExtremeBlock: 0.3,
 
   // Filters
-  maxDailySignals: 35, maxActiveSignals: 25,
+  enabledStrategies: '', maxDailySignals: 35, maxActiveSignals: 25,
   marketMomentumPnl: -0.7, marketMomentumSLs: 2,
   positionImbalancePct: 0.65, positionImbalanceMin: 4,
 

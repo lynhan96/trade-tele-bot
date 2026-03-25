@@ -211,7 +211,7 @@ function buildTraderPrompt(ctx) {
 
   return `AI trading ADVISOR. CANNOT close/open positions. Bot handles TP/SL/hedge/grid automatically.
 ALLOWED: UPDATE_CONFIG | LEARNING | NO_ACTION (max 5 actions)
-Config fields: takeProfitPercent, stopLossPercent, hedgeThreshold, trailStopPercent, maxActiveSignals, maxExposureLeverage, minConfidence, enabledStrategies
+Config fields: dcaTpPct, trailTrigger, trailKeepRatio, hedgePartialTriggerPct, maxActiveSignals, maxDailySignals, confidenceFloor, confidenceFloorRanging, enabledStrategies (format: "disable:STRAT1,STRAT2"), fundingDirectionalBlock, fundingExtremeBlock, btcPanic24hPct, btcBear4hPct, btcBull4hPct
 
 ADAPTIVE CONFIG TUNING — CRITICAL:
 Current regime: ${regime}. Recommended config: ${guide}

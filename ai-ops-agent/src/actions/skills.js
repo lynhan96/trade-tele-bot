@@ -540,17 +540,17 @@ export async function runPortfolioRisk() {
   if (totalUnrealized < -300) {
     _drawdownMode = "DEFENSIVE"
     actions.push(`🔴🔴 DEFENSIVE MODE: drawdown $${totalUnrealized.toFixed(2)} — max protection`)
-    await autoConfig("minConfidence", 68, `Defensive: drawdown $${totalUnrealized.toFixed(0)}`)
+    await autoConfig("confidenceFloor", 68, `Defensive: drawdown $${totalUnrealized.toFixed(0)}`)
     await autoConfig("maxActiveSignals", 3, `Defensive: drawdown $${totalUnrealized.toFixed(0)}`)
   } else if (totalUnrealized < -150) {
     _drawdownMode = "CAUTIOUS"
     actions.push(`🔴 CAUTIOUS MODE: drawdown $${totalUnrealized.toFixed(2)} — reduced risk`)
-    await autoConfig("minConfidence", 65, `Cautious: drawdown $${totalUnrealized.toFixed(0)}`)
+    await autoConfig("confidenceFloor", 65, `Cautious: drawdown $${totalUnrealized.toFixed(0)}`)
     await autoConfig("maxActiveSignals", 5, `Cautious: drawdown $${totalUnrealized.toFixed(0)}`)
   } else if (totalUnrealized > -50 && prevMode !== "NORMAL") {
     _drawdownMode = "NORMAL"
     actions.push(`🟢 NORMAL MODE restored: unrealized $${totalUnrealized.toFixed(2)}`)
-    await autoConfig("minConfidence", 60, `Recovery: drawdown eased to $${totalUnrealized.toFixed(0)}`)
+    await autoConfig("confidenceFloor", 60, `Recovery: drawdown eased to $${totalUnrealized.toFixed(0)}`)
     await autoConfig("maxActiveSignals", 8, `Recovery: normal mode restored`)
   } else if (totalUnrealized < -100) {
     actions.push(`🔴 Portfolio unrealized: $${totalUnrealized.toFixed(2)} — monitoring (${_drawdownMode})`)
