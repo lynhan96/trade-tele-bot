@@ -133,9 +133,10 @@ export class HedgeManagerService {
       }
 
       // Cycle 2+: stricter conditions — prevent blind re-entry
+      // Skip when isFirstCycle (after FLIP: hedgeCycleCount=0 → enter immediately for protection)
       // Skip FLIP_TP entries — they record main TP close, not real hedge exits
       const realHedges = (signal.hedgeHistory || []).filter((h: any) => h.reason !== 'FLIP_TP');
-      if (realHedges.length > 0) {
+      if (!isFirstCycle && realHedges.length > 0) {
         const lastHedge = realHedges[realHedges.length - 1];
 
         // 1. Price must be WORSE than last hedge exit (trend continuing)
