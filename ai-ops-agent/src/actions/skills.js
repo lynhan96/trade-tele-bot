@@ -11,6 +11,9 @@ let _silent = false
 // Dedup: only log findings that are NEW (not seen in previous cycle)
 const lastFindings = new Map() // skill → Set of finding keys
 function filterNewFindings(skill, findings) {
+  // Don't update cache during silent mode — otherwise first silent run
+  // caches everything and subsequent non-silent run sees nothing new
+  if (_silent) return findings
   const prev = lastFindings.get(skill) || new Set()
   const newOnes = findings.filter(f => !prev.has(f))
   lastFindings.set(skill, new Set(findings))
