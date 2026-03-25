@@ -86,10 +86,10 @@ async function runAnalysis() {
 
 async function start() {
   logger.info("=".repeat(50))
-  logger.info("🤖 AI Trading Advisor v8")
+  logger.info("🤖 AI Trading Advisor v9")
   logger.info(`Commit: ${JSON.stringify(getCurrentCommit())}`)
   logger.info("9 skills/15min | Claude Sonnet analysis/4h | Report/4h | Smart alerts/15min")
-  logger.info("Role: ADVISOR — adaptive config + learning + anomaly detection")
+  logger.info("Role: ADVISOR — adaptive config + auto-protection + learning + microstructure")
   logger.info("=".repeat(50))
 
   // Run light check on start — silent mode (log to file only, no dashboard events)

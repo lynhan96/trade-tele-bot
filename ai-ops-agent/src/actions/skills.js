@@ -4,9 +4,27 @@ import { collectMarketContext } from "../utils/marketContext.js"
 import { saveLearning } from "../utils/memory.js"
 import { logger } from "../utils/logger.js"
 import * as agentLog from "../utils/agentLogger.js"
+import { updateTradingConfig, getTradingConfig } from "../actions/adminApi.js"
 
 // Silent mode: log to file only, no dashboard events (used on startup)
 let _silent = false
+
+// ── Auto-config: skill can UPDATE_CONFIG with cooldown ──
+const configCooldowns = new Map() // field → lastChangeTime
+const CONFIG_COOLDOWN_MS = 30 * 60 * 1000 // 30 min cooldown per field
+let _drawdownMode = "NORMAL" // NORMAL | CAUTIOUS | DEFENSIVE
+
+async function autoConfig(field, value, reason) {
+  const lastChange = configCooldowns.get(field) || 0
+  if (Date.now() - lastChange < CONFIG_COOLDOWN_MS) return null
+  const result = await updateTradingConfig({ [field]: value })
+  if (result) {
+    configCooldowns.set(field, Date.now())
+    logger.info(`[AutoConfig] ${field}=${value} — ${reason}`)
+    if (!_silent) await agentLog.action("auto_config", `${field}=${value} — ${reason}`, "UPDATE_CONFIG")
+  }
+  return result
+}
 
 // Dedup: only log findings that are NEW (not seen in previous cycle)
 const lastFindings = new Map() // skill → Set of finding keys
@@ -122,35 +140,75 @@ export async function runDataValidator() {
 }
 
 // ══════════════════════════════════════════════════════════
-// SKILL 2: HEDGE MANAGER — auto-manage hedge positions
+// SKILL 2: HEDGE MANAGER + DYNAMIC PARAMS (#3) + PER-COIN MEMORY (#8)
+// Tracks per-coin hedge effectiveness, adjusts thresholds based on volatility
 // ══════════════════════════════════════════════════════════
+const hedgeCoinStats = {} // symbol → { totalCycles, profitCycles, totalBanked, avgCyclePnl }
 export async function runHedgeManager() {
   const db = await getDb()
   const actions = []
 
-  const active = await db.collection("ai_signals").find({ status: "ACTIVE", hedgeActive: true }).toArray()
+  const allActive = await db.collection("ai_signals").find({ status: "ACTIVE" }).toArray()
+  const hedgeActive = allActive.filter(s => s.hedgeActive)
 
-  for (const s of active) {
+  for (const s of hedgeActive) {
     const entry = s.gridAvgEntry || s.entryPrice
     const banked = (s.hedgeHistory || []).reduce((sum, h) => sum + (h.pnlUsdt || 0), 0)
     const mainNotional = s.simNotional || 1000
 
-    // NET_POSITIVE check: banked hedge > estimated main loss
+    // NET_POSITIVE check
     if (banked > 0 && entry > 0 && s.hedgeEntryPrice > 0) {
-      const hedgeOpenOrders = await db.collection("orders").find({ signalId: s._id, type: "HEDGE", status: "OPEN" }).toArray()
-      const totalHedgeVol = hedgeOpenOrders.reduce((sum, o) => sum + (o.notional || 0), 0)
-
-      // If banked is substantial and covers estimated loss
       if (banked > mainNotional * 0.05) {
         actions.push(`${s.symbol}: hedge banked $${banked.toFixed(2)} (${(banked / mainNotional * 100).toFixed(1)}% of vol) — monitoring for NET_POSITIVE`)
       }
     }
 
-    // Hedge spam check: too many breakeven cycles
+    // Hedge spam check
     const beCycles = (s.hedgeHistory || []).filter(h => Math.abs(h.pnlUsdt || 0) < 1).length
     if (beCycles >= 3 && s.hedgeCycleCount >= 5) {
       actions.push(`${s.symbol}: ${beCycles} breakeven cycles out of ${s.hedgeCycleCount} — hedge may be ineffective`)
     }
+
+    // #8 Per-coin hedge effectiveness tracking
+    const sym = s.symbol
+    if (!hedgeCoinStats[sym]) hedgeCoinStats[sym] = { totalCycles: 0, profitCycles: 0, totalBanked: 0 }
+    const stats = hedgeCoinStats[sym]
+    stats.totalCycles = s.hedgeCycleCount || 0
+    stats.profitCycles = (s.hedgeHistory || []).filter(h => (h.pnlUsdt || 0) > 1).length
+    stats.totalBanked = banked
+    stats.effectiveRate = stats.totalCycles > 0 ? (stats.profitCycles / stats.totalCycles * 100) : 0
+
+    if (stats.totalCycles >= 5 && stats.effectiveRate < 30) {
+      actions.push(`📉 ${sym}: hedge effectiveness ${stats.effectiveRate.toFixed(0)}% (${stats.profitCycles}/${stats.totalCycles} profitable) — consider higher threshold`)
+      saveLearning({ key: `hedge_ineffective_${sym}`, insight: `${sym} hedge only ${stats.effectiveRate.toFixed(0)}% profitable after ${stats.totalCycles} cycles, banked $${banked.toFixed(2)} — may need higher activation threshold` })
+    }
+    if (stats.totalCycles >= 5 && stats.effectiveRate > 70) {
+      actions.push(`✅ ${sym}: hedge effective ${stats.effectiveRate.toFixed(0)}% — well-suited for hedging`)
+    }
+  }
+
+  // #3 Dynamic Hedge Parameters — based on portfolio-wide volatility
+  // Use average absolute PnL% of active positions as volatility proxy
+  const prices = await getPrices(allActive.map(s => s.symbol))
+  let totalAbsPnl = 0, priceCount = 0
+  for (const s of allActive) {
+    const entry = s.gridAvgEntry || s.entryPrice
+    const price = prices[s.symbol] || 0
+    if (!entry || !price) continue
+    const pnlPct = Math.abs((price - entry) / entry * 100)
+    totalAbsPnl += pnlPct
+    priceCount++
+  }
+  const avgVolatility = priceCount > 0 ? totalAbsPnl / priceCount : 0
+
+  if (avgVolatility > 6) {
+    actions.push(`📊 High volatility (avg ${avgVolatility.toFixed(1)}% move) — hedge activation should be higher`)
+    // In high vol, hedge triggers too early → more breakeven cycles
+    // Let Claude handle the exact threshold adjustment
+    saveLearning({ key: "hedge_vol_high", insight: `Avg position move ${avgVolatility.toFixed(1)}% — high vol environment, hedge activation 2% may be too tight` })
+  } else if (avgVolatility < 2) {
+    actions.push(`📊 Low volatility (avg ${avgVolatility.toFixed(1)}% move) — hedge activation can be tighter`)
+    saveLearning({ key: "hedge_vol_low", insight: `Avg position move ${avgVolatility.toFixed(1)}% — low vol, hedge activation can be 1.5-2%` })
   }
 
   const newActions = filterNewFindings("hedge", actions)
@@ -162,12 +220,16 @@ export async function runHedgeManager() {
 }
 
 // ══════════════════════════════════════════════════════════
-// SKILL 3: STRATEGY REPORTER — info only, no disable recommendations
-// Strategies are enabled/disabled based on market regime, not WR alone
+// SKILL 3: STRATEGY REPORTER + REGIME-AWARE ROTATION (#1) + ENSEMBLE (#7)
+// Auto-disables strategies with WR <35% on 6+ trades
+// Tracks per-regime performance for smarter rotation
 // ══════════════════════════════════════════════════════════
+const regimeStrategyWR = {} // { regime: { strategy: { wins, total } } }
 export async function runStrategyTuner() {
   const db = await getDb()
   const actions = []
+  const market = await collectMarketContext()
+  const regime = market.regime || "UNKNOWN"
 
   const completed = await db.collection("ai_signals").find({ status: "COMPLETED" }).toArray()
   const stratPerf = {}
@@ -181,11 +243,65 @@ export async function runStrategyTuner() {
     stratPerf[base].pnl += s.pnlUsdt || 0
   }
 
+  // #1 Regime-aware WR tracking (last 30 trades per regime)
+  const recent = completed.slice(-100)
+  for (const s of recent) {
+    const r = s.marketRegime || "UNKNOWN"
+    const st = (s.strategy || "unknown").split("+")[0]
+    if (!regimeStrategyWR[r]) regimeStrategyWR[r] = {}
+    if (!regimeStrategyWR[r][st]) regimeStrategyWR[r][st] = { wins: 0, total: 0 }
+    regimeStrategyWR[r][st].total++
+    if ((s.pnlUsdt || 0) > 0) regimeStrategyWR[r][st].wins++
+  }
+
+  // Report overall stats + regime-specific
+  const weakStrategies = []
   for (const [name, s] of Object.entries(stratPerf)) {
     if (s.count < 3) continue
     const wr = (s.wins / s.count * 100)
-    // Info only — report stats without recommending disable
-    actions.push(`${name}: WR ${wr.toFixed(0)}% (${s.wins}/${s.count}) PnL $${s.pnl.toFixed(2)}`)
+    let note = ""
+    // Check regime-specific WR
+    const regimeData = regimeStrategyWR[regime]?.[name]
+    if (regimeData && regimeData.total >= 3) {
+      const regimeWR = (regimeData.wins / regimeData.total * 100)
+      note = ` [${regime}: ${regimeWR.toFixed(0)}%/${regimeData.total}]`
+    }
+    if (wr >= 65) actions.push(`✅ ${name}: WR ${wr.toFixed(0)}% (${s.wins}/${s.count}) PnL $${s.pnl.toFixed(2)}${note} — performing well`)
+    else if (wr < 35 && s.count >= 6) {
+      actions.push(`🔴 ${name}: WR ${wr.toFixed(0)}% (${s.wins}/${s.count}) PnL $${s.pnl.toFixed(2)}${note} — AUTO DISABLE`)
+      weakStrategies.push(name)
+    }
+    else actions.push(`${name}: WR ${wr.toFixed(0)}% (${s.wins}/${s.count}) PnL $${s.pnl.toFixed(2)}${note}`)
+  }
+
+  // #1 Auto-disable weak strategies (WR <35% on 6+ trades)
+  if (weakStrategies.length) {
+    try {
+      const config = await getTradingConfig()
+      const current = config?.enabledStrategies || []
+      if (Array.isArray(current) && current.length > 1) {
+        const updated = current.filter(s => !weakStrategies.includes(s))
+        if (updated.length < current.length && updated.length >= 1) {
+          await autoConfig("enabledStrategies", updated, `Disabled weak: ${weakStrategies.join(",")} (WR<35% on 6+ trades)`)
+          actions.push(`🔧 AUTO: Disabled ${weakStrategies.join(",")}`)
+        }
+      }
+    } catch (e) { logger.error(`[StrategyRotation] ${e.message}`) }
+  }
+
+  // #7 Strategy Ensemble Scoring — detect multi-strategy agreement on active signals
+  const active = await db.collection("ai_signals").find({ status: "ACTIVE" }).toArray()
+  const symbolDir = {} // symbol → { strategies: [], direction }
+  for (const s of active) {
+    const sym = s.symbol
+    const st = (s.strategy || "unknown").split("+")[0]
+    if (!symbolDir[sym]) symbolDir[sym] = { dir: s.direction, strategies: [] }
+    symbolDir[sym].strategies.push(st)
+  }
+  for (const [sym, info] of Object.entries(symbolDir)) {
+    if (info.strategies.length >= 2) {
+      actions.push(`🎯 ${sym}: ${info.strategies.length} strategies agree ${info.dir} (${info.strategies.join("+")}) — high conviction`)
+    }
   }
 
   const newActions = filterNewFindings("strategy", actions)
@@ -227,13 +343,14 @@ export async function runExposureManager() {
 }
 
 // ══════════════════════════════════════════════════════════
-// SKILL 5: PROFIT PROTECTOR — monitor winning positions
+// SKILL 5: PROFIT PROTECTOR + SMART TP OPTIMIZATION (#6)
+// Analyzes TP hit rates and suggests dynamic TP adjustments
 // ══════════════════════════════════════════════════════════
 export async function runProfitProtector() {
   const db = await getDb()
   const actions = []
 
-  // Check winning closed orders in last hour that could have been held longer
+  // Check winning closed orders in last hour
   const oneHourAgo = new Date(Date.now() - 3600000)
   const recentWins = await db.collection("orders").find({
     status: "CLOSED", type: "MAIN", pnlUsdt: { $gt: 0 }, closedAt: { $gte: oneHourAgo }
@@ -245,11 +362,43 @@ export async function runProfitProtector() {
     }
   }
 
-  // Check active signals with high unrealized profit (> 3%) — should have trail active
+  // Active signals with high unrealized profit
   const active = await db.collection("ai_signals").find({ status: "ACTIVE" }).toArray()
   for (const s of active) {
     if (s.peakPnlPct && s.peakPnlPct > 3 && !s.slMovedToEntry) {
       actions.push(`${s.symbol}: peak ${s.peakPnlPct.toFixed(2)}% but SL not moved to entry — profit unprotected`)
+    }
+  }
+
+  // #6 Smart TP Optimization — analyze where trades actually close vs configured TP
+  const closedSignals = await db.collection("ai_signals").find({ status: "COMPLETED" })
+    .sort({ positionClosedAt: -1 }).limit(50).toArray()
+
+  if (closedSignals.length >= 15) {
+    const tpHits = closedSignals.filter(s => s.closeReason === "TAKE_PROFIT" || s.closeReason === "TP")
+    const trailHits = closedSignals.filter(s => s.closeReason === "TRAIL_STOP")
+    const slHits = closedSignals.filter(s => s.closeReason === "STOP_LOSS" || s.closeReason === "SL")
+
+    // Average PnL% for TP hits — shows if TP is set correctly
+    if (tpHits.length >= 5) {
+      const avgTpPnl = tpHits.reduce((s, t) => s + (t.pnlPercent || 0), 0) / tpHits.length
+      actions.push(`📊 TP analysis: ${tpHits.length}/${closedSignals.length} hit TP (avg +${avgTpPnl.toFixed(1)}%)`)
+
+      // If most trades close via trail BELOW TP → TP might be too high
+      if (trailHits.length > tpHits.length * 2) {
+        const avgTrailPnl = trailHits.reduce((s, t) => s + (t.pnlPercent || 0), 0) / trailHits.length
+        actions.push(`⚠️ ${trailHits.length} trail stops vs ${tpHits.length} TP hits — TP may be too high (avg trail: +${avgTrailPnl.toFixed(1)}%)`)
+        saveLearning({ key: "tp_too_high", insight: `Trail stops (${trailHits.length}) dominate TP hits (${tpHits.length}). Avg trail close: +${avgTrailPnl.toFixed(1)}%, avg TP: +${avgTpPnl.toFixed(1)}%. Consider lowering TP closer to ${avgTrailPnl.toFixed(1)}%` })
+      }
+    }
+
+    // SL rate too high → signals entering too late or TP too ambitious
+    if (slHits.length >= 5) {
+      const slRate = (slHits.length / closedSignals.length * 100)
+      if (slRate > 40) {
+        actions.push(`🔴 SL rate ${slRate.toFixed(0)}% (${slHits.length}/${closedSignals.length}) — entry timing or TP needs review`)
+        saveLearning({ key: "high_sl_rate", insight: `SL rate ${slRate.toFixed(0)}% over last ${closedSignals.length} trades — possible issues: entries too late, TP too ambitious, or wrong regime` })
+      }
     }
   }
 
@@ -336,7 +485,8 @@ export async function runSignalQualityFilter() {
 }
 
 // ══════════════════════════════════════════════════════════
-// SKILL 7: PORTFOLIO RISK MONITOR — correlation & concentration
+// SKILL 7: PORTFOLIO RISK + DRAWDOWN RECOVERY (#2) + CORRELATION GUARD (#4)
+// Auto-adjusts config when portfolio risk exceeds thresholds
 // ══════════════════════════════════════════════════════════
 export async function runPortfolioRisk() {
   const db = await getDb()
@@ -356,11 +506,18 @@ export async function runPortfolioRisk() {
     const dir = s.direction
     sameDirAlts[dir] = (sameDirAlts[dir] || 0) + 1
   }
-  if ((sameDirAlts.LONG || 0) >= 4) {
-    actions.push(`🔴 ${sameDirAlts.LONG} altcoins ALL LONG — highly correlated, BTC drop = cascade loss`)
-  }
-  if ((sameDirAlts.SHORT || 0) >= 4) {
-    actions.push(`🔴 ${sameDirAlts.SHORT} altcoins ALL SHORT — highly correlated, BTC pump = cascade loss`)
+
+  // #4 Correlation Guard — auto-reduce maxActiveSignals when too concentrated
+  const maxSameDir = Math.max(sameDirAlts.LONG || 0, sameDirAlts.SHORT || 0)
+  const dominantDir = (sameDirAlts.LONG || 0) >= (sameDirAlts.SHORT || 0) ? "LONG" : "SHORT"
+  if (maxSameDir >= 10) {
+    actions.push(`🔴🔴 ${maxSameDir} altcoins ALL ${dominantDir} — extreme correlation risk`)
+    await autoConfig("maxActiveSignals", 3, `Correlation guard: ${maxSameDir} same-dir positions`)
+  } else if (maxSameDir >= 6) {
+    actions.push(`🔴 ${maxSameDir} altcoins ALL ${dominantDir} — highly correlated, cascade risk`)
+    await autoConfig("maxActiveSignals", 5, `Correlation guard: ${maxSameDir} same-dir positions`)
+  } else if (maxSameDir >= 4) {
+    actions.push(`⚠️ ${maxSameDir} altcoins ${dominantDir} — moderate correlation`)
   }
 
   // 2. Total unrealized PnL check — portfolio drawdown
@@ -374,11 +531,31 @@ export async function runPortfolioRisk() {
       : ((entry - price) / entry * 100)
     totalUnrealized += (pnlPct / 100) * (s.simNotional || 1000)
   }
-  if (totalUnrealized < -100) {
-    actions.push(`🔴 Portfolio unrealized: $${totalUnrealized.toFixed(2)} — consider reducing positions`)
+
+  // #2 Drawdown Recovery Mode — auto-adjust config based on drawdown severity
+  const prevMode = _drawdownMode
+  if (totalUnrealized < -300) {
+    _drawdownMode = "DEFENSIVE"
+    actions.push(`🔴🔴 DEFENSIVE MODE: drawdown $${totalUnrealized.toFixed(2)} — max protection`)
+    await autoConfig("minConfidence", 68, `Defensive: drawdown $${totalUnrealized.toFixed(0)}`)
+    await autoConfig("maxActiveSignals", 3, `Defensive: drawdown $${totalUnrealized.toFixed(0)}`)
+  } else if (totalUnrealized < -150) {
+    _drawdownMode = "CAUTIOUS"
+    actions.push(`🔴 CAUTIOUS MODE: drawdown $${totalUnrealized.toFixed(2)} — reduced risk`)
+    await autoConfig("minConfidence", 65, `Cautious: drawdown $${totalUnrealized.toFixed(0)}`)
+    await autoConfig("maxActiveSignals", 5, `Cautious: drawdown $${totalUnrealized.toFixed(0)}`)
+  } else if (totalUnrealized > -50 && prevMode !== "NORMAL") {
+    _drawdownMode = "NORMAL"
+    actions.push(`🟢 NORMAL MODE restored: unrealized $${totalUnrealized.toFixed(2)}`)
+    await autoConfig("minConfidence", 60, `Recovery: drawdown eased to $${totalUnrealized.toFixed(0)}`)
+    await autoConfig("maxActiveSignals", 8, `Recovery: normal mode restored`)
+  } else if (totalUnrealized < -100) {
+    actions.push(`🔴 Portfolio unrealized: $${totalUnrealized.toFixed(2)} — monitoring (${_drawdownMode})`)
   }
-  if (totalUnrealized < -200) {
-    actions.push(`🔴🔴 CRITICAL drawdown: $${totalUnrealized.toFixed(2)} — immediate risk management needed`)
+
+  if (prevMode !== _drawdownMode) {
+    actions.push(`📊 Mode: ${prevMode} → ${_drawdownMode}`)
+    saveLearning({ key: "drawdown_mode_shift", insight: `Shifted ${prevMode}→${_drawdownMode} at unrealized $${totalUnrealized.toFixed(0)} with ${active.length} positions` })
   }
 
   // 3. Single coin over-exposure (multiple grid entries on one coin)
@@ -388,7 +565,7 @@ export async function runPortfolioRisk() {
     volByCoin[o.symbol] = (volByCoin[o.symbol] || 0) + (o.notional || 0)
   }
   for (const [sym, vol] of Object.entries(volByCoin)) {
-    const pct = (vol / 1000) * 100 // % of $1000 wallet
+    const pct = (vol / 1000) * 100
     if (pct > 40) {
       actions.push(`⚠️ ${sym} exposure ${pct.toFixed(0)}% of wallet ($${vol.toFixed(0)}) — over-concentrated`)
     }
@@ -492,6 +669,43 @@ export async function runPostTradeLearning() {
     }
   }
 
+  // #5 Time-based Pattern Learning — WR by trading session
+  if (last50.length >= 20) {
+    const sessions = { ASIA: { wins: 0, total: 0 }, EU: { wins: 0, total: 0 }, US: { wins: 0, total: 0 } }
+    for (const s of last50) {
+      const hour = s.executedAt ? new Date(s.executedAt).getUTCHours() : -1
+      if (hour < 0) continue
+      const session = hour >= 0 && hour < 8 ? "ASIA" : hour >= 7 && hour < 16 ? "EU" : "US"
+      sessions[session].total++
+      if ((s.pnlUsdt || 0) > 0) sessions[session].wins++
+    }
+    for (const [sess, st] of Object.entries(sessions)) {
+      if (st.total >= 5) {
+        const wr = (st.wins / st.total * 100)
+        saveLearning({ key: `session_wr_${sess}`, insight: `${sess} session WR: ${wr.toFixed(0)}% (${st.wins}/${st.total}) — ${wr >= 60 ? "good" : wr < 40 ? "poor, consider pausing" : "average"}` })
+        if (wr < 35 && st.total >= 8) {
+          actions.push(`📉 ${sess} session WR only ${wr.toFixed(0)}% (${st.total} trades) — consider reducing activity`)
+        }
+      }
+    }
+
+    // #5 Day-of-week pattern
+    const dayStats = {}
+    for (const s of last50) {
+      const day = s.executedAt ? new Date(s.executedAt).getUTCDay() : -1
+      if (day < 0) continue
+      const dayName = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][day]
+      if (!dayStats[dayName]) dayStats[dayName] = { wins: 0, total: 0 }
+      dayStats[dayName].total++
+      if ((s.pnlUsdt || 0) > 0) dayStats[dayName].wins++
+    }
+    const bestDay = Object.entries(dayStats).filter(([,s]) => s.total >= 3).sort((a,b) => (b[1].wins/b[1].total) - (a[1].wins/a[1].total))[0]
+    const worstDay = Object.entries(dayStats).filter(([,s]) => s.total >= 3).sort((a,b) => (a[1].wins/a[1].total) - (b[1].wins/b[1].total))[0]
+    if (bestDay && worstDay && bestDay[0] !== worstDay[0]) {
+      saveLearning({ key: "day_pattern", insight: `Best day: ${bestDay[0]} (WR ${(bestDay[1].wins/bestDay[1].total*100).toFixed(0)}%), Worst: ${worstDay[0]} (WR ${(worstDay[1].wins/worstDay[1].total*100).toFixed(0)}%)` })
+    }
+  }
+
   const newActions = filterNewFindings("learning", actions)
   if (newActions.length) {
     logger.info(`[PostTradeLearning] ${newActions.join(" | ")}`)
@@ -563,7 +777,7 @@ export async function runSmartAlerts() {
     actions.push(`🔴 5 consecutive losses ($${totalLoss.toFixed(2)}) — consider pausing or reducing size`)
   }
 
-  // 6. Large position PnL swing (>3% move in either direction on active positions)
+  // 6. Large position PnL swing (>8% move from entry on active positions)
   const active = await db.collection("ai_signals").find({ status: "ACTIVE" }).toArray()
   const livePrices = await getPrices(active.map(s => s.symbol))
   for (const s of active) {
@@ -575,6 +789,48 @@ export async function runSmartAlerts() {
       const dir = price > entry ? "UP" : "DOWN"
       actions.push(`🚨 ${s.symbol} moved ${movePct.toFixed(1)}% ${dir} from entry — extreme position`)
     }
+  }
+
+  // #9 Market Microstructure Alerts
+
+  // 9a. Funding rate divergence — funding going opposite to price trend
+  for (const coin of onchain) {
+    const matchingSignal = active.find(s => s.symbol === `${coin.symbol}USDT`)
+    if (!matchingSignal) continue
+    const entry = matchingSignal.gridAvgEntry || matchingSignal.entryPrice
+    const price = livePrices[matchingSignal.symbol] || 0
+    if (!entry || !price) continue
+    const priceUp = price > entry
+    // Divergence: price going up but funding extremely negative (shorts paying longs) = unusual
+    if (priceUp && coin.fr < -0.04) {
+      actions.push(`🔍 ${coin.symbol}: price UP but funding negative (${coin.fr?.toFixed(4)}%) — shorts still building, potential squeeze continuation`)
+    }
+    if (!priceUp && coin.fr > 0.04) {
+      actions.push(`🔍 ${coin.symbol}: price DOWN but funding positive (${coin.fr?.toFixed(4)}%) — longs overleveraged, potential liquidation cascade`)
+    }
+  }
+
+  // 9b. Volume spike detection — taker ratio extreme across multiple coins
+  const extremeTakers = onchain.filter(c => c.taker && (c.taker > 0.62 || c.taker < 0.38))
+  if (extremeTakers.length >= 3) {
+    const buying = extremeTakers.filter(c => c.taker > 0.62).length
+    const selling = extremeTakers.filter(c => c.taker < 0.38).length
+    if (buying >= 3) {
+      actions.push(`🚨 ${buying} coins with extreme taker BUY pressure — possible coordinated pump`)
+    }
+    if (selling >= 3) {
+      actions.push(`🚨 ${selling} coins with extreme taker SELL pressure — possible coordinated dump`)
+    }
+  }
+
+  // 9c. Funding rate clustering — when many coins have extreme same-direction funding
+  const highFR = onchain.filter(c => (c.fr || 0) > 0.05)
+  const lowFR = onchain.filter(c => (c.fr || 0) < -0.05)
+  if (highFR.length >= 4) {
+    actions.push(`🚨 ${highFR.length} coins with high positive FR (>0.05%) — market-wide long crowding, squeeze risk`)
+  }
+  if (lowFR.length >= 4) {
+    actions.push(`🚨 ${lowFR.length} coins with high negative FR (<-0.05%) — market-wide short crowding, squeeze risk`)
   }
 
   const newActions = filterNewFindings("alerts", actions)

@@ -214,15 +214,27 @@ ALLOWED: UPDATE_CONFIG | LEARNING | NO_ACTION (max 5 actions)
 Config fields: takeProfitPercent, stopLossPercent, hedgeThreshold, trailStopPercent, maxActiveSignals, maxExposureLeverage, minConfidence, enabledStrategies
 
 ADAPTIVE CONFIG TUNING — CRITICAL:
-Current regime: ${regime}. Recommended config for this regime: ${guide}
+Current regime: ${regime}. Recommended config: ${guide}
 Compare current config vs recommended. If mismatch, use UPDATE_CONFIG to align.
 Rules: confidence cap MAX 68, gates cap MAX 68, SL stays 40% (safety net).
 Only change config if regime warrants it. Small incremental changes preferred.
+NOTE: Skills may have already auto-adjusted some config (drawdown recovery, correlation guard, strategy rotation).
+Check SKILLS FINDINGS for "AUTO:" actions. Avoid conflicting with auto-adjustments.
 
-SKILLS FINDINGS (auto-detected issues):
+HEDGE TUNING GUIDELINES:
+- High volatility (avg move >5%): suggest wider hedge activation (3%+), wider grid spacing (5%+)
+- Low volatility (avg move <2%): tighter hedge activation (1.5-2%), tighter grid spacing (3-4%)
+- If hedge effectiveness <30% on a coin: suggest raising threshold for that coin type
+
+TP OPTIMIZATION:
+- If trail stops >> TP hits: TP might be too ambitious, consider lowering
+- If SL rate >40%: entry timing or confidence threshold needs review
+- Check session/day patterns in learnings for timing optimization
+
+SKILLS FINDINGS (auto-detected issues — some already auto-acted):
 ${ctx.skillFindings || "None"}
 
-Analyze: regime alignment, strategy WR (<40% on 5+ → consider disable), hedge effectiveness, exposure risk, loss streaks, portfolio concentration.
+Analyze: regime alignment, strategy WR (<35% on 6+ → auto-disabled), hedge effectiveness per coin, exposure correlation, drawdown mode, TP hit rate, session patterns, microstructure signals.
 
 POSITIONS (${ctx.activePositions.length}):
 ${posText}
