@@ -8,7 +8,7 @@ export class AgentEvent {
   @Prop({ required: true, enum: ['THOUGHT', 'DECISION', 'ACTION', 'LEARNING', 'ERROR', 'REPORT'] })
   type: string;
 
-  @Prop({ required: true, enum: ['market_analyzer', 'position_manager', 'bug_detector', 'strategy_tuner', 'active_trader'] })
+  @Prop({ required: true, enum: ['market_analyzer', 'position_manager', 'bug_detector', 'strategy_tuner', 'active_trader', 'signal_filter', 'portfolio_risk', 'post_trade', 'smart_alert'] })
   agent: string;
 
   @Prop({ required: true })
