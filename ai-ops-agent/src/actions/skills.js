@@ -591,6 +591,7 @@ export async function runSmartAlerts() {
 export async function runAllSkills(silent = false) {
   const prevSilent = _silent
   _silent = silent
+  logger.info(`[Skills] _silent=${_silent} (param=${silent})`)
   const results = {
     dataFixes: await runDataValidator(),
     hedgeActions: await runHedgeManager(),

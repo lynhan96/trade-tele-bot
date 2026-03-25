@@ -6,7 +6,7 @@ const BASE = process.env.HEALTH_URL?.replace("/admin/health", "") || "http://127
 // Log agent events to MongoDB via admin API (for dashboard)
 export async function logAgentEvent(event) {
   try {
-    await axios.post(`${BASE}/admin/agent/events`, {
+    const payload = {
       type: event.type || "THOUGHT",
       agent: event.agent || "active_trader",
       message: event.message || "",
@@ -16,9 +16,10 @@ export async function logAgentEvent(event) {
       symbol: event.symbol || "",
       actionType: event.actionType || "",
       outcome: event.outcome || {},
-    }, { timeout: 5000 })
-  } catch {
-    // Silent fail — don't break agent flow
+    }
+    await axios.post(`${BASE}/admin/agent/events`, payload, { timeout: 5000 })
+  } catch (err) {
+    logger.error(`[AgentLog] POST failed: ${err.response?.status || err.code || err.message} | agent=${event.agent} msg=${(event.message || "").slice(0, 60)}`)
   }
 }
 
