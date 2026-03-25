@@ -103,7 +103,8 @@ export class HedgeManagerService {
       if (pnlPct > -cfg.hedgePartialTriggerPct) return null;
 
       // ── Momentum check (CYCLE 2+ ONLY) — cycle 1 enters immediately for protection ──
-      const isFirstCycle = !signal.hedgeHistory?.length;
+      // After FLIP: hedgeCycleCount=0 means first cycle for new direction → enter immediately
+      const isFirstCycle = !signal.hedgeHistory?.length || (signal.hedgeCycleCount || 0) === 0;
       if (!isFirstCycle) {
         try {
           const coin = signal.coin || signal.symbol?.replace('USDT', '');
@@ -132,8 +133,10 @@ export class HedgeManagerService {
       }
 
       // Cycle 2+: stricter conditions — prevent blind re-entry
-      if (signal.hedgeHistory?.length > 0) {
-        const lastHedge = signal.hedgeHistory[signal.hedgeHistory.length - 1];
+      // Skip FLIP_TP entries — they record main TP close, not real hedge exits
+      const realHedges = (signal.hedgeHistory || []).filter((h: any) => h.reason !== 'FLIP_TP');
+      if (realHedges.length > 0) {
+        const lastHedge = realHedges[realHedges.length - 1];
 
         // 1. Price must be WORSE than last hedge exit (trend continuing)
         const lastExitPrice = lastHedge?.exitPrice || 0;
