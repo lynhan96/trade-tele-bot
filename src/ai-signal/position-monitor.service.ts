@@ -502,15 +502,18 @@ export class PositionMonitorService implements OnModuleInit {
               ? Math.abs(((signal as any).originalSlPrice || (signal as any).stopLossPrice) - origEntry) / origEntry * 100
               : 2.5;
             const slPctForRecalc = Math.max(rawSlPct, minSlPctDca);
-            const newSl = direction === "LONG"
+            const curDir = signal.direction;
+            const newSl = curDir === "LONG"
               ? avgEntry * (1 - slPctForRecalc / 100)
               : avgEntry * (1 + slPctForRecalc / 100);
             (signal as any).stopLossPrice = newSl;
           }
 
           // DCA TP from config (default 3%)
+          // Use signal.direction (live) not destructured direction (stale after FLIP)
           const DCA_TP_PCT = cfg.dcaTpPct || 3.0;
-          const newTp = direction === "LONG"
+          const currentDir = signal.direction;
+          const newTp = currentDir === "LONG"
             ? avgEntry * (1 + DCA_TP_PCT / 100)
             : avgEntry * (1 - DCA_TP_PCT / 100);
           (signal as any).takeProfitPrice = newTp;
@@ -531,7 +534,7 @@ export class PositionMonitorService implements OnModuleInit {
       if (filledGrids.length > 0) {
         const TRAIL_TRIGGER = cfg.trailTrigger ?? 2.0;
         const TRAIL_KEEP_RATIO = cfg.trailKeepRatio ?? 0.75;
-        const pnlFromAvg = direction === "LONG"
+        const pnlFromAvg = signal.direction === "LONG"
           ? ((price - avgEntry) / avgEntry) * 100
           : ((avgEntry - price) / avgEntry) * 100;
 
