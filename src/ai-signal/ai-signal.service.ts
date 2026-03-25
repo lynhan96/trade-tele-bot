@@ -447,7 +447,10 @@ export class AiSignalService implements OnModuleInit {
     const cfg = this.tradingConfig.get();
     const maxSignals = Math.min(cfg.maxActiveSignals || MAX_ACTIVE_SIGNALS, MAX_ACTIVE_SIGNALS);
     const allActives = await this.signalQueueService.getAllActiveSignals();
-    if (allActives.length >= maxSignals) return;
+    if (allActives.length >= maxSignals) {
+      this.logger.debug(`[AiSignal] Active cap reached (${allActives.length}/${maxSignals}) — skipping new signal`);
+      return;
+    }
 
     // For dual-timeframe coins: also check if the OTHER profile already has an active signal
     // This prevents duplicate signals for the same symbol (e.g. ETH INTRADAY + SWING both SHORT)
