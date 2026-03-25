@@ -3,6 +3,7 @@ import { getPrices } from "../utils/redis.js"
 import { getDb } from "../utils/db.js"
 import { buildMemoryContext, saveDecision, saveLearning } from "../utils/memory.js"
 import { updateTradingConfig } from "../actions/adminApi.js"
+import { runAllSkills } from "../actions/skills.js"
 import { logger } from "../utils/logger.js"
 import * as agentLog from "../utils/agentLogger.js"
 import { execSync } from "child_process"
@@ -38,7 +39,7 @@ export async function runActiveTrader() {
     const env = { ...process.env, HOME: "/home/ubuntu" }
     delete env.ANTHROPIC_API_KEY
     const output = execSync(
-      `${NVM}cat ${tmpFile} | claude --print`,
+      `${NVM}cat ${tmpFile} | claude --print --model claude-sonnet-4-6`,
       { cwd: APP_ROOT(), encoding: "utf8", timeout: 3 * 60 * 1000, env }
     )
     decisions = parseResponse(output)
@@ -53,7 +54,7 @@ export async function runActiveTrader() {
 
   // ═══ 3. Execute decisions (config + learning ONLY) ═══
   const results = []
-  for (const d of (decisions || []).slice(0, 3)) {
+  for (const d of (decisions || []).slice(0, 5)) {
     // STRICT WHITELIST — reject any position execution attempts
     if (!ALLOWED_ACTIONS.has(d.action)) {
       logger.warn(`[Trader] REJECTED action: ${d.action} (not in whitelist)`)
@@ -166,10 +167,18 @@ async function collectFullContext(db) {
   const memory = buildMemoryContext()
   const market = await collectMarketContext()
 
+  // ── Skill findings (feed to Claude for adaptive tuning) ──
+  const skillResults = await runAllSkills(true) // silent — no dashboard spam
+  const skillFindings = Object.entries(skillResults)
+    .flatMap(([k, v]) => v.map(f => `[${k}] ${f}`))
+    .slice(0, 15) // cap to save tokens
+    .join("\n")
+
   return {
     activePositions: positions,
     recentClosed: recentInfo,
     onchain: onchainInfo,
+    skillFindings,
     stats: {
       wallet: +(1000 + mainPnl + hedgePnl).toFixed(2),
       mainPnl: +mainPnl.toFixed(2),
@@ -189,10 +198,31 @@ function buildTraderPrompt(ctx) {
     `${p.symbol} ${p.direction} entry:${p.entry} price:${p.livePrice} pnl:${p.mainPnlPct}%($${p.mainPnlUsdt}) hedge:${p.hedgeActive}${p.hedgeActive ? ` hDir:${p.hedgeDirection} hEntry:${p.hedgeEntry} hPnl:${p.hedgePnlPct}%` : ''} cycles:${p.hedgeCycles} banked:$${p.banked} total:$${p.totalPnl} conf:${p.confidence} strat:${p.strategy}`
   ).join("\n")
 
+  // Regime-specific config guidelines for adaptive tuning
+  const regimeGuide = {
+    STRONG_BULL: "TP can be wider (3-5%), trail looser, maxActiveSignals higher (8-10), minConfidence lower (55-60), hedge threshold higher",
+    BULL: "Balanced TP (2.5-4%), moderate trail, maxActiveSignals 6-8, minConfidence 58-63",
+    NEUTRAL: "Conservative TP (2-3%), tighter trail, maxActiveSignals 5-6, minConfidence 60-65",
+    BEAR: "Tight TP (1.5-2.5%), aggressive trail, maxActiveSignals 3-5, minConfidence 63-68, favor SHORT",
+    STRONG_BEAR: "Very tight TP (1-2%), maxActiveSignals 2-4, minConfidence 65-68, mostly SHORT, reduce exposure",
+  }
+  const regime = ctx.market?.regime || "UNKNOWN"
+  const guide = regimeGuide[regime] || "Unknown regime — be conservative"
+
   return `AI trading ADVISOR. CANNOT close/open positions. Bot handles TP/SL/hedge/grid automatically.
-ALLOWED: UPDATE_CONFIG | LEARNING | NO_ACTION (max 3 actions)
+ALLOWED: UPDATE_CONFIG | LEARNING | NO_ACTION (max 5 actions)
 Config fields: takeProfitPercent, stopLossPercent, hedgeThreshold, trailStopPercent, maxActiveSignals, maxExposureLeverage, minConfidence, enabledStrategies
-Analyze: regime, strategy WR (<40% on 5+ → disable), hedge effectiveness, exposure, loss streaks.
+
+ADAPTIVE CONFIG TUNING — CRITICAL:
+Current regime: ${regime}. Recommended config for this regime: ${guide}
+Compare current config vs recommended. If mismatch, use UPDATE_CONFIG to align.
+Rules: confidence cap MAX 68, gates cap MAX 68, SL stays 40% (safety net).
+Only change config if regime warrants it. Small incremental changes preferred.
+
+SKILLS FINDINGS (auto-detected issues):
+${ctx.skillFindings || "None"}
+
+Analyze: regime alignment, strategy WR (<40% on 5+ → consider disable), hedge effectiveness, exposure risk, loss streaks, portfolio concentration.
 
 POSITIONS (${ctx.activePositions.length}):
 ${posText}

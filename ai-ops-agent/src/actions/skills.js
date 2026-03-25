@@ -1,4 +1,7 @@
 import { getDb } from "../utils/db.js"
+import { getPrices } from "../utils/redis.js"
+import { collectMarketContext } from "../utils/marketContext.js"
+import { saveLearning } from "../utils/memory.js"
 import { logger } from "../utils/logger.js"
 import * as agentLog from "../utils/agentLogger.js"
 
@@ -256,6 +259,330 @@ export async function runProfitProtector() {
 }
 
 // ══════════════════════════════════════════════════════════
+// SKILL 6: SIGNAL QUALITY PRE-FILTER — local rules, no Claude
+// Checks funding rate, momentum, volume anomalies to flag low-quality setups
+// ══════════════════════════════════════════════════════════
+export async function runSignalQualityFilter() {
+  const db = await getDb()
+  const actions = []
+
+  const active = await db.collection("ai_signals").find({ status: "ACTIVE" }).toArray()
+  const market = await collectMarketContext()
+
+  // 1. Funding rate extreme — signals against extreme funding are risky
+  const onchain = market.onchain || []
+  for (const s of active) {
+    const coin = onchain.find(c => c.symbol === s.symbol?.replace("USDT", ""))
+    if (!coin) continue
+
+    // Extreme funding rate: LONG when funding > 0.06% = crowded long (risky)
+    if (s.direction === "LONG" && coin.fr > 0.06) {
+      actions.push(`⚠️ ${s.symbol} LONG but funding +${coin.fr?.toFixed(4)}% (crowded long) — higher reversal risk`)
+    }
+    if (s.direction === "SHORT" && coin.fr < -0.06) {
+      actions.push(`⚠️ ${s.symbol} SHORT but funding ${coin.fr?.toFixed(4)}% (crowded short) — higher squeeze risk`)
+    }
+
+    // 2. Long/short ratio extreme — going against 70%+ crowd
+    if (s.direction === "LONG" && coin.longPct > 70) {
+      actions.push(`⚠️ ${s.symbol} LONG with ${coin.longPct}% longs — contrarian signal may be better`)
+    }
+    if (s.direction === "SHORT" && coin.longPct < 30) {
+      actions.push(`⚠️ ${s.symbol} SHORT with only ${coin.longPct}% longs — contrarian signal may be better`)
+    }
+
+    // 3. Taker buy ratio — buying pressure vs selling pressure
+    if (s.direction === "LONG" && coin.taker && coin.taker < 0.42) {
+      actions.push(`⚠️ ${s.symbol} LONG but taker buy ratio ${coin.taker?.toFixed(2)} (sellers dominating)`)
+    }
+    if (s.direction === "SHORT" && coin.taker && coin.taker > 0.58) {
+      actions.push(`⚠️ ${s.symbol} SHORT but taker buy ratio ${coin.taker?.toFixed(2)} (buyers dominating)`)
+    }
+  }
+
+  // 4. Market-wide check: regime vs direction mismatch
+  const regime = market.regime || "UNKNOWN"
+  if (regime === "STRONG_BEAR" || regime === "BEAR") {
+    const longs = active.filter(s => s.direction === "LONG")
+    if (longs.length > 2) {
+      actions.push(`⚠️ Regime ${regime} but ${longs.length} LONG signals active — reduce long exposure`)
+    }
+  }
+  if (regime === "STRONG_BULL" || regime === "BULL") {
+    const shorts = active.filter(s => s.direction === "SHORT")
+    if (shorts.length > 2) {
+      actions.push(`⚠️ Regime ${regime} but ${shorts.length} SHORT signals active — reduce short exposure`)
+    }
+  }
+
+  // 5. Low confidence signals in bad market
+  const guard = market.marketGuard
+  if (guard?.riskLevel === "HIGH") {
+    const lowConf = active.filter(s => (s.aiConfidence || 100) < 60)
+    if (lowConf.length) {
+      actions.push(`🔴 HIGH RISK market + ${lowConf.length} low-confidence signals (<60) — quality concern`)
+    }
+  }
+
+  const newActions = filterNewFindings("signalQuality", actions)
+  if (newActions.length) {
+    logger.info(`[SignalQuality] ${newActions.join(" | ")}`)
+    if (!_silent) for (const a of newActions) await agentLog.thought("signal_filter", a)
+  }
+  return actions
+}
+
+// ══════════════════════════════════════════════════════════
+// SKILL 7: PORTFOLIO RISK MONITOR — correlation & concentration
+// ══════════════════════════════════════════════════════════
+export async function runPortfolioRisk() {
+  const db = await getDb()
+  const actions = []
+
+  const active = await db.collection("ai_signals").find({ status: "ACTIVE" }).toArray()
+  if (active.length < 2) return actions
+
+  const symbols = active.map(s => s.symbol)
+  const prices = await getPrices(symbols)
+
+  // 1. Sector concentration — too many altcoins correlated with BTC
+  const premiumCoins = new Set(["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"])
+  const altcoins = active.filter(s => !premiumCoins.has(s.symbol))
+  const sameDirAlts = {}
+  for (const s of altcoins) {
+    const dir = s.direction
+    sameDirAlts[dir] = (sameDirAlts[dir] || 0) + 1
+  }
+  if ((sameDirAlts.LONG || 0) >= 4) {
+    actions.push(`🔴 ${sameDirAlts.LONG} altcoins ALL LONG — highly correlated, BTC drop = cascade loss`)
+  }
+  if ((sameDirAlts.SHORT || 0) >= 4) {
+    actions.push(`🔴 ${sameDirAlts.SHORT} altcoins ALL SHORT — highly correlated, BTC pump = cascade loss`)
+  }
+
+  // 2. Total unrealized PnL check — portfolio drawdown
+  let totalUnrealized = 0
+  for (const s of active) {
+    const entry = s.gridAvgEntry || s.entryPrice
+    const price = prices[s.symbol] || 0
+    if (!entry || !price) continue
+    const pnlPct = s.direction === "LONG"
+      ? ((price - entry) / entry * 100)
+      : ((entry - price) / entry * 100)
+    totalUnrealized += (pnlPct / 100) * (s.simNotional || 1000)
+  }
+  if (totalUnrealized < -100) {
+    actions.push(`🔴 Portfolio unrealized: $${totalUnrealized.toFixed(2)} — consider reducing positions`)
+  }
+  if (totalUnrealized < -200) {
+    actions.push(`🔴🔴 CRITICAL drawdown: $${totalUnrealized.toFixed(2)} — immediate risk management needed`)
+  }
+
+  // 3. Single coin over-exposure (multiple grid entries on one coin)
+  const openOrders = await db.collection("orders").find({ status: "OPEN" }).toArray()
+  const volByCoin = {}
+  for (const o of openOrders) {
+    volByCoin[o.symbol] = (volByCoin[o.symbol] || 0) + (o.notional || 0)
+  }
+  for (const [sym, vol] of Object.entries(volByCoin)) {
+    const pct = (vol / 1000) * 100 // % of $1000 wallet
+    if (pct > 40) {
+      actions.push(`⚠️ ${sym} exposure ${pct.toFixed(0)}% of wallet ($${vol.toFixed(0)}) — over-concentrated`)
+    }
+  }
+
+  // 4. Win rate trend — recent 20 vs overall
+  const allClosed = await db.collection("orders").find({ status: "CLOSED", type: "MAIN" }).sort({ closedAt: -1 }).toArray()
+  if (allClosed.length >= 20) {
+    const recent20 = allClosed.slice(0, 20)
+    const recentWR = recent20.filter(o => (o.pnlUsdt || 0) > 0).length / 20 * 100
+    const overallWR = allClosed.filter(o => (o.pnlUsdt || 0) > 0).length / allClosed.length * 100
+    if (recentWR < overallWR - 15) {
+      actions.push(`📉 WR declining: recent20 ${recentWR.toFixed(0)}% vs overall ${overallWR.toFixed(0)}% — performance degrading`)
+    }
+  }
+
+  const newActions = filterNewFindings("portfolio", actions)
+  if (newActions.length) {
+    logger.info(`[PortfolioRisk] ${newActions.join(" | ")}`)
+    if (!_silent) for (const a of newActions) await agentLog.thought("portfolio_risk", a)
+  }
+  return actions
+}
+
+// ══════════════════════════════════════════════════════════
+// SKILL 8: POST-TRADE LEARNING — analyze closed trades, build patterns
+// ══════════════════════════════════════════════════════════
+let lastLearnCheck = 0 // timestamp of last check
+export async function runPostTradeLearning() {
+  const db = await getDb()
+  const actions = []
+
+  // Only analyze trades closed since last check (or last 2h on first run)
+  const since = lastLearnCheck || (Date.now() - 2 * 3600000)
+  lastLearnCheck = Date.now()
+
+  const recentClosed = await db.collection("ai_signals").find({
+    status: "COMPLETED",
+    positionClosedAt: { $gte: new Date(since) }
+  }).toArray()
+
+  if (!recentClosed.length) return actions
+
+  for (const s of recentClosed) {
+    const strategy = (s.strategy || "unknown").split("+")[0]
+    const pnl = s.pnlUsdt || 0
+    const won = pnl > 0
+    const holdTime = s.positionClosedAt && s.executedAt
+      ? Math.round((new Date(s.positionClosedAt) - new Date(s.executedAt)) / 3600000)
+      : 0
+    const hedgeCycles = s.hedgeCycleCount || 0
+    const banked = (s.hedgeHistory || []).reduce((sum, h) => sum + (h.pnlUsdt || 0), 0)
+
+    // Build learning pattern
+    const key = `trade_${s.symbol}_${strategy}_${won ? "win" : "loss"}`
+    const insight = [
+      `${s.symbol} ${s.direction} via ${strategy}:`,
+      `PnL $${pnl.toFixed(2)} (${won ? "WIN" : "LOSS"})`,
+      `Hold: ${holdTime}h`,
+      hedgeCycles > 0 ? `Hedge: ${hedgeCycles} cycles, banked $${banked.toFixed(2)}` : "No hedge",
+      `Confidence: ${s.aiConfidence || "?"}`,
+      `Close: ${s.closeReason || "?"}`,
+    ].join(" | ")
+
+    saveLearning({ key, insight })
+    actions.push(`📚 ${s.symbol}: ${won ? "WIN" : "LOSS"} $${pnl.toFixed(2)} (${strategy}, ${holdTime}h, hedge×${hedgeCycles})`)
+
+    // Pattern detection: strategy + regime correlation
+    if (!won && holdTime < 2) {
+      saveLearning({
+        key: `fast_loss_${strategy}`,
+        insight: `${strategy} produced fast loss (<2h) on ${s.symbol} ${s.direction} — may need tighter entry conditions`
+      })
+    }
+    if (won && banked > Math.abs(pnl) * 0.5) {
+      saveLearning({
+        key: `hedge_value_${strategy}`,
+        insight: `Hedge added significant value on ${s.symbol}: banked $${banked.toFixed(2)} vs main PnL $${pnl.toFixed(2)}`
+      })
+    }
+  }
+
+  // Aggregate pattern: strategy win rates over recent trades
+  const last50 = await db.collection("ai_signals").find({ status: "COMPLETED" })
+    .sort({ positionClosedAt: -1 }).limit(50).toArray()
+  const stratStats = {}
+  for (const s of last50) {
+    const st = (s.strategy || "unknown").split("+")[0]
+    if (!stratStats[st]) stratStats[st] = { wins: 0, total: 0, pnl: 0 }
+    stratStats[st].total++
+    if ((s.pnlUsdt || 0) > 0) stratStats[st].wins++
+    stratStats[st].pnl += s.pnlUsdt || 0
+  }
+  for (const [st, stats] of Object.entries(stratStats)) {
+    if (stats.total >= 5) {
+      const wr = (stats.wins / stats.total * 100).toFixed(0)
+      saveLearning({
+        key: `strategy_perf_${st}`,
+        insight: `Last ${stats.total} trades: WR ${wr}% PnL $${stats.pnl.toFixed(2)} — ${wr >= 60 ? "strong" : wr >= 45 ? "average" : "weak"} performer`
+      })
+    }
+  }
+
+  const newActions = filterNewFindings("learning", actions)
+  if (newActions.length) {
+    logger.info(`[PostTradeLearning] ${newActions.join(" | ")}`)
+    if (!_silent) for (const a of newActions) await agentLog.learning("post_trade", a)
+  }
+  return actions
+}
+
+// ══════════════════════════════════════════════════════════
+// SKILL 9: SMART ALERTS — event-driven anomaly detection
+// ══════════════════════════════════════════════════════════
+let prevFundingRates = {} // track previous FR for spike detection
+let prevRegime = null
+export async function runSmartAlerts() {
+  const db = await getDb()
+  const actions = []
+  const market = await collectMarketContext()
+
+  // 1. Funding rate spike detection (>0.03% change since last check)
+  const onchain = market.onchain || []
+  for (const coin of onchain) {
+    const prev = prevFundingRates[coin.symbol] || 0
+    const curr = coin.fr || 0
+    const delta = Math.abs(curr - prev)
+    if (prev !== 0 && delta > 0.03) {
+      const dir = curr > prev ? "spiked UP" : "spiked DOWN"
+      actions.push(`🚨 ${coin.symbol} funding ${dir}: ${prev.toFixed(4)}% → ${curr.toFixed(4)}% (Δ${delta.toFixed(4)}%)`)
+    }
+    prevFundingRates[coin.symbol] = curr
+  }
+
+  // 2. Regime change detection
+  const regime = market.regime || "UNKNOWN"
+  if (prevRegime && prevRegime !== regime && regime !== "UNKNOWN") {
+    actions.push(`🔄 REGIME SHIFT: ${prevRegime} → ${regime} — review config alignment!`)
+  }
+  prevRegime = regime
+
+  // 3. Extreme market conditions
+  const fundingSummary = market.fundingSummary
+  if (fundingSummary?.extreme === "HIGH_LONG") {
+    actions.push(`🚨 Market-wide HIGH LONG funding (avg ${fundingSummary.avgFR?.toFixed(4)}%) — long squeeze risk`)
+  }
+  if (fundingSummary?.extreme === "HIGH_SHORT") {
+    actions.push(`🚨 Market-wide HIGH SHORT funding (avg ${fundingSummary.avgFR?.toFixed(4)}%) — short squeeze risk`)
+  }
+
+  // 4. Alt pulse divergence — alts moving opposite to BTC
+  const altPulse = market.altPulse
+  if (altPulse) {
+    if (altPulse.signal === "BEARISH" && regime === "BULL") {
+      actions.push(`⚠️ Alt pulse BEARISH while regime BULL — altcoins lagging, possible rotation`)
+    }
+    if (altPulse.signal === "BULLISH" && regime === "BEAR") {
+      actions.push(`⚠️ Alt pulse BULLISH while regime BEAR — possible alt rally forming`)
+    }
+    // Extreme alt move
+    if (altPulse.avgChange4h && Math.abs(altPulse.avgChange4h) > 5) {
+      const dir = altPulse.avgChange4h > 0 ? "pump" : "dump"
+      actions.push(`🚨 Extreme alt ${dir}: avg 4h change ${altPulse.avgChange4h.toFixed(2)}% — high volatility`)
+    }
+  }
+
+  // 5. Consecutive loss detection (last 5 trades all losses)
+  const recentMain = await db.collection("orders").find({ status: "CLOSED", type: "MAIN" })
+    .sort({ closedAt: -1 }).limit(5).toArray()
+  if (recentMain.length === 5 && recentMain.every(o => (o.pnlUsdt || 0) < 0)) {
+    const totalLoss = recentMain.reduce((s, o) => s + (o.pnlUsdt || 0), 0)
+    actions.push(`🔴 5 consecutive losses ($${totalLoss.toFixed(2)}) — consider pausing or reducing size`)
+  }
+
+  // 6. Large position PnL swing (>3% move in either direction on active positions)
+  const active = await db.collection("ai_signals").find({ status: "ACTIVE" }).toArray()
+  const livePrices = await getPrices(active.map(s => s.symbol))
+  for (const s of active) {
+    const entry = s.gridAvgEntry || s.entryPrice
+    const price = livePrices[s.symbol] || 0
+    if (!entry || !price) continue
+    const movePct = Math.abs((price - entry) / entry * 100)
+    if (movePct > 8) {
+      const dir = price > entry ? "UP" : "DOWN"
+      actions.push(`🚨 ${s.symbol} moved ${movePct.toFixed(1)}% ${dir} from entry — extreme position`)
+    }
+  }
+
+  const newActions = filterNewFindings("alerts", actions)
+  if (newActions.length) {
+    logger.info(`[SmartAlerts] ${newActions.join(" | ")}`)
+    if (!_silent) for (const a of newActions) await agentLog.thought("smart_alert", a)
+  }
+  return actions
+}
+
+// ══════════════════════════════════════════════════════════
 // RUN ALL SKILLS
 // ══════════════════════════════════════════════════════════
 export async function runAllSkills(silent = false) {
@@ -266,11 +593,15 @@ export async function runAllSkills(silent = false) {
     hedgeActions: await runHedgeManager(),
     strategyAdvice: await runStrategyTuner(),
     exposureAlerts: await runExposureManager(),
-    profitAlerts: await runProfitProtector()
+    profitAlerts: await runProfitProtector(),
+    signalQuality: await runSignalQualityFilter(),
+    portfolioRisk: await runPortfolioRisk(),
+    tradeLearnings: await runPostTradeLearning(),
+    smartAlerts: await runSmartAlerts(),
   }
   _silent = prevSilent
 
   const totalActions = Object.values(results).flat().length
-  logger.info(`[Skills] Ran 5 skills — ${totalActions} total findings`)
+  logger.info(`[Skills] Ran 9 skills — ${totalActions} total findings`)
   return results
 }

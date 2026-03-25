@@ -5,7 +5,7 @@ import { checkTradingHealth } from "../monitors/tradingMonitor.js"
 import { runActiveTrader } from "./activeTrader.js"
 import { restartBot, getCurrentCommit } from "../actions/executor.js"
 import { runAllSkills } from "../actions/skills.js"
-import { notifyAutoFixed, notifyTradingReport } from "../notifications/telegram.js"
+import { notifyAutoFixed, notifyTradingReport, notifySmartAlert } from "../notifications/telegram.js"
 import { logger } from "../utils/logger.js"
 
 let lastReportHour = -1
@@ -24,7 +24,20 @@ async function runLightCheck(silent = false) {
       if (!silent) await notifyAutoFixed(["🔧 Auto-fix dữ liệu", ...fixes.slice(0, 3)])
     }
 
-    // ── 2. Crash detection (skip first run — stale logs cause false positives) ──
+    // ── 2. Smart alerts — event-driven notifications (immediate) ──
+    const alerts = skillResults.smartAlerts || []
+    const critical = alerts.filter(a => a.startsWith("🚨") || a.startsWith("🔴"))
+    if (critical.length && !silent) {
+      await notifySmartAlert(critical)
+    }
+
+    // ── 3. Portfolio risk alerts ──
+    const riskAlerts = (skillResults.portfolioRisk || []).filter(a => a.startsWith("🔴"))
+    if (riskAlerts.length && !silent) {
+      await notifySmartAlert(riskAlerts)
+    }
+
+    // ── 4. Crash detection (skip first run — stale logs cause false positives) ──
     const logs = collectLogs()
     if (isFirstRun) {
       isFirstRun = false
@@ -40,7 +53,7 @@ async function runLightCheck(silent = false) {
     }
     consecutiveCrashes = 0
 
-    // ── 3. Trading report every 4h ──
+    // ── 5. Trading report every 4h ──
     const hour = new Date().getUTCHours()
     if (hour % 4 === 0 && hour !== lastReportHour) {
       lastReportHour = hour
@@ -53,14 +66,16 @@ async function runLightCheck(silent = false) {
   }
 }
 
-// ═══ Claude analysis — every 2h (uses Claude tokens) ═══
+// ═══ Claude analysis — every 4h (uses Claude Sonnet tokens) ═══
+// Adaptive config tuning: Claude reviews regime, positions, skill findings
+// and adjusts config parameters to optimize for current market conditions
 async function runAnalysis() {
   try {
     const results = await runActiveTrader()
     const actions = results.filter(r => r.ok && !r.message.includes("Hold") && !r.message.includes("Learned"))
     if (actions.length) {
       await notifyAutoFixed([
-        "🧠 AI Advisor",
+        "🧠 AI Advisor (Sonnet 4.6)",
         ...actions.map(r => `✅ ${r.message}`)
       ])
     }
@@ -71,21 +86,22 @@ async function runAnalysis() {
 
 async function start() {
   logger.info("=".repeat(50))
-  logger.info("🤖 AI Trading Advisor v7")
+  logger.info("🤖 AI Trading Advisor v8")
   logger.info(`Commit: ${JSON.stringify(getCurrentCommit())}`)
-  logger.info("Skills/crash: 15min | Claude analysis: daily 0:00 UTC | Report: 4h")
-  logger.info("Role: ADVISOR only — config tuning + learnings")
+  logger.info("9 skills/15min | Claude Sonnet analysis/4h | Report/4h | Smart alerts/15min")
+  logger.info("Role: ADVISOR — adaptive config + learning + anomaly detection")
   logger.info("=".repeat(50))
 
   // Run light check on start — silent mode (log to file only, no dashboard events)
   // This prevents dashboard spam on every restart
   await runLightCheck(true)
 
-  // Skills + crash detection: every 15 min (cheap — no Claude)
+  // 9 skills + crash detection + smart alerts: every 15 min (cheap — no Claude)
   cron.schedule("*/15 * * * *", runLightCheck)
 
-  // Claude analysis: once daily at 0:00 UTC (7:00 AM Vietnam) — 1 token call/day
-  cron.schedule("0 0 * * *", runAnalysis)
+  // Claude analysis: every 4h (0:00, 4:00, 8:00, 12:00, 16:00, 20:00 UTC)
+  // ~6 calls/day using Sonnet 4.6 — fits within Max plan quota
+  cron.schedule("0 */4 * * *", runAnalysis)
 
   logger.info("Agent running.")
 }

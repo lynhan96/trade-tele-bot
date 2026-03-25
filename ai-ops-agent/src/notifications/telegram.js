@@ -48,6 +48,15 @@ export async function notifyAutoFixed(actions) {
   })
 }
 
+export async function notifySmartAlert(alerts) {
+  if (!alerts.length) return
+  await send('sendMessage', {
+    chat_id: process.env.TELEGRAM_CHAT_ID,
+    parse_mode: 'MarkdownV2',
+    text: `🚨 *Smart Alert*\n\n${alerts.map(a => `• ${esc(a)}`).join('\n')}\n\n🤖 _AI Ops Agent v8_`
+  })
+}
+
 export async function notifyTradingReport(report) {
   const pnl = report.pnl.net >= 0 ? `+$${report.pnl.net}` : `-$${Math.abs(report.pnl.net)}`
   const color = report.pnl.net >= 0 ? '🟢' : '🔴'
