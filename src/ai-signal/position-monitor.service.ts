@@ -1020,6 +1020,7 @@ export class PositionMonitorService implements OnModuleInit {
       const hedgeEntry = (signal as any).hedgeEntryPrice || flipHedgeOrder?.entryPrice;
       const hedgeNotional = (signal as any).hedgeSimNotional || flipHedgeOrder?.notional || signal.simNotional || 1000;
       if (this.resolvingSymbols.has(sigKey)) return;
+      this.resolvingSymbols.add(sigKey); // Prevent duplicate FLIP from concurrent price events
       this.logger.log(
         `[PositionMonitor] 🔄 ${sigKey} MAIN TP HIT while hedge active → FLIPPING to ${hedgeDir}`,
       );
@@ -1162,6 +1163,7 @@ export class PositionMonitorService implements OnModuleInit {
       if (this.hedgeCallback) {
         await this.hedgeCallback(signal, { action: 'CLOSE_HEDGE', hedgePnlPct: 0, hedgePnlUsdt: 0, reason: `FLIP: main TP → ${newDirection}`, hedgePhase: 'FLIP' }, price).catch(() => {});
       }
+      this.resolvingSymbols.delete(sigKey);
       return;
     }
 
