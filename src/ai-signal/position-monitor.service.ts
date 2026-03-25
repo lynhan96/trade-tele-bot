@@ -1001,10 +1001,27 @@ export class PositionMonitorService implements OnModuleInit {
     if (!slHit && !tpHit) return;
 
     // ── FLIP LOGIC: Main TP hit while hedge active → promote hedge to new main ──
-    if (tpHit && hedgeActive && (signal as any).hedgeEntryPrice && (signal as any).hedgeDirection) {
+    // Safety: also check DB for OPEN hedge order (hedgeActive flag can desync from actual order state)
+    let flipHedgeOrder: any = null;
+    if (tpHit && !hedgeActive) {
+      flipHedgeOrder = await this.orderModel.findOne({
+        signalId: (signal as any)._id, type: 'HEDGE', status: 'OPEN',
+      }).lean();
+      if (flipHedgeOrder) {
+        this.logger.warn(
+          `[PositionMonitor] ${sigKey} hedgeActive=false but OPEN HEDGE order found in DB (cycle ${flipHedgeOrder.cycleNumber}) — forcing FLIP`,
+        );
+      }
+    }
+    const hasActiveHedge = (hedgeActive && (signal as any).hedgeEntryPrice && (signal as any).hedgeDirection) || flipHedgeOrder;
+    if (tpHit && hasActiveHedge) {
+      // Resolve hedge info: prefer signal fields, fallback to DB order
+      const hedgeDir = (signal as any).hedgeDirection || flipHedgeOrder?.direction;
+      const hedgeEntry = (signal as any).hedgeEntryPrice || flipHedgeOrder?.entryPrice;
+      const hedgeNotional = (signal as any).hedgeSimNotional || flipHedgeOrder?.notional || signal.simNotional || 1000;
       if (this.resolvingSymbols.has(sigKey)) return;
       this.logger.log(
-        `[PositionMonitor] 🔄 ${sigKey} MAIN TP HIT while hedge active → FLIPPING to ${(signal as any).hedgeDirection}`,
+        `[PositionMonitor] 🔄 ${sigKey} MAIN TP HIT while hedge active → FLIPPING to ${hedgeDir}`,
       );
 
       // 1. Close MAIN order with TP profit
@@ -1035,10 +1052,10 @@ export class PositionMonitorService implements OnModuleInit {
         ? ((effectiveTpPrice - avgEntry) / avgEntry) * 100
         : ((avgEntry - effectiveTpPrice) / avgEntry) * 100;
 
-      // 2. Flip signal: hedge becomes new main
-      const newDirection = (signal as any).hedgeDirection;
-      const newEntry = (signal as any).hedgeEntryPrice;
-      const newNotional = (signal as any).hedgeSimNotional || signal.simNotional || 1000;
+      // 2. Flip signal: hedge becomes new main (use resolved vars from top of block)
+      const newDirection = hedgeDir;
+      const newEntry = hedgeEntry;
+      const newNotional = hedgeNotional;
       const hedgeCfgFlip = this.tradingConfig.get();
       const flipTpPct = 3.5; // TP for flipped position
       const flipSlPct = 40; // Safety net — hedge manages risk, not SL (same as original signal)
