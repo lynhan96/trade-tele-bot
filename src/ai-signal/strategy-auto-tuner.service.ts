@@ -165,7 +165,8 @@ export class StrategyAutoTunerService {
       let blockLong = false;
       let blockShort = false;
       let pauseAll = false;
-      let confidenceFloor = 63;
+      const tcfg = this.tradingConfig.get();
+      let confidenceFloor = tcfg.confidenceFloor || 63;
       const reasons: string[] = [];
 
       // ── Rule 1: Dynamic BTC momentum — relative % moves, no hardcoded prices ─
@@ -183,16 +184,15 @@ export class StrategyAutoTunerService {
         const belowEma200 = btcCtx ? (btcCtx.priceVsEma200 ?? 1) < 0 : false;
         const belowEma9   = btcCtx ? btcCtx.priceVsEma9 < -0.5 : false;
 
-        if (change24h <= -8 || (change4h <= -4 && belowEma200)) {
-          // Panic: -8% in 24h OR sharp dump -4% in 4h while below EMA200
+        if (change24h <= (tcfg.btcPanic24hPct || -8) || (change4h <= (tcfg.btcPanic4hPct || -4) && belowEma200)) {
           pauseAll = true;
           reasons.push(`BTC panic: 24h=${change24h.toFixed(1)}% 4h=${change4h.toFixed(1)}% belowEMA200=${belowEma200}`);
-        } else if (change4h <= -2.5 || (belowEma200 && btcCtx && btcCtx.rsi < 42)) {
+        } else if (change4h <= (tcfg.btcBear4hPct || -2.5) || (belowEma200 && btcCtx && btcCtx.rsi < (tcfg.btcBearRsi || 42))) {
           // Bear: -2.5% in 4h OR structurally below EMA200 with RSI weak
           blockLong = true;
           confidenceFloor = 68;
           reasons.push(`BTC bear: 4h=${change4h.toFixed(1)}% belowEMA200=${belowEma200} RSI=${btcCtx?.rsi ?? '?'}`);
-        } else if (change4h >= 1.5 && btcCtx && btcCtx.priceVsEma9 > 0.2) {
+        } else if (change4h >= (tcfg.btcBull4hPct || 1.5) && btcCtx && btcCtx.priceVsEma9 > 0.2) {
           // Bull momentum: +1.5% in 4h + above EMA9
           reasons.push(`BTC bull momentum: 4h=+${change4h.toFixed(1)}%`);
         }

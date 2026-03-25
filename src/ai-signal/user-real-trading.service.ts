@@ -13,6 +13,7 @@ import { UserTrade, UserTradeDocument } from "../schemas/user-trade.schema";
 import { DailyLimitHistory, DailyLimitHistoryDocument } from "../schemas/daily-limit-history.schema";
 import { AiSignal, AiSignalDocument } from "../schemas/ai-signal.schema";
 import { AiTunedParams } from "../strategy/ai-optimizer/ai-tuned-params.interface";
+import { TradingConfigService } from "./trading-config";
 import { getProxyAgent } from "../utils/proxy";
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -61,6 +62,7 @@ export class UserRealTradingService implements OnModuleInit {
     private readonly dailyLimitHistoryModel: Model<DailyLimitHistoryDocument>,
     @InjectModel(AiSignal.name)
     private readonly aiSignalModel: Model<AiSignalDocument>,
+    private readonly tradingConfig: TradingConfigService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -1567,8 +1569,9 @@ export class UserRealTradingService implements OnModuleInit {
             // Mirrors position-monitor logic: TRAIL_TRIGGER=2.0%, keep 60% of peak
             // Runs every 2min as safety net + primary trailing for trades whose signal is no longer watched
             if (currentPrice && trade.entryPrice && slPrice) {
-              const TRAIL_TRIGGER = 2.0;
-              const TRAIL_KEEP_RATIO = 0.75; // keep 60% of peak profit
+              const tcfg = this.tradingConfig.get();
+              const TRAIL_TRIGGER = tcfg.trailTrigger ?? 2.0;
+              const TRAIL_KEEP_RATIO = tcfg.trailKeepRatio ?? 0.75;
               // Use grid avg entry if available
               const entry = (trade as any).gridAvgEntry || trade.entryPrice;
               const currentPnlPct = direction === "LONG"
@@ -1989,7 +1992,7 @@ export class UserRealTradingService implements OnModuleInit {
               : avgEntry * (1 + origSlPct / 100);
 
             // DCA TP: 3% from new avgEntry
-            const DCA_TP_PCT = 3.0;
+            const DCA_TP_PCT = this.tradingConfig.get().dcaTpPct ?? 3.0;
             const tpUpdate: Record<string, any> = {};
             if (trade.tpPrice) {
               tpUpdate.tpPrice = direction === "LONG"

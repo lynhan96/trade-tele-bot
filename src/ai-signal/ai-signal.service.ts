@@ -484,13 +484,14 @@ export class AiSignalService implements OnModuleInit {
     }
 
     // Confidence floor: regime-aware, boosted by market guard when direction is unclear
-    const CONFIDENCE_FLOOR = 63;
+    const CONFIDENCE_FLOOR = cfg.confidenceFloor || 63;
     const isRanging = params.regime === "RANGE_BOUND" || params.regime === "SIDEWAYS";
     // Uniform floor — hedge manages risk, don't over-restrict entries
-    const effectiveFloor = isRanging ? Math.max(67, marketGuard.confidenceFloor) : Math.max(CONFIDENCE_FLOOR, marketGuard.confidenceFloor);
+    const rangingFloor = cfg.confidenceFloorRanging || 67;
+    const effectiveFloor = isRanging ? Math.max(rangingFloor, marketGuard.confidenceFloor) : Math.max(CONFIDENCE_FLOOR, marketGuard.confidenceFloor);
     params.minConfidenceToTrade = Math.max(params.minConfidenceToTrade ?? 0, effectiveFloor);
     // Hard cap 68 for ALL regimes — hedge manages risk, let signals flow
-    const MAX_CONFIDENCE_CAP = 68;
+    const MAX_CONFIDENCE_CAP = (cfg as any).maxConfidenceCap || 68;
     if (params.minConfidenceToTrade > MAX_CONFIDENCE_CAP) {
       params.minConfidenceToTrade = MAX_CONFIDENCE_CAP;
     }
@@ -665,8 +666,8 @@ export class AiSignalService implements OnModuleInit {
         };
 
         const fundingPct = fa.fundingRate * 100; // raw 0.001 → 0.1%
-        const FUNDING_DIRECTION_BLOCK = 0.1; // block directional trade if crowd is >0.1% aligned (was 0.3%)
-        const FUNDING_EXTREME_BLOCK = 0.3;   // block entirely if >0.3% (was 0.5%)
+        const FUNDING_DIRECTION_BLOCK = cfg.fundingDirectionalBlock || 0.1;
+        const FUNDING_EXTREME_BLOCK = cfg.fundingExtremeBlock || 0.3;
         if (Math.abs(fundingPct) > FUNDING_EXTREME_BLOCK) {
           this.logger.log(
             `[AiSignal] ${signalKey} BLOCKED — extreme funding rate ${fundingPct.toFixed(4)}% (manipulation risk)`,
@@ -849,7 +850,7 @@ export class AiSignalService implements OnModuleInit {
     }
 
     // ── Daily signal cap: check BEFORE processing, increment AFTER success ──
-    const MAX_DAILY_SIGNALS = 35;
+    const MAX_DAILY_SIGNALS = this.tradingConfig.get().maxDailySignals || 35;
     const dailyCountKey = "cache:ai:daily-signal-count";
     const now = new Date();
     const midnight = new Date(now);

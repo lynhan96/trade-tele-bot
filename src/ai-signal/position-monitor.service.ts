@@ -529,8 +529,8 @@ export class PositionMonitorService implements OnModuleInit {
       const skipTrailSl = !!(signal as any).hedgeActive;
       const filledGrids = grids.filter((g) => g.status === "FILLED");
       if (filledGrids.length > 0) {
-        const TRAIL_TRIGGER = 2.0;
-        const TRAIL_KEEP_RATIO = 0.75; // keep 75% of peak profit
+        const TRAIL_TRIGGER = cfg.trailTrigger ?? 2.0;
+        const TRAIL_KEEP_RATIO = cfg.trailKeepRatio ?? 0.75;
         const pnlFromAvg = direction === "LONG"
           ? ((price - avgEntry) / avgEntry) * 100
           : ((avgEntry - price) / avgEntry) * 100;
