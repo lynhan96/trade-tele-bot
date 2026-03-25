@@ -1086,6 +1086,7 @@ export class PositionMonitorService implements OnModuleInit {
           direction: direction, // original main direction that TP'd
           entryPrice: avgEntry,
           exitPrice: effectiveTpPrice,
+          notional: signal.simNotional || 1000, // main signal's volume
           pnlPct: mainPnlPct,
           pnlUsdt: mainPnlTotal,
           openedAt: (signal as any).executedAt || new Date(),
