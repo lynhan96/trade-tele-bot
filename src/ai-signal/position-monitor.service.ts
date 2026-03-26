@@ -504,7 +504,7 @@ export class PositionMonitorService implements OnModuleInit {
           // If hedge disabled: keep original SL% distance
           const hedgeCfgNow = this.tradingConfig?.get();
           // When hedge active: SL=0 (disabled), skip recalc
-          if ((signal as any).hedgeActive) {
+          if (hedgeOrder) {
             (signal as any).stopLossPrice = 0;
           } else {
             const minSlPctDca = hedgeCfgNow?.hedgeEnabled
@@ -666,7 +666,7 @@ export class PositionMonitorService implements OnModuleInit {
     // Trailing SL + TP boost for non-grid signals only
     // (grid signals handle trailing in the grid block above)
     // Skip trail SL when hedge is active — hedge manages risk
-    if (!isGridSignal && !(signal as any).hedgeActive) {
+    if (!isGridSignal && !hedgeOrder) {
       // Trail trigger: move SL to break-even at 2.5% profit (was 2%, caused early trail exits)
       // Trail distance: keep 80% of peak profit (was 75%, avg win only $9)
       // Example: peak 3% → SL at +2.4%, peak 5% → SL at +4%
@@ -792,6 +792,7 @@ export class PositionMonitorService implements OnModuleInit {
         const exitAction = this.hedgeManager.checkHedgeExit(signal, price, pnlPct, hedgeOrder);
         if (exitAction && exitAction.action === "CLOSE_HEDGE") {
           await this.handleHedgeClose(signal, exitAction, price);
+          hedgeOrder = null; // order now CLOSED — prevent stale reads in NET_POSITIVE/FLIP below
         } else if (exitAction && exitAction.action === 'NONE') {
           // Update flags from hedge manager (breakeven lock, trail activated)
           const updates: Record<string, any> = {};
@@ -1684,7 +1685,7 @@ export class PositionMonitorService implements OnModuleInit {
       notional: hedgeNotionalForFees,
       pnlPct: action.hedgePnlPct,
       pnlUsdt: hedgePnlUsdtNet,
-      openedAt: (signal as any).hedgeOpenedAt,
+      openedAt: hedgeOpenedAtForFees || (signal as any).hedgeOpenedAt,
       closedAt: new Date(),
       reason: action.reason,
       entryReason, // e.g. "PnL -19.52% | Cycle 1 (immediate) | regime: MIXED | banked: $147.36"
