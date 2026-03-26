@@ -1006,8 +1006,10 @@ export class RuleEngineService {
     }
 
     // EMA_PULLBACK SHORT: price pulled back UP to EMA in downtrend, then resumes down
-    if (!["STRONG_BEAR", "VOLATILE"].includes(params.regime)) {
-      this.logger.debug(`[RuleEngine] ${coin} EMA_PULLBACK SHORT skipped: ${params.regime} not suitable`);
+    // Allow SHORT in BEAR, STRONG_BEAR, VOLATILE, MIXED (HTF slope confirms direction)
+    // Only block in STRONG_BULL (counter-trend SHORT too risky)
+    if (params.regime === "STRONG_BULL") {
+      this.logger.debug(`[RuleEngine] ${coin} EMA_PULLBACK SHORT skipped: STRONG_BULL — counter-trend too risky`);
       return null;
     }
     // Mirror of LONG: 2 red candles after touching EMA from below, RSI 45-70
