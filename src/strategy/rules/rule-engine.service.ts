@@ -47,8 +47,9 @@ export class RuleEngineService {
     currency: string,
     params: AiTunedParams,
   ): Promise<SignalResult | null> {
-    // Cap confidence threshold — hedge manages risk, let signals flow
-    const maxConfThreshold = 68;
+    // Cap confidence threshold — read from config, hedge manages risk
+    const cfg = this.tradingConfig.get();
+    const maxConfThreshold = cfg.confidenceFloor ?? 68;
     const confThreshold = Math.min(params.minConfidenceToTrade || 60, maxConfThreshold);
     if (params.confidence < confThreshold) {
       this.logger.debug(
