@@ -98,9 +98,32 @@ export class HedgeManagerService {
       // Calculate banked profit from hedgeHistory (survives restart)
       const banked = (signal.hedgeHistory || []).reduce((sum: number, h: any) => sum + (h.pnlUsdt || 0), 0);
 
+      // ── Agent Brain hedge intelligence ──
+      let triggerPct = cfg.hedgePartialTriggerPct;
+      try {
+        const brain = await this.redisService.get<any>('cache:agent:brain');
+        if (brain) {
+          // Skip hedge on coins agent identified as ineffective
+          if ((brain.hedgeSkipCoins || []).includes(signal.symbol)) {
+            this.logger.log(`[${signal.coin}] Hedge skip: agent đánh dấu hedge kém hiệu quả (<30% profitable)`);
+            return null;
+          }
+          // Agent suggests dynamic trigger based on volatility
+          if (brain.hedgeTriggerSuggestion && brain.hedgeTriggerSuggestion > 0) {
+            triggerPct = brain.hedgeTriggerSuggestion;
+            this.logger.debug(`[${signal.coin}] Hedge trigger điều chỉnh theo agent: ${triggerPct}% (vol=${brain.avgVolatility}%)`);
+          }
+          // In DEFENSIVE mode, hedge sooner (lower trigger)
+          if (brain.drawdownMode === 'DEFENSIVE' && triggerPct > 2) {
+            triggerPct = 2;
+            this.logger.debug(`[${signal.coin}] Hedge trigger giảm xuống 2% do DEFENSIVE mode`);
+          }
+        }
+      } catch {}
+
       // ── Entry conditions ──
       // PnL must be bad enough to hedge
-      if (pnlPct > -cfg.hedgePartialTriggerPct) return null;
+      if (pnlPct > -triggerPct) return null;
 
       // ── Momentum check (CYCLE 2+ ONLY) — cycle 1 enters immediately for protection ──
       // After FLIP: hedgeCycleCount=0 means first cycle for new direction → enter immediately

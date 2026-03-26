@@ -1015,6 +1015,38 @@ async function sendAgentBrain() {
     if (avgTrailPnl > 0 && avgTrailPnl < 3) tpSuggestion = Math.round(avgTrailPnl * 10) / 10
   }
 
+  // 8. Hedge intelligence — per-coin effectiveness from order history
+  const hedgeSkipCoins = [] // coins where hedge is ineffective (<30% profitable)
+  const hedgeBoostCoins = [] // coins where hedge works great (>70% profitable)
+  const activeSignals = await db.collection("ai_signals").find({ status: "ACTIVE" }).toArray()
+  for (const sig of activeSignals) {
+    const closedHedges = await db.collection("orders").find({
+      signalId: sig._id, type: "HEDGE", status: "CLOSED"
+    }).toArray()
+    if (closedHedges.length >= 5) {
+      const profitCycles = closedHedges.filter(o => (o.pnlUsdt || 0) > 1).length
+      const effectiveRate = profitCycles / closedHedges.length * 100
+      if (effectiveRate < 30) hedgeSkipCoins.push(sig.symbol)
+      if (effectiveRate > 70) hedgeBoostCoins.push(sig.symbol)
+    }
+  }
+
+  // 9. Volatility-based hedge threshold suggestion
+  const prices = await getPrices(activeSignals.map(s => s.symbol))
+  let totalAbsPnl = 0, priceCount = 0
+  for (const s of activeSignals) {
+    const entry = s.gridAvgEntry || s.entryPrice
+    const price = prices[s.symbol] || 0
+    if (!entry || !price) continue
+    totalAbsPnl += Math.abs((price - entry) / entry * 100)
+    priceCount++
+  }
+  const avgVolatility = priceCount > 0 ? totalAbsPnl / priceCount : 0
+  // High vol → suggest higher hedge trigger, low vol → suggest tighter
+  let hedgeTriggerSuggestion = null
+  if (avgVolatility > 6) hedgeTriggerSuggestion = 4 // don't trigger too early in high vol
+  else if (avgVolatility < 2) hedgeTriggerSuggestion = 2 // tighter trigger in low vol
+
   const brain = {
     drawdownMode: _drawdownMode,
     blockLong,
@@ -1033,6 +1065,11 @@ async function sendAgentBrain() {
     altPulse,
     consecutiveLosses,
     tpSuggestion,
+    // Hedge intelligence
+    hedgeSkipCoins,
+    hedgeBoostCoins,
+    hedgeTriggerSuggestion,
+    avgVolatility: Math.round(avgVolatility * 10) / 10,
   }
 
   await axios.post(`${BASE}/admin/agent/brain`, brain, { timeout: 5000 })
