@@ -1219,7 +1219,7 @@ export class AdminService {
     if (signal.status !== 'ACTIVE') return { success: false, error: `Signal is ${signal.status}` };
 
     // Check OPEN HEDGE order in DB (source of truth, not signal.hedgeActive flag)
-    const existingHedge = await this.orderModel.findOne({ signalId: id, type: 'HEDGE', status: 'OPEN' });
+    const existingHedge = await this.orderModel.findOne({ signalId: (signal as any)._id, type: 'HEDGE', status: 'OPEN' });
     if (existingHedge) return { success: false, error: 'Hedge already active (OPEN HEDGE order exists)' };
 
     // Set hedgeForceOpen flag — PositionMonitor will open hedge on next tick
@@ -1241,7 +1241,7 @@ export class AdminService {
     if (signal.status !== 'ACTIVE') return { success: false, error: `Signal is ${signal.status}` };
 
     // Read hedge state from OPEN HEDGE order (source of truth)
-    const hedgeOrder = await this.orderModel.findOne({ signalId: id, type: 'HEDGE', status: 'OPEN' }).lean();
+    const hedgeOrder = await this.orderModel.findOne({ signalId: (signal as any)._id, type: 'HEDGE', status: 'OPEN' }).lean();
     if (!hedgeOrder) return { success: false, error: 'No active hedge (no OPEN HEDGE order)' };
 
     const hedgeEntry = hedgeOrder.entryPrice;
@@ -1281,6 +1281,8 @@ export class AdminService {
 
   /** Get all orders for a signal (for admin panel signal detail). */
   async getSignalOrders(signalId: string): Promise<any[]> {
-    return this.orderModel.find({ signalId }).sort({ openedAt: -1 }).lean();
+    const { Types } = require('mongoose');
+    const oid = Types.ObjectId.isValid(signalId) ? new Types.ObjectId(signalId) : signalId;
+    return this.orderModel.find({ signalId: oid }).sort({ openedAt: -1 }).lean();
   }
 }
