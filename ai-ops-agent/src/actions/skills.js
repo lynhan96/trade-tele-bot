@@ -1,3 +1,4 @@
+import axios from "axios"
 import { getDb } from "../utils/db.js"
 import { getPrices } from "../utils/redis.js"
 import { collectMarketContext } from "../utils/marketContext.js"
@@ -5,6 +6,8 @@ import { saveLearning } from "../utils/memory.js"
 import { logger } from "../utils/logger.js"
 import * as agentLog from "../utils/agentLogger.js"
 import { updateTradingConfig, getTradingConfig } from "../actions/adminApi.js"
+
+const BASE = process.env.HEALTH_URL?.replace("/admin/health", "") || "http://127.0.0.1:3001"
 
 // Silent mode: log to file only, no dashboard events (used on startup)
 let _silent = false
@@ -849,15 +852,32 @@ export async function runSmartAlerts() {
   }
 
   // 9b. Volume spike detection — taker ratio extreme across multiple coins
+  // Send to bot as market hints for strategy confidence boost
   const extremeTakers = onchain.filter(c => c.taker && (c.taker > 0.62 || c.taker < 0.38))
   if (extremeTakers.length >= 3) {
-    const buying = extremeTakers.filter(c => c.taker > 0.62).length
-    const selling = extremeTakers.filter(c => c.taker < 0.38).length
-    if (buying >= 3) {
-      actions.push(`🚨 ${buying} coins with extreme taker BUY pressure — possible coordinated pump`)
+    const buyCoins = extremeTakers.filter(c => c.taker > 0.62).sort((a, b) => b.taker - a.taker)
+    const sellCoins = extremeTakers.filter(c => c.taker < 0.38).sort((a, b) => a.taker - b.taker)
+    if (buyCoins.length >= 3) {
+      const topBuyers = buyCoins.slice(0, 8).map(c => `${c.symbol}(${(c.taker * 100).toFixed(0)}%)`).join(", ")
+      actions.push(`🚨 ${buyCoins.length} coins áp lực MUA cực mạnh: ${topBuyers}`)
     }
-    if (selling >= 3) {
-      actions.push(`🚨 ${selling} coins with extreme taker SELL pressure — possible coordinated dump`)
+    if (sellCoins.length >= 3) {
+      const topSellers = sellCoins.slice(0, 8).map(c => `${c.symbol}(${(c.taker * 100).toFixed(0)}%)`).join(", ")
+      actions.push(`🚨 ${sellCoins.length} coins áp lực BÁN cực mạnh: ${topSellers}`)
+    }
+
+    // Send hints to bot for strategy boost
+    try {
+      const takerDetails = {}
+      for (const c of extremeTakers) takerDetails[c.symbol] = c.taker
+      await axios.post(`${BASE}/admin/agent/market-hints`, {
+        takerBuyCoins: buyCoins.map(c => c.symbol),
+        takerSellCoins: sellCoins.map(c => c.symbol),
+        takerDetails,
+      }, { timeout: 5000 })
+      logger.info(`[SmartAlerts] Đã gửi ${extremeTakers.length} market hints cho bot (buy=${buyCoins.length}, sell=${sellCoins.length})`)
+    } catch (err) {
+      logger.warn(`[SmartAlerts] Gửi market hints thất bại: ${err.message}`)
     }
   }
 
@@ -865,10 +885,12 @@ export async function runSmartAlerts() {
   const highFR = onchain.filter(c => (c.fr || 0) > 0.05)
   const lowFR = onchain.filter(c => (c.fr || 0) < -0.05)
   if (highFR.length >= 4) {
-    actions.push(`🚨 ${highFR.length} coins with high positive FR (>0.05%) — market-wide long crowding, squeeze risk`)
+    const topFR = highFR.sort((a, b) => b.fr - a.fr).slice(0, 6).map(c => `${c.symbol}(${c.fr?.toFixed(3)}%)`).join(", ")
+    actions.push(`🚨 ${highFR.length} coins FR dương cao: ${topFR} — long tập trung, rủi ro squeeze`)
   }
   if (lowFR.length >= 4) {
-    actions.push(`🚨 ${lowFR.length} coins with high negative FR (<-0.05%) — market-wide short crowding, squeeze risk`)
+    const topFR = lowFR.sort((a, b) => a.fr - b.fr).slice(0, 6).map(c => `${c.symbol}(${c.fr?.toFixed(3)}%)`).join(", ")
+    actions.push(`🚨 ${lowFR.length} coins FR âm cao: ${topFR} — short tập trung, rủi ro squeeze`)
   }
 
   const newActions = filterNewFindings("alerts", actions)

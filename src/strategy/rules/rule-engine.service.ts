@@ -239,18 +239,46 @@ export class RuleEngineService {
       // Don't block — on-chain is advisory for non-OP_ONCHAIN strategies
     }
 
+    // ── Agent Market Hints — boost confidence from taker pressure ──
+    let takerBoost = '';
+    try {
+      const hintsRaw = await this.redisService.get<any>('cache:agent:market-hints');
+      if (hintsRaw) {
+        const sym = `${coin}USDT`;
+        const buyCoins: string[] = hintsRaw.takerBuyCoins || [];
+        const sellCoins: string[] = hintsRaw.takerSellCoins || [];
+        const details: Record<string, number> = hintsRaw.takerDetails || {};
+        const ratio = details[sym] || 0;
+        // LONG + extreme BUY pressure = boost | SHORT + extreme SELL pressure = boost
+        if (isLong && buyCoins.includes(sym)) {
+          takerBoost = ` | 🔥 Taker BUY boost (${(ratio * 100).toFixed(0)}%)`;
+          this.logger.log(`[RuleEngine] ${coin} LONG boosted by agent taker BUY hint (${(ratio * 100).toFixed(0)}%)`);
+        } else if (!isLong && sellCoins.includes(sym)) {
+          takerBoost = ` | 🔥 Taker SELL boost (${(ratio * 100).toFixed(0)}%)`;
+          this.logger.log(`[RuleEngine] ${coin} SHORT boosted by agent taker SELL hint (${(ratio * 100).toFixed(0)}%)`);
+        }
+        // Conflict: signal direction opposite to taker pressure = warn
+        if (isLong && sellCoins.includes(sym)) {
+          this.logger.debug(`[RuleEngine] ${coin} ⚠️ LONG nhưng taker SELL pressure (${(ratio * 100).toFixed(0)}%) — cẩn thận`);
+        }
+        if (!isLong && buyCoins.includes(sym)) {
+          this.logger.debug(`[RuleEngine] ${coin} ⚠️ SHORT nhưng taker BUY pressure (${(ratio * 100).toFixed(0)}%) — cẩn thận`);
+        }
+      }
+    } catch {}
+
     if (winners.length >= 2) {
       const names = winners.map(w => w.strategy).join("+");
       const reasons = winners.map(w => w.result.reason).join(" | ");
       const ocInfo = ocResult.reasons.filter(r => r.includes('OK') || r.includes('SURGE') || r.includes('BUY') || r.includes('SELL')).join(', ');
       this.logger.log(
-        `[RuleEngine] ${coin} ✓ ${isLong ? "LONG" : "SHORT"} confluence (${winners.length}/${strategies.length}): ${names} | SG: ${sgResult.reasons.filter(r => r.includes('OK') || r.includes('SPIKE')).join(', ')} | OC: ${ocInfo}`,
+        `[RuleEngine] ${coin} ✓ ${isLong ? "LONG" : "SHORT"} confluence (${winners.length}/${strategies.length}): ${names} | SG: ${sgResult.reasons.filter(r => r.includes('OK') || r.includes('SPIKE')).join(', ')} | OC: ${ocInfo}${takerBoost}`,
       );
       return {
         isLong,
         entryPrice: primary.entryPrice,
         strategy: names,
-        reason: `Confluence ${names}: ${reasons}`,
+        reason: `Confluence ${names}: ${reasons}${takerBoost}`,
         sgFilters: sgResult.reasons,
         onChainFilters: ocResult.reasons,
       };
@@ -258,9 +286,9 @@ export class RuleEngineService {
 
     // Single strategy fired — still valid
     this.logger.debug(
-      `[RuleEngine] ${coin} △ ${winners[0].strategy} fired alone (1/${strategies.length}) — allowed as single`,
+      `[RuleEngine] ${coin} △ ${winners[0].strategy} fired alone (1/${strategies.length}) — allowed as single${takerBoost}`,
     );
-    return { ...primary, sgFilters: sgResult.reasons, onChainFilters: ocResult.reasons };
+    return { ...primary, reason: `${primary.reason}${takerBoost}`, sgFilters: sgResult.reasons, onChainFilters: ocResult.reasons };
   }
 
   /**

@@ -1209,6 +1209,25 @@ export class AdminService {
     return event;
   }
 
+  // ── Market Hints (from Agent → Bot strategy) ──
+  private readonly MARKET_HINTS_KEY = 'cache:agent:market-hints';
+
+  async setMarketHints(dto: { takerBuyCoins?: string[]; takerSellCoins?: string[]; takerDetails?: Record<string, number> }) {
+    const hints = {
+      takerBuyCoins: dto.takerBuyCoins || [],
+      takerSellCoins: dto.takerSellCoins || [],
+      takerDetails: dto.takerDetails || {},
+      updatedAt: new Date().toISOString(),
+    };
+    await this.redisService.set(this.MARKET_HINTS_KEY, hints, 20 * 60); // 20min TTL
+    return { ok: true, hints };
+  }
+
+  async getMarketHints(): Promise<any> {
+    const hints = await this.redisService.get<any>(this.MARKET_HINTS_KEY);
+    return hints || { takerBuyCoins: [], takerSellCoins: [], takerDetails: {}, updatedAt: null };
+  }
+
   /**
    * Force open hedge for an active signal.
    * Sets flags so PositionMonitor triggers hedge on next tick.

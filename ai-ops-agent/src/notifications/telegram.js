@@ -53,7 +53,7 @@ export async function notifySmartAlert(alerts) {
   await send('sendMessage', {
     chat_id: process.env.TELEGRAM_CHAT_ID,
     parse_mode: 'MarkdownV2',
-    text: `🚨 *Smart Alert*\n\n${alerts.map(a => `• ${esc(a)}`).join('\n')}\n\n🤖 _AI Ops Agent v8_`
+    text: `🚨 *Cảnh Báo Thị Trường*\n\n${alerts.map(a => `• ${esc(a)}`).join('\n')}\n\n🤖 _AI Ops Agent v9_`
   })
 }
 

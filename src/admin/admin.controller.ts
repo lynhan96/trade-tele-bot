@@ -307,4 +307,15 @@ export class AdminController {
     // No auth required — agent calls this internally
     return this.adminService.createAgentEvent(dto);
   }
+
+  @Post("agent/market-hints")
+  setMarketHints(@Body() dto: { takerBuyCoins?: string[]; takerSellCoins?: string[]; takerDetails?: Record<string, number> }) {
+    // Agent sends extreme taker coins → stored in Redis for strategy boost
+    return this.adminService.setMarketHints(dto);
+  }
+
+  @Get("agent/market-hints")
+  getMarketHints() {
+    return this.adminService.getMarketHints();
+  }
 }
