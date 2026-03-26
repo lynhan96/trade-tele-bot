@@ -310,12 +310,22 @@ export class AdminController {
 
   @Post("agent/market-hints")
   setMarketHints(@Body() dto: { takerBuyCoins?: string[]; takerSellCoins?: string[]; takerDetails?: Record<string, number> }) {
-    // Agent sends extreme taker coins → stored in Redis for strategy boost
     return this.adminService.setMarketHints(dto);
   }
 
   @Get("agent/market-hints")
   getMarketHints() {
     return this.adminService.getMarketHints();
+  }
+
+  @Post("agent/brain")
+  setAgentBrain(@Body() dto: any) {
+    // Agent sends all insights in one payload — stored in Redis for bot strategy
+    return this.adminService.setAgentBrain(dto);
+  }
+
+  @Get("agent/brain")
+  getAgentBrain() {
+    return this.adminService.getAgentBrain();
   }
 }

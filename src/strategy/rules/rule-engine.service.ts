@@ -239,30 +239,91 @@ export class RuleEngineService {
       // Don't block — on-chain is advisory for non-OP_ONCHAIN strategies
     }
 
-    // ── Agent Market Hints — boost confidence from taker pressure ──
-    let takerBoost = '';
+    // ── Agent Brain — comprehensive intelligence from AI Ops Agent ──
+    let agentNotes = '';
     try {
-      const hintsRaw = await this.redisService.get<any>('cache:agent:market-hints');
-      if (hintsRaw) {
+      const brain = await this.redisService.get<any>('cache:agent:brain');
+      if (brain) {
         const sym = `${coin}USDT`;
-        const buyCoins: string[] = hintsRaw.takerBuyCoins || [];
-        const sellCoins: string[] = hintsRaw.takerSellCoins || [];
-        const details: Record<string, number> = hintsRaw.takerDetails || {};
-        const ratio = details[sym] || 0;
-        // LONG + extreme BUY pressure = boost | SHORT + extreme SELL pressure = boost
-        if (isLong && buyCoins.includes(sym)) {
-          takerBoost = ` | 🔥 Taker BUY boost (${(ratio * 100).toFixed(0)}%)`;
-          this.logger.log(`[RuleEngine] ${coin} LONG boosted by agent taker BUY hint (${(ratio * 100).toFixed(0)}%)`);
-        } else if (!isLong && sellCoins.includes(sym)) {
-          takerBoost = ` | 🔥 Taker SELL boost (${(ratio * 100).toFixed(0)}%)`;
-          this.logger.log(`[RuleEngine] ${coin} SHORT boosted by agent taker SELL hint (${(ratio * 100).toFixed(0)}%)`);
+
+        // 1. Direction block — agent says market conditions don't favor this direction
+        if (isLong && brain.blockLong) {
+          this.logger.log(`[RuleEngine] ${coin} LONG blocked by agent brain (blockLong=true, lý do: ${brain.blockLongReason || 'market guard'})`);
+          return null;
         }
-        // Conflict: signal direction opposite to taker pressure = warn
-        if (isLong && sellCoins.includes(sym)) {
-          this.logger.debug(`[RuleEngine] ${coin} ⚠️ LONG nhưng taker SELL pressure (${(ratio * 100).toFixed(0)}%) — cẩn thận`);
+        if (!isLong && brain.blockShort) {
+          this.logger.log(`[RuleEngine] ${coin} SHORT blocked by agent brain (blockShort=true, lý do: ${brain.blockShortReason || 'market guard'})`);
+          return null;
         }
-        if (!isLong && buyCoins.includes(sym)) {
-          this.logger.debug(`[RuleEngine] ${coin} ⚠️ SHORT nhưng taker BUY pressure (${(ratio * 100).toFixed(0)}%) — cẩn thận`);
+
+        // 2. Consecutive loss guard — pause after 5+ losses
+        if ((brain.consecutiveLosses || 0) >= 5) {
+          this.logger.log(`[RuleEngine] ${coin} blocked: ${brain.consecutiveLosses} thua liên tiếp — tạm dừng`);
+          return null;
+        }
+
+        // 3. Session WR filter — skip entries during poor-performing sessions
+        const hour = new Date().getUTCHours();
+        const session = hour >= 0 && hour < 8 ? 'ASIA' : hour >= 8 && hour < 16 ? 'EU' : 'US';
+        const sessionWR = brain.sessionWR?.[session];
+        if (sessionWR !== undefined && sessionWR < 35 && (brain.sessionWR?.[`${session}_total`] || 0) >= 8) {
+          this.logger.log(`[RuleEngine] ${coin} blocked: session ${session} WR chỉ ${sessionWR}% (<35%) — agent khuyên tránh`);
+          return null;
+        }
+
+        // 4. Cold coin filter — agent identifies coins with poor historical WR
+        if ((brain.coldCoins || []).includes(sym)) {
+          this.logger.log(`[RuleEngine] ${coin} blocked: agent đánh dấu cold coin (WR kém) — bỏ qua`);
+          return null;
+        }
+
+        // 5. Taker pressure boost/warning
+        const takerDetails: Record<string, number> = brain.takerDetails || {};
+        const ratio = takerDetails[sym] || 0;
+        if (isLong && (brain.takerBuyCoins || []).includes(sym)) {
+          agentNotes += ` | 🔥 Taker BUY (${(ratio * 100).toFixed(0)}%)`;
+          this.logger.log(`[RuleEngine] ${coin} LONG boost: áp lực mua mạnh (${(ratio * 100).toFixed(0)}%)`);
+        } else if (!isLong && (brain.takerSellCoins || []).includes(sym)) {
+          agentNotes += ` | 🔥 Taker SELL (${(ratio * 100).toFixed(0)}%)`;
+          this.logger.log(`[RuleEngine] ${coin} SHORT boost: áp lực bán mạnh (${(ratio * 100).toFixed(0)}%)`);
+        }
+        // Conflict warning
+        if (isLong && (brain.takerSellCoins || []).includes(sym)) {
+          agentNotes += ` | ⚠️ Taker ngược chiều`;
+          this.logger.debug(`[RuleEngine] ${coin} ⚠️ LONG nhưng taker SELL (${(ratio * 100).toFixed(0)}%)`);
+        }
+        if (!isLong && (brain.takerBuyCoins || []).includes(sym)) {
+          agentNotes += ` | ⚠️ Taker ngược chiều`;
+          this.logger.debug(`[RuleEngine] ${coin} ⚠️ SHORT nhưng taker BUY (${(ratio * 100).toFixed(0)}%)`);
+        }
+
+        // 6. Hot coin bonus — log it
+        if ((brain.hotCoins || []).includes(sym)) {
+          agentNotes += ` | ⭐ Hot coin`;
+          this.logger.debug(`[RuleEngine] ${coin} hot coin theo agent`);
+        }
+
+        // 7. Drawdown mode — log current risk state
+        if (brain.drawdownMode && brain.drawdownMode !== 'NORMAL') {
+          agentNotes += ` | 🛡️ ${brain.drawdownMode}`;
+        }
+
+        // 8. Alt pulse divergence warning
+        if (brain.altPulse === 'BEARISH' && isLong) {
+          agentNotes += ` | ⚠️ Alt pulse BEARISH`;
+          this.logger.debug(`[RuleEngine] ${coin} LONG nhưng alt pulse bearish`);
+        }
+        if (brain.altPulse === 'BULLISH' && !isLong) {
+          agentNotes += ` | ⚠️ Alt pulse BULLISH`;
+          this.logger.debug(`[RuleEngine] ${coin} SHORT nhưng alt pulse bullish`);
+        }
+
+        // 9. Funding extreme warning
+        if (brain.fundingExtreme === 'HIGH_LONG' && isLong) {
+          agentNotes += ` | ⚠️ FR crowded long`;
+        }
+        if (brain.fundingExtreme === 'HIGH_SHORT' && !isLong) {
+          agentNotes += ` | ⚠️ FR crowded short`;
         }
       }
     } catch {}
@@ -272,13 +333,13 @@ export class RuleEngineService {
       const reasons = winners.map(w => w.result.reason).join(" | ");
       const ocInfo = ocResult.reasons.filter(r => r.includes('OK') || r.includes('SURGE') || r.includes('BUY') || r.includes('SELL')).join(', ');
       this.logger.log(
-        `[RuleEngine] ${coin} ✓ ${isLong ? "LONG" : "SHORT"} confluence (${winners.length}/${strategies.length}): ${names} | SG: ${sgResult.reasons.filter(r => r.includes('OK') || r.includes('SPIKE')).join(', ')} | OC: ${ocInfo}${takerBoost}`,
+        `[RuleEngine] ${coin} ✓ ${isLong ? "LONG" : "SHORT"} confluence (${winners.length}/${strategies.length}): ${names} | SG: ${sgResult.reasons.filter(r => r.includes('OK') || r.includes('SPIKE')).join(', ')} | OC: ${ocInfo}${agentNotes}`,
       );
       return {
         isLong,
         entryPrice: primary.entryPrice,
         strategy: names,
-        reason: `Confluence ${names}: ${reasons}${takerBoost}`,
+        reason: `Confluence ${names}: ${reasons}${agentNotes}`,
         sgFilters: sgResult.reasons,
         onChainFilters: ocResult.reasons,
       };
@@ -286,9 +347,9 @@ export class RuleEngineService {
 
     // Single strategy fired — still valid
     this.logger.debug(
-      `[RuleEngine] ${coin} △ ${winners[0].strategy} fired alone (1/${strategies.length}) — allowed as single${takerBoost}`,
+      `[RuleEngine] ${coin} △ ${winners[0].strategy} fired alone (1/${strategies.length}) — allowed as single${agentNotes}`,
     );
-    return { ...primary, reason: `${primary.reason}${takerBoost}`, sgFilters: sgResult.reasons, onChainFilters: ocResult.reasons };
+    return { ...primary, reason: `${primary.reason}${agentNotes}`, sgFilters: sgResult.reasons, onChainFilters: ocResult.reasons };
   }
 
   /**

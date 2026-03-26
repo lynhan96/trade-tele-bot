@@ -920,7 +920,121 @@ export async function runAllSkills(silent = false) {
   }
   _silent = prevSilent
 
+  // ── Compile & send Agent Brain to bot ──
+  try {
+    await sendAgentBrain()
+  } catch (err) {
+    logger.warn(`[Skills] Gửi brain thất bại: ${err.message}`)
+  }
+
   const totalActions = Object.values(results).flat().length
   logger.info(`[Skills] Ran 9 skills — ${totalActions} total findings`)
   return results
+}
+
+// ── Agent Brain: compile all insights into one payload for bot strategy ──
+async function sendAgentBrain() {
+  const db = await getDb()
+
+  // 1. Session WR from recent 50 closed signals
+  const last50 = await db.collection("ai_signals").find({ status: "COMPLETED" })
+    .sort({ completedAt: -1 }).limit(50).toArray()
+  const sessionWR = {}
+  if (last50.length >= 10) {
+    const sessions = { ASIA: { wins: 0, total: 0 }, EU: { wins: 0, total: 0 }, US: { wins: 0, total: 0 } }
+    for (const s of last50) {
+      const hour = s.executedAt ? new Date(s.executedAt).getUTCHours() : -1
+      if (hour < 0) continue
+      const sess = hour >= 0 && hour < 8 ? "ASIA" : hour >= 8 && hour < 16 ? "EU" : "US"
+      sessions[sess].total++
+      if ((s.pnlUsdt || 0) > 0) sessions[sess].wins++
+    }
+    for (const [sess, st] of Object.entries(sessions)) {
+      if (st.total >= 3) {
+        sessionWR[sess] = Math.round(st.wins / st.total * 100)
+        sessionWR[`${sess}_total`] = st.total
+      }
+    }
+  }
+
+  // 2. Consecutive losses
+  const recentMain = await db.collection("orders").find({ status: "CLOSED", type: { $in: ["MAIN", "FLIP_MAIN"] } })
+    .sort({ closedAt: -1 }).limit(5).toArray()
+  const consecutiveLosses = recentMain.length === 5 && recentMain.every(o => (o.pnlUsdt || 0) < 0) ? 5 : 0
+
+  // 3. Cold coins — symbols with WR < 30% on 5+ trades
+  const coldCoins = []
+  const symbolStats = {}
+  for (const s of last50) {
+    const sym = s.symbol
+    if (!symbolStats[sym]) symbolStats[sym] = { wins: 0, total: 0 }
+    symbolStats[sym].total++
+    if ((s.pnlUsdt || 0) > 0) symbolStats[sym].wins++
+  }
+  for (const [sym, st] of Object.entries(symbolStats)) {
+    if (st.total >= 5 && (st.wins / st.total) < 0.30) coldCoins.push(sym)
+  }
+
+  // 4. Hot coins — from market hints (already sent separately, include here too)
+  let takerBuyCoins = [], takerSellCoins = [], takerDetails = {}
+  try {
+    const hintsRes = await axios.get(`${BASE}/admin/agent/market-hints`, { timeout: 3000 })
+    const hints = hintsRes.data || {}
+    takerBuyCoins = hints.takerBuyCoins || []
+    takerSellCoins = hints.takerSellCoins || []
+    takerDetails = hints.takerDetails || {}
+  } catch {}
+
+  // 5. Market context
+  const ctx = await collectMarketContext()
+  const altPulse = ctx?.altPulse?.signal || null
+  const fundingExtreme = ctx?.fundingSummary?.extreme || null
+  const regime = ctx?.regime || "MIXED"
+
+  // 6. Direction blocks based on regime + funding
+  let blockLong = false, blockShort = false, blockLongReason = "", blockShortReason = ""
+  if (regime === "STRONG_BEAR" || regime === "BEAR") {
+    if (fundingExtreme === "HIGH_LONG") {
+      blockLong = true
+      blockLongReason = `${regime} regime + crowded long funding → rủi ro squeeze`
+    }
+  }
+  if (regime === "STRONG_BULL" || regime === "BULL") {
+    if (fundingExtreme === "HIGH_SHORT") {
+      blockShort = true
+      blockShortReason = `${regime} regime + crowded short funding → rủi ro squeeze`
+    }
+  }
+
+  // 7. TP suggestion from profit protector analysis
+  let tpSuggestion = null
+  const tpHits = last50.filter(s => (s.closeReason || "").includes("TP"))
+  const trailHits = last50.filter(s => (s.closeReason || "").includes("TRAIL"))
+  if (trailHits.length > tpHits.length * 2 && trailHits.length >= 5) {
+    const avgTrailPnl = trailHits.reduce((sum, s) => sum + (s.pnlPercent || 0), 0) / trailHits.length
+    if (avgTrailPnl > 0 && avgTrailPnl < 3) tpSuggestion = Math.round(avgTrailPnl * 10) / 10
+  }
+
+  const brain = {
+    drawdownMode: _drawdownMode,
+    blockLong,
+    blockShort,
+    blockLongReason,
+    blockShortReason,
+    riskLevel: _drawdownMode === "DEFENSIVE" ? "HIGH" : _drawdownMode === "CAUTIOUS" ? "MEDIUM" : "NORMAL",
+    regime,
+    sessionWR,
+    hotCoins: takerBuyCoins.slice(0, 5),
+    coldCoins,
+    takerBuyCoins,
+    takerSellCoins,
+    takerDetails,
+    fundingExtreme,
+    altPulse,
+    consecutiveLosses,
+    tpSuggestion,
+  }
+
+  await axios.post(`${BASE}/admin/agent/brain`, brain, { timeout: 5000 })
+  logger.info(`[Brain] Đã gửi: mode=${_drawdownMode} blockL=${blockLong} blockS=${blockShort} cold=${coldCoins.length} sessions=${JSON.stringify(sessionWR)}`)
 }

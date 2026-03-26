@@ -1228,6 +1228,35 @@ export class AdminService {
     return hints || { takerBuyCoins: [], takerSellCoins: [], takerDetails: {}, updatedAt: null };
   }
 
+  // ── Agent Brain (comprehensive insights → Bot strategy) ──
+  private readonly AGENT_BRAIN_KEY = 'cache:agent:brain';
+
+  async setAgentBrain(dto: any) {
+    const brain = { ...dto, updatedAt: new Date().toISOString() };
+    await this.redisService.set(this.AGENT_BRAIN_KEY, brain, 25 * 60); // 25min TTL (agent runs every 15min)
+    return { ok: true };
+  }
+
+  async getAgentBrain(): Promise<any> {
+    return await this.redisService.get<any>(this.AGENT_BRAIN_KEY) || {
+      drawdownMode: 'NORMAL',
+      blockLong: false,
+      blockShort: false,
+      riskLevel: 'NORMAL',
+      sessionWR: {},
+      hotCoins: [],
+      coldCoins: [],
+      takerBuyCoins: [],
+      takerSellCoins: [],
+      takerDetails: {},
+      fundingExtreme: null,
+      altPulse: null,
+      consecutiveLosses: 0,
+      tpSuggestion: null,
+      updatedAt: null,
+    };
+  }
+
   /**
    * Force open hedge for an active signal.
    * Sets flags so PositionMonitor triggers hedge on next tick.
