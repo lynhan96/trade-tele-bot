@@ -32,6 +32,7 @@
     "fix-pnl-usdt.ts",
     "run-hedge-simulator.ts",
     "run-order-refactor-simulator.ts",
+    "migrate-orders.ts",
     "dist",
     "node_modules"
   ]
