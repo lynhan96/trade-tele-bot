@@ -30,8 +30,8 @@ interface MockOrder {
   signalId: string;
   symbol: string;
   direction: 'LONG' | 'SHORT';
-  type: 'MAIN' | 'DCA' | 'HEDGE';
-  status: 'OPEN' | 'CLOSED';
+  type: 'MAIN' | 'DCA' | 'HEDGE' | 'FLIP_MAIN';
+  status: 'OPEN' | 'CLOSED' | 'PROMOTED';
   entryPrice: number;
   exitPrice?: number;
   notional: number;
@@ -58,7 +58,7 @@ function resetDB(): void {
   nextOrderId = 1;
 }
 
-function createOrder(fields: Partial<MockOrder> & { signalId: string; symbol: string; direction: 'LONG' | 'SHORT'; type: MockOrder['type']; entryPrice: number; notional: number }): MockOrder {
+function createOrder(fields: Partial<MockOrder> & { signalId: string; symbol: string; direction: 'LONG' | 'SHORT'; type: 'MAIN' | 'DCA' | 'HEDGE' | 'FLIP_MAIN'; entryPrice: number; notional: number }): MockOrder {
   const order: MockOrder = {
     _id: `order_${nextOrderId++}`,
     status: 'OPEN',
@@ -80,12 +80,21 @@ function findOrder(query: Partial<MockOrder>): MockOrder | null {
   ) ?? null;
 }
 
+/** Find MAIN + FLIP_MAIN orders (mirrors MAIN_ORDER_TYPES in production code) */
+function findMainOrders(signalId: string, status?: string): MockOrder[] {
+  return ordersDB.filter(o =>
+    o.signalId === signalId &&
+    (o.type === 'MAIN' || o.type === 'FLIP_MAIN') &&
+    (!status || o.status === status)
+  );
+}
+
 function findOrders(query: Partial<MockOrder> & { closedAfter?: Date }): MockOrder[] {
   return ordersDB.filter(o =>
     (!query.signalId || o.signalId === query.signalId) &&
     (!query.type || o.type === query.type) &&
     (!query.status || o.status === query.status) &&
-    (!query.closedAfter || (o.closedAt && o.closedAt > query.closedAfter))
+    (!query.closedAfter || (o.closedAt && o.closedAt >= query.closedAfter))
   );
 }
 
@@ -174,15 +183,15 @@ function getActiveHedge(signalId: string): MockOrder | null {
   return findOrder({ signalId, type: 'HEDGE', status: 'OPEN' });
 }
 
-/** Phase 1.1: getActiveDirection from MAIN orders */
+/** Phase 1.1: getActiveDirection from MAIN/FLIP_MAIN orders */
 function getActiveDirection(signalId: string): string | null {
-  const main = findOrder({ signalId, type: 'MAIN', status: 'OPEN' });
-  return main?.direction ?? null;
+  const mains = findMainOrders(signalId, 'OPEN');
+  return mains[0]?.direction ?? null;
 }
 
-/** Phase 1.2: getAvgEntry from MAIN orders */
+/** Phase 1.2: getAvgEntry from MAIN/FLIP_MAIN orders */
 function getMainOrderState(signalId: string): { avgEntry: number; totalNotional: number; direction: string | null } {
-  const orders = findOrders({ signalId, type: 'MAIN', status: 'OPEN' });
+  const orders = findMainOrders(signalId, 'OPEN');
   if (!orders.length) return { avgEntry: 0, totalNotional: 0, direction: null };
   const totalNotional = orders.reduce((s, o) => s + o.notional, 0);
   const avgEntry = orders.reduce((s, o) => s + o.entryPrice * o.notional, 0) / totalNotional;
@@ -283,8 +292,8 @@ function closeHedgeOrder(signal: SimSignal, hedgeOrder: MockOrder, exitPrice: nu
 
 /** Simulate FLIP: main TP hit while hedge active */
 function executeFLIP(signal: SimSignal, hedgeOrder: MockOrder, tpPrice: number): void {
-  // 1. Close MAIN orders with TP
-  const mainOrders = findOrders({ signalId: signal._id, type: 'MAIN', status: 'OPEN' });
+  // 1. Close MAIN + FLIP_MAIN orders with TP
+  const mainOrders = findMainOrders(signal._id, 'OPEN');
   let mainPnlTotal = 0;
   for (const ord of mainOrders) {
     closeOrder(ord._id, tpPrice, 'TAKE_PROFIT');
@@ -310,10 +319,10 @@ function executeFLIP(signal: SimSignal, hedgeOrder: MockOrder, tpPrice: number):
     reason: 'FLIP_TP',
   });
 
-  // 4. Promote HEDGE order → MAIN
+  // 4. Promote HEDGE order → FLIP_MAIN (Phase 3: distinguishable from original MAIN)
   const promotedOrder = ordersDB.find(o => o._id === hedgeOrder._id);
   if (promotedOrder) {
-    promotedOrder.type = 'MAIN';
+    promotedOrder.type = 'FLIP_MAIN';
     const flipTpPct = 3.5;
     const flipSlPct = 40;
     promotedOrder.takeProfitPrice = hedgeOrder.direction === 'LONG'
@@ -611,20 +620,23 @@ console.log('\n--- Test 3.4: Post-FLIP banked profit only counts post-flip hedge
   const sig = createSignal({ direction: 'LONG', entryPrice: 100 });
   createOrder({ signalId: sig._id, symbol: 'TESTUSDT', direction: 'LONG', type: 'MAIN', entryPrice: 100, notional: 400 });
 
-  // Pre-flip hedge cycle
+  // Pre-flip hedge cycle (closed 1 hour ago — before FLIP)
   const h1 = openHedge(sig, 97);
   closeHedgeOrder(sig, h1, 94.575, 'HEDGE_TP');
+  // Backdate the closed hedge to ensure it's before FLIP timestamp
+  const closedH1 = ordersDB.find(o => o._id === h1._id);
+  if (closedH1) closedH1.closedAt = new Date(Date.now() - 3600000);
   const preFLIPBanked = sig.hedgeHistory.reduce((s: number, h: any) => s + h.pnlUsdt, 0);
   assert(preFLIPBanked > 0, `Pre-FLIP banked: $${preFLIPBanked.toFixed(2)}`);
 
-  // FLIP happens
+  // FLIP happens (now)
   const h2 = openHedge(sig, 93);
   executeFLIP(sig, h2, 103.5); // main TP hit
   assert(sig.lastFlipAt !== undefined, 'lastFlipAt set after FLIP');
 
   // Post-flip: open new MAIN order (simulating promoted HEDGE→MAIN)
   // Note: executeFLIP already promoted the order. Check:
-  const postFlipMain = findOrder({ signalId: sig._id, type: 'MAIN', status: 'OPEN' });
+  const postFlipMain = findMainOrders(sig._id, 'OPEN')[0] ?? null;
   assert(postFlipMain !== null, 'Promoted MAIN order exists after FLIP');
   assert(postFlipMain?.direction === 'SHORT', `Post-FLIP direction from ORDER: ${postFlipMain?.direction}`);
 
@@ -658,7 +670,7 @@ console.log('\n--- Test 4.1: Basic FLIP ---');
   assert(closedMain.length > 0, 'Original MAIN order closed');
   assert(closedMain[0].closeReason === 'TAKE_PROFIT', 'Close reason: TAKE_PROFIT');
 
-  const promotedMain = findOrder({ signalId: sig._id, type: 'MAIN', status: 'OPEN' });
+  const promotedMain = findMainOrders(sig._id, 'OPEN')[0] ?? null;
   assert(promotedMain !== null, 'Promoted MAIN order exists');
   assert(promotedMain?.direction === 'SHORT', 'Promoted MAIN direction: SHORT');
   assert(promotedMain?.entryPrice === 97, 'Promoted MAIN entry: 97 (original hedge entry)');
@@ -838,7 +850,7 @@ console.log('\n=== SUITE 7: Full lifecycle — LONG, hedge, FLIP, hedge, NET_POS
   assert(sig.direction === 'SHORT', 'After FLIP: now SHORT');
 
   // Verify order state
-  const mainOrder = findOrder({ signalId: sig._id, type: 'MAIN', status: 'OPEN' });
+  const mainOrder = findMainOrders(sig._id, 'OPEN')[0] ?? null;
   assert(mainOrder !== null, 'New MAIN order exists (promoted from HEDGE)');
   assert(mainOrder?.direction === 'SHORT', 'New MAIN is SHORT');
   assert(mainOrder?.entryPrice === 93, 'New MAIN entry = old hedge entry');
@@ -922,6 +934,236 @@ console.log('\n--- Test 8.3: SHORT signal full lifecycle ---');
   executeFLIP(sig, h2, 96.5);
   assert(sig.direction === 'LONG', 'After FLIP: SHORT → LONG (promoted LONG hedge)');
   assert(sig.entryPrice === 104, 'Entry from hedge order');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TEST SUITE 9: Phase 3 — FLIP_MAIN type + PROMOTED status
+// ═══════════════════════════════════════════════════════════════════════════
+
+console.log('\n=== SUITE 9: Phase 3 — FLIP_MAIN type ===');
+
+// TEST 9.1: FLIP creates FLIP_MAIN order (not MAIN)
+console.log('\n--- Test 9.1: Promoted order has type FLIP_MAIN ---');
+{
+  resetDB();
+  const sig = createSignal({ direction: 'LONG', entryPrice: 100 });
+  createOrder({ signalId: sig._id, symbol: 'TESTUSDT', direction: 'LONG', type: 'MAIN', entryPrice: 100, notional: 400 });
+
+  const h = openHedge(sig, 97);
+  executeFLIP(sig, h, 103.5);
+
+  // Promoted order should be FLIP_MAIN
+  const flipMain = ordersDB.find(o => o.signalId === sig._id && o.type === 'FLIP_MAIN');
+  assert(flipMain !== undefined, 'FLIP_MAIN order exists after FLIP');
+  assert(flipMain?.status === 'OPEN', 'FLIP_MAIN is OPEN');
+  assert(flipMain?.direction === 'SHORT', 'FLIP_MAIN direction: SHORT (promoted from SHORT hedge)');
+  assert(flipMain?.entryPrice === 97, 'FLIP_MAIN entry: 97');
+
+  // Original MAIN should be CLOSED
+  const closedMain = ordersDB.find(o => o.signalId === sig._id && o.type === 'MAIN' && o.status === 'CLOSED');
+  assert(closedMain !== undefined, 'Original MAIN is CLOSED after FLIP');
+
+  // No OPEN orders with type MAIN
+  const openMain = ordersDB.find(o => o.signalId === sig._id && o.type === 'MAIN' && o.status === 'OPEN');
+  assert(openMain === undefined, 'No OPEN MAIN after FLIP (only FLIP_MAIN)');
+}
+
+// TEST 9.2: findMainOrders includes both MAIN and FLIP_MAIN
+console.log('\n--- Test 9.2: findMainOrders includes FLIP_MAIN ---');
+{
+  resetDB();
+  const sig = createSignal({ direction: 'LONG', entryPrice: 100 });
+  createOrder({ signalId: sig._id, symbol: 'TESTUSDT', direction: 'LONG', type: 'MAIN', entryPrice: 100, notional: 400 });
+
+  const h = openHedge(sig, 97);
+  executeFLIP(sig, h, 103.5);
+
+  // findMainOrders should find the FLIP_MAIN
+  const mains = findMainOrders(sig._id, 'OPEN');
+  assert(mains.length === 1, `findMainOrders returns 1 OPEN (got ${mains.length})`);
+  assert(mains[0].type === 'FLIP_MAIN', 'Found order is FLIP_MAIN type');
+
+  // getActiveDirection should work with FLIP_MAIN
+  const dir = getActiveDirection(sig._id);
+  assert(dir === 'SHORT', `getActiveDirection after FLIP: ${dir}`);
+
+  // getMainOrderState should include FLIP_MAIN
+  const state = getMainOrderState(sig._id);
+  assert(state.direction === 'SHORT', `getMainOrderState direction: ${state.direction}`);
+  assert(state.totalNotional === 750, `getMainOrderState notional: ${state.totalNotional}`);
+}
+
+// TEST 9.3: Double FLIP creates FLIP_MAIN for both
+console.log('\n--- Test 9.3: Double FLIP correctness ---');
+{
+  resetDB();
+  const sig = createSignal({ direction: 'LONG', entryPrice: 100 });
+  createOrder({ signalId: sig._id, symbol: 'TESTUSDT', direction: 'LONG', type: 'MAIN', entryPrice: 100, notional: 400 });
+
+  // First FLIP: LONG → SHORT
+  const h1 = openHedge(sig, 97);
+  executeFLIP(sig, h1, 103.5);
+  assert(sig.direction === 'SHORT', 'After FLIP 1: SHORT');
+
+  // Second FLIP: SHORT → LONG (need to open hedge LONG, then main TP hits)
+  const h2 = openHedge(sig, 100);
+  assert(h2.direction === 'LONG', 'Post-FLIP hedge is LONG');
+  executeFLIP(sig, h2, 93.605); // SHORT TP hit
+
+  assert(sig.direction === 'LONG', 'After FLIP 2: back to LONG');
+
+  // Should have 2 FLIP_MAIN orders (both CLOSED since second FLIP closed the first promoted)
+  const flipMains = ordersDB.filter(o => o.type === 'FLIP_MAIN');
+  assert(flipMains.length === 2, `2 FLIP_MAIN orders total: ${flipMains.length}`);
+
+  const openMains = findMainOrders(sig._id, 'OPEN');
+  assert(openMains.length === 1, 'Only 1 OPEN main order after double FLIP');
+  assert(openMains[0].type === 'FLIP_MAIN', 'Latest open is FLIP_MAIN');
+
+  // hedgeHistory should have 2 FLIP_TP entries
+  const flipTPs = sig.hedgeHistory.filter((h: any) => h.reason === 'FLIP_TP');
+  assert(flipTPs.length === 2, `2 FLIP_TP entries in hedgeHistory: ${flipTPs.length}`);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TEST SUITE 10: Phase 5 — Admin order-based reads
+// ═══════════════════════════════════════════════════════════════════════════
+
+console.log('\n=== SUITE 10: Phase 5 — Admin order-based reads ===');
+
+// TEST 10.1: forceOpenHedge checks OPEN HEDGE order (not signal flag)
+console.log('\n--- Test 10.1: forceOpenHedge uses order check ---');
+{
+  resetDB();
+  const sig = createSignal();
+  createOrder({ signalId: sig._id, symbol: 'TESTUSDT', direction: 'LONG', type: 'MAIN', entryPrice: 100, notional: 400 });
+
+  // No hedge active → can open
+  const existingHedge1 = getActiveHedge(sig._id);
+  assert(existingHedge1 === null, 'No hedge → forceOpenHedge allowed');
+
+  // Open hedge
+  openHedge(sig, 97);
+  const existingHedge2 = getActiveHedge(sig._id);
+  assert(existingHedge2 !== null, 'Hedge exists → forceOpenHedge blocked');
+
+  // Desync: signal says false, but order exists
+  sig.hedgeActive = false; // simulate desync
+  const existingHedge3 = getActiveHedge(sig._id);
+  assert(existingHedge3 !== null, 'Order-based check catches desync (signal=false, order=OPEN)');
+}
+
+// TEST 10.2: forceCloseHedge reads from order
+console.log('\n--- Test 10.2: forceCloseHedge reads from HEDGE order ---');
+{
+  resetDB();
+  const sig = createSignal();
+  createOrder({ signalId: sig._id, symbol: 'TESTUSDT', direction: 'LONG', type: 'MAIN', entryPrice: 100, notional: 400 });
+  const h = openHedge(sig, 97);
+
+  // Corrupt signal fields
+  sig.hedgeEntryPrice = 999;
+  sig.hedgeDirection = 'WRONG' as any;
+
+  // Order has correct data
+  const hedgeOrder = getActiveHedge(sig._id);
+  assert(hedgeOrder !== null, 'HEDGE order found');
+  assert(hedgeOrder!.entryPrice === 97, `Order entry: ${hedgeOrder!.entryPrice} (not 999)`);
+  assert(hedgeOrder!.direction === 'SHORT', `Order direction: ${hedgeOrder!.direction} (not WRONG)`);
+
+  // Agent safety gate uses order data
+  const livePrice = 96; // hedge SHORT from 97, price at 96 → +1.03%
+  const hedgePnlPct = hedgeOrder!.direction === 'LONG'
+    ? ((livePrice - hedgeOrder!.entryPrice) / hedgeOrder!.entryPrice) * 100
+    : ((hedgeOrder!.entryPrice - livePrice) / hedgeOrder!.entryPrice) * 100;
+  assert(hedgePnlPct > 0 && hedgePnlPct < 1.5, `Hedge PnL: ${hedgePnlPct.toFixed(2)}% < 1.5% → agent BLOCKED`);
+}
+
+// TEST 10.3: getSignalOrders returns all orders
+console.log('\n--- Test 10.3: getSignalOrders for admin panel ---');
+{
+  resetDB();
+  const sig = createSignal();
+  createOrder({ signalId: sig._id, symbol: 'TESTUSDT', direction: 'LONG', type: 'MAIN', entryPrice: 100, notional: 400 });
+  const h1 = openHedge(sig, 97);
+  closeHedgeOrder(sig, h1, 94.575, 'HEDGE_TP');
+  const h2 = openHedge(sig, 93);
+  executeFLIP(sig, h2, 103.5);
+
+  const allOrders = ordersDB.filter(o => o.signalId === sig._id);
+  assert(allOrders.length >= 3, `Signal has ${allOrders.length} orders (MAIN+HEDGE+FLIP_MAIN+...)`);
+
+  const types = new Set(allOrders.map(o => o.type));
+  assert(types.has('MAIN'), 'Has MAIN orders');
+  assert(types.has('HEDGE'), 'Has HEDGE orders');
+  assert(types.has('FLIP_MAIN'), 'Has FLIP_MAIN orders');
+
+  const statuses = new Set(allOrders.map(o => o.status));
+  assert(statuses.has('OPEN'), 'Has OPEN orders');
+  assert(statuses.has('CLOSED'), 'Has CLOSED orders');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TEST SUITE 11: OrderHelpers consistency checks
+// ═══════════════════════════════════════════════════════════════════════════
+
+console.log('\n=== SUITE 11: Order helpers consistency ===');
+
+// TEST 11.1: After every operation, signal fields match order state
+console.log('\n--- Test 11.1: Dual-write consistency ---');
+{
+  resetDB();
+  const sig = createSignal({ direction: 'LONG', entryPrice: 100 });
+  createOrder({ signalId: sig._id, symbol: 'TESTUSDT', direction: 'LONG', type: 'MAIN', entryPrice: 100, notional: 400 });
+
+  // After hedge open: signal and order agree
+  const h = openHedge(sig, 97);
+  assert(sig.hedgeActive === true, 'Signal: hedgeActive=true');
+  assert(getActiveHedge(sig._id) !== null, 'Order: HEDGE OPEN exists');
+  assert(sig.hedgeDirection === getActiveHedge(sig._id)?.direction, 'Direction: signal matches order');
+  assert(sig.hedgeEntryPrice === getActiveHedge(sig._id)?.entryPrice, 'Entry: signal matches order');
+
+  // After hedge close: both agree
+  closeHedgeOrder(sig, h, 94.575, 'HEDGE_TP');
+  assert(sig.hedgeActive === false, 'Signal: hedgeActive=false');
+  assert(getActiveHedge(sig._id) === null, 'Order: no OPEN HEDGE');
+
+  // After FLIP: direction from signal matches order
+  const h2 = openHedge(sig, 93);
+  executeFLIP(sig, h2, 103.5);
+  const orderDir = getActiveDirection(sig._id);
+  assert(sig.direction === orderDir, `Direction consistent: signal=${sig.direction} order=${orderDir}`);
+
+  const state = getMainOrderState(sig._id);
+  assertClose(sig.gridAvgEntry, state.avgEntry, 0.01, `AvgEntry consistent: signal=${sig.gridAvgEntry.toFixed(2)} order=${state.avgEntry.toFixed(2)}`);
+}
+
+// TEST 11.2: Grid DCA updates work on FLIP_MAIN orders
+console.log('\n--- Test 11.2: DCA on FLIP_MAIN order ---');
+{
+  resetDB();
+  const sig = createSignal({ direction: 'LONG', entryPrice: 100 });
+  createOrder({ signalId: sig._id, symbol: 'TESTUSDT', direction: 'LONG', type: 'MAIN', entryPrice: 100, notional: 400 });
+
+  // FLIP to SHORT
+  const h = openHedge(sig, 97);
+  executeFLIP(sig, h, 103.5);
+
+  // findMainOrders should find FLIP_MAIN for DCA update
+  const mains = findMainOrders(sig._id, 'OPEN');
+  assert(mains.length === 1, 'FLIP_MAIN found for DCA');
+  assert(mains[0].type === 'FLIP_MAIN', 'Type is FLIP_MAIN');
+
+  // Simulate DCA fill: add notional to FLIP_MAIN
+  const dcaNotional = 250;
+  const dcaPrice = 99;
+  mains[0].notional += dcaNotional;
+  mains[0].entryPrice = (97 * 750 + dcaPrice * dcaNotional) / (750 + dcaNotional);
+  mains[0].quantity = mains[0].notional / mains[0].entryPrice;
+
+  const state = getMainOrderState(sig._id);
+  assert(state.totalNotional === 1000, `Post-DCA notional: $${state.totalNotional}`);
+  assertClose(state.avgEntry, mains[0].entryPrice, 0.01, `Post-DCA avgEntry: ${state.avgEntry.toFixed(4)}`);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

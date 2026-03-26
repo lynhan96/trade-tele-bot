@@ -29,6 +29,9 @@ export interface ResolvedSignalInfo {
 const MONITOR_POSITIONS_KEY = "cache:ai:monitor:positions";
 const MONITOR_POSITIONS_TTL = 60; // 60s
 
+/** Order types that represent the main position (includes promoted hedge after FLIP). */
+const MAIN_ORDER_TYPES = { $in: ['MAIN', 'FLIP_MAIN'] };
+
 /** Coins that run BOTH INTRADAY and SWING strategies simultaneously. */
 const DUAL_TIMEFRAME_COINS = ["BTC", "ETH", "SOL", "BNB", "XRP"];
 
@@ -360,7 +363,7 @@ export class PositionMonitorService implements OnModuleInit {
       const gridNotionalL0 = simNotional * (DCA_WEIGHTS[0] / 100);
       const l0EntryFee = this.calcTakerFee(gridNotionalL0);
       await this.orderModel.findOneAndUpdate(
-        { signalId: (signal as any)._id, type: 'MAIN', status: 'OPEN' },
+        { signalId: (signal as any)._id, type: MAIN_ORDER_TYPES, status: 'OPEN' },
         {
           $set: {
             entryPrice: origEntry,
@@ -474,7 +477,7 @@ export class PositionMonitorService implements OnModuleInit {
           // DCA fills update the MAIN order (add notional, recalculate avg price)
           const dcaEntryFee = this.calcMakerFee(gridNotional);
           const mainOrder = await this.orderModel.findOne({
-            signalId: (signal as any)._id, type: 'MAIN', status: 'OPEN',
+            signalId: (signal as any)._id, type: MAIN_ORDER_TYPES, status: 'OPEN',
           });
           if (mainOrder) {
             const newNotional = mainOrder.notional + gridNotional;
@@ -1043,7 +1046,7 @@ export class PositionMonitorService implements OnModuleInit {
       );
 
       // 1. Close MAIN order with TP profit
-      const mainOrders = await this.orderModel.find({ signalId: (signal as any)._id, type: 'MAIN', status: 'OPEN' });
+      const mainOrders = await this.orderModel.find({ signalId: (signal as any)._id, type: MAIN_ORDER_TYPES, status: 'OPEN' });
       const mainFundingRate = (signal as any).fundingRate || 0;
       let mainPnlTotal = 0;
       for (const ord of mainOrders) {
@@ -1090,7 +1093,7 @@ export class PositionMonitorService implements OnModuleInit {
       });
       if (flipHedgeOrderDoc) {
         await this.orderModel.findByIdAndUpdate(flipHedgeOrderDoc._id, {
-          type: 'MAIN', stopLossPrice: newSl, takeProfitPrice: newTp, cycleNumber: 0,
+          type: 'FLIP_MAIN', stopLossPrice: newSl, takeProfitPrice: newTp, cycleNumber: 0,
         });
       }
 
@@ -1393,7 +1396,7 @@ export class PositionMonitorService implements OnModuleInit {
         this.registerListener(signal);
 
         // Safety: ensure MAIN order exists for every active signal
-        const hasMain = await this.orderModel.countDocuments({ signalId: (signal as any)._id, type: 'MAIN' });
+        const hasMain = await this.orderModel.countDocuments({ signalId: (signal as any)._id, type: MAIN_ORDER_TYPES });
         if (hasMain === 0) {
           const entry = (signal as any).gridAvgEntry || signal.entryPrice;
           const vol = ((signal as any).simNotional || 1000) * 0.4;

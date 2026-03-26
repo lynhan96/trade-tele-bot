@@ -796,7 +796,7 @@ export class SignalQueueService {
 
     // Also update MAIN order entry price to stay in sync (prevents stale order entry → wrong PnL)
     await this.orderModel.updateMany(
-      { signalId: (signal as any)._id, type: 'MAIN', status: 'OPEN' },
+      { signalId: (signal as any)._id, type: { $in: ['MAIN', 'FLIP_MAIN'] }, status: 'OPEN' },
       { entryPrice: currentPrice },
     );
 

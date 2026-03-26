@@ -1186,7 +1186,10 @@ export class AdminService {
     const signal = await this.signalModel.findById(id);
     if (!signal) return { success: false, error: 'Signal not found' };
     if (signal.status !== 'ACTIVE') return { success: false, error: `Signal is ${signal.status}` };
-    if ((signal as any).hedgeActive) return { success: false, error: 'Hedge already active' };
+
+    // Check OPEN HEDGE order in DB (source of truth, not signal.hedgeActive flag)
+    const existingHedge = await this.orderModel.findOne({ signalId: id, type: 'HEDGE', status: 'OPEN' });
+    if (existingHedge) return { success: false, error: 'Hedge already active (OPEN HEDGE order exists)' };
 
     // Set hedgeForceOpen flag — PositionMonitor will open hedge on next tick
     await this.signalModel.findByIdAndUpdate(id, {
@@ -1205,12 +1208,16 @@ export class AdminService {
     const signal = await this.signalModel.findById(id);
     if (!signal) return { success: false, error: 'Signal not found' };
     if (signal.status !== 'ACTIVE') return { success: false, error: `Signal is ${signal.status}` };
-    if (!(signal as any).hedgeActive) return { success: false, error: 'No active hedge' };
+
+    // Read hedge state from OPEN HEDGE order (source of truth)
+    const hedgeOrder = await this.orderModel.findOne({ signalId: id, type: 'HEDGE', status: 'OPEN' }).lean();
+    if (!hedgeOrder) return { success: false, error: 'No active hedge (no OPEN HEDGE order)' };
+
+    const hedgeEntry = hedgeOrder.entryPrice;
+    const hedgeDir = hedgeOrder.direction;
 
     // SAFETY GATE: agent cannot close hedge with low PnL
     if (source === 'agent') {
-      const hedgeEntry = (signal as any).hedgeEntryPrice;
-      const hedgeDir = (signal as any).hedgeDirection;
       if (hedgeEntry) {
         const livePrice = await this.fetchBinancePrice(signal.symbol);
         if (livePrice) {
@@ -1230,12 +1237,19 @@ export class AdminService {
     // Force hedge TP by setting price to immediate trigger
     // SHORT hedge: set TP very high (any price triggers)
     // LONG hedge: set TP very low (any price triggers)
-    const forceTP = (signal as any).hedgeDirection === 'LONG' ? 0.0001 : 999999;
+    const forceTP = hedgeDir === 'LONG' ? 0.0001 : 999999;
     await this.signalModel.findByIdAndUpdate(id, {
       $set: { hedgeTpPrice: forceTP, hedgeForceClose: true },
     });
+    // Also update the HEDGE order takeProfitPrice (source of truth for checkHedgeExit)
+    await this.orderModel.findByIdAndUpdate(hedgeOrder._id, { takeProfitPrice: forceTP });
 
     this.logger.log(`[Admin] Force hedge close requested for ${signal.symbol} (${id})`);
     return { success: true };
+  }
+
+  /** Get all orders for a signal (for admin panel signal detail). */
+  async getSignalOrders(signalId: string): Promise<any[]> {
+    return this.orderModel.find({ signalId }).sort({ openedAt: -1 }).lean();
   }
 }

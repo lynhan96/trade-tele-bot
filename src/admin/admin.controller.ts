@@ -109,6 +109,12 @@ export class AdminController {
   }
 
   @UseGuards(AdminGuard)
+  @Get("signals/:id/orders")
+  getSignalOrders(@Param("id") id: string) {
+    return this.adminService.getSignalOrders(id);
+  }
+
+  @UseGuards(AdminGuard)
   @Get("users/ranking")
   getUserRanking(@Query() query: Record<string, string>) {
     return this.adminService.getUserRanking(query);

@@ -14,10 +14,10 @@ export class Order {
   @Prop({ required: true, enum: ['LONG', 'SHORT'] })
   direction: string;
 
-  @Prop({ required: true, enum: ['MAIN', 'DCA', 'HEDGE'] })
+  @Prop({ required: true, enum: ['MAIN', 'DCA', 'HEDGE', 'FLIP_MAIN'] })
   type: string;
 
-  @Prop({ required: true, enum: ['OPEN', 'CLOSED'] })
+  @Prop({ required: true, enum: ['OPEN', 'CLOSED', 'PROMOTED'] })
   status: string;
 
   @Prop({ required: true })
