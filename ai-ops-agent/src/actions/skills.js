@@ -484,12 +484,12 @@ export async function runSignalQualityFilter() {
       actions.push(`⚠️ ${s.symbol} SHORT with only ${coin.longPct}% longs — contrarian signal may be better`)
     }
 
-    // 3. Taker buy ratio — buying pressure vs selling pressure
-    if (s.direction === "LONG" && coin.taker && coin.taker < 0.42) {
-      actions.push(`⚠️ ${s.symbol} LONG but taker buy ratio ${coin.taker?.toFixed(2)} (sellers dominating)`)
+    // 3. Taker buy/sell ratio — >1 = more buying, <1 = more selling
+    if (s.direction === "LONG" && coin.taker && coin.taker < 0.85) {
+      actions.push(`⚠️ ${s.symbol} LONG nhưng taker ratio x${coin.taker?.toFixed(2)} (bên bán mạnh hơn)`)
     }
-    if (s.direction === "SHORT" && coin.taker && coin.taker > 0.58) {
-      actions.push(`⚠️ ${s.symbol} SHORT but taker buy ratio ${coin.taker?.toFixed(2)} (buyers dominating)`)
+    if (s.direction === "SHORT" && coin.taker && coin.taker > 1.15) {
+      actions.push(`⚠️ ${s.symbol} SHORT nhưng taker ratio x${coin.taker?.toFixed(2)} (bên mua mạnh hơn)`)
     }
   }
 
@@ -853,16 +853,17 @@ export async function runSmartAlerts() {
 
   // 9b. Volume spike detection — taker ratio extreme across multiple coins
   // Send to bot as market hints for strategy confidence boost
-  const extremeTakers = onchain.filter(c => c.taker && (c.taker > 0.62 || c.taker < 0.38))
+  // takerBuyRatio: >1 = more buying, <1 = more selling. 1.2+ = extreme buy, 0.8- = extreme sell
+  const extremeTakers = onchain.filter(c => c.taker && (c.taker > 1.2 || c.taker < 0.8))
   if (extremeTakers.length >= 3) {
-    const buyCoins = extremeTakers.filter(c => c.taker > 0.62).sort((a, b) => b.taker - a.taker)
-    const sellCoins = extremeTakers.filter(c => c.taker < 0.38).sort((a, b) => a.taker - b.taker)
+    const buyCoins = extremeTakers.filter(c => c.taker > 1.2).sort((a, b) => b.taker - a.taker)
+    const sellCoins = extremeTakers.filter(c => c.taker < 0.8).sort((a, b) => a.taker - b.taker)
     if (buyCoins.length >= 3) {
-      const topBuyers = buyCoins.slice(0, 8).map(c => `${c.symbol}(${(c.taker * 100).toFixed(0)}%)`).join(", ")
+      const topBuyers = buyCoins.slice(0, 8).map(c => `${c.symbol}(x${c.taker.toFixed(2)})`).join(", ")
       actions.push(`🚨 ${buyCoins.length} coins áp lực MUA cực mạnh: ${topBuyers}`)
     }
     if (sellCoins.length >= 3) {
-      const topSellers = sellCoins.slice(0, 8).map(c => `${c.symbol}(${(c.taker * 100).toFixed(0)}%)`).join(", ")
+      const topSellers = sellCoins.slice(0, 8).map(c => `${c.symbol}(x${c.taker.toFixed(2)})`).join(", ")
       actions.push(`🚨 ${sellCoins.length} coins áp lực BÁN cực mạnh: ${topSellers}`)
     }
 

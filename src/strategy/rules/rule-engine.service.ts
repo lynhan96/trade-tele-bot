@@ -281,20 +281,20 @@ export class RuleEngineService {
         const takerDetails: Record<string, number> = brain.takerDetails || {};
         const ratio = takerDetails[sym] || 0;
         if (isLong && (brain.takerBuyCoins || []).includes(sym)) {
-          agentNotes += ` | 🔥 Taker BUY (${(ratio * 100).toFixed(0)}%)`;
-          this.logger.log(`[RuleEngine] ${coin} LONG boost: áp lực mua mạnh (${(ratio * 100).toFixed(0)}%)`);
+          agentNotes += ` | 🔥 Taker BUY (${ratio.toFixed(2)}x)`;
+          this.logger.log(`[RuleEngine] ${coin} LONG boost: áp lực mua mạnh (${ratio.toFixed(2)}x)`);
         } else if (!isLong && (brain.takerSellCoins || []).includes(sym)) {
-          agentNotes += ` | 🔥 Taker SELL (${(ratio * 100).toFixed(0)}%)`;
-          this.logger.log(`[RuleEngine] ${coin} SHORT boost: áp lực bán mạnh (${(ratio * 100).toFixed(0)}%)`);
+          agentNotes += ` | 🔥 Taker SELL (${ratio.toFixed(2)}x)`;
+          this.logger.log(`[RuleEngine] ${coin} SHORT boost: áp lực bán mạnh (${ratio.toFixed(2)}x)`);
         }
         // Conflict warning
         if (isLong && (brain.takerSellCoins || []).includes(sym)) {
           agentNotes += ` | ⚠️ Taker ngược chiều`;
-          this.logger.debug(`[RuleEngine] ${coin} ⚠️ LONG nhưng taker SELL (${(ratio * 100).toFixed(0)}%)`);
+          this.logger.debug(`[RuleEngine] ${coin} ⚠️ LONG nhưng taker SELL (${ratio.toFixed(2)}x)`);
         }
         if (!isLong && (brain.takerBuyCoins || []).includes(sym)) {
           agentNotes += ` | ⚠️ Taker ngược chiều`;
-          this.logger.debug(`[RuleEngine] ${coin} ⚠️ SHORT nhưng taker BUY (${(ratio * 100).toFixed(0)}%)`);
+          this.logger.debug(`[RuleEngine] ${coin} ⚠️ SHORT nhưng taker BUY (${ratio.toFixed(2)}x)`);
         }
 
         // 6. Hot coin bonus — log it
