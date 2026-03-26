@@ -275,6 +275,18 @@ export class PositionMonitorService implements OnModuleInit {
     // True DCA: grids fit within signal's SL range. TP = signal TP price (Fibo).
     // Trailing stop uses weighted avg entry. Close ALL grids together on TP/SL.
     const cfg = this.tradingConfig.get();
+
+    // ─── Derive hedge state from DB order (source of truth — fixes hedgeActive flag desync) ─
+    let hedgeOrder: OrderDocument | null = null;
+    if ((signal as any).hedgeActive) {
+      hedgeOrder = await this.getActiveHedge((signal as any)._id);
+      if (!hedgeOrder) {
+        this.logger.warn(`[PositionMonitor] ${sigKey} hedgeActive=true but no OPEN HEDGE order found — clearing stale flag`);
+        (signal as any).hedgeActive = false;
+        await this.aiSignalModel.findByIdAndUpdate((signal as any)._id, { hedgeActive: false }).exec().catch(() => {});
+      }
+    }
+
     const GRID_LEVEL_COUNT = cfg.gridLevelCount || 3;
     // DCA volume weights: L0=40% base, L1=25%, L2=35% (sum=100)
     const DCA_WEIGHTS = [40, 25, 35];
@@ -383,8 +395,8 @@ export class PositionMonitorService implements OnModuleInit {
       let filledCount = (signal as any).gridFilledCount ?? 1;
       let closedCount = (signal as any).gridClosedCount ?? 0;
 
-      // Skip grid DCA fills when hedge is active in FULL phase (don't add to losing position)
-      const skipGridFills = !!(signal as any).hedgeActive && (signal as any).hedgePhase === "FULL";
+      // Skip grid DCA fills when hedge is active (don't add to losing position)
+      const skipGridFills = !!hedgeOrder; // when hedge active, don't DCA into losing position
 
       // Check PENDING grids: price moved against position → simulate fill
       // RSI guard: only DCA when RSI shows exhaustion (likely to bounce)
@@ -528,8 +540,7 @@ export class PositionMonitorService implements OnModuleInit {
 
       // Trailing stop for grid DCA: uses avg entry
       // TP/SL hit detection handled by normal path below (falls through)
-      // Skip trail SL when hedge is active — hedge manages risk
-      const skipTrailSl = !!(signal as any).hedgeActive;
+      const skipTrailSl = !!hedgeOrder; // hedge manages risk when active, skip trail SL
       const filledGrids = grids.filter((g) => g.status === "FILLED");
       if (filledGrids.length > 0) {
         const TRAIL_TRIGGER = cfg.trailTrigger ?? 2.0;
@@ -751,7 +762,7 @@ export class PositionMonitorService implements OnModuleInit {
     // ─── Auto-Hedge Logic ──────────────────────────────────────────────────
     const hedgeCfg = this.tradingConfig.get();
     const hedgeEnabled = hedgeCfg.hedgeEnabled;
-    const hedgeActive = !!(signal as any).hedgeActive;
+    const hedgeActive = !!hedgeOrder; // derived from DB order at start of tick
 
     if (hedgeEnabled) {
       if (!hedgeActive) {
@@ -778,7 +789,7 @@ export class PositionMonitorService implements OnModuleInit {
         // Hedge is active — check for exit
         let closeReason: string | null = null;
         let exitPrice: number | null = null;
-        const exitAction = this.hedgeManager.checkHedgeExit(signal, price, pnlPct);
+        const exitAction = this.hedgeManager.checkHedgeExit(signal, price, pnlPct, hedgeOrder);
         if (exitAction && exitAction.action === "CLOSE_HEDGE") {
           await this.handleHedgeClose(signal, exitAction, price);
         } else if (exitAction && exitAction.action === 'NONE') {
@@ -820,10 +831,10 @@ export class PositionMonitorService implements OnModuleInit {
         const mainUnrealizedUsdt = (pnlPct / 100) * filledVol;
         // Include current open hedge PnL
         let currentHedgePnlUsdt = 0;
-        if ((signal as any).hedgeEntryPrice && (signal as any).hedgeDirection) {
-          const hDir = (signal as any).hedgeDirection;
-          const hEntry = (signal as any).hedgeEntryPrice;
-          const hNotional = (signal as any).hedgeSimNotional || 0;
+        if (hedgeOrder) {
+          const hDir = hedgeOrder.direction;
+          const hEntry = hedgeOrder.entryPrice;
+          const hNotional = hedgeOrder.notional;
           const hPnlPct = hDir === "LONG"
             ? ((price - hEntry) / hEntry) * 100
             : ((hEntry - price) / hEntry) * 100;
@@ -850,11 +861,11 @@ export class PositionMonitorService implements OnModuleInit {
         let mainTpHitForFlip = false;
         if (effectiveTpHedge) {
           const mainTpHit = direction === "LONG" ? price >= effectiveTpHedge : price <= effectiveTpHedge;
-          if (mainTpHit && (signal as any).hedgeEntryPrice && (signal as any).hedgeDirection) {
+          if (mainTpHit && hedgeOrder) {
             mainTpHitForFlip = true;
             forceCloseReason = null; // FLIP overrides NET_POSITIVE
             this.logger.log(
-              `[PositionMonitor] 🔄 ${sigKey} MAIN TP HIT at ${price} while hedge active → FLIP to ${(signal as any).hedgeDirection}`,
+              `[PositionMonitor] 🔄 ${sigKey} MAIN TP HIT at ${price} while hedge active → FLIP to ${hedgeOrder.direction}`,
             );
           }
         }
@@ -868,10 +879,10 @@ export class PositionMonitorService implements OnModuleInit {
           // Skip force close — fall through to TP/SL check with FLIP logic
         } else {
         // Close open hedge if any
-        if ((signal as any).hedgeEntryPrice && (signal as any).hedgeDirection) {
-          const hDir = (signal as any).hedgeDirection;
-          const hEntry = (signal as any).hedgeEntryPrice;
-          const hNotional = (signal as any).hedgeSimNotional || 0;
+        if (hedgeOrder) {
+          const hDir = hedgeOrder.direction;
+          const hEntry = hedgeOrder.entryPrice;
+          const hNotional = hedgeOrder.notional;
           const hPnlPct = hDir === "LONG"
             ? ((price - hEntry) / hEntry) * 100
             : ((hEntry - price) / hEntry) * 100;
@@ -1007,24 +1018,23 @@ export class PositionMonitorService implements OnModuleInit {
     if (!slHit && !tpHit) return;
 
     // ── FLIP LOGIC: Main TP hit while hedge active → promote hedge to new main ──
-    // Safety: also check DB for OPEN hedge order (hedgeActive flag can desync from actual order state)
-    let flipHedgeOrder: any = null;
-    if (tpHit && !hedgeActive) {
-      flipHedgeOrder = await this.orderModel.findOne({
+    // Safety: if hedgeActive=false but TP hit, do one final DB check for orphan hedge order
+    if (tpHit && !hedgeOrder) {
+      const orphanHedge = await this.orderModel.findOne({
         signalId: (signal as any)._id, type: 'HEDGE', status: 'OPEN',
       }).lean();
-      if (flipHedgeOrder) {
+      if (orphanHedge) {
         this.logger.warn(
-          `[PositionMonitor] ${sigKey} hedgeActive=false but OPEN HEDGE order found in DB (cycle ${flipHedgeOrder.cycleNumber}) — forcing FLIP`,
+          `[PositionMonitor] ${sigKey} hedgeActive=false but OPEN HEDGE order found (cycle ${(orphanHedge as any).cycleNumber}) — forcing FLIP`,
         );
+        hedgeOrder = orphanHedge as any;
       }
     }
-    const hasActiveHedge = (hedgeActive && (signal as any).hedgeEntryPrice && (signal as any).hedgeDirection) || flipHedgeOrder;
+    const hasActiveHedge = !!hedgeOrder;
     if (tpHit && hasActiveHedge) {
-      // Resolve hedge info: prefer signal fields, fallback to DB order
-      const hedgeDir = (signal as any).hedgeDirection || flipHedgeOrder?.direction;
-      const hedgeEntry = (signal as any).hedgeEntryPrice || flipHedgeOrder?.entryPrice;
-      const hedgeNotional = (signal as any).hedgeSimNotional || flipHedgeOrder?.notional || signal.simNotional || 1000;
+      const hedgeDir = hedgeOrder!.direction;
+      const hedgeEntry = hedgeOrder!.entryPrice;
+      const hedgeNotional = hedgeOrder!.notional || signal.simNotional || 1000;
       if (this.resolvingSymbols.has(sigKey)) return;
       this.resolvingSymbols.add(sigKey); // Prevent duplicate FLIP from concurrent price events
       this.logger.log(
@@ -1073,12 +1083,12 @@ export class PositionMonitorService implements OnModuleInit {
         ? +(newEntry * (1 - flipSlPct / 100)).toFixed(6)
         : +(newEntry * (1 + flipSlPct / 100)).toFixed(6);
 
-      // 3. Promote HEDGE order to new MAIN
-      const hedgeOrder = await this.orderModel.findOne({
+      // 3. Promote HEDGE order to new MAIN (hedgeOrder already resolved above — reuse it)
+      const flipHedgeOrderDoc = hedgeOrder ?? await this.orderModel.findOne({
         signalId: (signal as any)._id, type: 'HEDGE', status: 'OPEN',
       });
-      if (hedgeOrder) {
-        await this.orderModel.findByIdAndUpdate(hedgeOrder._id, {
+      if (flipHedgeOrderDoc) {
+        await this.orderModel.findByIdAndUpdate(flipHedgeOrderDoc._id, {
           type: 'MAIN', stopLossPrice: newSl, takeProfitPrice: newTp, cycleNumber: 0,
         });
       }
@@ -1540,6 +1550,11 @@ export class PositionMonitorService implements OnModuleInit {
     return (await this.marketDataService.getPrice(symbol)) ?? 0;
   }
 
+  /** Get the currently open HEDGE order from DB (source of truth for hedge state). */
+  private async getActiveHedge(signalId: any): Promise<OrderDocument | null> {
+    return this.orderModel.findOne({ signalId, type: 'HEDGE', status: 'OPEN' });
+  }
+
   // ─── Auto-Hedge helpers ─────────────────────────────────────────────────
 
   /**
@@ -1601,6 +1616,7 @@ export class PositionMonitorService implements OnModuleInit {
       entryPrice: currentPrice,
       notional: action.hedgeNotional,
       quantity: action.hedgeNotional / currentPrice,
+      takeProfitPrice: action.hedgeTpPrice, // stored for order-based reads
       entryFeeUsdt: hedgeEntryFee,
       openedAt: new Date(),
       cycleNumber: ((signal as any).hedgeCycleCount || 0) + 1,
@@ -1635,31 +1651,37 @@ export class PositionMonitorService implements OnModuleInit {
 
     const cycleCount = ((signal as any).hedgeCycleCount || 0) + 1;
 
-    // Calculate hedge fees first (needed for accurate historyEntry PnL)
-    const hedgeNotionalForFees = (signal as any).hedgeSimNotional || 0;
+    // Query HEDGE order from DB (source of truth for hedge state)
+    const hedgeOrderForClose = await this.orderModel.findOne({
+      signalId: (signal as any)._id, type: 'HEDGE', status: 'OPEN',
+    }).lean().catch(() => null);
+
+    // Use order fields as source of truth, fallback to signal fields for backward compat
+    const hedgeNotionalForFees = (hedgeOrderForClose as any)?.notional ?? (signal as any).hedgeSimNotional ?? 0;
+    const hedgeOpenedAtForFees = (hedgeOrderForClose as any)?.openedAt ?? (signal as any).hedgeOpenedAt;
+    const hedgeDirForHistory = (hedgeOrderForClose as any)?.direction ?? (signal as any).hedgeDirection;
+    const hedgeEntryForHistory = (hedgeOrderForClose as any)?.entryPrice ?? (signal as any).hedgeEntryPrice;
+    const hedgePhaseForHistory = (hedgeOrderForClose as any)?.metadata?.phase ?? (signal as any).hedgePhase;
+    const entryReason = (hedgeOrderForClose as any)?.metadata?.reason || '';
+
+    // Calculate hedge fees
     const hedgeEntryFeeCalc = this.calcTakerFee(hedgeNotionalForFees);
     const hedgeExitFeeCalc = this.calcTakerFee(hedgeNotionalForFees);
-    const hedgeHoursHeldCalc = (signal as any).hedgeOpenedAt
-      ? (Date.now() - new Date((signal as any).hedgeOpenedAt).getTime()) / 3600000 : 0;
+    const hedgeHoursHeldCalc = hedgeOpenedAtForFees
+      ? (Date.now() - new Date(hedgeOpenedAtForFees).getTime()) / 3600000 : 0;
     const hedgeFundingRateCalc = (signal as any).fundingRate || 0;
     const hedgeFundingFeeCalc = this.tradingConfig.get().simFundingEnabled
       ? this.calcFundingFee(hedgeNotionalForFees, Math.abs(hedgeFundingRateCalc), hedgeHoursHeldCalc) : 0;
     const hedgeTotalFees = hedgeEntryFeeCalc + hedgeExitFeeCalc + hedgeFundingFeeCalc;
     const hedgePnlUsdtNet = Math.round(((action.hedgePnlUsdt || 0) - hedgeTotalFees) * 100) / 100;
 
-    // Get entry reason from HEDGE order metadata (saved when hedge opened)
-    const hedgeOrderForEntry = await this.orderModel.findOne({
-      signalId: (signal as any)._id, type: 'HEDGE', status: 'OPEN',
-    }).lean().catch(() => null);
-    const entryReason = (hedgeOrderForEntry as any)?.metadata?.reason || '';
-
     // Build hedge history entry (with fee-deducted PnL)
     const historyEntry = {
-      phase: (signal as any).hedgePhase,
-      direction: (signal as any).hedgeDirection,
-      entryPrice: (signal as any).hedgeEntryPrice,
+      phase: hedgePhaseForHistory,
+      direction: hedgeDirForHistory,
+      entryPrice: hedgeEntryForHistory,
       exitPrice: currentPrice,
-      notional: (signal as any).hedgeSimNotional,
+      notional: hedgeNotionalForFees,
       pnlPct: action.hedgePnlPct,
       pnlUsdt: hedgePnlUsdtNet,
       openedAt: (signal as any).hedgeOpenedAt,

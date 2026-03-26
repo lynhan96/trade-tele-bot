@@ -265,15 +265,16 @@ export class HedgeManagerService {
    * NO hedge SL — hedge only closes on: TP, trail, or main recovery.
    * When hedge is losing, main is recovering → no need to cut hedge.
    */
-  checkHedgeExit(signal: any, currentPrice: number, mainPnlPct?: number): HedgeAction | null {
+  checkHedgeExit(signal: any, currentPrice: number, mainPnlPct?: number, hedgeOrder?: { entryPrice: number; direction: string; notional: number; takeProfitPrice?: number; metadata?: any } | null): HedgeAction | null {
     try {
       const cfg = this.tradingConfig.get();
       const signalId = signal._id?.toString();
       if (!signalId) return null;
 
-      const hedgeEntry = signal.hedgeEntryPrice;
-      const hedgeDir = signal.hedgeDirection;
-      const hedgeNotional = signal.hedgeSimNotional || 0;
+      // Use hedgeOrder (source of truth) when provided, fallback to signal fields
+      const hedgeEntry = hedgeOrder?.entryPrice ?? signal.hedgeEntryPrice;
+      const hedgeDir = hedgeOrder?.direction ?? signal.hedgeDirection;
+      const hedgeNotional = hedgeOrder?.notional ?? signal.hedgeSimNotional ?? 0;
       if (!hedgeEntry || !hedgeDir) return null;
 
       // Calculate hedge PnL
@@ -307,10 +308,11 @@ export class HedgeManagerService {
       // ── 2. Trailing TP — ride the trend ──
       // When hedge reaches TP level, don't close immediately — activate trail
       // Track peak PnL, close when pullback > 1% from peak
-      if (signal.hedgeTpPrice) {
+      const hedgeTpPrice = hedgeOrder?.takeProfitPrice ?? signal.hedgeTpPrice;
+      if (hedgeTpPrice) {
         const tpHit = hedgeDir === 'LONG'
-          ? currentPrice >= signal.hedgeTpPrice
-          : currentPrice <= signal.hedgeTpPrice;
+          ? currentPrice >= hedgeTpPrice
+          : currentPrice <= hedgeTpPrice;
 
         // Track peak PnL for trailing
         const currentPeak = this.hedgePeakMap.get(signalId) || 0;
