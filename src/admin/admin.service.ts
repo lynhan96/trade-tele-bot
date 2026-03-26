@@ -315,7 +315,38 @@ export class AdminService {
       lossPnlUsdt = Math.round((agg[0]?.lossPnlUsdt ?? 0) * 100) / 100;
     }
 
-    return { data, total, page, limit, totalPages: Math.ceil(total / limit), wins, losses, totalPnl, totalPnlUsdt, winPnl, lossPnl, winPnlUsdt, lossPnlUsdt };
+    // Enrich ACTIVE signals with order-based data (source of truth)
+    const enrichedData = await Promise.all(data.map(async (sig: any) => {
+      if (sig.status !== 'ACTIVE') return sig;
+      try {
+        const [mainOrders, hedgeOrder] = await Promise.all([
+          this.orderModel.find({ signalId: sig._id, type: { $in: ['MAIN', 'FLIP_MAIN'] }, status: 'OPEN' }).lean(),
+          this.orderModel.findOne({ signalId: sig._id, type: 'HEDGE', status: 'OPEN' }).lean(),
+        ]);
+        const totalMainNotional = mainOrders.reduce((s, o) => s + (o.notional || 0), 0);
+        const avgEntry = totalMainNotional > 0
+          ? mainOrders.reduce((s, o) => s + o.entryPrice * o.notional, 0) / totalMainNotional
+          : sig.gridAvgEntry || sig.entryPrice;
+        return {
+          ...sig,
+          _orderState: {
+            direction: mainOrders[0]?.direction ?? sig.direction,
+            avgEntry: +avgEntry.toFixed(6),
+            totalNotional: +totalMainNotional.toFixed(2),
+            mainOrderCount: mainOrders.length,
+            mainOrderType: mainOrders[0]?.type ?? null, // 'MAIN' or 'FLIP_MAIN'
+            hedgeActive: !!hedgeOrder,
+            hedgeDirection: hedgeOrder?.direction ?? null,
+            hedgeEntryPrice: hedgeOrder?.entryPrice ?? null,
+            hedgeNotional: hedgeOrder?.notional ?? null,
+            hedgeTpPrice: hedgeOrder?.takeProfitPrice ?? null,
+            hedgeOpenedAt: hedgeOrder?.openedAt ?? null,
+          },
+        };
+      } catch { return sig; }
+    }));
+
+    return { data: enrichedData, total, page, limit, totalPages: Math.ceil(total / limit), wins, losses, totalPnl, totalPnlUsdt, winPnl, lossPnl, winPnlUsdt, lossPnlUsdt };
   }
 
   async getSignalStats(query: { status?: string; direction?: string }) {
