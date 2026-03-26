@@ -17,11 +17,17 @@ let _drawdownMode = "NORMAL" // NORMAL | CAUTIOUS | DEFENSIVE
 async function autoConfig(field, value, reason) {
   const lastChange = configCooldowns.get(field) || 0
   if (Date.now() - lastChange < CONFIG_COOLDOWN_MS) return null
+  // Skip if value already matches current config (avoid redundant PATCHes)
+  try {
+    const current = await getTradingConfig()
+    const currentVal = current?.config?.[field] ?? current?.[field]
+    if (currentVal === value) return null // already set
+  } catch {} // proceed if check fails
   const result = await updateTradingConfig({ [field]: value })
   if (result) {
     configCooldowns.set(field, Date.now())
     logger.info(`[AutoConfig] ${field}=${value} — ${reason}`)
-    if (!_silent) await agentLog.action("auto_config", `${field}=${value} — ${reason}`, "UPDATE_CONFIG")
+    if (!_silent) await agentLog.action("auto_config", `${field}=${value} — ${reason}`, "UPDATE_CONFIG").catch(() => {})
   }
   return result
 }
@@ -149,21 +155,42 @@ export async function runHedgeManager() {
   const actions = []
 
   const allActive = await db.collection("ai_signals").find({ status: "ACTIVE" }).toArray()
-  const hedgeActive = allActive.filter(s => s.hedgeActive)
+
+  // ── Order-based hedge state (source of truth — not signal.hedgeActive flag) ──
+  const openHedgeOrders = await db.collection("orders").find({ type: "HEDGE", status: "OPEN" }).toArray()
+  const hedgeBySignalId = {}
+  for (const o of openHedgeOrders) hedgeBySignalId[o.signalId.toString()] = o
+
+  // Signals with OPEN HEDGE orders (not signal.hedgeActive flag which can desync)
+  const hedgeActive = allActive.filter(s => hedgeBySignalId[s._id.toString()])
 
   for (const s of hedgeActive) {
-    const entry = s.gridAvgEntry || s.entryPrice
-    const banked = (s.hedgeHistory || []).reduce((sum, h) => sum + (h.pnlUsdt || 0), 0)
+    const hedgeOrder = hedgeBySignalId[s._id.toString()]
+
+    // Get main order state (source of truth for avgEntry/notional)
+    const mainOrders = await db.collection("orders").find({
+      signalId: s._id, type: { $in: ["MAIN", "FLIP_MAIN"] }, status: "OPEN"
+    }).toArray()
+    const totalMainNotional = mainOrders.reduce((sum, o) => sum + (o.notional || 0), 0)
+    const avgEntry = totalMainNotional > 0
+      ? mainOrders.reduce((sum, o) => sum + o.entryPrice * o.notional, 0) / totalMainNotional
+      : s.gridAvgEntry || s.entryPrice
     const mainNotional = s.simNotional || 1000
 
-    // NET_POSITIVE check
-    if (banked > 0 && entry > 0 && s.hedgeEntryPrice > 0) {
+    // Banked profit from CLOSED HEDGE orders (source of truth — not signal.hedgeHistory)
+    const closedHedges = await db.collection("orders").find({
+      signalId: s._id, type: "HEDGE", status: "CLOSED"
+    }).toArray()
+    const banked = closedHedges.reduce((sum, o) => sum + (o.pnlUsdt || 0), 0)
+
+    // NET_POSITIVE check (using order data)
+    if (banked > 0 && avgEntry > 0 && hedgeOrder.entryPrice > 0) {
       if (banked > mainNotional * 0.05) {
         actions.push(`${s.symbol}: hedge banked $${banked.toFixed(2)} (${(banked / mainNotional * 100).toFixed(1)}% of vol) — monitoring for NET_POSITIVE`)
       }
     }
 
-    // Hedge spam check
+    // Hedge spam check (hedgeHistory still on signal for cycle tracking)
     const beCycles = (s.hedgeHistory || []).filter(h => Math.abs(h.pnlUsdt || 0) < 1).length
     if (beCycles >= 3 && s.hedgeCycleCount >= 5) {
       actions.push(`${s.symbol}: ${beCycles} breakeven cycles out of ${s.hedgeCycleCount} — hedge may be ineffective`)
@@ -173,8 +200,8 @@ export async function runHedgeManager() {
     const sym = s.symbol
     if (!hedgeCoinStats[sym]) hedgeCoinStats[sym] = { totalCycles: 0, profitCycles: 0, totalBanked: 0 }
     const stats = hedgeCoinStats[sym]
-    stats.totalCycles = s.hedgeCycleCount || 0
-    stats.profitCycles = (s.hedgeHistory || []).filter(h => (h.pnlUsdt || 0) > 1).length
+    stats.totalCycles = closedHedges.length
+    stats.profitCycles = closedHedges.filter(o => (o.pnlUsdt || 0) > 1).length
     stats.totalBanked = banked
     stats.effectiveRate = stats.totalCycles > 0 ? (stats.profitCycles / stats.totalCycles * 100) : 0
 
@@ -189,10 +216,18 @@ export async function runHedgeManager() {
 
   // #3 Dynamic Hedge Parameters — based on portfolio-wide volatility
   // Use average absolute PnL% of active positions as volatility proxy
+  // Use order avgEntry when available (source of truth after DCA/FLIP)
   const prices = await getPrices(allActive.map(s => s.symbol))
   let totalAbsPnl = 0, priceCount = 0
   for (const s of allActive) {
-    const entry = s.gridAvgEntry || s.entryPrice
+    // Get avgEntry from MAIN orders (source of truth)
+    const mains = await db.collection("orders").find({
+      signalId: s._id, type: { $in: ["MAIN", "FLIP_MAIN"] }, status: "OPEN"
+    }).toArray()
+    const mainNotional = mains.reduce((sum, o) => sum + (o.notional || 0), 0)
+    const entry = mainNotional > 0
+      ? mains.reduce((sum, o) => sum + o.entryPrice * o.notional, 0) / mainNotional
+      : s.gridAvgEntry || s.entryPrice
     const price = prices[s.symbol] || 0
     if (!entry || !price) continue
     const pnlPct = Math.abs((price - entry) / entry * 100)
