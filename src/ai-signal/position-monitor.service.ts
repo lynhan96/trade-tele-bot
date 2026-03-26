@@ -290,11 +290,17 @@ export class PositionMonitorService implements OnModuleInit {
       }
     }
 
+    // ─── Load MAIN order (source of truth for position state — Binance Hedge Mode) ─
+    const mainOrder = await this.orderModel.findOne({
+      signalId: (signal as any)._id, type: MAIN_ORDER_TYPES, status: 'OPEN',
+    });
+    const orderMeta = (mainOrder as any)?.metadata || {};
+
     const GRID_LEVEL_COUNT = cfg.gridLevelCount || 3;
     // DCA volume weights: L0=40% base, L1=25%, L2=35% (sum=100)
     const DCA_WEIGHTS = [40, 25, 35];
 
-    const gridLevels: any[] = (signal as any).gridLevels ?? [];
+    const gridLevels: any[] = orderMeta.gridLevels ?? (signal as any).gridLevels ?? [];
     const isGridSignal = gridLevels.length > 0;
 
     // Initialize grid on first tick (base grid = level 0)
@@ -359,7 +365,7 @@ export class PositionMonitorService implements OnModuleInit {
         `[PositionMonitor] Grid DCA init ${sigKey}: ${GRID_LEVEL_COUNT} levels, step=${gridStep.toFixed(2)}%, SL=${effectiveSl.toFixed(4)} (orig=${originalSlForGrid.toFixed(4)}), TP=${takeProfitPrice?.toFixed(4)}`,
       );
 
-      // Update MAIN order with grid data (order already created in signal-queue)
+      // Update MAIN order with grid data + metadata (order already created in signal-queue)
       const gridNotionalL0 = simNotional * (DCA_WEIGHTS[0] / 100);
       const l0EntryFee = this.calcTakerFee(gridNotionalL0);
       await this.orderModel.findOneAndUpdate(
@@ -372,6 +378,15 @@ export class PositionMonitorService implements OnModuleInit {
             stopLossPrice: effectiveSl,
             takeProfitPrice: takeProfitPrice || 0,
             entryFeeUsdt: l0EntryFee,
+            'metadata.gridLevels': grids,
+            'metadata.originalEntryPrice': origEntry,
+            'metadata.gridFilledCount': 1,
+            'metadata.gridClosedCount': 0,
+            'metadata.simNotional': simNotional,
+            'metadata.peakPnlPct': 0,
+            'metadata.slMovedToEntry': false,
+            'metadata.tpBoosted': false,
+            'metadata.originalSlPrice': (signal as any).originalSlPrice || effectiveSl,
           },
           $setOnInsert: {
             signalId: (signal as any)._id,
@@ -388,15 +403,15 @@ export class PositionMonitorService implements OnModuleInit {
     }
 
     // Process grid events (skip if FLIP/resolve in progress to prevent grid corruption)
-    if ((signal as any).gridLevels?.length > 0 && !this.resolvingSymbols.has(sigKey)) {
-      const grids: any[] = (signal as any).gridLevels;
-      const origEntry = (signal as any).originalEntryPrice ?? entryPrice;
-      const globalSl = (signal as any).gridGlobalSlPrice;
-      const signalTp = takeProfitPrice; // Fibo TP price
-      let avgEntry: number = (signal as any).gridAvgEntry ?? origEntry;
+    if (gridLevels.length > 0 && !this.resolvingSymbols.has(sigKey)) {
+      const grids: any[] = gridLevels;
+      const origEntry = orderMeta.originalEntryPrice ?? (signal as any).originalEntryPrice ?? entryPrice;
+      const globalSl = mainOrder?.stopLossPrice ?? (signal as any).gridGlobalSlPrice;
+      const signalTp = mainOrder?.takeProfitPrice ?? takeProfitPrice; // Fibo TP price
+      let avgEntry: number = mainOrder?.entryPrice ?? (signal as any).gridAvgEntry ?? origEntry;
       let gridChanged = false;
-      let filledCount = (signal as any).gridFilledCount ?? 1;
-      let closedCount = (signal as any).gridClosedCount ?? 0;
+      let filledCount = orderMeta.gridFilledCount ?? (signal as any).gridFilledCount ?? 1;
+      let closedCount = orderMeta.gridClosedCount ?? (signal as any).gridClosedCount ?? 0;
 
       // Skip grid DCA fills when hedge is active (don't add to losing position)
       const skipGridFills = !!hedgeOrder; // when hedge active, don't DCA into losing position
@@ -466,7 +481,7 @@ export class PositionMonitorService implements OnModuleInit {
             }
           }
           if (grid.level >= 1 && rsiOk === false) { grid.status = "PENDING"; continue; }
-          const simTotalNotional = (signal as any).simNotional || 1000;
+          const simTotalNotional = orderMeta.simNotional || (signal as any).simNotional || 1000;
           const gridNotional = simTotalNotional * (grid.volumePct / 100);
           grid.status = "FILLED";
           grid.fillPrice = price;
@@ -514,7 +529,7 @@ export class PositionMonitorService implements OnModuleInit {
               ? (hedgeCfgNow.hedgePartialTriggerPct || 3) + 1.0  // min 4% for hedge room
               : 2.5;
             const rawSlPct = origEntry > 0
-              ? Math.abs(((signal as any).originalSlPrice || (signal as any).stopLossPrice) - origEntry) / origEntry * 100
+              ? Math.abs((orderMeta.originalSlPrice || (signal as any).originalSlPrice || (signal as any).stopLossPrice) - origEntry) / origEntry * 100
               : 2.5;
             const slPctForRecalc = Math.max(rawSlPct, minSlPctDca);
             const curDir = signal.direction;
@@ -552,20 +567,25 @@ export class PositionMonitorService implements OnModuleInit {
           ? ((price - avgEntry) / avgEntry) * 100
           : ((avgEntry - price) / avgEntry) * 100;
 
-        const prevPeak = (signal as any).peakPnlPct || 0;
+        const prevPeak = orderMeta.peakPnlPct ?? (signal as any).peakPnlPct ?? 0;
         if (pnlFromAvg > prevPeak) {
           (signal as any).peakPnlPct = pnlFromAvg;
+          if (mainOrder) await this.orderModel.findByIdAndUpdate(mainOrder._id, { 'metadata.peakPnlPct': pnlFromAvg }).catch(() => {});
         }
         const peak = (signal as any).peakPnlPct || 0;
 
         // Move SL to avg entry (break-even) at 2% from avg — skip when hedge active
-        if (!skipTrailSl && peak >= TRAIL_TRIGGER && !(signal as any).slMovedToEntry) {
+        const slAlreadyMoved = orderMeta.slMovedToEntry ?? (signal as any).slMovedToEntry;
+        if (!skipTrailSl && peak >= TRAIL_TRIGGER && !slAlreadyMoved) {
           (signal as any).stopLossPrice = avgEntry;
           (signal as any).slMovedToEntry = true;
           (signal as any).gridGlobalSlPrice = avgEntry;
           await this.aiSignalModel.findByIdAndUpdate((signal as any)._id, {
             stopLossPrice: avgEntry, slMovedToEntry: true, peakPnlPct: peak,
           }).exec();
+          if (mainOrder) await this.orderModel.findByIdAndUpdate(mainOrder._id, {
+            stopLossPrice: avgEntry, 'metadata.slMovedToEntry': true, 'metadata.peakPnlPct': peak,
+          }).catch(() => {});
           gridChanged = true;
           this.logger.log(
             `[PositionMonitor] 🛡️ Grid ${sigKey} SL → avg entry ${avgEntry.toFixed(4)} (BE, peak=${peak.toFixed(2)}%)`,
@@ -586,17 +606,21 @@ export class PositionMonitorService implements OnModuleInit {
             : Infinity;
           const nearTp = distanceToTp < 0.5;
 
-          if ((signal as any).slMovedToEntry && peak > TRAIL_TRIGGER && !nearTp) {
+          const slMovedForTrail = orderMeta.slMovedToEntry ?? (signal as any).slMovedToEntry;
+          if (slMovedForTrail && peak > TRAIL_TRIGGER && !nearTp) {
             const trailPct = peak * TRAIL_KEEP_RATIO;
             const trailSl = direction === "LONG"
               ? avgEntry * (1 + trailPct / 100)
               : avgEntry * (1 - trailPct / 100);
-            const currentSl = (signal as any).gridGlobalSlPrice || avgEntry;
+            const currentSl = mainOrder?.stopLossPrice ?? (signal as any).gridGlobalSlPrice ?? avgEntry;
             const shouldRaise = direction === "LONG" ? trailSl > currentSl : trailSl < currentSl;
             if (shouldRaise) {
               (signal as any).stopLossPrice = trailSl;
               (signal as any).gridGlobalSlPrice = trailSl;
               await this.signalQueueService.raiseStopLoss((signal as any)._id.toString(), trailSl, peak);
+              if (mainOrder) await this.orderModel.findByIdAndUpdate(mainOrder._id, {
+                stopLossPrice: trailSl, 'metadata.peakPnlPct': peak,
+              }).catch(() => {});
               gridChanged = true;
               this.logger.log(
                 `[PositionMonitor] 📈 Grid ${sigKey} trail SL → +${trailPct.toFixed(1)}% (${trailSl.toFixed(4)}) peak=${peak.toFixed(2)}%`,
@@ -609,8 +633,10 @@ export class PositionMonitorService implements OnModuleInit {
         }
 
         // TP boost at 2% peak from avg entry
-        if (pnlFromAvg >= 2.5 && !(signal as any).tpBoosted && signalTp) {
+        const tpAlreadyBoosted = orderMeta.tpBoosted ?? (signal as any).tpBoosted;
+        if (pnlFromAvg >= 2.5 && !tpAlreadyBoosted && signalTp) {
           (signal as any).tpBoosted = true;
+          if (mainOrder) await this.orderModel.findByIdAndUpdate(mainOrder._id, { 'metadata.tpBoosted': true }).catch(() => {});
           try {
             const hasMomentum = await this.marketDataService.hasVolumeMomentum(symbol);
             if (hasMomentum) {
@@ -624,6 +650,7 @@ export class PositionMonitorService implements OnModuleInit {
               await this.signalQueueService.extendTakeProfit(
                 (signal as any)._id.toString(), newTpPrice, boostedTpPct,
               );
+              if (mainOrder) await this.orderModel.findByIdAndUpdate(mainOrder._id, { takeProfitPrice: newTpPrice }).catch(() => {});
               gridChanged = true;
               this.logger.log(
                 `[PositionMonitor] 🚀 Grid ${sigKey} TP boosted to ${boostedTpPct.toFixed(1)}% from avgEntry (${newTpPrice.toFixed(4)})`,
@@ -647,6 +674,17 @@ export class PositionMonitorService implements OnModuleInit {
           (signal as any).stopLossPrice,
           (signal as any).takeProfitPrice,
         );
+        // Dual-write grid state to MAIN order metadata
+        if (mainOrder) {
+          await this.orderModel.findByIdAndUpdate(mainOrder._id, {
+            stopLossPrice: (signal as any).stopLossPrice,
+            takeProfitPrice: (signal as any).takeProfitPrice,
+            entryPrice: avgEntry,
+            'metadata.gridLevels': grids,
+            'metadata.gridFilledCount': filledCount,
+            'metadata.gridClosedCount': closedCount,
+          }).catch(() => {});
+        }
       }
 
       // Fall through to normal TP/SL check below (uses signal.stopLossPrice + takeProfitPrice
@@ -654,8 +692,8 @@ export class PositionMonitorService implements OnModuleInit {
     }
 
     // ─── Auto risk management ──────────────────────────────────────────────
-    // Use gridAvgEntry for DCA signals (reflects actual cost basis after averaging down)
-    const currentEntry = (signal as any).gridAvgEntry || entryPrice;
+    // Use mainOrder.entryPrice for DCA signals (reflects actual cost basis after averaging down)
+    const currentEntry = mainOrder?.entryPrice ?? (signal as any).gridAvgEntry ?? entryPrice;
     const pnlPct =
       direction === "LONG"
         ? ((price - currentEntry) / currentEntry) * 100
@@ -664,7 +702,7 @@ export class PositionMonitorService implements OnModuleInit {
     // Hedge loss calculation (used for TP extension + trail lock skip)
     const hedgeBanked = ((signal as any).hedgeHistory || []).reduce((s: number, h: any) => s + (h.pnlUsdt || 0), 0);
     const hedgeLoss = hedgeBanked < 0 ? Math.abs(hedgeBanked) : 0;
-    const mainNotional = (signal as any).simNotional || 1000;
+    const mainNotional = orderMeta.simNotional || (signal as any).simNotional || 1000;
 
     // Trailing SL + TP boost for non-grid signals only
     // (grid signals handle trailing in the grid block above)
@@ -676,16 +714,21 @@ export class PositionMonitorService implements OnModuleInit {
       const TRAIL_TRIGGER = cfg.trailTrigger || 2.5;
       const TRAIL_KEEP_RATIO = cfg.trailKeepRatio || 0.80;
 
-      const prevPeak = (signal as any).peakPnlPct || 0;
+      const prevPeak = orderMeta.peakPnlPct ?? (signal as any).peakPnlPct ?? 0;
       if (pnlPct > prevPeak) {
         (signal as any).peakPnlPct = pnlPct;
+        if (mainOrder) await this.orderModel.findByIdAndUpdate(mainOrder._id, { 'metadata.peakPnlPct': pnlPct }).catch(() => {});
       }
       const peak = (signal as any).peakPnlPct || 0;
 
-      if (peak >= TRAIL_TRIGGER && !(signal as any).slMovedToEntry) {
+      const slMovedNonGrid = orderMeta.slMovedToEntry ?? (signal as any).slMovedToEntry;
+      if (peak >= TRAIL_TRIGGER && !slMovedNonGrid) {
         (signal as any).stopLossPrice = currentEntry;
         (signal as any).slMovedToEntry = true;
         await this.signalQueueService.moveStopLossToEntry((signal as any)._id.toString());
+        if (mainOrder) await this.orderModel.findByIdAndUpdate(mainOrder._id, {
+          stopLossPrice: currentEntry, 'metadata.slMovedToEntry': true, 'metadata.peakPnlPct': peak,
+        }).catch(() => {});
         this.logger.log(
           `[PositionMonitor] 🛡️ ${sigKey} SL moved to entry ${currentEntry} (PnL: ${pnlPct.toFixed(2)}%)`,
         );
@@ -705,16 +748,20 @@ export class PositionMonitorService implements OnModuleInit {
       const hasHedgeLoss = hedgeLoss > mainNotional * 0.03; // hedge lost > 3% of notional
       const nearTp = distanceToTp < 0.5 && !hasHedgeLoss;
 
-      if ((signal as any).slMovedToEntry && peak > TRAIL_TRIGGER && !nearTp) {
+      const slMovedForContinuousTrail = orderMeta.slMovedToEntry ?? (signal as any).slMovedToEntry;
+      if (slMovedForContinuousTrail && peak > TRAIL_TRIGGER && !nearTp) {
         const trailPct = peak * TRAIL_KEEP_RATIO;
         const trailSl = direction === "LONG"
           ? currentEntry * (1 + trailPct / 100)
           : currentEntry * (1 - trailPct / 100);
-        const currentSl = (signal as any).stopLossPrice || currentEntry;
+        const currentSl = mainOrder?.stopLossPrice ?? (signal as any).stopLossPrice ?? currentEntry;
         const shouldRaise = direction === "LONG" ? trailSl > currentSl : trailSl < currentSl;
         if (shouldRaise) {
           (signal as any).stopLossPrice = trailSl;
           await this.signalQueueService.raiseStopLoss((signal as any)._id.toString(), trailSl, peak);
+          if (mainOrder) await this.orderModel.findByIdAndUpdate(mainOrder._id, {
+            stopLossPrice: trailSl, 'metadata.peakPnlPct': peak,
+          }).catch(() => {});
           this.logger.log(
             `[PositionMonitor] 📈 ${sigKey} trailing SL → +${trailPct.toFixed(1)}% (${trailSl.toFixed(4)}) peak: ${peak.toFixed(2)}%`,
           );
@@ -731,8 +778,10 @@ export class PositionMonitorService implements OnModuleInit {
       ? Math.min(10, 6 + (hedgeLoss / mainNotional) * 100 * 0.3)
       : 6;
 
-    if (pnlPct >= 2.5 && !(signal as any).tpBoosted && takeProfitPrice) {
+    const tpBoostedNonGrid = orderMeta.tpBoosted ?? (signal as any).tpBoosted;
+    if (pnlPct >= 2.5 && !tpBoostedNonGrid && takeProfitPrice) {
       (signal as any).tpBoosted = true;
+      if (mainOrder) await this.orderModel.findByIdAndUpdate(mainOrder._id, { 'metadata.tpBoosted': true }).catch(() => {});
       try {
         const hasMomentum = await this.marketDataService.hasVolumeMomentum(symbol);
         if (hasMomentum) {
@@ -745,6 +794,7 @@ export class PositionMonitorService implements OnModuleInit {
           await this.signalQueueService.extendTakeProfit(
             (signal as any)._id.toString(), newTpPrice, boostedTpPct,
           );
+          if (mainOrder) await this.orderModel.findByIdAndUpdate(mainOrder._id, { takeProfitPrice: newTpPrice }).catch(() => {});
           this.logger.log(
             `[PositionMonitor] 🚀 ${sigKey} TP boosted to ${boostedTpPct.toFixed(1)}% (${newTpPrice.toFixed(4)}) — volume momentum detected`,
           );
@@ -861,7 +911,7 @@ export class PositionMonitorService implements OnModuleInit {
         }
 
         // Check main TP hit while hedge active → FLIP takes priority over NET_POSITIVE
-        const effectiveTpHedge = (signal as any).takeProfitPrice;
+        const effectiveTpHedge = mainOrder?.takeProfitPrice || (signal as any).takeProfitPrice;
         let mainTpHitForFlip = false;
         if (effectiveTpHedge) {
           const mainTpHit = direction === "LONG" ? price >= effectiveTpHedge : price <= effectiveTpHedge;
@@ -1006,9 +1056,9 @@ export class PositionMonitorService implements OnModuleInit {
     }
 
     // ─── Original TP/SL check (non-grid signals) ──────────────────────────
-    // Re-read takeProfitPrice in case it was boosted above
-    const effectiveTpPrice = (signal as any).takeProfitPrice ?? takeProfitPrice;
-    const stopLossPrice = (signal as any).stopLossPrice;
+    // Re-read takeProfitPrice in case it was boosted above — prefer order as source of truth
+    const effectiveTpPrice = mainOrder?.takeProfitPrice || ((signal as any).takeProfitPrice ?? takeProfitPrice);
+    const stopLossPrice = mainOrder?.stopLossPrice ?? (signal as any).stopLossPrice;
     // SL=0 means hedge mode (SL disabled) — never trigger SL on price check
     const slHit = stopLossPrice > 0
       ? (direction === "LONG" ? price <= stopLossPrice : price >= stopLossPrice)
@@ -1094,6 +1144,12 @@ export class PositionMonitorService implements OnModuleInit {
       if (flipHedgeOrderDoc) {
         await this.orderModel.findByIdAndUpdate(flipHedgeOrderDoc._id, {
           type: 'FLIP_MAIN', stopLossPrice: newSl, takeProfitPrice: newTp, cycleNumber: 0,
+          'metadata.peakPnlPct': 0,
+          'metadata.slMovedToEntry': false,
+          'metadata.tpBoosted': false,
+          'metadata.originalSlPrice': newSl,
+          'metadata.originalEntryPrice': newEntry,
+          'metadata.simNotional': signal.simNotional || 1000,
         });
       }
 
@@ -1186,6 +1242,15 @@ export class PositionMonitorService implements OnModuleInit {
 
       await this.signalQueueService.updateSignalGrid((signal as any)._id.toString(), newGrids, 1, 0);
       await this.signalQueueService.initGridSignal((signal as any)._id.toString(), newEntry, newSl, newEntry);
+
+      // Write grid metadata to promoted FLIP_MAIN order
+      if (flipHedgeOrderDoc) {
+        await this.orderModel.findByIdAndUpdate(flipHedgeOrderDoc._id, {
+          'metadata.gridLevels': newGrids,
+          'metadata.gridFilledCount': 1,
+          'metadata.gridClosedCount': 0,
+        }).catch(() => {});
+      }
 
       this.logger.log(
         `[PositionMonitor] 🔄 ${sigKey} FLIPPED to ${newDirection} | Entry: ${newEntry} | SL: ${newSl} (${flipSlPct}%) | TP: ${newTp} (${flipTpPct}%) | Main TP profit: $${mainPnlTotal.toFixed(2)}`,
@@ -1595,6 +1660,12 @@ export class PositionMonitorService implements OnModuleInit {
     (signal as any).hedgeSafetySlPrice = 0;
     this.logger.log(`[PositionMonitor] ${sigKey} SL DISABLED — hedge active, catastrophic stop at -25% remains`);
 
+    // Update MAIN order SL to 0 (hedge manages risk)
+    await this.orderModel.findOneAndUpdate(
+      { signalId: (signal as any)._id, type: MAIN_ORDER_TYPES, status: 'OPEN' },
+      { stopLossPrice: 0 },
+    ).catch(() => {});
+
     // Persist to DB
     await this.aiSignalModel.findByIdAndUpdate(signalId, {
       hedgeActive: true,
@@ -1711,6 +1782,12 @@ export class PositionMonitorService implements OnModuleInit {
       updates.hedgeSafetySlPrice = finalSlPrice;
     }
     this.logger.log(`[PositionMonitor] ${sigKey} SL restored to ${finalSlPrice} (${finalSlPercent.toFixed(1)}%) after hedge close`);
+
+    // Restore SL on MAIN order
+    await this.orderModel.findOneAndUpdate(
+      { signalId: (signal as any)._id, type: MAIN_ORDER_TYPES, status: 'OPEN' },
+      { stopLossPrice: finalSlPrice },
+    ).catch(() => {});
 
     // Update in-memory signal
     (signal as any).hedgeActive = false;
