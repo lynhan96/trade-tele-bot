@@ -1586,7 +1586,7 @@ export class AiSignalService implements OnModuleInit {
       const modeLabel = isTest ? "Test mode" : "Live";
       const cycle = (signal.hedgeCycleCount || 0) + 1;
 
-      if (action.action === "OPEN_PARTIAL" || action.action === "UPGRADE_FULL") {
+      if (action.action === "OPEN_FULL" || action.action === "OPEN_PARTIAL" || action.action === "UPGRADE_FULL") {
         const phaseLabel = action.hedgePhase === "FULL" ? "FULL 100%" : "PARTIAL 50%";
         const banked = action.bankedProfit ?? 0;
         const text =

@@ -468,7 +468,8 @@ export class UserRealTradingService implements OnModuleInit {
     newSlPrice: number,
     direction: string,
   ): Promise<void> {
-    const openTrades = await this.userTradeModel.find({ symbol, status: "OPEN" }).lean();
+    // Only move SL for main trades (not hedge) matching the direction
+    const openTrades = await this.userTradeModel.find({ symbol, status: "OPEN", direction, isHedge: { $ne: true } }).lean();
     if (openTrades.length === 0) return;
 
     // Round price to exchange precision before placing orders
@@ -559,7 +560,8 @@ export class UserRealTradingService implements OnModuleInit {
     newTpPrice: number,
     direction: string,
   ): Promise<void> {
-    const openTrades = await this.userTradeModel.find({ symbol, status: "OPEN" }).lean();
+    // Only move TP for main trades (not hedge) matching the direction
+    const openTrades = await this.userTradeModel.find({ symbol, status: "OPEN", direction, isHedge: { $ne: true } }).lean();
     if (openTrades.length === 0) return;
 
     const pricePrecision = await this.getPricePrecision(symbol);
@@ -2387,57 +2389,103 @@ export class UserRealTradingService implements OnModuleInit {
     const signalId = signal._id?.toString();
     if (!signalId) return;
 
-    if (action.action === 'OPEN_PARTIAL' || action.action === 'UPGRADE_FULL') {
-      // Create OPEN hedge trade for each real subscriber
+    if (action.action === 'OPEN_FULL' || action.action === 'OPEN_PARTIAL' || action.action === 'UPGRADE_FULL') {
+      // Open hedge trade for each real subscriber (Binance Hedge Mode)
       const subscribers = await this.subscriptionService.findRealModeSubscribers();
       for (const sub of subscribers) {
-        // Find parent trade for this signal
-        const parentTrade = await this.userTradeModel.findOne({
-          telegramId: sub.telegramId,
-          aiSignalId: signalId,
-          status: 'OPEN',
-          isHedge: { $ne: true },
-        });
-        if (!parentTrade) continue;
+        try {
+          // Find parent (main) trade for this signal
+          const parentTrade = await this.userTradeModel.findOne({
+            telegramId: sub.telegramId,
+            aiSignalId: signalId,
+            status: 'OPEN',
+            isHedge: { $ne: true },
+          });
+          if (!parentTrade) continue;
 
-        // Check if hedge trade already exists
-        const existingHedge = await this.userTradeModel.findOne({
-          telegramId: sub.telegramId,
-          aiSignalId: signalId,
-          isHedge: true,
-          status: 'OPEN',
-        });
-        if (existingHedge) continue;
+          // Check if hedge trade already exists
+          const existingHedge = await this.userTradeModel.findOne({
+            telegramId: sub.telegramId,
+            aiSignalId: signalId,
+            isHedge: true,
+            status: 'OPEN',
+          });
+          if (existingHedge) continue;
 
-        const hedgeDir = action.hedgeDirection || (signal.direction === 'LONG' ? 'SHORT' : 'LONG');
-        const hedgeNotional = action.hedgeNotional || 0;
-        const hedgeQty = hedgeNotional / price;
+          const hedgeDir = action.hedgeDirection || (signal.direction === 'LONG' ? 'SHORT' : 'LONG');
+          const hedgeNotional = action.hedgeNotional || 0;
+          if (hedgeNotional <= 0) continue;
 
-        await this.userTradeModel.create({
-          telegramId: sub.telegramId,
-          chatId: sub.chatId,
-          symbol: signal.symbol,
-          direction: hedgeDir,
-          entryPrice: price,
-          quantity: hedgeQty,
-          leverage: parentTrade.leverage || 1,
-          notionalUsdt: hedgeNotional,
-          slPrice: 0,
-          tpPrice: action.hedgeTpPrice || 0,
-          status: 'OPEN',
-          openedAt: new Date(),
-          aiSignalId: signalId,
-          isHedge: true,
-          parentTradeId: parentTrade._id,
-          hedgeCycle: (signal.hedgeCycleCount || 0) + 1,
-          hedgePhase: action.hedgePhase || 'PARTIAL',
-        });
+          // Place REAL Binance hedge order (Hedge Mode — opposite side)
+          const keys = await this.userSettingsService.getApiKeys(sub.telegramId, 'binance');
+          if (!keys?.apiKey) continue;
 
-        this.logger.log(
-          `[UserRealTrading] Hedge trade created for ${sub.telegramId} | ${signal.symbol} ${hedgeDir} $${hedgeNotional.toFixed(0)} @ ${price}`,
-        );
+          const [qtyPrec, pricePrec] = await Promise.all([
+            this.getQuantityPrecision(signal.symbol),
+            this.getPricePrecision(signal.symbol),
+          ]);
+          const hedgeQty = parseFloat((hedgeNotional / price).toFixed(qtyPrec));
+          if (hedgeQty <= 0) continue;
+
+          let fillPrice = price;
+          try {
+            const order = await this.binanceService.openPosition(keys.apiKey, keys.apiSecret, {
+              symbol: signal.symbol,
+              side: hedgeDir as 'LONG' | 'SHORT',
+              quantity: hedgeQty,
+              leverage: parentTrade.leverage || 1,
+            });
+            fillPrice = parseFloat(order?.avgPrice || order?.price) || price;
+            this.logger.log(`[UserRealTrading] Hedge order placed on Binance: ${signal.symbol} ${hedgeDir} qty=${hedgeQty} fill=${fillPrice}`);
+          } catch (err) {
+            this.logger.error(`[UserRealTrading] Hedge Binance order FAILED for ${sub.telegramId} ${signal.symbol}: ${err?.message}`);
+            continue; // Don't create trade record if Binance order failed
+          }
+
+          // Place TP order for hedge on Binance (if configured)
+          if (action.hedgeTpPrice) {
+            try {
+              await this.binanceService.setTakeProfitAtPrice(
+                keys.apiKey, keys.apiSecret,
+                signal.symbol,
+                parseFloat(action.hedgeTpPrice.toFixed(pricePrec)),
+                hedgeDir as 'LONG' | 'SHORT',
+                hedgeQty,
+              );
+            } catch (err) {
+              this.logger.warn(`[UserRealTrading] Hedge TP order failed: ${err?.message}`);
+            }
+          }
+
+          await this.userTradeModel.create({
+            telegramId: sub.telegramId,
+            chatId: sub.chatId,
+            symbol: signal.symbol,
+            direction: hedgeDir,
+            entryPrice: fillPrice,
+            quantity: hedgeQty,
+            leverage: parentTrade.leverage || 1,
+            notionalUsdt: hedgeNotional,
+            slPrice: 0,
+            tpPrice: action.hedgeTpPrice || 0,
+            status: 'OPEN',
+            openedAt: new Date(),
+            aiSignalId: signalId,
+            isHedge: true,
+            parentTradeId: parentTrade._id,
+            hedgeCycle: (signal.hedgeCycleCount || 0) + 1,
+            hedgePhase: action.hedgePhase || 'FULL',
+          });
+
+          this.logger.log(
+            `[UserRealTrading] Hedge trade opened for ${sub.telegramId} | ${signal.symbol} ${hedgeDir} $${hedgeNotional.toFixed(0)} @ ${fillPrice}`,
+          );
+        } catch (err) {
+          this.logger.error(`[UserRealTrading] Hedge open error for ${sub.telegramId}: ${err?.message}`);
+        }
       }
     } else if (action.action === 'CLOSE_HEDGE') {
+      const isFlip = action.hedgePhase === 'FLIP';
       // Close all open hedge trades for this signal
       const openHedges = await this.userTradeModel.find({
         aiSignalId: signalId,
@@ -2446,29 +2494,127 @@ export class UserRealTradingService implements OnModuleInit {
       });
 
       for (const hedge of openHedges) {
-        const pnlPct = hedge.direction === 'LONG'
-          ? ((price - hedge.entryPrice) / hedge.entryPrice) * 100
-          : ((hedge.entryPrice - price) / hedge.entryPrice) * 100;
-        const pnlUsdt = Math.round((pnlPct / 100) * hedge.notionalUsdt * 100) / 100;
+        try {
+          // Close REAL Binance hedge position
+          const keys = await this.userSettingsService.getApiKeys(hedge.telegramId, 'binance');
+          if (keys?.apiKey) {
+            try {
+              await this.binanceService.closePosition(
+                keys.apiKey, keys.apiSecret,
+                hedge.symbol, hedge.quantity, hedge.direction,
+              );
+              this.logger.log(`[UserRealTrading] Hedge Binance position closed: ${hedge.symbol} ${hedge.direction} qty=${hedge.quantity}`);
+            } catch (err) {
+              this.logger.error(`[UserRealTrading] Hedge Binance close FAILED for ${hedge.telegramId} ${hedge.symbol}: ${err?.message}`);
+            }
+          }
 
-        let closeReason = 'HEDGE_CLOSE';
-        if (action.reason?.includes('Recovery')) closeReason = 'HEDGE_RECOVERY';
-        else if (action.reason?.includes('trail')) closeReason = 'HEDGE_TRAIL';
-        else if (action.reason?.includes('TP')) closeReason = 'HEDGE_TP';
-        else if (pnlUsdt >= 0) closeReason = 'HEDGE_TP';
+          const pnlPct = hedge.direction === 'LONG'
+            ? ((price - hedge.entryPrice) / hedge.entryPrice) * 100
+            : ((hedge.entryPrice - price) / hedge.entryPrice) * 100;
+          const pnlUsdt = Math.round((pnlPct / 100) * hedge.notionalUsdt * 100) / 100;
 
-        await this.userTradeModel.findByIdAndUpdate(hedge._id, {
-          status: 'CLOSED',
-          exitPrice: price,
-          pnlPercent: Math.round(pnlPct * 100) / 100,
-          pnlUsdt,
-          closeReason,
-          closedAt: new Date(),
-        });
+          let closeReason = 'HEDGE_CLOSE';
+          if (isFlip) closeReason = 'HEDGE_FLIP';
+          else if (action.reason?.includes('Recovery')) closeReason = 'HEDGE_RECOVERY';
+          else if (action.reason?.includes('trail')) closeReason = 'HEDGE_TRAIL';
+          else if (action.reason?.includes('TP')) closeReason = 'HEDGE_TP';
+          else if (pnlUsdt >= 0) closeReason = 'HEDGE_TP';
 
-        this.logger.log(
-          `[UserRealTrading] Hedge trade closed for ${hedge.telegramId} | ${signal.symbol} PnL: ${pnlPct.toFixed(2)}% ($${pnlUsdt})`,
-        );
+          await this.userTradeModel.findByIdAndUpdate(hedge._id, {
+            status: 'CLOSED',
+            exitPrice: price,
+            pnlPercent: Math.round(pnlPct * 100) / 100,
+            pnlUsdt,
+            closeReason,
+            closedAt: new Date(),
+          });
+
+          this.logger.log(
+            `[UserRealTrading] Hedge trade closed for ${hedge.telegramId} | ${signal.symbol} PnL: ${pnlPct.toFixed(2)}% ($${pnlUsdt}) reason=${closeReason}`,
+          );
+
+          // FLIP: Close main trade (old direction) + open new main (flipped direction)
+          if (isFlip) {
+            const mainTrade = await this.userTradeModel.findOne({
+              telegramId: hedge.telegramId,
+              aiSignalId: signalId,
+              status: 'OPEN',
+              isHedge: { $ne: true },
+            });
+            if (mainTrade && keys?.apiKey) {
+              // Close old main position on Binance
+              try {
+                await this.binanceService.closePosition(
+                  keys.apiKey, keys.apiSecret,
+                  mainTrade.symbol, mainTrade.quantity, mainTrade.direction,
+                );
+                this.logger.log(`[UserRealTrading] FLIP: closed main Binance position ${mainTrade.symbol} ${mainTrade.direction}`);
+              } catch (err) {
+                this.logger.error(`[UserRealTrading] FLIP: main close FAILED: ${err?.message}`);
+              }
+
+              // Close main trade record
+              const mainPnlPct = mainTrade.direction === 'LONG'
+                ? ((price - mainTrade.entryPrice) / mainTrade.entryPrice) * 100
+                : ((mainTrade.entryPrice - price) / mainTrade.entryPrice) * 100;
+              const mainPnlUsdt = Math.round((mainPnlPct / 100) * mainTrade.notionalUsdt * 100) / 100;
+
+              await this.userTradeModel.findByIdAndUpdate(mainTrade._id, {
+                status: 'CLOSED',
+                exitPrice: price,
+                pnlPercent: Math.round(mainPnlPct * 100) / 100,
+                pnlUsdt: mainPnlUsdt,
+                closeReason: 'FLIP',
+                closedAt: new Date(),
+              });
+
+              // Open new main trade in flipped direction (hedge direction becomes new main)
+              const newDirection = hedge.direction; // hedge was opposite, now becomes main
+              const newNotional = mainTrade.notionalUsdt; // same volume as original main
+              const [qtyPrec] = await Promise.all([this.getQuantityPrecision(signal.symbol)]);
+              const newQty = parseFloat((newNotional / price).toFixed(qtyPrec));
+
+              if (newQty > 0) {
+                try {
+                  const flipOrder = await this.binanceService.openPosition(keys.apiKey, keys.apiSecret, {
+                    symbol: signal.symbol,
+                    side: newDirection as 'LONG' | 'SHORT',
+                    quantity: newQty,
+                    leverage: mainTrade.leverage || 1,
+                  });
+                  const flipFill = parseFloat(flipOrder?.avgPrice || flipOrder?.price) || price;
+
+                  await this.userTradeModel.create({
+                    telegramId: hedge.telegramId,
+                    chatId: mainTrade.chatId,
+                    symbol: signal.symbol,
+                    direction: newDirection,
+                    entryPrice: flipFill,
+                    quantity: newQty,
+                    leverage: mainTrade.leverage || 1,
+                    notionalUsdt: newNotional,
+                    slPrice: 0,
+                    tpPrice: 0,
+                    status: 'OPEN',
+                    openedAt: new Date(),
+                    aiSignalId: signalId,
+                    isHedge: false,
+                    isFlipped: true,
+                  });
+
+                  this.logger.log(
+                    `[UserRealTrading] FLIP: new main trade ${signal.symbol} ${newDirection} $${newNotional.toFixed(0)} @ ${flipFill}`,
+                  );
+                } catch (err) {
+                  this.logger.error(`[UserRealTrading] FLIP: new main open FAILED: ${err?.message}`);
+                }
+              }
+            }
+          }
+        } catch (err) {
+          this.logger.error(`[UserRealTrading] Hedge close error for ${hedge.telegramId}: ${err?.message}`);
+        }
       }
     }
   }
