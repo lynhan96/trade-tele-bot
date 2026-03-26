@@ -1,28 +1,18 @@
 {
   "permissions": {
     "allow": [
-      "Bash(npx prettier:*)",
-      "Bash(npx tsc:*)",
-      "WebFetch(domain:github.com)",
-      "WebFetch(domain:developers.binance.com)",
-      "Bash(npx nest build:*)",
-      "Bash(yarn build:*)",
-      "Bash(yarn build)",
-      "Bash(yarn install:*)",
-      "Bash(yarn add:*)",
-      "Bash(npm run build:*)",
-      "Bash(npm install:*)",
-      "Bash(wc:*)",
-      "Bash(ls:*)",
-      "Bash(find:*)",
-      "Bash(xargs:*)",
-      "Bash(fc:*)",
-      "Bash(mkdir:*)",
-      "Bash(sed:*)",
-      "Read(//Users/elvislee/Workspace/DTS/elvis/admin/src/**)"
+      "Bash",
+      "Read(**)",
+      "Write(**)",
+      "Edit(**)",
+      "WebFetch(*)",
+      "WebSearch"
     ],
     "additionalDirectories": [
-      "/Users/elvislee/Workspace/DTS/elvis/admin/src/pages"
+      "/Users/elvislee/Workspace/DTS/elvis/admin/src/pages",
+      "/Users/elvislee/Workspace/DTS/elvis/admin/src",
+      "/Users/elvislee/.claude",
+      "/tmp"
     ]
   }
 }

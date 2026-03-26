@@ -139,6 +139,9 @@ export interface TradingConfig {
   // ── OP + On-Chain Strategy ─────────────────────────────────────────────
   opOnchainEnabled: boolean;         // Enable OP_ONCHAIN strategy (default true)
   gateOpOnchain: number;             // Min confidence for OP_ONCHAIN (default 65)
+
+  // Regime-adaptive SL/TP overrides (key = regime name)
+  regimeSlTp: Record<string, { slMin: number; slMax: number; tpMin: number; tpMax: number; gridEnabled?: boolean }>;
 }
 
 export const DEFAULT_TRADING_CONFIG: TradingConfig = {
@@ -171,8 +174,8 @@ export const DEFAULT_TRADING_CONFIG: TradingConfig = {
   // Time stop
   timeStopHours: 24, timeStopPnlRange: 0.5,
 
-  // DCA Grid
-  gridLevelCount: 3, gridFillCooldownMin: 5,
+  // DCA Grid — 4 levels to average down before hedge trigger
+  gridLevelCount: 4, gridFillCooldownMin: 5,
   gridRsiLong: 45, gridRsiShort: 55,
 
   // Market Guard
@@ -242,6 +245,15 @@ export const DEFAULT_TRADING_CONFIG: TradingConfig = {
   // OP + On-Chain Strategy
   opOnchainEnabled: true,
   gateOpOnchain: 65,
+
+  // Regime-adaptive SL/TP — let winners run in trending, tight in sideways
+  regimeSlTp: {
+    STRONG_BULL: { slMin: 1.5, slMax: 2.5, tpMin: 4.0, tpMax: 6.0, gridEnabled: true },
+    STRONG_BEAR: { slMin: 1.5, slMax: 2.5, tpMin: 4.0, tpMax: 6.0, gridEnabled: true },
+    VOLATILE:    { slMin: 2.5, slMax: 3.5, tpMin: 3.0, tpMax: 4.5, gridEnabled: true },
+    SIDEWAYS:    { slMin: 1.5, slMax: 2.0, tpMin: 1.5, tpMax: 2.5, gridEnabled: false },
+    RANGE_BOUND: { slMin: 1.5, slMax: 2.0, tpMin: 1.5, tpMax: 2.5, gridEnabled: false },
+  },
 };
 
 const TRADING_CONFIG_KEY = "cache:ai:trading-config";

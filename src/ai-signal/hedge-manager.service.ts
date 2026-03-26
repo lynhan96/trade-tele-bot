@@ -270,6 +270,19 @@ export class HedgeManagerService {
    */
   getHedgeTpPrice(entryPrice: number, direction: string, regime: string): number {
     const cfg = this.tradingConfig.get();
+
+    // Hedge TP = 65% of main TP from regime config (scale together)
+    const regimeSlTp = cfg.regimeSlTp?.[regime];
+    if (regimeSlTp) {
+      const mainTpPct = (regimeSlTp.tpMin + regimeSlTp.tpMax) / 2;
+      const tpPct = mainTpPct * 0.65;
+      this.logger.debug(`[HedgeManager] Hedge TP from regime ${regime}: main avg ${mainTpPct.toFixed(1)}% × 0.65 = ${tpPct.toFixed(1)}%`);
+      return direction === 'LONG'
+        ? +(entryPrice * (1 + tpPct / 100)).toFixed(6)
+        : +(entryPrice * (1 - tpPct / 100)).toFixed(6);
+    }
+
+    // Fallback: use fixed config values
     let tpPct: number;
     if (regime === 'STRONG_BULL' || regime === 'STRONG_BEAR') {
       tpPct = cfg.hedgeTpPctTrend;
@@ -309,22 +322,26 @@ export class HedgeManagerService {
       // NOTE: Net Positive Exit is handled in PositionMonitor.handlePriceTick (closes both hedge + main)
       // Do NOT duplicate here — PositionMonitor has full context to resolve the main signal.
 
-      // ── 1. Recovery Close: ONLY when hedge has meaningful profit (>= 1.5%) ──
-      // NEVER close hedge at a loss or tiny profit — let it ride to TP/trail/FLIP
-      // ONDO lesson: repeated recovery-close cycles with small profits accumulated net losses
-      // Stricter recovery: main must be > 1% (not just > 0) to avoid closing hedge on tiny recovery
-      // OR hedge must be very profitable (> 2.5%) to justify closing regardless
-      if (mainPnlPct !== undefined && ((mainPnlPct > 1.0 && hedgePnlPct >= 1.5) || hedgePnlPct >= 2.5) && mainPnlPct > 0) {
-        const banked = (signal.hedgeHistory || []).reduce((sum: number, h: any) => sum + (h.pnlUsdt || 0), 0);
+      // ── 1. Recovery Close: 3 conditions (any one triggers close) ──
+      // A) Soft: main > 0.5% AND hedge >= 1.0% (both sides slightly profitable)
+      // B) Hedge run: hedge >= 3.0% alone (great hedge run, bank it regardless)
+      // C) Banked total: accumulated hedge profits > $20 (already made money from this symbol)
+      const banked = (signal.hedgeHistory || []).reduce((sum: number, h: any) => sum + (h.pnlUsdt || 0), 0);
+      const softClose = mainPnlPct !== undefined && mainPnlPct > 0.5 && hedgePnlPct >= 1.0;
+      const hedgeRun = hedgePnlPct >= 3.0;
+      const bankedTotal = banked + hedgePnlUsdt > 20;
+      if (softClose || hedgeRun || bankedTotal) {
+        const reason = softClose ? `Recovery soft: main +${mainPnlPct?.toFixed(2)}%`
+          : hedgeRun ? `Hedge run: +${hedgePnlPct.toFixed(2)}%`
+          : `Banked total: $${(banked + hedgePnlUsdt).toFixed(2)}`;
         this.logger.log(
-          `[${signal.coin}] Hedge RECOVERY CLOSE (profitable) | Main at +${mainPnlPct.toFixed(2)}% | ` +
+          `[${signal.coin}] Hedge RECOVERY CLOSE | ${reason} | ` +
           `Hedge PnL: +${hedgePnlPct.toFixed(2)}% (+$${hedgePnlUsdt.toFixed(2)}) | Banked: $${banked.toFixed(2)}`,
         );
-        return this.closeHedgeWithProfit(signal, signalId, hedgePnlPct, hedgePnlUsdt, cfg,
-          `Recovery close: main +${mainPnlPct.toFixed(2)}%`);
+        return this.closeHedgeWithProfit(signal, signalId, hedgePnlPct, hedgePnlUsdt, cfg, reason);
       }
       if (mainPnlPct !== undefined && mainPnlPct > 0) {
-        this.logger.debug(`[${signal.coin}] Recovery skip: main +${mainPnlPct.toFixed(2)}% hedge +${hedgePnlPct.toFixed(2)}% — need main>1%+hedge≥1.5% or hedge≥2.5%`);
+        this.logger.debug(`[${signal.coin}] Recovery skip: main +${mainPnlPct.toFixed(2)}% hedge +${hedgePnlPct.toFixed(2)}% — need soft(0.5%+1%) or hedge≥3% or banked>$20`);
       }
       // Hedge losing → hold. Exits: trailing TP, NET_POSITIVE, FLIP (in PositionMonitor)
 

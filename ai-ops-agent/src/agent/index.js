@@ -88,7 +88,7 @@ async function start() {
   logger.info("=".repeat(50))
   logger.info("🤖 AI Trading Advisor v9")
   logger.info(`Commit: ${JSON.stringify(getCurrentCommit())}`)
-  logger.info("9 skills/15min | Claude Sonnet analysis/4h | Report/4h | Smart alerts/15min")
+  logger.info("9 skills/15min | Claude Sonnet analysis/2h | Report/4h | Smart alerts/15min")
   logger.info("Role: ADVISOR — adaptive config + auto-protection + learning + microstructure")
   logger.info("=".repeat(50))
 
@@ -100,9 +100,9 @@ async function start() {
   // Wrap in arrow fn to prevent cron passing Date as silent arg
   cron.schedule("*/15 * * * *", () => runLightCheck())
 
-  // Claude analysis: every 4h (0:00, 4:00, 8:00, 12:00, 16:00, 20:00 UTC)
-  // ~6 calls/day using Sonnet 4.6 — fits within Max plan quota
-  cron.schedule("0 */4 * * *", () => runAnalysis())
+  // Claude analysis: every 2h — 12 calls/day using Sonnet 4.6
+  // More frequent = faster adaptation to market regime changes
+  cron.schedule("0 */2 * * *", () => runAnalysis())
 
   logger.info("Agent running.")
 }

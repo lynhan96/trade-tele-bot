@@ -296,9 +296,10 @@ export class PositionMonitorService implements OnModuleInit {
     });
     const orderMeta = (mainOrder as any)?.metadata || {};
 
-    const GRID_LEVEL_COUNT = cfg.gridLevelCount || 3;
-    // DCA volume weights: L0=40% base, L1=25%, L2=35% (sum=100)
-    const DCA_WEIGHTS = [40, 25, 35];
+    const GRID_LEVEL_COUNT = cfg.gridLevelCount || 4;
+    // DCA volume weights: L0=35% base, L1=20%, L2=25%, L3=20% (sum=100)
+    // L3 fills BEFORE hedge trigger — maximizes avg entry improvement
+    const DCA_WEIGHTS = [35, 20, 25, 20];
 
     const gridLevels: any[] = orderMeta.gridLevels ?? (signal as any).gridLevels ?? [];
     const isGridSignal = gridLevels.length > 0;
@@ -450,12 +451,16 @@ export class PositionMonitorService implements OnModuleInit {
                 const rsiVals = RSI.calculate({ period: 14, values: closes });
                 const rsi = rsiVals[rsiVals.length - 1];
                 const cfg = this.tradingConfig?.get();
-                const rsiLongThresh = cfg?.gridRsiLong ?? 45;
-                const rsiShortThresh = cfg?.gridRsiShort ?? 55;
+                // Softer RSI per level: L1=48/52, L2=45/55, L3+=42/58
+                const baseLong = cfg?.gridRsiLong ?? 45;
+                const baseShort = cfg?.gridRsiShort ?? 55;
+                const levelOffset = grid.level === 1 ? 3 : grid.level === 2 ? 0 : -3;
+                const rsiLongThresh = baseLong + levelOffset;
+                const rsiShortThresh = baseShort - levelOffset;
                 const rsiExhausted = direction === "LONG" ? rsi < rsiLongThresh : rsi > rsiShortThresh;
 
                 if (grid.level <= 2) {
-                  // L1-L2: RSI only — allow DCA more freely to avg down
+                  // L1-L2: RSI only — softer thresholds to fill before hedge trigger
                   rsiOk = rsiExhausted;
                 } else {
                   // L3+: RSI + sustained check (bigger positions need confirmation)

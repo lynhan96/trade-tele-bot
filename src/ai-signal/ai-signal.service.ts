@@ -810,6 +810,18 @@ export class AiSignalService implements OnModuleInit {
         this.logger.warn(`[AiSignal] AI Signal Gate error for ${signalKey}: ${err?.message} — pass-through`);
       }
 
+      // ── Regime-adaptive SL/TP override ──
+      const regimeSlTp = cfg.regimeSlTp?.[params.regime];
+      if (regimeSlTp) {
+        const origSl = params.stopLossPercent;
+        const origTp = params.takeProfitPercent;
+        params.stopLossPercent = Math.max(regimeSlTp.slMin, Math.min(regimeSlTp.slMax, params.stopLossPercent || regimeSlTp.slMax));
+        params.takeProfitPercent = Math.max(regimeSlTp.tpMin, Math.min(regimeSlTp.tpMax, params.takeProfitPercent || regimeSlTp.tpMax));
+        if (origSl !== params.stopLossPercent || origTp !== params.takeProfitPercent) {
+          this.logger.log(`[AiSignal] ${signalKey} regime ${params.regime} SL/TP adjusted: SL ${origSl}→${params.stopLossPercent}% TP ${origTp}→${params.takeProfitPercent}%`);
+        }
+      }
+
       // ── AI direction-aware confidence (Tier 3) ──
       try {
         const aiAnalysis = await this.aiMarketAnalyst.getAnalysis();

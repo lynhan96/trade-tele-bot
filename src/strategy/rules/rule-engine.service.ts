@@ -345,9 +345,19 @@ export class RuleEngineService {
       };
     }
 
-    // Single strategy fired — still valid
+    // High-quality strategies allowed to fire ALONE (no confluence needed)
+    const HIGH_QUALITY_SOLO = ['STOCH_EMA_KDJ', 'OP_ONCHAIN'];
+    const soloStrategy = winners[0]?.strategy;
+    if (soloStrategy && HIGH_QUALITY_SOLO.includes(soloStrategy)) {
+      this.logger.log(
+        `[RuleEngine] ${coin} ★ ${isLong ? "LONG" : "SHORT"} solo high-quality: ${soloStrategy}${agentNotes}`,
+      );
+      return { ...primary, reason: `Solo ${soloStrategy}: ${primary.reason}${agentNotes}`, sgFilters: sgResult.reasons, onChainFilters: ocResult.reasons };
+    }
+
+    // Other single strategies — still allowed but logged as weaker signal
     this.logger.debug(
-      `[RuleEngine] ${coin} △ ${winners[0].strategy} fired alone (1/${strategies.length}) — allowed as single${agentNotes}`,
+      `[RuleEngine] ${coin} △ ${soloStrategy} fired alone (1/${strategies.length}) — allowed as single${agentNotes}`,
     );
     return { ...primary, reason: `${primary.reason}${agentNotes}`, sgFilters: sgResult.reasons, onChainFilters: ocResult.reasons };
   }
