@@ -914,9 +914,10 @@ export class PositionMonitorService implements OnModuleInit {
 
         // NET_POSITIVE: only trigger on BANKED profit (realized), not current hedge PnL
         // Hedge should close via its own TP/trail — NET_POSITIVE is for banked recovery only
-        // Require minimum $2 net to avoid closing for dust amounts
+        // Require banked net > 5% of filled volume to ensure meaningful profit
         const bankedNetPnl = mainUnrealizedUsdt + bankedProfit;
-        if (bankedNetPnl > 2) {
+        const netPositiveThreshold = filledVol * 0.05; // 5% of position size
+        if (bankedNetPnl > netPositiveThreshold) {
           this.logger.log(
             `[PositionMonitor] ${sigKey} NET POSITIVE EXIT | main=$${mainUnrealizedUsdt.toFixed(2)} banked=$${bankedProfit.toFixed(2)} hedge=$${currentHedgePnlUsdt.toFixed(2)} → bankedNet=$${bankedNetPnl.toFixed(2)}`,
           );
