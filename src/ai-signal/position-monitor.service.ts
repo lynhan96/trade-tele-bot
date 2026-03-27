@@ -855,7 +855,7 @@ export class PositionMonitorService implements OnModuleInit {
         const exitAction = this.hedgeManager.checkHedgeExit(signal, price, pnlPct, hedgeOrder);
         if (exitAction && exitAction.action === "CLOSE_HEDGE") {
           await this.handleHedgeClose(signal, exitAction, price);
-          hedgeOrder = null; // order now CLOSED — prevent stale reads in NET_POSITIVE/FLIP below
+          return; // Hedge closed (TP/trail/recovery) — skip NET_POSITIVE, let next tick reassess
         } else if (exitAction && exitAction.action === 'NONE') {
           // Update flags from hedge manager (breakeven lock, trail activated)
           const updates: Record<string, any> = {};
@@ -912,9 +912,13 @@ export class PositionMonitorService implements OnModuleInit {
 
         let forceCloseReason: "NET_POSITIVE" | "CATASTROPHIC_STOP" | null = null;
 
-        if (netPnlUsdt > 0) {
+        // NET_POSITIVE: only trigger on BANKED profit (realized), not current hedge PnL
+        // Hedge should close via its own TP/trail — NET_POSITIVE is for banked recovery only
+        // Require minimum $2 net to avoid closing for dust amounts
+        const bankedNetPnl = mainUnrealizedUsdt + bankedProfit;
+        if (bankedNetPnl > 2) {
           this.logger.log(
-            `[PositionMonitor] ${sigKey} NET POSITIVE EXIT | main=$${mainUnrealizedUsdt.toFixed(2)} banked=$${bankedProfit.toFixed(2)} hedge=$${currentHedgePnlUsdt.toFixed(2)} → net=$${netPnlUsdt.toFixed(2)}`,
+            `[PositionMonitor] ${sigKey} NET POSITIVE EXIT | main=$${mainUnrealizedUsdt.toFixed(2)} banked=$${bankedProfit.toFixed(2)} hedge=$${currentHedgePnlUsdt.toFixed(2)} → bankedNet=$${bankedNetPnl.toFixed(2)}`,
           );
           forceCloseReason = "NET_POSITIVE";
         } else if (catastrophicPct <= -25) {
