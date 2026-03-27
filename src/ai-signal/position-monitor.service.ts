@@ -499,18 +499,18 @@ export class PositionMonitorService implements OnModuleInit {
 
           // DCA fills update the MAIN order (add notional, recalculate avg price)
           const dcaEntryFee = this.calcMakerFee(gridNotional);
-          const mainOrder = await this.orderModel.findOne({
+          const dcaMainOrder = await this.orderModel.findOne({
             signalId: (signal as any)._id, type: MAIN_ORDER_TYPES, status: 'OPEN',
           });
-          if (mainOrder) {
-            const newNotional = mainOrder.notional + gridNotional;
-            const newQty = mainOrder.quantity + gridNotional / price;
-            const newAvgEntry = (mainOrder.entryPrice * mainOrder.notional + price * gridNotional) / newNotional;
-            await this.orderModel.findByIdAndUpdate(mainOrder._id, {
+          if (dcaMainOrder) {
+            const newNotional = dcaMainOrder.notional + gridNotional;
+            const newQty = dcaMainOrder.quantity + gridNotional / price;
+            const newAvgEntry = (dcaMainOrder.entryPrice * dcaMainOrder.notional + price * gridNotional) / newNotional;
+            await this.orderModel.findByIdAndUpdate(dcaMainOrder._id, {
               entryPrice: newAvgEntry,
               notional: newNotional,
               quantity: newQty,
-              entryFeeUsdt: (mainOrder.entryFeeUsdt || 0) + dcaEntryFee,
+              entryFeeUsdt: (dcaMainOrder.entryFeeUsdt || 0) + dcaEntryFee,
             });
           }
 
