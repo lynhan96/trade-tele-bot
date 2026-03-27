@@ -368,10 +368,14 @@ export class HedgeManagerService {
           ? currentPrice >= hedgeTpPrice
           : currentPrice <= hedgeTpPrice;
 
-        // Track peak PnL for trailing
-        const currentPeak = this.hedgePeakMap.get(signalId) || 0;
+        // Track peak PnL for trailing — persist to signal so it survives restart
+        const currentPeak = this.hedgePeakMap.get(signalId) || (signal as any).hedgePeakPnlPct || 0;
         if (hedgePnlPct > currentPeak) {
           this.hedgePeakMap.set(signalId, hedgePnlPct);
+          // Persist to DB (async, non-blocking) — survives bot restart
+          this.orderModel.db?.collection('ai_signals').updateOne(
+            { _id: signal._id }, { $set: { hedgePeakPnlPct: hedgePnlPct } },
+          ).catch(() => {});
         }
         const peak = this.hedgePeakMap.get(signalId) || 0;
 

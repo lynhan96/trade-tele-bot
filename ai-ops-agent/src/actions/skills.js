@@ -716,7 +716,7 @@ export async function runPostTradeLearning() {
     for (const s of last50) {
       const hour = s.executedAt ? new Date(s.executedAt).getUTCHours() : -1
       if (hour < 0) continue
-      const session = hour >= 0 && hour < 8 ? "ASIA" : hour >= 7 && hour < 16 ? "EU" : "US"
+      const session = hour >= 0 && hour < 8 ? "ASIA" : hour >= 8 && hour < 16 ? "EU" : "US"
       sessions[session].total++
       if ((s.pnlUsdt || 0) > 0) sessions[session].wins++
     }

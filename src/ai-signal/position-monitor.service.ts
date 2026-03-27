@@ -11,6 +11,7 @@ import { UserRealTradingService } from "./user-real-trading.service";
 import { TradingConfigService } from "./trading-config";
 import { HedgeManagerService, HedgeAction } from "./hedge-manager.service";
 import { Order, OrderDocument } from "../schemas/order.schema";
+import { RSI } from "technicalindicators";
 
 export interface ResolvedSignalInfo {
   symbol: string;
@@ -71,6 +72,25 @@ export class PositionMonitorService implements OnModuleInit {
   /** Debounce timers for SL/TP propagation — prevents rapid tick spam to Binance */
   private slDebounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private tpDebounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  /** In-memory order cache — avoids 500+ DB queries/s on price ticks */
+  private orderCache = new Map<string, { main: any; hedge: any; ts: number }>();
+  private readonly ORDER_CACHE_TTL = 5000; // 5s — invalidated on writes
+
+  private getCachedOrders(signalId: string) {
+    const c = this.orderCache.get(signalId);
+    if (c && Date.now() - c.ts < this.ORDER_CACHE_TTL) return c;
+    return null;
+  }
+
+  private setCachedOrders(signalId: string, main: any, hedge: any) {
+    this.orderCache.set(signalId, { main, hedge, ts: Date.now() });
+  }
+
+  /** Invalidate cache after DB writes (hedge open/close, grid fill, SL/TP update) */
+  invalidateOrderCache(signalId: string) {
+    this.orderCache.delete(signalId);
+  }
 
   setResolveCallback(cb: (info: ResolvedSignalInfo) => Promise<void>): void {
     this.resolveCallback = cb;
@@ -279,27 +299,37 @@ export class PositionMonitorService implements OnModuleInit {
     // Trailing stop uses weighted avg entry. Close ALL grids together on TP/SL.
     const cfg = this.tradingConfig.get();
 
-    // ─── Derive hedge state from DB order (source of truth — always check DB, not in-memory flag) ─
-    let hedgeOrder: OrderDocument | null = await this.getActiveHedge((signal as any)._id);
+    // ─── Load orders from cache (5s TTL) or DB — reduces 500+ queries/s to ~5/s ─
+    const signalId = (signal as any)._id?.toString();
+    let cached = this.getCachedOrders(signalId);
+    if (!cached) {
+      const [hedgeFromDb, mainFromDb] = await Promise.all([
+        this.getActiveHedge((signal as any)._id),
+        this.orderModel.findOne({ signalId: (signal as any)._id, type: MAIN_ORDER_TYPES, status: 'OPEN' }),
+      ]);
+      this.setCachedOrders(signalId, mainFromDb, hedgeFromDb);
+      cached = this.getCachedOrders(signalId)!;
+    }
+    let hedgeOrder: OrderDocument | null = cached.hedge;
+    const mainOrder = cached.main;
+
+    // Sync hedge flag
     if (hedgeOrder && !(signal as any).hedgeActive) {
-      // DB has OPEN hedge but in-memory flag is false — sync flag
       (signal as any).hedgeActive = true;
     } else if (!hedgeOrder && (signal as any).hedgeActive) {
       this.logger.warn(`[PositionMonitor] ${sigKey} hedgeActive=true but no OPEN HEDGE order found — clearing stale flag`);
       (signal as any).hedgeActive = false;
       await this.aiSignalModel.findByIdAndUpdate((signal as any)._id, { hedgeActive: false }).exec().catch(() => {});
     }
-
-    // ─── Load MAIN order (source of truth for position state — Binance Hedge Mode) ─
-    const mainOrder = await this.orderModel.findOne({
-      signalId: (signal as any)._id, type: MAIN_ORDER_TYPES, status: 'OPEN',
-    });
     const orderMeta = (mainOrder as any)?.metadata || {};
 
     const GRID_LEVEL_COUNT = cfg.gridLevelCount || 4;
     // DCA volume weights: L0=35% base, L1=20%, L2=25%, L3=20% (sum=100)
     // L3 fills BEFORE hedge trigger — maximizes avg entry improvement
-    const DCA_WEIGHTS = [35, 20, 25, 20];
+    // Dynamic DCA weights: high volatility → smaller L0, bigger L3 (better avg on extensions)
+    const defaultWeights = [35, 20, 25, 20];
+    const highVolWeights = [25, 20, 25, 30]; // less initial exposure, more DCA firepower
+    const DCA_WEIGHTS = ((cfg as any).dcaWeightsProfile === 'HIGH_VOL') ? highVolWeights : ((cfg as any).dcaWeights || defaultWeights);
 
     const gridLevels: any[] = orderMeta.gridLevels ?? (signal as any).gridLevels ?? [];
     const isGridSignal = gridLevels.length > 0;
@@ -450,7 +480,7 @@ export class PositionMonitorService implements OnModuleInit {
             try {
               const closes = await this.marketDataService.getClosePrices(coin, "15m");
               if (closes.length >= 14) {
-                const { RSI } = require("technicalindicators");
+                // RSI imported at module scope
                 const rsiVals = RSI.calculate({ period: 14, values: closes });
                 const rsi = rsiVals[rsiVals.length - 1];
                 const cfg = this.tradingConfig?.get();
@@ -512,6 +542,7 @@ export class PositionMonitorService implements OnModuleInit {
               quantity: newQty,
               entryFeeUsdt: (dcaMainOrder.entryFeeUsdt || 0) + dcaEntryFee,
             });
+            this.invalidateOrderCache((signal as any)._id?.toString());
           }
 
           filledCount++;
@@ -1720,6 +1751,7 @@ export class PositionMonitorService implements OnModuleInit {
       cycleNumber: ((signal as any).hedgeCycleCount || 0) + 1,
       metadata: { phase: action.hedgePhase, reason: action.reason },
     });
+    this.invalidateOrderCache((signal as any)._id?.toString());
 
     this.logger.log(
       `[PositionMonitor] ${sigKey} HEDGE ${action.action} | ${action.hedgeDirection} | ` +
@@ -1884,6 +1916,7 @@ export class PositionMonitorService implements OnModuleInit {
     }
 
     // NOTE: No separate COMPLETED signal for hedge — order records are the source of truth
+    this.invalidateOrderCache((signal as any)._id?.toString());
 
     this.logger.log(
       `[PositionMonitor] ${sigKey} HEDGE CLOSED | PnL: ${action.hedgePnlPct?.toFixed(2)}% ($${action.hedgePnlUsdt?.toFixed(2)}) | ` +

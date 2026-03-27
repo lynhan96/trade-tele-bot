@@ -359,47 +359,13 @@ export class AiSignalService implements OnModuleInit {
   @Cron("*/5 * * * *")
   async cleanupExpiredSignals() {
     try {
-      // 1. Clean expired QUEUED signals
       const { count } = await this.signalQueueService.cleanupExpiredQueued();
       if (count > 0) {
-        this.logger.log(
-          `[AiSignal] Cleaned up ${count} expired QUEUED signal(s)`,
-        );
+        this.logger.log(`[AiSignal] Cleaned up ${count} expired QUEUED signal(s)`);
       }
-
-      // 2. Time-based stop: close signals not performing after 8h
-      // AND auto-close profitable signals after 48h
-      const isTestMode = await this.isTestModeEnabled();
-      const allActives = await this.signalQueueService.getAllActiveSignals();
-
-      for (const signal of allActives) {
-        try {
-          const currentPrice = await this.marketDataService.getPrice(signal.symbol);
-          if (!currentPrice) continue;
-
-          const entryForPnl = (signal as any).gridAvgEntry || signal.entryPrice;
-          const pnlPercent =
-            signal.direction === "LONG"
-              ? ((currentPrice - entryForPnl) / entryForPnl) * 100
-              : ((entryForPnl - currentPrice) / entryForPnl) * 100;
-
-          // Use executedAt (activation time) if available, fallback to createdAt
-          const ageRef = (signal as any).executedAt ?? (signal as any).createdAt;
-          const ageMs = Date.now() - new Date(ageRef).getTime();
-          const ageH = ageMs / 3600000;
-
-          // Time-stop and 48h auto-close REMOVED — hedge system manages stagnant positions.
-          // Trail SL + DCA + hedge provide proper exit mechanisms without arbitrary time limits.
-        } catch (err) {
-          this.logger.error(
-            `[AiSignal] Auto-close check failed for ${signal.symbol}: ${err?.message}`,
-          );
-        }
-      }
+      // Time-stop removed — hedge/trail/DCA handle exits
     } catch (err) {
-      this.logger.error(
-        `[AiSignal] cleanupExpiredSignals error: ${err?.message}`,
-      );
+      this.logger.error(`[AiSignal] cleanupExpiredSignals error: ${err?.message}`);
     }
   }
 

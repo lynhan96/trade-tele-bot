@@ -35,9 +35,9 @@ const COIN_BLOCKED_AT_KEY = "cache:coin-blocked-at"; // Record<string, isoString
 const MARKET_GUARD_KEY = "cache:ai:market-guard"; // auto market condition guard
 const STRATEGY_GATES_TTL = 5 * 60 * 60; // 5h (re-evaluated every 4h)
 const MARKET_GUARD_TTL = 35 * 60; // 35min (re-evaluated every 15min)
-const MIN_TRADES_TO_EVALUATE = 8; // need at least 8 trades to judge
-const MIN_COIN_TRADES = 1; // only 1 trade needed — a $20+ loss is enough signal
-const LOOKBACK_DAYS = 3; // 3-day window — fast reaction to current market
+const MIN_TRADES_TO_EVALUATE = 15; // need 15+ trades to reduce false disabling (was 8)
+const MIN_COIN_TRADES = 2; // need 2+ trades per coin to judge (was 1)
+const LOOKBACK_DAYS = 7; // 7-day window — more data, less noise (was 3)
 const MIN_BLOCK_HOURS = 12; // minimum hours a coin stays blocked before re-evaluation
 
 
