@@ -888,10 +888,14 @@ export class PositionMonitorService implements OnModuleInit {
         if (lastFlipAt) hedgeQuery.closedAt = { $gt: new Date(lastFlipAt) };
         const closedHedgeOrders = await this.orderModel.find(hedgeQuery);
         const bankedProfit = closedHedgeOrders.reduce((sum, o) => sum + (o.pnlUsdt || 0), 0);
-        const npGrids: any[] = (signal as any).gridLevels || [];
+        // Read grids from order metadata (source of truth after DCA fills), fallback to signal
+        const npMainOrder = await this.orderModel.findOne({
+          signalId: (signal as any)._id, type: MAIN_ORDER_TYPES, status: 'OPEN',
+        }).lean().catch(() => null);
+        const npGrids: any[] = (npMainOrder as any)?.metadata?.gridLevels || (signal as any).gridLevels || [];
         const filledVol = npGrids.length > 0
-          ? npGrids.filter((g: any) => g.status === "FILLED" || g.status === "TP_CLOSED" || g.status === "SL_CLOSED").reduce((s: number, g: any) => s + (g.simNotional || 0), 0) || ((signal as any).simNotional || 1000) * 0.4
-          : ((signal as any).simNotional || 1000) * 0.4;
+          ? npGrids.filter((g: any) => g.status === "FILLED" || g.status === "TP_CLOSED" || g.status === "SL_CLOSED").reduce((s: number, g: any) => s + (g.simNotional || 0), 0) || (npMainOrder?.notional || ((signal as any).simNotional || 1000) * 0.35)
+          : (npMainOrder?.notional || ((signal as any).simNotional || 1000) * 0.35);
         const mainUnrealizedUsdt = (pnlPct / 100) * filledVol;
         // Include current open hedge PnL
         let currentHedgePnlUsdt = 0;
