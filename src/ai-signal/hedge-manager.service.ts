@@ -24,7 +24,7 @@ export interface HedgeAction {
   reason: string;
 }
 
-const LOCK_TTL_SECONDS = 30;
+const LOCK_TTL_SECONDS = 3600; // 1 hour — lock lives for entire hedge lifecycle, deleted on close
 const HEDGE_LOCK_PREFIX = 'cache:hedge:lock:';
 
 @Injectable()
@@ -221,7 +221,16 @@ export class HedgeManagerService {
         }
       }
 
-      // Acquire Redis lock
+      // Double-check: DB might already have an OPEN hedge (concurrent tick race)
+      const existingHedge = await this.orderModel.findOne({
+        signalId: signal._id, type: 'HEDGE', status: 'OPEN',
+      }).lean();
+      if (existingHedge) {
+        this.logger.debug(`[${signal.coin}] Hedge already OPEN in DB — skip duplicate open`);
+        return null;
+      }
+
+      // Acquire Redis lock (TTL=1h, deleted on hedge close)
       const lockKey = `${HEDGE_LOCK_PREFIX}${signalId}`;
       const acquired = await this.redisService.setNX(lockKey, 1, LOCK_TTL_SECONDS);
       if (!acquired) return null;

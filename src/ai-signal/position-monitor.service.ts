@@ -279,15 +279,15 @@ export class PositionMonitorService implements OnModuleInit {
     // Trailing stop uses weighted avg entry. Close ALL grids together on TP/SL.
     const cfg = this.tradingConfig.get();
 
-    // ─── Derive hedge state from DB order (source of truth — fixes hedgeActive flag desync) ─
-    let hedgeOrder: OrderDocument | null = null;
-    if ((signal as any).hedgeActive) {
-      hedgeOrder = await this.getActiveHedge((signal as any)._id);
-      if (!hedgeOrder) {
-        this.logger.warn(`[PositionMonitor] ${sigKey} hedgeActive=true but no OPEN HEDGE order found — clearing stale flag`);
-        (signal as any).hedgeActive = false;
-        await this.aiSignalModel.findByIdAndUpdate((signal as any)._id, { hedgeActive: false }).exec().catch(() => {});
-      }
+    // ─── Derive hedge state from DB order (source of truth — always check DB, not in-memory flag) ─
+    let hedgeOrder: OrderDocument | null = await this.getActiveHedge((signal as any)._id);
+    if (hedgeOrder && !(signal as any).hedgeActive) {
+      // DB has OPEN hedge but in-memory flag is false — sync flag
+      (signal as any).hedgeActive = true;
+    } else if (!hedgeOrder && (signal as any).hedgeActive) {
+      this.logger.warn(`[PositionMonitor] ${sigKey} hedgeActive=true but no OPEN HEDGE order found — clearing stale flag`);
+      (signal as any).hedgeActive = false;
+      await this.aiSignalModel.findByIdAndUpdate((signal as any)._id, { hedgeActive: false }).exec().catch(() => {});
     }
 
     // ─── Load MAIN order (source of truth for position state — Binance Hedge Mode) ─
