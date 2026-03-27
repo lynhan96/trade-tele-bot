@@ -194,6 +194,8 @@ export class RiskScoreService {
     return { score: Math.round(totalScore), blocked, breakdown };
   }
 
+  /** Intentionally simplified closes-only EMA — no dependency on IndicatorService injection
+   * (IndicatorService requires full OHLC candle arrays, RiskScore only has closes from marketDataService) */
   private calcEma(closes: number[], period: number): number | null {
     if (closes.length < period) return null;
     const k = 2 / (period + 1);

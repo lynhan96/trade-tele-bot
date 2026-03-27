@@ -56,7 +56,7 @@ export class AiMarketAnalystService {
     private readonly redisService: RedisService,
   ) {}
 
-  /** Signal gate — always approve (AI Ops Agent handles gating externally) */
+  // DEPRECATED: always returns APPROVE (Anthropic API disabled, AI Ops Agent handles gating externally)
   async evaluateSignal(_params: {
     symbol: string;
     direction: "LONG" | "SHORT";

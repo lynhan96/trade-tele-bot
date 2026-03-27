@@ -947,7 +947,7 @@ export class PositionMonitorService implements OnModuleInit {
         // Hedge should close via its own TP/trail — NET_POSITIVE is for banked recovery only
         // Require banked net > 5% of filled volume to ensure meaningful profit
         const bankedNetPnl = mainUnrealizedUsdt + bankedProfit;
-        const netPositiveThreshold = filledVol * 0.05; // 5% of position size
+        const netPositiveThreshold = filledVol * 0.02; // 2% of position — ~$7 for $350 L0
         if (bankedNetPnl > netPositiveThreshold) {
           this.logger.log(
             `[PositionMonitor] ${sigKey} NET POSITIVE EXIT | main=$${mainUnrealizedUsdt.toFixed(2)} banked=$${bankedProfit.toFixed(2)} hedge=$${currentHedgePnlUsdt.toFixed(2)} → bankedNet=$${bankedNetPnl.toFixed(2)}`,
@@ -1305,6 +1305,9 @@ export class PositionMonitorService implements OnModuleInit {
           'metadata.gridClosedCount': 0,
         }).catch(() => {});
       }
+
+      // Invalidate order cache — FLIP modified order types/metadata, stale cache causes wrong reads
+      this.invalidateOrderCache((signal as any)._id?.toString());
 
       this.logger.log(
         `[PositionMonitor] 🔄 ${sigKey} FLIPPED to ${newDirection} | Entry: ${newEntry} | SL: ${newSl} (${flipSlPct}%) | TP: ${newTp} (${flipTpPct}%) | Main TP profit: $${mainPnlTotal.toFixed(2)}`,

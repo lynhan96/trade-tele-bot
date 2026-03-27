@@ -613,11 +613,7 @@ export class AiOptimizerService {
    * Ask AI whether a signal should be taken. Returns true (take) or false (skip).
    * Uses GPT-4o-mini with minimal tokens. Falls back to true if AI unavailable.
    */
-  /**
-   * Rule-based signal validation — replaces GPT validation (was generic, zero value).
-   * Uses actual market data: price position in range, candle momentum, RSI checks.
-   * Results saved to ai_signal_validations for tracking.
-   */
+  // DEPRECATED: extracted RSI checks to processCoin, no longer called (kept for type compatibility)
   async validateSignal(signal: {
     symbol: string;
     direction: string;

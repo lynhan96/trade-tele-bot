@@ -57,6 +57,10 @@ export class AiSignalService implements OnModuleInit {
   // Track coins being processed in current scan to prevent race conditions
   private readonly processingCoins = new Set<string>();
 
+  // Cache getAllActiveSignals to avoid 150 identical DB queries per scan cycle
+  private activeSignalsCache: { data: any[]; ts: number } | null = null;
+  private readonly ACTIVE_CACHE_TTL = 15000; // 15s
+
   // Whether test mode is enabled at startup (can be toggled at runtime)
   private readonly defaultTestMode: boolean;
 
@@ -394,9 +398,15 @@ export class AiSignalService implements OnModuleInit {
     // Cap total active signals
     const cfg = this.tradingConfig.get();
     const maxSignals = Math.min(cfg.maxActiveSignals || MAX_ACTIVE_SIGNALS, MAX_ACTIVE_SIGNALS);
-    const allActives = await this.signalQueueService.getAllActiveSignals();
+    let allActives;
+    if (this.activeSignalsCache && Date.now() - this.activeSignalsCache.ts < this.ACTIVE_CACHE_TTL) {
+      allActives = this.activeSignalsCache.data;
+    } else {
+      allActives = await this.signalQueueService.getAllActiveSignals();
+      this.activeSignalsCache = { data: allActives, ts: Date.now() };
+    }
     if (allActives.length >= maxSignals) {
-      this.logger.debug(`[AiSignal] Active cap reached (${allActives.length}/${maxSignals}) — skipping new signal`);
+      this.logger.debug(`[AiSignal] Active cap reached (${allActives.length}/${maxSignals}${cfg.maxActiveSignals ? ' [config]' : ' [default]'}) — skipping`);
       return { pass: false, reason: 'active_cap' };
     }
 
@@ -629,6 +639,9 @@ export class AiSignalService implements OnModuleInit {
     params: Record<string, any>,
     isTestMode?: boolean,
   ): Promise<void> {
+    // Invalidate active signals cache — a new signal just activated
+    this.activeSignalsCache = null;
+
     if (isTestMode === undefined) {
       isTestMode = await this.isTestModeEnabled();
     }
