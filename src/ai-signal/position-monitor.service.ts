@@ -307,13 +307,16 @@ export class PositionMonitorService implements OnModuleInit {
     // Initialize grid on first tick (base grid = level 0)
     if (!isGridSignal) {
       const origEntry = entryPrice;
-      // Use original SL for grid spacing (not widened safety SL)
-      // When SL=0 (hedge manages risk), use default 4% for grid spacing
+      // When hedge enabled: space grids within hedge trigger range so DCA fills BEFORE hedge opens
+      // When hedge disabled: space within SL range
+      const hedgeTrigger = cfg.hedgeEnabled ? (cfg.hedgePartialTriggerPct || 3) : 0;
       const originalSlForGrid = (signal as any).originalSlPrice || (signal as any).stopLossPrice;
       let signalSlPct = originalSlForGrid > 0 ? Math.abs((originalSlForGrid - origEntry) / origEntry) * 100 : 0;
-      if (signalSlPct < 1) signalSlPct = 4; // Minimum grid spacing 4% when SL=0 or too tight
-      // Dynamic grid step: L4 at 80% of SL range, 20% buffer before SL
-      const gridStep = signalSlPct / GRID_LEVEL_COUNT;
+      if (signalSlPct < 1) signalSlPct = 4;
+      // Use hedge trigger range for grid spacing (all DCA fills before hedge opens)
+      // Grid step = triggerPct / levels, e.g. 3% / 4 = 0.75% per level
+      const effectiveRange = hedgeTrigger > 0 ? hedgeTrigger : signalSlPct;
+      const gridStep = effectiveRange / GRID_LEVEL_COUNT;
 
       const simNotional = 1000;
       const simQuantity = simNotional / origEntry;
@@ -1063,9 +1066,12 @@ export class PositionMonitorService implements OnModuleInit {
     }
 
     // ─── Original TP/SL check (non-grid signals) ──────────────────────────
-    // Re-read takeProfitPrice in case it was boosted above — prefer order as source of truth
-    const effectiveTpPrice = mainOrder?.takeProfitPrice || ((signal as any).takeProfitPrice ?? takeProfitPrice);
-    const stopLossPrice = mainOrder?.stopLossPrice ?? (signal as any).stopLossPrice;
+    // Re-read SL/TP from FRESH DB order (mainOrder loaded at tick start may be stale after grid init / hedge)
+    const freshMainOrder = await this.orderModel.findOne({
+      signalId: (signal as any)._id, type: MAIN_ORDER_TYPES, status: 'OPEN',
+    }).lean().catch(() => null);
+    const effectiveTpPrice = (freshMainOrder as any)?.takeProfitPrice || ((signal as any).takeProfitPrice ?? takeProfitPrice);
+    const stopLossPrice = (freshMainOrder as any)?.stopLossPrice ?? (signal as any).stopLossPrice;
     // SL=0 means hedge mode (SL disabled) — never trigger SL on price check
     const slHit = stopLossPrice > 0
       ? (direction === "LONG" ? price <= stopLossPrice : price >= stopLossPrice)
@@ -1233,7 +1239,8 @@ export class PositionMonitorService implements OnModuleInit {
       const hedgeVol = newNotional; // actual hedge volume (e.g. 750)
       const hedgeVolPct = Math.round((hedgeVol / origSimNotional) * 100);
       const remainingPct = 100 - hedgeVolPct;
-      const flipGridStep = Math.max(4, flipSlPct / 3); // Min 4% grid spacing
+      const hedgeTriggerForFlip = hedgeCfgFlip.hedgePartialTriggerPct || 3;
+      const flipGridStep = hedgeCfgFlip.hedgeEnabled ? hedgeTriggerForFlip / 2 : Math.max(4, flipSlPct / 3);
       const newGrids: any[] = [
         // L0 = full hedge volume, already filled
         { level: 0, deviationPct: 0, fillPrice: newEntry, volumePct: hedgeVolPct, status: "FILLED", filledAt: new Date(), simNotional: hedgeVol, simQuantity: hedgeVol / newEntry },
