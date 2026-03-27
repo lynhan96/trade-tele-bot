@@ -109,6 +109,12 @@ export class AdminController {
   }
 
   @UseGuards(AdminGuard)
+  @Get("filter-funnel")
+  getFilterFunnel() {
+    return this.adminService.getFilterFunnel();
+  }
+
+  @UseGuards(AdminGuard)
   @Get("signals/:id/orders")
   getSignalOrders(@Param("id") id: string) {
     return this.adminService.getSignalOrders(id);

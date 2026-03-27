@@ -236,6 +236,7 @@ export class AiSignalService implements OnModuleInit {
           this.logger.log(
             `[AiSignal] ${entry.coin.toUpperCase()} skipped — extreme 24h move (${entry.priceChangePercent > 0 ? "+" : ""}${entry.priceChangePercent.toFixed(1)}%)`,
           );
+          this.redisService.initAndIncr('cache:ai:filter:extreme_move', 0, 86400).catch(() => {});
           return false;
         }
         return true;
@@ -428,7 +429,10 @@ export class AiSignalService implements OnModuleInit {
 
     // Cooldown after SL/TP — prevent ping-pong recreation
     const cooldown = await this.redisService.get<boolean>(`cache:ai:cooldown:${signalKey}`);
-    if (cooldown) return;
+    if (cooldown) {
+      this.redisService.initAndIncr('cache:ai:filter:cooldown', 0, 86400).catch(() => {});
+      return;
+    }
 
     const params = await this.aiOptimizerService.tuneParamsForSymbol(
       coin,
@@ -514,6 +518,7 @@ export class AiSignalService implements OnModuleInit {
       this.logger.debug(
         `[AiSignal] ${coin.toUpperCase()} ${signalResult.isLong ? "LONG" : "SHORT"} blocked — confidence ${params.confidence} < min ${params.minConfidenceToTrade} (${params.regime})`,
       );
+      this.redisService.initAndIncr('cache:ai:filter:confidence_block', 0, 86400).catch(() => {});
       return;
     }
 
@@ -536,6 +541,7 @@ export class AiSignalService implements OnModuleInit {
         this.logger.log(
           `[AiSignal] ${coin.toUpperCase()} LONG skipped — regime STRONG_BEAR (shorts only)${sentiment ? ` [sentiment=${sentiment.score}]` : ""}`,
         );
+        this.redisService.initAndIncr('cache:ai:filter:regime_block', 0, 86400).catch(() => {});
         return;
       }
     }
@@ -548,6 +554,7 @@ export class AiSignalService implements OnModuleInit {
         this.logger.log(
           `[AiSignal] ${coin.toUpperCase()} SHORT skipped — regime STRONG_BULL (longs only)${sentiment ? ` [sentiment=${sentiment.score}]` : ""}`,
         );
+        this.redisService.initAndIncr('cache:ai:filter:regime_block', 0, 86400).catch(() => {});
         return;
       }
     }
@@ -641,18 +648,21 @@ export class AiSignalService implements OnModuleInit {
           this.logger.log(
             `[AiSignal] ${signalKey} BLOCKED — extreme funding rate ${fundingPct.toFixed(4)}% (manipulation risk)`,
           );
+          this.redisService.initAndIncr('cache:ai:filter:funding_block', 0, 86400).catch(() => {});
           return;
         }
         if (fundingPct > FUNDING_DIRECTION_BLOCK && signalResult.isLong) {
           this.logger.log(
             `[AiSignal] ${signalKey} LONG BLOCKED — positive funding ${fundingPct.toFixed(4)}% (crowded longs, squeeze down risk)`,
           );
+          this.redisService.initAndIncr('cache:ai:filter:funding_block', 0, 86400).catch(() => {});
           return;
         }
         if (fundingPct < -FUNDING_DIRECTION_BLOCK && !signalResult.isLong) {
           this.logger.log(
             `[AiSignal] ${signalKey} SHORT BLOCKED — negative funding ${fundingPct.toFixed(4)}% (crowded shorts, squeeze up risk)`,
           );
+          this.redisService.initAndIncr('cache:ai:filter:funding_block', 0, 86400).catch(() => {});
           return;
         }
       }
@@ -758,6 +768,7 @@ export class AiSignalService implements OnModuleInit {
 
         if (gateResult.action === "REJECT") {
           this.logger.log(`[AiSignal] ${signalKey} REJECTED by AI Signal Gate: ${gateResult.reason}`);
+          this.redisService.initAndIncr('cache:ai:filter:ai_gate_reject', 0, 86400).catch(() => {});
           await this.redisService.set(validationCooldownKey, true, 15 * 60);
           this.validationModel.create({
             ...valBase, approved: false, model: "ai-signal-gate",

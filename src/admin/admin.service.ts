@@ -1327,10 +1327,66 @@ export class AdminService {
     return { success: true };
   }
 
+  /** Get filter rejection funnel — counts of signals blocked at each filter stage (24h rolling). */
+  async getFilterFunnel(): Promise<Record<string, number>> {
+    const keys = [
+      'regime_block',
+      'funding_block',
+      'confidence_block',
+      'extreme_move',
+      'ai_gate_reject',
+      'cooldown',
+    ];
+    const result: Record<string, number> = {};
+    for (const key of keys) {
+      const val = await this.redisService.get<number>(`cache:ai:filter:${key}`);
+      result[key] = val || 0;
+    }
+    return result;
+  }
+
   /** Get all orders for a signal (for admin panel signal detail). */
-  async getSignalOrders(signalId: string): Promise<any[]> {
+  async getSignalOrders(signalId: string): Promise<any> {
     const { Types } = require('mongoose');
     const oid = Types.ObjectId.isValid(signalId) ? new Types.ObjectId(signalId) : signalId;
-    return this.orderModel.find({ signalId: oid }).sort({ openedAt: -1 }).lean();
+    const orders = await this.orderModel.find({ signalId: oid }).sort({ openedAt: -1 }).lean();
+
+    // Build hedge waterfall summary from closed hedge orders
+    const closedHedges = orders
+      .filter((o: any) => o.type === 'HEDGE' && o.status === 'CLOSED')
+      .sort((a: any, b: any) => new Date(a.openedAt).getTime() - new Date(b.openedAt).getTime());
+
+    const cycles = closedHedges.map((h: any, idx: number) => {
+      const openedAt = h.openedAt ? new Date(h.openedAt) : null;
+      const closedAt = h.closedAt ? new Date(h.closedAt) : null;
+      let duration = '';
+      if (openedAt && closedAt) {
+        const diffMs = closedAt.getTime() - openedAt.getTime();
+        const diffMin = Math.round(diffMs / 60000);
+        if (diffMin < 60) duration = `${diffMin}m`;
+        else if (diffMin < 1440) duration = `${Math.round(diffMin / 60)}h`;
+        else duration = `${Math.round(diffMin / 1440)}d`;
+      }
+      return {
+        cycle: idx + 1,
+        direction: h.direction,
+        entry: h.entryPrice || 0,
+        exit: h.exitPrice || 0,
+        pnl: Math.round((h.pnlUsdt || 0) * 100) / 100,
+        duration,
+        reason: h.closeReason || 'UNKNOWN',
+      };
+    });
+
+    const totalBanked = Math.round(cycles.reduce((sum: number, c: any) => sum + c.pnl, 0) * 100) / 100;
+
+    return {
+      orders,
+      hedgeWaterfall: {
+        totalCycles: cycles.length,
+        totalBanked,
+        cycles,
+      },
+    };
   }
 }

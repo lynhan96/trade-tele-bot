@@ -903,6 +903,197 @@ export async function runSmartAlerts() {
 }
 
 // ══════════════════════════════════════════════════════════
+// SKILL 10: DYNAMIC SL/TP per ATR — volatility-aware TP/SL recommendations
+// ══════════════════════════════════════════════════════════
+export async function runDynamicSlTp() {
+  const findings = []
+  try {
+    const res = await axios.get(BASE + "/admin/signals?status=ACTIVE", { timeout: 10000 })
+    const signals = res.data?.data || res.data || []
+    if (!Array.isArray(signals) || signals.length === 0) return findings
+
+    for (const sig of signals) {
+      const symbol = sig.symbol
+      if (!symbol) continue
+      try {
+        // Fetch 4h candles for ATR calculation
+        const candleRes = await axios.get(BASE + "/admin/market-data/candles", {
+          params: { symbol, interval: "4h", limit: 15 },
+          timeout: 5000,
+        }).catch(() => null)
+
+        let atrPct = 0
+        if (candleRes?.data?.length >= 2) {
+          const candles = candleRes.data
+          // Calculate ATR% from candle high-low ranges
+          let trSum = 0
+          for (let i = 1; i < candles.length; i++) {
+            const high = parseFloat(candles[i].high || candles[i].h || 0)
+            const low = parseFloat(candles[i].low || candles[i].l || 0)
+            const prevClose = parseFloat(candles[i - 1].close || candles[i - 1].c || 0)
+            if (!prevClose) continue
+            const tr = Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose))
+            trSum += (tr / prevClose) * 100
+          }
+          atrPct = trSum / (candles.length - 1)
+        } else {
+          // Fallback: estimate from signal entry vs current price volatility
+          continue
+        }
+
+        const tp = sig.takeProfitPercent || 2.5
+        const sl = sig.stopLossPercent || 40
+
+        if (atrPct > 3 && tp <= 2.5) {
+          findings.push(`${symbol}: ATR=${atrPct.toFixed(1)}% but TP only ${tp}% → TP too conservative, suggest ${Math.min(atrPct * 1.2, 8).toFixed(1)}%`)
+        }
+        if (atrPct < 1 && sl >= 40) {
+          findings.push(`${symbol}: ATR=${atrPct.toFixed(1)}% but SL=${sl}% → SL too wide for low-vol coin, suggest ${Math.max(atrPct * 5, 5).toFixed(0)}%`)
+        }
+        if (atrPct > 5 && tp < 4) {
+          findings.push(`${symbol}: High ATR=${atrPct.toFixed(1)}% — consider widening TP to capture full move`)
+        }
+      } catch (err) {
+        logger.debug(`[DynamicSlTp] ${symbol} candle fetch error: ${err.message}`)
+      }
+    }
+  } catch (err) {
+    logger.warn(`[DynamicSlTp] Failed to fetch active signals: ${err.message}`)
+  }
+
+  const newFindings = filterNewFindings("dynamicSlTp", findings)
+  if (newFindings.length) {
+    logger.info(`[DynamicSlTp] ${newFindings.join(" | ")}`)
+    if (!_silent) for (const f of newFindings) await agentLog.thought("dynamic_sl_tp", f)
+  }
+  return findings
+}
+
+// ══════════════════════════════════════════════════════════
+// SKILL 11: REGIME WATCH — BTC rapid move detector
+// ══════════════════════════════════════════════════════════
+let _lastBtcPrice = null
+let _lastBtcPriceTime = 0
+export async function runRegimeWatch() {
+  const alerts = []
+  try {
+    const redis = (await import("redis")).createClient({
+      url: `redis://${process.env.REDIS_HOST || "localhost"}:${process.env.REDIS_PORT || 6379}`,
+      database: parseInt(process.env.REDIS_DB || "2"),
+    })
+    redis.on("error", () => {})
+    await redis.connect()
+
+    // Get current BTC price from bot's price cache
+    const btcPriceRaw = await redis.get("binance-bot:price:BTCUSDT")
+    const btcPrice = btcPriceRaw ? parseFloat(btcPriceRaw) : 0
+    if (!btcPrice) {
+      await redis.quit()
+      return alerts
+    }
+
+    // Get stored 30min-ago price
+    const storedKey = "binance-telebot:cache:agent:btc-price-30m"
+    const storedRaw = await redis.get(storedKey)
+    const stored = storedRaw ? JSON.parse(storedRaw) : null
+    const now = Date.now()
+
+    if (stored && stored.price > 0) {
+      const elapsed = (now - stored.time) / 1000 / 60 // minutes
+      if (elapsed >= 25) {
+        // Compare with stored price (approx 30min ago)
+        const movePct = Math.abs((btcPrice - stored.price) / stored.price * 100)
+        const dir = btcPrice > stored.price ? "UP" : "DOWN"
+
+        if (movePct > 3) {
+          alerts.push(`🚨 CRITICAL: BTC moved ${movePct.toFixed(2)}% ${dir} in ~${Math.round(elapsed)}min ($${stored.price.toFixed(0)} → $${btcPrice.toFixed(0)}) — regime transition likely!`)
+        } else if (movePct > 2) {
+          alerts.push(`⚠️ BTC moved ${movePct.toFixed(2)}% ${dir} in ~${Math.round(elapsed)}min ($${stored.price.toFixed(0)} → $${btcPrice.toFixed(0)}) — regime transition risk`)
+        }
+
+        // Update stored price for next check
+        await redis.set(storedKey, JSON.stringify({ price: btcPrice, time: now }))
+      }
+    } else {
+      // First run or expired — store current price
+      await redis.set(storedKey, JSON.stringify({ price: btcPrice, time: now }))
+    }
+
+    await redis.quit()
+  } catch (err) {
+    logger.warn(`[RegimeWatch] Error: ${err.message}`)
+  }
+
+  const newAlerts = filterNewFindings("regimeWatch", alerts)
+  if (newAlerts.length) {
+    logger.info(`[RegimeWatch] ${newAlerts.join(" | ")}`)
+    if (!_silent) for (const a of newAlerts) await agentLog.thought("regime_watch", a)
+  }
+  return alerts
+}
+
+// ══════════════════════════════════════════════════════════
+// SKILL 12: LIQUIDATION RISK MONITOR — leverage exposure tracking
+// ══════════════════════════════════════════════════════════
+export async function runLiquidationRisk() {
+  const alerts = []
+  try {
+    const db = await getDb()
+    const WALLET_BALANCE = 1000 // default assumed balance
+
+    // Get all active signals
+    const activeSignals = await db.collection("ai_signals").find({ status: "ACTIVE" }).toArray()
+    if (activeSignals.length === 0) return alerts
+
+    let totalNotional = 0
+    for (const sig of activeSignals) {
+      // Main position notional
+      const mainNotional = sig.simNotional || 0
+      totalNotional += mainNotional
+
+      // Sum open orders (includes DCA grids + hedge)
+      const openOrders = await db.collection("orders").find({
+        signalId: sig._id, status: "OPEN",
+      }).toArray()
+      for (const o of openOrders) {
+        totalNotional += (o.notional || 0)
+      }
+    }
+
+    const effectiveLeverage = totalNotional / WALLET_BALANCE
+
+    if (effectiveLeverage > 8) {
+      alerts.push(`🚨 CRITICAL: Effective leverage ${effectiveLeverage.toFixed(1)}x ($${totalNotional.toFixed(0)} / $${WALLET_BALANCE}) — REDUCE exposure! Consider lowering maxActiveSignals`)
+      // Auto-reduce maxActiveSignals if critically overleveraged
+      const currentActive = activeSignals.length
+      if (currentActive > 3) {
+        await autoConfig("maxActiveSignals", Math.max(3, currentActive - 2), `leverage ${effectiveLeverage.toFixed(1)}x > 8x`)
+      }
+    } else if (effectiveLeverage > 5) {
+      alerts.push(`⚠️ High leverage ${effectiveLeverage.toFixed(1)}x ($${totalNotional.toFixed(0)} / $${WALLET_BALANCE}) — monitor closely`)
+    }
+
+    // Per-signal concentration check
+    for (const sig of activeSignals) {
+      const sigNotional = sig.simNotional || 0
+      const concentration = (sigNotional / totalNotional) * 100
+      if (concentration > 40 && totalNotional > WALLET_BALANCE * 3) {
+        alerts.push(`⚠️ ${sig.symbol}: ${concentration.toFixed(0)}% of total exposure — high concentration risk`)
+      }
+    }
+  } catch (err) {
+    logger.warn(`[LiquidationRisk] Error: ${err.message}`)
+  }
+
+  const newAlerts = filterNewFindings("liquidationRisk", alerts)
+  if (newAlerts.length) {
+    logger.info(`[LiquidationRisk] ${newAlerts.join(" | ")}`)
+    if (!_silent) for (const a of newAlerts) await agentLog.thought("liquidation_risk", a)
+  }
+  return alerts
+}
+
+// ══════════════════════════════════════════════════════════
 // RUN ALL SKILLS
 // ══════════════════════════════════════════════════════════
 export async function runAllSkills(silent = false) {
@@ -918,6 +1109,9 @@ export async function runAllSkills(silent = false) {
     portfolioRisk: await runPortfolioRisk(),
     tradeLearnings: await runPostTradeLearning(),
     smartAlerts: await runSmartAlerts(),
+    dynamicSlTp: await runDynamicSlTp(),
+    regimeWatch: await runRegimeWatch(),
+    liquidationRisk: await runLiquidationRisk(),
   }
   _silent = prevSilent
 
@@ -929,7 +1123,7 @@ export async function runAllSkills(silent = false) {
   }
 
   const totalActions = Object.values(results).flat().length
-  logger.info(`[Skills] Ran 9 skills — ${totalActions} total findings`)
+  logger.info(`[Skills] Ran 12 skills — ${totalActions} total findings`)
   return results
 }
 
