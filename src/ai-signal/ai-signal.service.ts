@@ -32,6 +32,7 @@ import { CoinGeckoService } from "../coingecko/coingecko.service";
 import { StrategyAutoTunerService } from "./strategy-auto-tuner.service";
 import { AiMarketAnalystService } from "./ai-market-analyst.service";
 import { TradingConfigService } from "./trading-config";
+import { RiskScoreService } from "./risk-score.service";
 
 const AI_PAUSED_KEY = "cache:ai:paused";
 const AI_TEST_MODE_KEY = "cache:ai:test-mode";
@@ -77,6 +78,7 @@ export class AiSignalService implements OnModuleInit {
     private readonly strategyAutoTuner: StrategyAutoTunerService,
     private readonly aiMarketAnalyst: AiMarketAnalystService,
     private readonly tradingConfig: TradingConfigService,
+    private readonly riskScoreService: RiskScoreService,
     @InjectModel(AiSignal.name)
     private readonly aiSignalModel: Model<AiSignalDocument>,
     @InjectModel(AiCoinProfile.name)
@@ -370,7 +372,68 @@ export class AiSignalService implements OnModuleInit {
     }
   }
 
-  // ─── Core: process a single coin ─────────────────────────────────────────
+  // ─── Pre-filter: fast cache-only checks (no indicator/API calls) ────────
+
+  private async preFilter(
+    coin: string,
+    symbol: string,
+    signalKey: string,
+    isDual: boolean,
+    forceProfile?: string,
+  ): Promise<{ pass: boolean; marketGuard?: any; reason?: string }> {
+    // Coin blacklist (auto-tuner disabled due to poor PnL)
+    const coinBlacklist = await this.strategyAutoTuner.getCoinBlacklist();
+    if (coinBlacklist.has(coin.toUpperCase())) {
+      return { pass: false, reason: 'blacklisted' };
+    }
+
+    // Active signal check
+    const hasActive = await this.signalQueueService.getActiveSignal(signalKey);
+    if (hasActive) return { pass: false, reason: 'has_active' };
+
+    // Cap total active signals
+    const cfg = this.tradingConfig.get();
+    const maxSignals = Math.min(cfg.maxActiveSignals || MAX_ACTIVE_SIGNALS, MAX_ACTIVE_SIGNALS);
+    const allActives = await this.signalQueueService.getAllActiveSignals();
+    if (allActives.length >= maxSignals) {
+      this.logger.debug(`[AiSignal] Active cap reached (${allActives.length}/${maxSignals}) — skipping new signal`);
+      return { pass: false, reason: 'active_cap' };
+    }
+
+    // Dual-timeframe conflict
+    if (isDual && forceProfile) {
+      const otherProfile = forceProfile === "INTRADAY" ? "SWING" : "INTRADAY";
+      const otherActive = await this.signalQueueService.getActiveSignal(`${symbol}:${otherProfile}`);
+      if (otherActive) return { pass: false, reason: 'dual_conflict' };
+    }
+
+    // Cooldown after SL/TP
+    const cooldown = await this.redisService.get<boolean>(`cache:ai:cooldown:${signalKey}`);
+    if (cooldown) {
+      this.redisService.initAndIncr('cache:ai:filter:cooldown', 0, 86400).catch(() => {});
+      return { pass: false, reason: 'cooldown' };
+    }
+
+    // Market Guard pauseAll
+    const marketGuard = await this.strategyAutoTuner.getMarketGuard();
+    if (marketGuard.pauseAll) {
+      this.logger.log(`[AiSignal] ${coin.toUpperCase()} skipped — Market Guard: ALL paused (${marketGuard.reason})`);
+      return { pass: false, marketGuard, reason: 'market_guard_pause' };
+    }
+
+    // Daily signal cap
+    const MAX_DAILY_SIGNALS = cfg.maxDailySignals || 35;
+    const dailyCountKey = "cache:ai:daily-signal-count";
+    const currentDailyCount = await this.redisService.get<number>(dailyCountKey) ?? 0;
+    if (currentDailyCount >= MAX_DAILY_SIGNALS) {
+      this.logger.debug(`[AiSignal] Daily signal cap reached (${MAX_DAILY_SIGNALS}) — skipping ${coin.toUpperCase()}`);
+      return { pass: false, reason: 'daily_cap' };
+    }
+
+    return { pass: true, marketGuard };
+  }
+
+  // ─── Core: process a single coin (3-tier pipeline) ─────────────────────
 
   private async processCoin(
     coin: string,
@@ -378,24 +441,17 @@ export class AiSignalService implements OnModuleInit {
     globalRegime: string,
     forceProfile?: string,
   ): Promise<void> {
-    // Early exit: skip blacklisted coins (auto-tuner disabled due to poor PnL)
     const symbol = `${coin.toUpperCase()}${currency.toUpperCase()}`;
     const coinUpper = coin.toUpperCase();
-    const coinBlacklist = await this.strategyAutoTuner.getCoinBlacklist();
-    if (coinBlacklist.has(coinUpper)) {
-      return; // silently skip — logged by auto-tuner
-    }
     const isDual = DUAL_TIMEFRAME_COINS.includes(coinUpper);
-
-    // For dual-timeframe coins, use profile-aware lock key
     const lockKey = isDual && forceProfile ? `${symbol}:${forceProfile}` : symbol;
+    const signalKey = isDual && forceProfile ? `${symbol}:${forceProfile}` : symbol;
 
     // In-memory lock to prevent same coin+profile being processed concurrently
     if (this.processingCoins.has(lockKey)) return;
     this.processingCoins.add(lockKey);
 
     // Symbol-level lock for dual coins: prevent INTRADAY+SWING racing each other
-    // One profile must finish before the other starts checking otherActive
     if (isDual) {
       while (this.processingCoins.has(`${symbol}:__DUAL_LOCK__`)) {
         await new Promise((r) => setTimeout(r, 50));
@@ -404,506 +460,158 @@ export class AiSignalService implements OnModuleInit {
     }
 
     try {
-    // For dual coins, check active signal using profile-aware key
-    const signalKey = isDual && forceProfile ? `${symbol}:${forceProfile}` : symbol;
-    const hasActive = await this.signalQueueService.getActiveSignal(signalKey);
-    if (hasActive) return;
 
-    // Cap total active signals to reduce correlated risk
-    // Use dynamic config (agent can adjust) with hardcoded max as upper bound
+    // ═══ TIER 1: Pre-filter (cache only) ═══
+    const pre = await this.preFilter(coin, symbol, signalKey, isDual, forceProfile);
+    if (!pre.pass) return;
+    const marketGuard = pre.marketGuard;
     const cfg = this.tradingConfig.get();
-    const maxSignals = Math.min(cfg.maxActiveSignals || MAX_ACTIVE_SIGNALS, MAX_ACTIVE_SIGNALS);
-    const allActives = await this.signalQueueService.getAllActiveSignals();
-    if (allActives.length >= maxSignals) {
-      this.logger.debug(`[AiSignal] Active cap reached (${allActives.length}/${maxSignals}) — skipping new signal`);
-      return;
-    }
 
-    // For dual-timeframe coins: also check if the OTHER profile already has an active signal
-    // This prevents duplicate signals for the same symbol (e.g. ETH INTRADAY + SWING both SHORT)
-    if (isDual && forceProfile) {
-      const otherProfile = forceProfile === "INTRADAY" ? "SWING" : "INTRADAY";
-      const otherActive = await this.signalQueueService.getActiveSignal(`${symbol}:${otherProfile}`);
-      if (otherActive) return;
-    }
-
-    // Cooldown after SL/TP — prevent ping-pong recreation
-    const cooldown = await this.redisService.get<boolean>(`cache:ai:cooldown:${signalKey}`);
-    if (cooldown) {
-      this.redisService.initAndIncr('cache:ai:filter:cooldown', 0, 86400).catch(() => {});
-      return;
-    }
-
+    // ═══ TIER 2: Strategy + Confluence ═══
     const params = await this.aiOptimizerService.tuneParamsForSymbol(
-      coin,
-      currency,
-      globalRegime,
-      forceProfile,
+      coin, currency, globalRegime, forceProfile,
     );
 
-    // Adjust confidence using cached futures analytics (no extra API calls)
-    // Now DIRECTIONAL: funding/L-S/taker data boosts confidence when aligned with signal direction
-    const cachedAnalytics = await this.futuresAnalyticsService.getCachedAnalytics();
-    const fa = cachedAnalytics.get(symbol);
-    if (fa) {
-      // We'll apply confidence adjustments after signal direction is known (below)
-    }
-
-    // ── Market Guard (pauseAll check before heavy evaluation) ────────────────
-    const marketGuard = await this.strategyAutoTuner.getMarketGuard();
-    if (marketGuard.pauseAll) {
-      this.logger.log(`[AiSignal] ${coin.toUpperCase()} skipped — Market Guard: ALL paused (${marketGuard.reason})`);
-      return;
-    }
-
-    // Confidence floor: regime-aware, boosted by market guard when direction is unclear
+    // Confidence floor: regime-aware, boosted by market guard
     const CONFIDENCE_FLOOR = cfg.confidenceFloor || 63;
     const isRanging = params.regime === "RANGE_BOUND" || params.regime === "SIDEWAYS";
-    // Uniform floor — hedge manages risk, don't over-restrict entries
     const rangingFloor = cfg.confidenceFloorRanging || 67;
-    const effectiveFloor = isRanging ? Math.max(rangingFloor, marketGuard.confidenceFloor) : Math.max(CONFIDENCE_FLOOR, marketGuard.confidenceFloor);
+    const effectiveFloor = isRanging
+      ? Math.max(rangingFloor, marketGuard.confidenceFloor)
+      : Math.max(CONFIDENCE_FLOOR, marketGuard.confidenceFloor);
     params.minConfidenceToTrade = Math.max(params.minConfidenceToTrade ?? 0, effectiveFloor);
-    // Hard cap 68 for ALL regimes — hedge manages risk, let signals flow
     const MAX_CONFIDENCE_CAP = (cfg as any).maxConfidenceCap || 68;
     if (params.minConfidenceToTrade > MAX_CONFIDENCE_CAP) {
       params.minConfidenceToTrade = MAX_CONFIDENCE_CAP;
     }
 
-    const signalResult = await this.ruleEngineService.evaluate(
-      coin,
-      currency,
-      params,
-    );
+    // Rule engine evaluate (confluence + agent brain + Singapore/on-chain filters)
+    const signalResult = await this.ruleEngineService.evaluate(coin, currency, params);
     if (!signalResult) return;
 
-    // ── Market Guard: directional block ───────────────────────────────────
-    if (marketGuard.blockLong && signalResult.isLong) {
-      this.logger.log(`[AiSignal] ${coin.toUpperCase()} LONG blocked by Market Guard (${marketGuard.reason})`);
-      return;
-    }
-    if (marketGuard.blockShort && !signalResult.isLong) {
-      this.logger.log(`[AiSignal] ${coin.toUpperCase()} SHORT blocked by Market Guard (${marketGuard.reason})`);
-      return;
-    }
-
-    // ── Directional confidence adjustment using futures data ──────────────
-    // Boost confidence when futures data aligns with signal direction, penalize when against.
+    // Futures analytics: confidence adjustment (boost/penalize based on direction alignment)
+    const cachedAnalytics = await this.futuresAnalyticsService.getCachedAnalytics();
+    const fa = cachedAnalytics.get(symbol);
     if (fa) {
       let adj = 0;
       const isLong = signalResult.isLong;
-
-      // Funding: positive funding = longs paying → bearish for longs, bullish for shorts
       if (fa.fundingRate > 0.001) adj += isLong ? -8 : 8;
       else if (fa.fundingRate < -0.001) adj += isLong ? 8 : -8;
-      else if (Math.abs(fa.fundingRate) < 0.0003) adj += 3; // neutral funding = stable
-
-      // L/S ratio: crowded longs → bearish for longs
+      else if (Math.abs(fa.fundingRate) < 0.0003) adj += 3;
       if (fa.longShortRatio > 2.0) adj += isLong ? -10 : 10;
       else if (fa.longShortRatio < 0.5) adj += isLong ? 10 : -10;
-
-      // Taker momentum: sell pressure → bearish for longs
       if (fa.takerBuyRatio < 0.7) adj += isLong ? -5 : 5;
       else if (fa.takerBuyRatio > 1.3) adj += isLong ? 5 : -5;
-
       if (adj !== 0) {
         params.confidence = Math.max(10, Math.min(95, params.confidence + adj));
         this.logger.debug(
-          `[AiSignal] ${coin.toUpperCase()} confidence ${adj > 0 ? "+" : ""}${adj} from futures data (now ${params.confidence})`,
+          `[AiSignal] ${coinUpper} confidence ${adj > 0 ? "+" : ""}${adj} from futures data (now ${params.confidence})`,
         );
       }
     }
 
-    // ── Main confidence gate: block weak signals (after futures adjustment) ──
+    // Main confidence gate (after futures adjustment)
     if (params.confidence < params.minConfidenceToTrade) {
       this.logger.debug(
-        `[AiSignal] ${coin.toUpperCase()} ${signalResult.isLong ? "LONG" : "SHORT"} blocked — confidence ${params.confidence} < min ${params.minConfidenceToTrade} (${params.regime})`,
+        `[AiSignal] ${coinUpper} ${signalResult.isLong ? "LONG" : "SHORT"} blocked — confidence ${params.confidence} < min ${params.minConfidenceToTrade} (${params.regime})`,
       );
       this.redisService.initAndIncr('cache:ai:filter:confidence_block', 0, 86400).catch(() => {});
       return;
     }
 
-    // Strategy-specific confidence gates REMOVED — now handled by AI Signal Gate (Tier 2)
-    // and AI direction-aware confidence (per-direction min from AI Market Analyst)
-
-    // ── Global regime trend filter (uses indicator-based globalRegime, not AI params.regime) ──
-    // STRONG_BEAR: only SHORT signals (unless futures sentiment is strongly bullish).
-    // STRONG_BULL: only LONG signals (unless futures sentiment is strongly bearish).
-    // Futures sentiment override threshold: |score| >= 30 = allow counter-regime signals.
-    const SENTIMENT_OVERRIDE_THRESHOLD = 30;
-    const sentiment = await this.futuresAnalyticsService.calculateSentiment(symbol);
-
-    if (globalRegime === "STRONG_BEAR" && signalResult.isLong) {
-      if (sentiment && sentiment.score >= SENTIMENT_OVERRIDE_THRESHOLD) {
-        this.logger.log(
-          `[AiSignal] ${coin.toUpperCase()} LONG allowed in STRONG_BEAR — futures sentiment bullish (${sentiment.score}): ${sentiment.signals.join("; ")}`,
-        );
-      } else {
-        this.logger.log(
-          `[AiSignal] ${coin.toUpperCase()} LONG skipped — regime STRONG_BEAR (shorts only)${sentiment ? ` [sentiment=${sentiment.score}]` : ""}`,
-        );
-        this.redisService.initAndIncr('cache:ai:filter:regime_block', 0, 86400).catch(() => {});
-        return;
-      }
-    }
-    if (globalRegime === "STRONG_BULL" && !signalResult.isLong) {
-      if (sentiment && sentiment.score <= -SENTIMENT_OVERRIDE_THRESHOLD) {
-        this.logger.log(
-          `[AiSignal] ${coin.toUpperCase()} SHORT allowed in STRONG_BULL — futures sentiment bearish (${sentiment.score}): ${sentiment.signals.join("; ")}`,
-        );
-      } else {
-        this.logger.log(
-          `[AiSignal] ${coin.toUpperCase()} SHORT skipped — regime STRONG_BULL (longs only)${sentiment ? ` [sentiment=${sentiment.score}]` : ""}`,
-        );
-        this.redisService.initAndIncr('cache:ai:filter:regime_block', 0, 86400).catch(() => {});
-        return;
-      }
-    }
-
-    // NOTE: 4 BTC direction filters REMOVED (2026-03-15) — all handled by Market Guard cron:
-    // - BTC RSI exhaustion (STRONG_BULL) → Market Guard dynamic BTC momentum
-    // - VOLATILE BTC direction block → Market Guard bear/bull scoring
-    // - BTC multi-TF scoring (MIXED/RANGE) → Market Guard Rule 2 (identical scoring)
-    // - LONG -20 penalty (STRONG_BEAR) → Market Guard blocks LONG when bear
-    // - Market momentum filter → Market Guard Rule 3 (recent perf)
-    // - Position imbalance filter → removed (caused deadlocks)
-    // Duplicate logic was causing deadlocks (both LONG+SHORT blocked simultaneously).
-    // Market Guard evaluates every 15min: recent perf SLs + regime scoring.
-
-    // ── Per-coin 4h EMA trend alignment ─────────────────────────────────────
-    // Block signals that go against the coin's own 4h trend, regardless of global regime.
-    // Neutral zone (spread below threshold) = no clear trend → both directions allowed.
-    // Regime-aware: ranging markets use 2.0% (small trends are noise), trending uses 1.0%.
-    // Confluence signals (2+ strategies confirmed) get a higher threshold — multi-TA agreement
-    // is strong enough to trade against mild 4h trends.
-    const isConfluenceSignal = signalResult.strategy.includes("+");
-    try {
-      const htf4hCloses = await this.indicatorService.getCloses(coin, "4h");
-      if (htf4hCloses.length >= 55) {
-        const ema21 = this.indicatorService.getEma(htf4hCloses, 21);
-        const ema50 = this.indicatorService.getEma(htf4hCloses, 50);
-        const spreadPct = (Math.abs(ema21.last - ema50.last) / ema50.last) * 100;
-
-        const isRanging = params.regime === "RANGE_BOUND" || params.regime === "SIDEWAYS";
-        // Confluence signals get 50% higher threshold (e.g. 3% instead of 2% for ranging)
-        const baseThreshold = isRanging ? 2.0 : 1.0;
-        const trendSpreadThreshold = isConfluenceSignal ? baseThreshold * 1.5 : baseThreshold;
-
-        if (spreadPct > trendSpreadThreshold) {
-          const coinTrendUp = ema21.last > ema50.last;
-          if (signalResult.isLong && !coinTrendUp) {
-            this.logger.log(
-              `[AiSignal] ${signalKey} LONG blocked — 4h downtrend (EMA21 < EMA50, spread=${spreadPct.toFixed(2)}%${isConfluenceSignal ? ", confluence threshold=" + trendSpreadThreshold.toFixed(1) + "%" : ""})`,
-            );
-            return;
-          }
-          if (!signalResult.isLong && coinTrendUp) {
-            // Allow SHORT against 4h uptrend if futures sentiment is strongly bearish
-            if (sentiment && sentiment.score <= -SENTIMENT_OVERRIDE_THRESHOLD) {
-              this.logger.log(
-                `[AiSignal] ${signalKey} SHORT allowed against 4h uptrend — futures sentiment bearish (${sentiment.score})`,
-              );
-            } else {
-              this.logger.log(
-                `[AiSignal] ${signalKey} SHORT blocked — 4h uptrend (EMA21 > EMA50, spread=${spreadPct.toFixed(2)}%)${sentiment ? ` [sentiment=${sentiment.score}]` : ""}`,
-              );
-              return;
-            }
-          }
-        }
-      }
-    } catch (err) {
-      this.logger.warn(`[AiSignal] Trend filter error for ${signalKey}: ${err?.message}`);
-    }
-
-    // ── Funding rate filter: skip manipulated/over-leveraged coins ─────────────
-    // Positive funding = longs paying → over-crowded longs → block LONG (squeeze down risk)
-    // Negative funding = shorts paying → over-crowded shorts → block SHORT (squeeze up risk)
-    // |funding| > 0.5% = extreme manipulation → block signal entirely
-    // Threshold: ±0.3% per 8h session. Fail-open (allow signal if cache miss).
+    // ═══ TIER 3: Risk Score ═══
     let signalFuturesData: { fundingRate?: number; longShortRatio?: number; takerBuyRatio?: number; openInterestUsd?: number } | undefined;
     try {
-      const symbol = `${coin.toUpperCase()}${currency.toUpperCase()}`;
       const analyticsCache = await this.futuresAnalyticsService.getCachedAnalytics();
-      let fa = analyticsCache.get(symbol);
-
-      // Cache miss: fetch funding rate directly for this coin (don't fail-open on missing data)
-      if (!fa) {
+      let faData = analyticsCache.get(symbol);
+      if (!faData) {
         this.logger.debug(`[AiSignal] ${signalKey} no cached analytics — fetching live funding rate`);
-        fa = await this.futuresAnalyticsService.fetchSingleCoin(symbol);
+        faData = await this.futuresAnalyticsService.fetchSingleCoin(symbol);
       }
-
-      if (fa) {
-        // Capture for DB storage regardless of filter outcome
+      if (faData) {
         signalFuturesData = {
-          fundingRate: fa.fundingRate,
-          longShortRatio: fa.longShortRatio,
-          takerBuyRatio: fa.takerBuyRatio,
-          openInterestUsd: fa.openInterestUsd || 0,
+          fundingRate: faData.fundingRate,
+          longShortRatio: faData.longShortRatio,
+          takerBuyRatio: faData.takerBuyRatio,
+          openInterestUsd: faData.openInterestUsd || 0,
         };
-
-        const fundingPct = fa.fundingRate * 100; // raw 0.001 → 0.1%
-        const FUNDING_DIRECTION_BLOCK = cfg.fundingDirectionalBlock || 0.1;
-        const FUNDING_EXTREME_BLOCK = cfg.fundingExtremeBlock || 0.3;
-        if (Math.abs(fundingPct) > FUNDING_EXTREME_BLOCK) {
-          this.logger.log(
-            `[AiSignal] ${signalKey} BLOCKED — extreme funding rate ${fundingPct.toFixed(4)}% (manipulation risk)`,
-          );
-          this.redisService.initAndIncr('cache:ai:filter:funding_block', 0, 86400).catch(() => {});
-          return;
-        }
-        if (fundingPct > FUNDING_DIRECTION_BLOCK && signalResult.isLong) {
-          this.logger.log(
-            `[AiSignal] ${signalKey} LONG BLOCKED — positive funding ${fundingPct.toFixed(4)}% (crowded longs, squeeze down risk)`,
-          );
-          this.redisService.initAndIncr('cache:ai:filter:funding_block', 0, 86400).catch(() => {});
-          return;
-        }
-        if (fundingPct < -FUNDING_DIRECTION_BLOCK && !signalResult.isLong) {
-          this.logger.log(
-            `[AiSignal] ${signalKey} SHORT BLOCKED — negative funding ${fundingPct.toFixed(4)}% (crowded shorts, squeeze up risk)`,
-          );
-          this.redisService.initAndIncr('cache:ai:filter:funding_block', 0, 86400).catch(() => {});
-          return;
-        }
       }
     } catch (err) {
-      this.logger.debug(`[AiSignal] Funding rate filter error for ${signalKey}: ${err?.message}`);
+      this.logger.debug(`[AiSignal] Futures data fetch error for ${signalKey}: ${err?.message}`);
     }
 
-    // ── BTC Dominance filter — block LONG alts when BTC.D rising (long trap risk) ──
-    // BTC.D rising = money flowing from alts to BTC → alt LONGs get trapped.
-    // BTC.D falling = altcoin season → alt SHORTs risky. Fail-open if fetch fails.
-    const isBtc = coin.toUpperCase() === "BTC";
-    let btcDominance: number | undefined;
-    let btcDomDelta30m: number | undefined;
-    if (!isBtc) {
-      try {
-        const domData = await this.coinGeckoService.getBtcDominanceDelta();
-        if (domData) {
-          const { current, delta30m } = domData;
-          btcDominance = current;
-          btcDomDelta30m = delta30m;
-          // Block LONG alts when BTC.D rising (>+0.2% in 30min or absolute >60%)
-          if (signalResult.isLong && (delta30m > 0.2 || current > 60)) {
-            this.logger.log(
-              `[AiSignal] ${signalKey} LONG BLOCKED — BTC.D ${current.toFixed(2)}% Δ30m=${delta30m > 0 ? "+" : ""}${delta30m.toFixed(2)}% (altcoin long trap risk)`,
-            );
-            return;
-          }
-          // Block SHORT alts when BTC.D falling aggressively (<-0.2% in 30min or absolute <42%)
-          if (!signalResult.isLong && (delta30m < -0.2 || current < 42)) {
-            this.logger.log(
-              `[AiSignal] ${signalKey} SHORT BLOCKED — BTC.D ${current.toFixed(2)}% Δ30m=${delta30m.toFixed(2)}% (altcoin season, short squeeze risk)`,
-            );
-            return;
-          }
-        }
-      } catch (err) {
-        this.logger.debug(`[AiSignal] BTC dominance filter error for ${signalKey}: ${err?.message}`);
-      }
-    }
-
-    // Validation gate — rule-based checks + Claude Haiku contextual analysis
-    // Uses price position, candle momentum, RSI checks. Fail-open on error.
-    const validationCooldownKey = `cache:ai:validation-cooldown:${signalKey}`;
-    const sym = `${coin.toUpperCase()}${currency.toUpperCase()}`;
-    const dir = signalResult.isLong ? "LONG" : "SHORT";
-    let valBase: any = {
-      symbol: sym, direction: dir, strategy: signalResult.strategy,
-      regime: params.regime || "UNKNOWN", confidence: params.confidence ?? 0,
-      stopLossPercent: params.stopLossPercent, takeProfitPercent: params.takeProfitPercent,
-    };
-    let validationReason = "";
-    let gateAction = "APPROVE";
-    let gateReason = "";
-    try {
-      const cooldown = await this.redisService.get<boolean>(validationCooldownKey);
-      if (cooldown) {
-        return; // on cooldown from recent rejection
-      }
-      const validation = await this.aiOptimizerService.validateSignal({
-        symbol: sym,
-        direction: dir,
-        strategy: signalResult.strategy,
-        confidence: params.confidence ?? 0,
-        regime: params.regime,
-        indicators: params as any,
-        stopLossPercent: params.stopLossPercent,
-        takeProfitPercent: params.takeProfitPercent,
-        fundingRate: signalFuturesData?.fundingRate,
-        longShortRatio: signalFuturesData?.longShortRatio,
-        btcDominance,
-        btcDomDelta30m,
-      });
-
-      // Update valBase with indicator data from validation
-      valBase = {
-        ...valBase,
-        pricePosition: validation.pricePosition, candleMomentum: validation.candleMomentum,
-        rsiValue: validation.rsiValue, htfRsiValue: validation.htfRsiValue,
-      };
-      validationReason = validation.reason;
-
-      if (!validation.approved) {
-        await this.redisService.set(validationCooldownKey, true, 15 * 60);
-        this.logger.log(`[AiSignal] ${signalKey} REJECTED by rule validation (15min cooldown): ${validation.reason}`);
-        this.validationModel.create({
-          ...valBase, approved: false, model: "rule-engine",
-          reason: validation.reason, rejectedBy: validation.rejectedBy,
-        }).catch(() => {});
-        return;
-      }
-      this.logger.debug(`[AiSignal] ${signalKey} APPROVED: ${validation.reason}`);
-
-      // ── AI Signal Gate (Tier 2) ──
-      try {
-        const gateResult = await this.aiMarketAnalyst.evaluateSignal({
-          symbol: sym, direction: dir, strategy: signalResult.strategy,
-          confidence: params.confidence ?? 0, entryPrice: signalResult.entryPrice,
-          stopLossPercent: params.stopLossPercent, takeProfitPercent: params.takeProfitPercent,
-          regime: params.regime,
-        });
-        gateAction = gateResult.action;
-        gateReason = gateResult.reason || "";
-
-        if (gateResult.action === "REJECT") {
-          this.logger.log(`[AiSignal] ${signalKey} REJECTED by AI Signal Gate: ${gateResult.reason}`);
-          this.redisService.initAndIncr('cache:ai:filter:ai_gate_reject', 0, 86400).catch(() => {});
-          await this.redisService.set(validationCooldownKey, true, 15 * 60);
-          this.validationModel.create({
-            ...valBase, approved: false, model: "ai-signal-gate",
-            reason: `[rule-engine] ${validationReason}\n[ai-signal-gate] REJECTED: ${gateResult.reason}`,
-            rejectedBy: ["ai-signal-gate"],
-          }).catch(() => {});
-          return;
-        }
-        if (gateResult.action === "ADJUST") {
-          if (gateResult.adjustedConfidence) params.confidence = gateResult.adjustedConfidence;
-          if (gateResult.adjustedSL) params.stopLossPercent = gateResult.adjustedSL;
-          if (gateResult.adjustedTP) params.takeProfitPercent = gateResult.adjustedTP;
-          this.logger.log(`[AiSignal] ${signalKey} ADJUSTED by AI Signal Gate: ${gateResult.reason}`);
-        }
-      } catch (err) {
-        this.logger.warn(`[AiSignal] AI Signal Gate error for ${signalKey}: ${err?.message} — pass-through`);
-      }
-
-      // ── Regime-adaptive SL/TP override ──
-      const regimeSlTp = cfg.regimeSlTp?.[params.regime];
-      if (regimeSlTp) {
-        const origSl = params.stopLossPercent;
-        const origTp = params.takeProfitPercent;
-        params.stopLossPercent = Math.max(regimeSlTp.slMin, Math.min(regimeSlTp.slMax, params.stopLossPercent || regimeSlTp.slMax));
-        params.takeProfitPercent = Math.max(regimeSlTp.tpMin, Math.min(regimeSlTp.tpMax, params.takeProfitPercent || regimeSlTp.tpMax));
-        if (origSl !== params.stopLossPercent || origTp !== params.takeProfitPercent) {
-          this.logger.log(`[AiSignal] ${signalKey} regime ${params.regime} SL/TP adjusted: SL ${origSl}→${params.stopLossPercent}% TP ${origTp}→${params.takeProfitPercent}%`);
-        }
-      }
-
-      // ── AI direction-aware confidence (Tier 3) ──
-      try {
-        const aiAnalysis = await this.aiMarketAnalyst.getAnalysis();
-        if (aiAnalysis) {
-          const dirMinConf = signalResult.isLong ? aiAnalysis.longConfidenceMin : aiAnalysis.shortConfidenceMin;
-          if ((params.confidence ?? 0) < dirMinConf) {
-            this.logger.log(`[AiSignal] ${signalKey} ${dir} blocked — AI confidence ${params.confidence} < ${dirMinConf} (bias: ${aiAnalysis.directionBias})`);
-            await this.redisService.set(validationCooldownKey, true, 15 * 60);
-            this.validationModel.create({
-              ...valBase, approved: false, model: "ai-direction-bias",
-              reason: `[rule-engine] ${validationReason}\n[ai-signal-gate] ${gateAction}: ${gateReason}\n[ai-direction-bias] REJECTED: conf ${params.confidence} < ${dirMinConf} (bias: ${aiAnalysis.directionBias})`,
-              rejectedBy: ["ai-direction-bias"],
-            }).catch(() => {});
-            return;
-          }
-        }
-      } catch {}
-
-      // ── Agent strategy blacklist (enabledStrategies = "disable:X,Y") ──
-      const enabledStrats = cfg.enabledStrategies || '';
-      if (enabledStrats.startsWith('disable:')) {
-        const disabled = enabledStrats.replace('disable:', '').split(',').map(s => s.trim()).filter(Boolean);
-        const sigStrat = signalResult.strategy.split('+')[0]; // handle confluence "A+B" → check first
-        if (disabled.some(d => signalResult.strategy.includes(d))) {
-          this.logger.debug(`[AiSignal] ${signalKey} BLOCKED — strategy ${signalResult.strategy} disabled by agent (${enabledStrats})`);
-          return;
-        }
-      }
-
-      // ── Strategy weight check (Tier 4) ──
-      try {
-        const weight = await this.aiMarketAnalyst.getStrategyWeight(signalResult.strategy);
-        if (weight <= 0) {
-          this.logger.log(`[AiSignal] ${signalKey} BLOCKED — strategy ${signalResult.strategy} weight=0 (AI disabled)`);
-          await this.redisService.set(validationCooldownKey, true, 15 * 60);
-          this.validationModel.create({
-            ...valBase, approved: false, model: "ai-strategy-weight",
-            reason: `[rule-engine] ${validationReason}\n[ai-strategy-weight] REJECTED: ${signalResult.strategy} disabled (weight=0)`,
-            rejectedBy: ["ai-strategy-weight"],
-          }).catch(() => {});
-          return;
-        }
-        if (weight < 1.0) {
-          if (Math.random() > weight) {
-            this.logger.debug(`[AiSignal] ${signalKey} SKIPPED — strategy ${signalResult.strategy} weight=${weight} (AI reduced)`);
-            return;
-          }
-        }
-      } catch {}
-    } catch (err) {
-      this.logger.warn(`[AiSignal] Validation error for ${signalKey}: ${err?.message} — APPROVED (fail-open)`);
-    }
-
-    // ── Daily signal cap: check BEFORE processing, increment AFTER success ──
-    const MAX_DAILY_SIGNALS = this.tradingConfig.get().maxDailySignals || 35;
-    const dailyCountKey = "cache:ai:daily-signal-count";
-    const now = new Date();
-    const midnight = new Date(now);
-    midnight.setUTCDate(midnight.getUTCDate() + 1);
-    midnight.setUTCHours(0, 0, 0, 0);
-    const ttl = Math.ceil((midnight.getTime() - now.getTime()) / 1000);
-    const currentDailyCount = await this.redisService.get<number>(dailyCountKey) ?? 0;
-    if (currentDailyCount >= MAX_DAILY_SIGNALS) {
-      this.logger.debug(`[AiSignal] Daily signal cap reached (${MAX_DAILY_SIGNALS}) — skipping ${coin.toUpperCase()}`);
+    const fundingRate = signalFuturesData?.fundingRate || fa?.fundingRate || 0;
+    const agentBrain = await this.redisService.get<any>('cache:agent:brain');
+    const risk = await this.riskScoreService.computeRiskScore(
+      coin, signalResult.isLong, globalRegime, marketGuard, agentBrain, fundingRate, cfg,
+    );
+    if (risk.blocked) {
+      this.logger.debug(`[AiSignal] ${coin} risk score ${risk.score} > threshold — skipped`);
+      await this.redisService.initAndIncr('cache:ai:filter:risk_score', 0, 86400);
       return;
     }
 
-    // ── Save combined validation record (all tiers passed) ──
-    this.validationModel.create({
-      ...valBase, approved: true, model: gateAction === "ADJUST" ? "ai-signal-gate" : "rule-engine",
-      reason: `[rule-engine] ${validationReason}${gateReason ? `\n[ai-signal-gate] ${gateAction}: ${gateReason}` : ""}`,
-      rejectedBy: [],
-    }).catch(() => {});
+    // Agent strategy blacklist (enabledStrategies = "disable:X,Y")
+    const enabledStrats = cfg.enabledStrategies || '';
+    if (enabledStrats.startsWith('disable:')) {
+      const disabled = enabledStrats.replace('disable:', '').split(',').map(s => s.trim()).filter(Boolean);
+      if (disabled.some(d => signalResult.strategy.includes(d))) {
+        this.logger.debug(`[AiSignal] ${signalKey} BLOCKED — strategy ${signalResult.strategy} disabled by agent (${enabledStrats})`);
+        return;
+      }
+    }
 
+    // Strategy weight check (deterministic disable only — weight <= 0)
+    try {
+      const weight = await this.aiMarketAnalyst.getStrategyWeight(signalResult.strategy);
+      if (weight <= 0) {
+        this.logger.log(`[AiSignal] ${signalKey} BLOCKED — strategy ${signalResult.strategy} weight=0 (AI disabled)`);
+        return;
+      }
+    } catch {}
+
+    // Regime-adaptive SL/TP override
+    const regimeSlTp = cfg.regimeSlTp?.[params.regime];
+    if (regimeSlTp) {
+      const origSl = params.stopLossPercent;
+      const origTp = params.takeProfitPercent;
+      params.stopLossPercent = Math.max(regimeSlTp.slMin, Math.min(regimeSlTp.slMax, params.stopLossPercent || regimeSlTp.slMax));
+      params.takeProfitPercent = Math.max(regimeSlTp.tpMin, Math.min(regimeSlTp.tpMax, params.takeProfitPercent || regimeSlTp.tpMax));
+      if (origSl !== params.stopLossPercent || origTp !== params.takeProfitPercent) {
+        this.logger.log(`[AiSignal] ${signalKey} regime ${params.regime} SL/TP adjusted: SL ${origSl}→${params.stopLossPercent}% TP ${origTp}→${params.takeProfitPercent}%`);
+      }
+    }
+
+    // ═══ Emit Signal ═══
     const isTestMode = await this.isTestModeEnabled();
 
     this.logger.log(
-      `[AiSignal]${isTestMode ? " [TEST]" : ""} Signal: ${coin.toUpperCase()}${currency.toUpperCase()} ${signalResult.isLong ? "LONG" : "SHORT"} (${signalResult.strategy}) — ${signalResult.reason}`,
+      `[AiSignal]${isTestMode ? " [TEST]" : ""} Signal: ${symbol} ${signalResult.isLong ? "LONG" : "SHORT"} (${signalResult.strategy}) — ${signalResult.reason} [risk=${risk.score}]`,
     );
 
     const queueResult = await this.signalQueueService.handleNewSignal(
-      coin,
-      currency,
-      signalResult,
-      params,
-      params.regime,
-      isTestMode,
-      forceProfile,
-      signalFuturesData,
+      coin, currency, signalResult, params, params.regime, isTestMode, forceProfile, signalFuturesData,
     );
 
     // Only increment daily count for signals that were actually EXECUTED or QUEUED
     if (queueResult.action === "EXECUTED" || queueResult.action === "QUEUED") {
-      await this.redisService.initAndIncr(dailyCountKey, 0, ttl);
+      const now = new Date();
+      const midnight = new Date(now);
+      midnight.setUTCDate(midnight.getUTCDate() + 1);
+      midnight.setUTCHours(0, 0, 0, 0);
+      const ttl = Math.ceil((midnight.getTime() - now.getTime()) / 1000);
+      await this.redisService.initAndIncr("cache:ai:daily-signal-count", 0, ttl);
     }
 
     if (queueResult.action === "EXECUTED") {
       await this.handlePostActivation(signalKey, params, isTestMode);
     } else if (queueResult.action === "QUEUED") {
-      const queuedSignal =
-        await this.signalQueueService.getQueuedSignal(signalKey);
+      const queuedSignal = await this.signalQueueService.getQueuedSignal(signalKey);
       if (queuedSignal) {
         await this.notifySignalQueued(queuedSignal, isTestMode);
       }
     }
+
     } finally {
       this.processingCoins.delete(lockKey);
       if (isDual) this.processingCoins.delete(`${symbol}:__DUAL_LOCK__`);

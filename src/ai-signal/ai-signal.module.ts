@@ -47,6 +47,7 @@ import {
 import { Order, OrderSchema } from "../schemas/order.schema";
 import { OnChainSnapshot, OnChainSnapshotSchema } from "../schemas/onchain-snapshot.schema";
 import { OnChainScannerService } from "./onchain-scanner.service";
+import { RiskScoreService } from "./risk-score.service";
 
 @Module({
   imports: [
@@ -88,6 +89,7 @@ import { OnChainScannerService } from "./onchain-scanner.service";
     HedgeManagerService,
     TradingConfigService,
     OnChainScannerService,
+    RiskScoreService,
   ],
   exports: [AiSignalService, UserSignalSubscriptionService, UserRealTradingService, SignalQueueService, PositionMonitorService, TradingConfigService, StrategyAutoTunerService, AiMarketAnalystService],
 })

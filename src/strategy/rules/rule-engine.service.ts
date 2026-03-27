@@ -124,64 +124,8 @@ export class RuleEngineService {
     const isLong = longs.length > 0;
     const primary = winners[0].result;
 
-    // ── Price Position Filter — prevent shorting bottoms & longing tops ──
-    // Check where price sits in recent 1h range (20 candles = ~20h)
-    // SHORT blocked if price in bottom 30% (shorting the floor)
-    // LONG blocked if price in top 30% (longing the ceiling)
-    const pricePos = await this.getPricePosition(coin, "1h", 20);
-    if (pricePos !== null) {
-      if (!isLong && pricePos < 30) {
-        this.logger.log(
-          `[RuleEngine] ${coin} SHORT blocked: price at ${pricePos.toFixed(0)}% of range (bottom 30%) — don't short the bottom`,
-        );
-        return null;
-      }
-      if (isLong && pricePos > 70) {
-        this.logger.log(
-          `[RuleEngine] ${coin} LONG blocked: price at ${pricePos.toFixed(0)}% of range (top 30%) — don't long the top`,
-        );
-        return null;
-      }
-      this.logger.debug(`[RuleEngine] ${coin} price position: ${pricePos.toFixed(0)}% (${isLong ? "LONG" : "SHORT"} OK)`);
-    }
-
-    // ── Move Exhaustion Filter — don't chase moves that already happened ──
-    // Use 1h candles, 3-candle lookback (3h window) — short enough to not block during sustained trends
-    // Threshold: 3% (was 2% on 24h window — too strict, blocked everything after market drops)
-    const ohlc1hExhaust = await this.indicatorService.getOhlc(coin, "1h");
-    if (ohlc1hExhaust.closes.length >= 3) {
-      const recentHighs = ohlc1hExhaust.highs.slice(-3);
-      const recentLows = ohlc1hExhaust.lows.slice(-3);
-      const recentHigh = Math.max(...recentHighs);
-      const recentLow = Math.min(...recentLows);
-      const currentPrice = ohlc1hExhaust.closes[ohlc1hExhaust.closes.length - 1];
-      const dropFromHigh = ((recentHigh - currentPrice) / recentHigh) * 100;
-      const riseFromLow = ((currentPrice - recentLow) / recentLow) * 100;
-
-      if (!isLong && dropFromHigh > 3) {
-        this.logger.log(
-          `[RuleEngine] ${coin} SHORT blocked: price dropped ${dropFromHigh.toFixed(1)}% from 3h high — move exhaustion`,
-        );
-        return null;
-      }
-      if (isLong && riseFromLow > 3) {
-        this.logger.log(
-          `[RuleEngine] ${coin} LONG blocked: price rallied ${riseFromLow.toFixed(1)}% from 3h low — move exhaustion`,
-        );
-        return null;
-      }
-    }
-
-    // ── Candle Momentum Confirmation — require recent candles to confirm direction ──
-    // At least 2 of last 3 candles must align with signal direction
-    // LONG: green candles (close > open), SHORT: red candles (close < open)
-    const momentumOk = await this.checkCandleMomentum(coin, "15m", isLong);
-    if (!momentumOk) {
-      this.logger.log(
-        `[RuleEngine] ${coin} ${isLong ? "LONG" : "SHORT"} blocked: candle momentum doesn't confirm (need 2/3 candles aligned)`,
-      );
-      return null;
-    }
+    // NOTE: Price Position, Move Exhaustion, and Candle Momentum filters REMOVED (2026-03-27)
+    // — moved to RiskScoreService (weighted scoring) instead of hard blocks.
 
     // ── RSI Divergence Filter — block signals that go against divergence ──
     // NOTE: RSI divergence filter REMOVED (2026-03-15) — rarely triggers, adds latency (extra OHLC fetch)
