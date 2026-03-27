@@ -5,7 +5,7 @@ import { collectMarketContext } from "../utils/marketContext.js"
 import { saveLearning } from "../utils/memory.js"
 import { logger } from "../utils/logger.js"
 import * as agentLog from "../utils/agentLogger.js"
-import { updateTradingConfig, getTradingConfig } from "../actions/adminApi.js"
+import { updateTradingConfig, getTradingConfig, getSignals } from "../actions/adminApi.js"
 
 const BASE = process.env.HEALTH_URL?.replace("/admin/health", "") || "http://127.0.0.1:3001"
 
@@ -908,8 +908,8 @@ export async function runSmartAlerts() {
 export async function runDynamicSlTp() {
   const findings = []
   try {
-    const res = await axios.get(BASE + "/admin/signals?status=ACTIVE", { timeout: 10000 })
-    const signals = res.data?.data || res.data || []
+    const res = await getSignals({ status: "ACTIVE", limit: 50 })
+    const signals = res?.data || res?.signals || []
     if (!Array.isArray(signals) || signals.length === 0) return findings
 
     for (const sig of signals) {

@@ -40,10 +40,10 @@ export async function collectMarketContext() {
   ctx.btc = { price: btcPrice ? parseFloat(btcPrice) : 0 }
   ctx.eth = { price: ethPrice ? parseFloat(ethPrice) : 0 }
 
-  // 2. Market regime
-  const regime = await getRedisJSON("cache:ai:regime")
-  ctx.regime = regime?.regime || "UNKNOWN"
-  ctx.regimeBias = regime?.bias || "NEUTRAL"
+  // 2. Market regime (stored as plain string in Redis, e.g. "STRONG_BEAR")
+  const regimeRaw = await getRedisJSON("cache:ai:regime")
+  ctx.regime = typeof regimeRaw === "string" ? regimeRaw : (regimeRaw?.regime || "UNKNOWN")
+  ctx.regimeBias = typeof regimeRaw === "object" ? (regimeRaw?.bias || "NEUTRAL") : "NEUTRAL"
 
   // 3. Market analysis (alt pulse, sentiment)
   const analysis = await getRedisJSON("cache:ai:market-analysis")
