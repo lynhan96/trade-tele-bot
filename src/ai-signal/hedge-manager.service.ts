@@ -227,7 +227,12 @@ export class HedgeManagerService {
       if (!acquired) return null;
 
       const hedgeDirection = signal.direction === 'LONG' ? 'SHORT' : 'LONG';
-      const positionNotional = signal.simNotional || signal.notional || 0;
+      // Use filled grid volume (not full simNotional) — hedge should match actual position size
+      const gridLevels: any[] = (signal as any).gridLevels || [];
+      const filledVolume = gridLevels.length > 0
+        ? gridLevels.filter((g: any) => g.status === 'FILLED').reduce((s: number, g: any) => s + (g.simNotional || 0), 0)
+        : 0;
+      const positionNotional = filledVolume > 0 ? filledVolume : (signal.simNotional || signal.notional || 0);
       if (positionNotional <= 0) return null;
 
       // Fixed 75% notional — consistent hedge size across all cycles

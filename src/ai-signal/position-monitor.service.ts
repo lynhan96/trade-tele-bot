@@ -833,6 +833,7 @@ export class PositionMonitorService implements OnModuleInit {
           const action = await this.hedgeManager.checkHedge(signal, price, -999, regime); // -999 bypasses PnL threshold
           if (action && action.action !== "NONE") {
             await this.handleHedgeAction(signal, action, price);
+            return; // Hedge just opened — skip SL/TP check this tick (mainOrder is stale)
           }
         }
         // Check if PnL crosses hedge trigger
@@ -841,6 +842,7 @@ export class PositionMonitorService implements OnModuleInit {
           const action = await this.hedgeManager.checkHedge(signal, price, pnlPct, regime);
           if (action && action.action !== "NONE") {
             await this.handleHedgeAction(signal, action, price);
+            return; // Hedge just opened — skip SL/TP check this tick (mainOrder is stale)
           }
         }
       } else {

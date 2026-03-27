@@ -99,7 +99,7 @@ export class SignalQueueService {
       // Fixes: signals closing before grid init → 0 orders
       const simNotional = 1000;
       const entryPrice = signalResult.entryPrice;
-      const l0Vol = simNotional * 0.4; // L0 = 40%
+      const l0Vol = simNotional * 0.35; // L0 = 35% (matches DCA_WEIGHTS[0] in position-monitor)
       const takerFeePct = this.tradingConfig?.get()?.simTakerFeePct || 0.05;
       const entryFee = +(l0Vol * takerFeePct / 100).toFixed(4);
       try {
