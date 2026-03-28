@@ -162,14 +162,14 @@ export class HedgeManagerService {
       if (!isFirstCycle && realHedges.length > 0) {
         const lastHedge = realHedges[realHedges.length - 1];
 
-        // 1. Price must be WORSE than last hedge exit (trend continuing)
+        // 1. Price should be near or worse than last hedge exit
+        // Allow small bounce (< 1%) if PnL still deeply negative (> 2x trigger)
         const lastExitPrice = lastHedge?.exitPrice || 0;
         if (lastExitPrice > 0) {
           const priceWorse = signal.direction === 'LONG'
-            ? currentPrice < lastExitPrice  // LONG: price must be lower
-            : currentPrice > lastExitPrice; // SHORT: price must be higher
-          if (!priceWorse) {
-            this.logger.log(`[${signal.coin}] Hedge blocked: price ${currentPrice} not worse than lastExit ${lastExitPrice} (dir=${signal.direction})`);
+            ? currentPrice < lastExitPrice
+            : currentPrice > lastExitPrice;
+          if (!priceWorse && pnlPct > -triggerPct * 2) {
             return null;
           }
         }
