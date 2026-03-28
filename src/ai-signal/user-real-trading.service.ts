@@ -272,15 +272,7 @@ export class UserRealTradingService implements OnModuleInit {
       }
 
       const leverage = await this.resolveLeverage(sub, params, keys.apiKey, keys.apiSecret, symbol);
-      const rawVol = this.getVolForUser(signal.symbol, sub);
-      // Risk-based position sizing: cap volume so max loss per trade ≤ 2% of trading balance.
-      // maxLoss = balance * 2%, SL = hedgeTrigger (first hedge cycle protects beyond this).
-      // volume = maxLoss / (slPct / 100). If raw volume exceeds this, cap it.
-      const balance = sub.tradingBalance ?? 1000;
-      const maxLossPerTrade = balance * 0.02; // 2% of balance
-      const slPctForSizing = this.tradingConfig.get().hedgePartialTriggerPct || 3; // use hedge trigger as effective SL
-      const riskCapVol = Math.round(maxLossPerTrade / (slPctForSizing / 100));
-      const fullVol = Math.min(rawVol, riskCapVol);
+      const fullVol = this.getVolForUser(signal.symbol, sub);
       // Grid: base order = 1/gridLevelCount of full volume (rest reserved for grid levels)
       const isGrid = sub.gridEnabled === true;
       // DCA: L0 gets 30% of volume, L1=30%, L2=40% (fixed 3 levels at 2/4/6%)
