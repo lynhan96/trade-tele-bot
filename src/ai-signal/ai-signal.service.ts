@@ -288,9 +288,8 @@ export class AiSignalService implements OnModuleInit {
 
   @Cron("*/30 * * * * *")
   async monitorActiveSignals() {
-    // Skip position monitoring in test mode (no real positions exist)
-    const isTestMode = await this.isTestModeEnabled();
-    if (isTestMode) return;
+    // Always run — checkAndResolve already skips isTestMode signals (line 1544)
+    // Live positions must be monitored even when test mode is ON
 
     try {
       const resolved = await this.positionMonitorService.checkAndResolve();
@@ -343,8 +342,6 @@ export class AiSignalService implements OnModuleInit {
 
   @Cron("*/30 * * * * *")
   async runTestModeSimulation() {
-    const isTestMode = await this.isTestModeEnabled();
-    if (!isTestMode) return;
     if (this.testSimRunning) return; // prevent overlap
 
     this.testSimRunning = true;
@@ -665,10 +662,12 @@ export class AiSignalService implements OnModuleInit {
     }
     await this.notifySignalActive(activeSignal, params as any, isTestMode);
 
-    // Trigger real order placement for users with real mode enabled
-    this.userRealTradingService.onSignalActivated(activeSignal, params as any).catch((err) =>
-      this.logger.error(`[AiSignal] Real trading error: ${err?.message}`),
-    );
+    // Trigger real order placement for users with real mode enabled (skip test signals)
+    if (!isTestMode) {
+      this.userRealTradingService.onSignalActivated(activeSignal, params as any).catch((err) =>
+        this.logger.error(`[AiSignal] Real trading error: ${err?.message}`),
+      );
+    }
   }
 
   // ─── Market-wide SL cooldown ─────────────────────────────────────────────
