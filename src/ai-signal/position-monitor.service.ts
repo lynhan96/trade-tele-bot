@@ -377,9 +377,10 @@ export class PositionMonitorService implements OnModuleInit {
     }
     const orderMeta = (mainOrder as any)?.metadata || {};
 
-    const GRID_LEVEL_COUNT = cfg.gridLevelCount || 4;
-    // DCA volume weights: L0=40% base, remaining 60% linearly increasing (matches real trading)
-    const DCA_WEIGHTS = this.getDcaWeights(GRID_LEVEL_COUNT);
+    // Fixed 3 DCA grid levels at 2%, 4%, 6% deviation — same for sim + real
+    const GRID_LEVEL_COUNT = 3;
+    const GRID_DEVIATIONS = [0, 2, 4, 6]; // L0=entry, L1=2%, L2=4%, L3=6%
+    const DCA_WEIGHTS = [30, 30, 40]; // L0=30%, L1=30%, L2=40% (heavier at deeper levels)
 
     const gridLevels: any[] = orderMeta.gridLevels ?? (signal as any).gridLevels ?? [];
     const isGridSignal = gridLevels.length > 0;
@@ -387,23 +388,14 @@ export class PositionMonitorService implements OnModuleInit {
     // Initialize grid on first tick (base grid = level 0)
     if (!isGridSignal) {
       const origEntry = entryPrice;
-      // When hedge enabled: space grids within hedge trigger range so DCA fills BEFORE hedge opens
-      // When hedge disabled: space within SL range
-      const hedgeTrigger = cfg.hedgeEnabled ? (cfg.hedgePartialTriggerPct || 3) : 0;
       const originalSlForGrid = (signal as any).originalSlPrice || (signal as any).stopLossPrice;
-      let signalSlPct = originalSlForGrid > 0 ? Math.abs((originalSlForGrid - origEntry) / origEntry) * 100 : 0;
-      if (signalSlPct < 1) signalSlPct = 4;
-      // Use hedge trigger range for grid spacing (all DCA fills before hedge opens)
-      // Grid step = triggerPct / levels, e.g. 3% / 4 = 0.75% per level
-      const effectiveRange = hedgeTrigger > 0 ? hedgeTrigger : signalSlPct;
-      const gridStep = effectiveRange / GRID_LEVEL_COUNT;
 
       const simNotional = cfg.simNotional || 1000;
       const simQuantity = simNotional / origEntry;
       const grids: any[] = [];
 
       for (let i = 0; i < GRID_LEVEL_COUNT; i++) {
-        const dev = i * gridStep;
+        const dev = GRID_DEVIATIONS[i];
         const volPct = DCA_WEIGHTS[i];
         const gridNotional = simNotional * (volPct / 100);
         if (i === 0) {
@@ -415,7 +407,7 @@ export class PositionMonitorService implements OnModuleInit {
           });
         } else {
           grids.push({
-            level: i, deviationPct: parseFloat(dev.toFixed(3)), fillPrice: 0,
+            level: i, deviationPct: dev, fillPrice: 0,
             volumePct: volPct,
             status: "PENDING",
           });
@@ -446,7 +438,7 @@ export class PositionMonitorService implements OnModuleInit {
         (signal as any)._id.toString(), simNotional, simQuantity,
       );
       this.logger.log(
-        `[PositionMonitor] Grid DCA init ${sigKey}: ${GRID_LEVEL_COUNT} levels, step=${gridStep.toFixed(2)}%, SL=${effectiveSl.toFixed(4)} (orig=${originalSlForGrid.toFixed(4)}), TP=${takeProfitPrice?.toFixed(4)}`,
+        `[PositionMonitor] Grid DCA init ${sigKey}: ${GRID_LEVEL_COUNT} levels (2/4/6%), SL=${effectiveSl.toFixed(4)} (orig=${originalSlForGrid.toFixed(4)}), TP=${takeProfitPrice?.toFixed(4)}`,
       );
 
       // Update MAIN order with grid data + metadata (order already created in signal-queue)
