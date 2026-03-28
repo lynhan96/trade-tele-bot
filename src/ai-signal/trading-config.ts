@@ -50,6 +50,7 @@ export interface TradingConfig {
   marketMomentumSLs: number;        // Require N SLs to confirm (default 2)
   positionImbalancePct: number;     // Block when X% in one direction (default 0.65)
   positionImbalanceMin: number;     // Min signals to apply imbalance filter (default 4)
+  riskScoreThreshold: number;       // Block signal if risk score > threshold (default 55)
 
   // ── Price Position ───────────────────────────────────────────────────────
   pricePositionBlockLong: number;   // Block LONG above this % of range (default 70)
@@ -155,7 +156,7 @@ export const DEFAULT_TRADING_CONFIG: TradingConfig = {
   tpProximityLock: 0.5, tpBoostTrigger: 2.5, tpBoostExtend: 2.0, tpBoostCap: 4.0,
 
   // Confidence
-  confidenceFloor: 63, confidenceFloorRanging: 67, confidenceFloorStrongBull: 80,
+  confidenceFloor: 68, confidenceFloorRanging: 70, confidenceFloorStrongBull: 80,
   regimeCaps: { SIDEWAYS: 70, RANGE_BOUND: 70, MIXED: 68, VOLATILE: 70, BTC_CORRELATION: 68, STRONG_BULL: 80, STRONG_BEAR: 72 },
 
   // Strategy gates
@@ -167,7 +168,7 @@ export const DEFAULT_TRADING_CONFIG: TradingConfig = {
   // Filters
   enabledStrategies: '', maxDailySignals: 35, maxActiveSignals: 25,
   marketMomentumPnl: -0.7, marketMomentumSLs: 2,
-  positionImbalancePct: 0.65, positionImbalanceMin: 4,
+  positionImbalancePct: 0.65, positionImbalanceMin: 4, riskScoreThreshold: 55,
 
   // Price position
   pricePositionBlockLong: 70, pricePositionBlockShort: 30,
