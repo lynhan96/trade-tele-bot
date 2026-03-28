@@ -447,7 +447,7 @@ export class UserRealTradingService implements OnModuleInit {
         `Stop Loss: *${fmtP(roundedSl)}* (${actualSlPct.toFixed(1)}%)${binanceSlAlgoId ? "" : " ⚠️"}\n` +
         (roundedTp ? `Take Profit: *${fmtP(roundedTp)}* (${actualTpPct.toFixed(1)}%)${binanceTpAlgoId ? "" : " ⚠️"}\n` : "") +
         `Volume: *${vol.toLocaleString()} USDT*` +
-        (isGrid ? `\n🔲 Grid DCA: 3 levels (2/4/6%) | Signal SL/TP` : ``);
+        (isGrid ? `\n🔲 Grid DCA: 4 levels (0/2/4/6%) | Signal SL/TP` : ``);
       await this.telegramService.sendTelegramMessage(chatId, msg).catch(() => {});
 
       // Register data stream to monitor fills/closings
@@ -2118,10 +2118,10 @@ export class UserRealTradingService implements OnModuleInit {
    * Build grid levels array for a new trade.
    * Level 0 = base (FILLED at entry), levels 1-N = PENDING at deviation steps.
    */
-  // Fixed 3 DCA grid levels at 2%, 4%, 6% — matches sim exactly
+  // Fixed 4 DCA grid levels at 0%, 2%, 4%, 6% — matches sim exactly
   private static readonly GRID_DEVIATIONS = [0, 2, 4, 6];
-  private static readonly GRID_DCA_WEIGHTS = [30, 30, 40]; // L0=30%, L1=30%, L2=40%
-  private static readonly GRID_LEVEL_COUNT = 3;
+  private static readonly GRID_DCA_WEIGHTS = [40, 15, 15, 30]; // L0=40%, L1=15%, L2=15%, L3=30%
+  private static readonly GRID_LEVEL_COUNT = 4;
 
   private buildGridLevels(
     fillPrice: number,
@@ -2185,11 +2185,7 @@ export class UserRealTradingService implements OnModuleInit {
           const { direction, symbol, telegramId } = trade;
           let gridChanged = false;
 
-          // Skip grid DCA fills when hedge is active (don't add to losing position — matches sim)
-          const hedgeTrade = await this.userTradeModel.findOne({
-            telegramId, symbol, status: "OPEN", isHedge: true,
-          }).select('_id').lean();
-          if (hedgeTrade) continue;
+          // DCA continues even when hedge is active — lowers avgEntry for easier recovery
 
           // Check PENDING grids for fill triggers (DCA: add to position)
           // RSI guard: only DCA when RSI shows exhaustion (likely to bounce)

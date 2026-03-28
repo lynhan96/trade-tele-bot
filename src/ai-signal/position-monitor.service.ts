@@ -377,10 +377,10 @@ export class PositionMonitorService implements OnModuleInit {
     }
     const orderMeta = (mainOrder as any)?.metadata || {};
 
-    // Fixed 3 DCA grid levels at 2%, 4%, 6% deviation — same for sim + real
-    const GRID_LEVEL_COUNT = 3;
+    // Fixed 4 DCA grid levels at 0%, 2%, 4%, 6% deviation — same for sim + real
+    const GRID_LEVEL_COUNT = 4;
     const GRID_DEVIATIONS = [0, 2, 4, 6]; // L0=entry, L1=2%, L2=4%, L3=6%
-    const DCA_WEIGHTS = [30, 30, 40]; // L0=30%, L1=30%, L2=40% (heavier at deeper levels)
+    const DCA_WEIGHTS = [40, 15, 15, 30]; // L0=40%, L1=15%, L2=15%, L3=30%
 
     const gridLevels: any[] = orderMeta.gridLevels ?? (signal as any).gridLevels ?? [];
     const isGridSignal = gridLevels.length > 0;
@@ -489,8 +489,7 @@ export class PositionMonitorService implements OnModuleInit {
       let filledCount = orderMeta.gridFilledCount ?? (signal as any).gridFilledCount ?? 1;
       let closedCount = orderMeta.gridClosedCount ?? (signal as any).gridClosedCount ?? 0;
 
-      // Skip grid DCA fills when hedge is active (don't add to losing position)
-      const skipGridFills = !!hedgeOrder; // when hedge active, don't DCA into losing position
+      // DCA continues even when hedge is active — lowers avgEntry for easier recovery
 
       // Check PENDING grids: price moved against position → simulate fill
       // RSI guard: only DCA when RSI shows exhaustion (likely to bounce)
@@ -499,7 +498,6 @@ export class PositionMonitorService implements OnModuleInit {
 
       for (const grid of grids) {
         if (grid.status !== "PENDING") continue;
-        if (skipGridFills) continue;
         const triggerPrice = direction === "LONG"
           ? origEntry * (1 - grid.deviationPct / 100)
           : origEntry * (1 + grid.deviationPct / 100);
