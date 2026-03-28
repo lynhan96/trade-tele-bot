@@ -17,11 +17,10 @@
  *   node scripts/sync-binance-positions.js --symbol 4USDT  (filter symbol)
  */
 
-import { MongoClient } from "mongodb"
-import crypto from "crypto"
-import https from "https"
-import dotenv from "dotenv"
-dotenv.config()
+const { MongoClient } = require("mongodb")
+const crypto = require("crypto")
+const https = require("https")
+require("dotenv").config()
 
 const MONGODB_URI = process.env.MONGODB_URI || "mongodb://127.0.0.1:27017/binance-telebot"
 const DRY_RUN = process.argv.includes("--dry-run")
