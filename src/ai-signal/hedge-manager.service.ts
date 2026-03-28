@@ -124,6 +124,7 @@ export class HedgeManagerService {
       // ── Entry conditions ──
       // PnL must be bad enough to hedge
       if (pnlPct > -triggerPct) return null;
+      this.logger.log(`[${signal.coin}] Hedge entry check: PnL=${pnlPct.toFixed(2)}% trigger=-${triggerPct}% cycle=${signal.hedgeCycleCount} price=${currentPrice}`);
 
       // ── Momentum check (CYCLE 2+ ONLY) — cycle 1 enters immediately for protection ──
       // After FLIP: hedgeCycleCount=0 means first cycle for new direction → enter immediately
@@ -168,12 +169,14 @@ export class HedgeManagerService {
             ? currentPrice < lastExitPrice  // LONG: price must be lower
             : currentPrice > lastExitPrice; // SHORT: price must be higher
           if (!priceWorse) {
+            this.logger.log(`[${signal.coin}] Hedge blocked: price ${currentPrice} not worse than lastExit ${lastExitPrice} (dir=${signal.direction})`);
             return null;
           }
         }
 
-        // 2. PnL must be worse than trigger (not just at -3%, need momentum)
+        // 2. PnL must be worse than trigger * 1.2
         if (pnlPct > -cfg.hedgePartialTriggerPct * 1.2) {
+          this.logger.log(`[${signal.coin}] Hedge blocked: PnL ${pnlPct.toFixed(2)}% > -${(cfg.hedgePartialTriggerPct * 1.2).toFixed(2)}%`);
           return null;
         }
 
@@ -197,6 +200,7 @@ export class HedgeManagerService {
             const rsi15m = rsiVals[rsiVals.length - 1];
             const rsiOk = signal.direction === 'LONG' ? rsi15m < 40 : rsi15m > 60;
             if (!rsiOk) {
+              this.logger.log(`[${signal.coin}] Hedge blocked: RSI15m=${rsi15m.toFixed(1)} not confirmed (dir=${signal.direction})`);
               return null;
             }
 
