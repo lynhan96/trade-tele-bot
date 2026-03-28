@@ -198,8 +198,8 @@ export class HedgeManagerService {
           if (closes15m.length >= 14) {
             const rsiVals = RSI.calculate({ period: 14, values: closes15m });
             const rsi15m = rsiVals[rsiVals.length - 1];
-            // Relax RSI when PnL deeply negative (> 2x trigger)
-            const rsiThresh = pnlPct < -triggerPct * 2 ? 45 : 40;
+            // Relax RSI when PnL deeply negative (> 1.5x trigger)
+            const rsiThresh = pnlPct < -triggerPct * 1.5 ? 45 : 40;
             const rsiOk = signal.direction === 'LONG' ? rsi15m < rsiThresh : rsi15m > (100 - rsiThresh);
             if (!rsiOk) {
               this.logger.log(`[${signal.coin}] Hedge blocked: RSI15m=${rsi15m.toFixed(1)} (need <${rsiThresh} for LONG) PnL=${pnlPct.toFixed(1)}%`);
@@ -211,7 +211,7 @@ export class HedgeManagerService {
             if (closes1h.length >= 14) {
               const rsiVals1h = RSI.calculate({ period: 14, values: closes1h });
               const rsi1h = rsiVals1h[rsiVals1h.length - 1];
-              const htfThresh = pnlPct < -triggerPct * 2 ? 50 : 45;
+              const htfThresh = pnlPct < -triggerPct * 1.5 ? 50 : 45;
               const htfOk = signal.direction === 'LONG' ? rsi1h < htfThresh : rsi1h > (100 - htfThresh);
               if (!htfOk) {
                 this.logger.log(`[${signal.coin}] Hedge blocked: RSI1h=${rsi1h.toFixed(1)} (need <${htfThresh}) PnL=${pnlPct.toFixed(1)}%`);
