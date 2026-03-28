@@ -221,7 +221,7 @@ export class HedgeManagerService {
             this.logger.log(`[${coin}] Hedge re-entry RSI confirmed: 15m=${rsi15m.toFixed(1)} 1h OK`);
           }
         } catch (err) {
-          this.logger.debug(`[${signal.coin}] RSI check failed, proceeding: ${err?.message}`);
+          this.logger.log(`[${signal.coin}] RSI check FAILED — proceeding without RSI gate: ${err?.message}`);
         }
       }
 
