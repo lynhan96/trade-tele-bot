@@ -666,12 +666,10 @@ export class AiSignalService implements OnModuleInit {
     }
     await this.notifySignalActive(activeSignal, params as any, isTestMode);
 
-    // Trigger real order placement for users with real mode enabled (skip test signals)
-    if (!isTestMode) {
-      this.userRealTradingService.onSignalActivated(activeSignal, params as any).catch((err) =>
-        this.logger.error(`[AiSignal] Real trading error: ${err?.message}`),
-      );
-    }
+    // Trigger real order placement for users with real mode enabled (always — test mode tracks sim alongside real)
+    this.userRealTradingService.onSignalActivated(activeSignal, params as any).catch((err) =>
+      this.logger.error(`[AiSignal] Real trading error: ${err?.message}`),
+    );
   }
 
   // ─── Market-wide SL cooldown ─────────────────────────────────────────────
