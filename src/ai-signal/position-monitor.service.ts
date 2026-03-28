@@ -69,6 +69,9 @@ export class PositionMonitorService implements OnModuleInit {
   /** Callback for hedge events (open/close). */
   private hedgeCallback?: (signal: AiSignalDocument, action: HedgeAction, price: number) => Promise<void>;
 
+  /** Per-signal concurrency guard — prevents multiple ticks processing same signal simultaneously */
+  private processingSignals = new Set<string>();
+
   /** Debounce timers for SL/TP propagation — prevents rapid tick spam to Binance */
   private slDebounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private tpDebounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -342,8 +345,24 @@ export class PositionMonitorService implements OnModuleInit {
     signal: AiSignalDocument,
     price: number,
   ): Promise<void> {
-    const { symbol, direction, entryPrice, takeProfitPrice } = signal;
     const sigKey = this.getSignalKey(signal);
+
+    // Per-signal concurrency guard — prevents duplicate hedge opens from concurrent ticks
+    if (this.processingSignals.has(sigKey)) return;
+    this.processingSignals.add(sigKey);
+    try {
+      await this._handlePriceTickInner(signal, price, sigKey);
+    } finally {
+      this.processingSignals.delete(sigKey);
+    }
+  }
+
+  private async _handlePriceTickInner(
+    signal: AiSignalDocument,
+    price: number,
+    sigKey: string,
+  ): Promise<void> {
+    const { symbol, direction, entryPrice, takeProfitPrice } = signal;
 
     // ─── Grid DCA Simulation (signal level) ─────────────────────────────────
     // True DCA: grids fit within signal's SL range. TP = signal TP price (Fibo).
@@ -364,13 +383,17 @@ export class PositionMonitorService implements OnModuleInit {
     let hedgeOrder: OrderDocument | null = cached.hedge;
     const mainOrder = cached.main;
 
-    // Sync hedge flag
+    // Sync hedge flag — grace period: don't clear if hedge was opened < 10s ago (order may not be cached yet)
     if (hedgeOrder && !(signal as any).hedgeActive) {
       (signal as any).hedgeActive = true;
     } else if (!hedgeOrder && (signal as any).hedgeActive) {
-      this.logger.warn(`[PositionMonitor] ${sigKey} hedgeActive=true but no OPEN HEDGE order found — clearing stale flag`);
-      (signal as any).hedgeActive = false;
-      await this.aiSignalModel.findByIdAndUpdate((signal as any)._id, { hedgeActive: false }).exec().catch(() => {});
+      const hedgeOpenedAt = (signal as any).hedgeOpenedAt;
+      const hedgeAge = hedgeOpenedAt ? Date.now() - new Date(hedgeOpenedAt).getTime() : Infinity;
+      if (hedgeAge > 10_000) {
+        this.logger.warn(`[PositionMonitor] ${sigKey} hedgeActive=true but no OPEN HEDGE order found — clearing stale flag`);
+        (signal as any).hedgeActive = false;
+        await this.aiSignalModel.findByIdAndUpdate((signal as any)._id, { hedgeActive: false }).exec().catch(() => {});
+      }
     }
     const orderMeta = (mainOrder as any)?.metadata || {};
 
@@ -1746,6 +1769,10 @@ export class PositionMonitorService implements OnModuleInit {
     (signal as any).hedgeSimNotional = action.hedgeNotional;
     (signal as any).hedgeTpPrice = action.hedgeTpPrice;
     (signal as any).hedgeOpenedAt = new Date();
+    // Reset exit flags — fresh hedge must NOT inherit stale breakeven/trail state
+    (signal as any).hedgeSlAtEntry = false;
+    (signal as any).hedgeTrailActivated = false;
+    (signal as any).hedgePeakPnlPct = 0;
 
     // Disable SL when hedge active — hedge IS the risk management
     // Catastrophic stop at -25% remains as absolute safety net in handlePriceTick
@@ -1760,7 +1787,7 @@ export class PositionMonitorService implements OnModuleInit {
       { stopLossPrice: 0 },
     ).catch(() => {});
 
-    // Persist to DB
+    // Persist to DB — $unset stale exit flags from previous hedge cycle
     await this.aiSignalModel.findByIdAndUpdate(signalId, {
       hedgeActive: true,
       hedgePhase: phase,
@@ -1772,6 +1799,7 @@ export class PositionMonitorService implements OnModuleInit {
       stopLossPrice: 0,
       stopLossPercent: 0,
       hedgeSafetySlPrice: 0,
+      $unset: { hedgeSlAtEntry: 1, hedgeTrailActivated: 1, hedgePeakPnlPct: 1 },
     });
 
     // Create HEDGE order record (taker fee — market order)
