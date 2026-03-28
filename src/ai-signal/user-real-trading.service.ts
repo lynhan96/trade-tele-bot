@@ -760,6 +760,21 @@ export class UserRealTradingService implements OnModuleInit {
     const trade = await this.userTradeModel.findOne({ telegramId, symbol, status: "OPEN", isHedge: { $ne: true } }).lean();
     if (!trade) return { success: false };
 
+    // Grace period for synced trades: prevent sim from immediately closing a position
+    // that was manually synced from Binance (sim entry ≠ real entry, stale TP/SL).
+    // User-initiated closes (ADMIN_CLOSE, MANUAL, CYCLE_TARGET, DAILY_STOP) are always allowed.
+    if ((trade as any).syncedFromBinance) {
+      const syncAgeMs = Date.now() - new Date((trade as any).createdAt).getTime();
+      const SYNC_GRACE_MS = 60 * 60 * 1000; // 60 minutes
+      const userInitiated = ['ADMIN_CLOSE', 'MANUAL', 'CYCLE_TARGET', 'DAILY_STOP', 'ADMIN_RESET'].includes(reason);
+      if (!userInitiated && syncAgeMs < SYNC_GRACE_MS) {
+        this.logger.warn(
+          `[RealTrading] closeRealPosition: SKIPPED ${symbol} for user ${telegramId} — synced trade protected for ${Math.round((SYNC_GRACE_MS - syncAgeMs) / 60000)}m (reason: ${reason})`,
+        );
+        return { success: false };
+      }
+    }
+
     const keys = await this.userSettingsService.getApiKeys(telegramId, "binance");
     if (!keys?.apiKey) return { success: false };
 

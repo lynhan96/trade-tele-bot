@@ -226,39 +226,74 @@ async function main() {
       if (!DRY_RUN) {
         let parentTradeId = null
         if (isHedge) {
-          // Find the main trade that was just inserted (or already in DB)
           const mainTrade = await db.collection("user_trades").findOne({
             telegramId, symbol: pos.symbol, direction: signalDir, status: "OPEN",
           })
           parentTradeId = mainTrade?._id?.toString() || null
         }
 
-        const tradeDoc = {
-          telegramId,
-          chatId,
-          symbol: pos.symbol,
-          direction: pos.direction,
-          entryPrice: pos.entryPrice,
-          quantity: pos.quantity,
-          leverage: pos.leverage,
-          notionalUsdt: pos.notionalUsdt,
-          slPrice: isHedge ? 0 : slPrice,  // hedge has no SL
-          tpPrice: isHedge ? (activeSignal?.takeProfitPrice ? pos.entryPrice * (signalDir === "LONG" ? 0.97 : 1.03) : 0) : (activeSignal?.takeProfitPrice || 0),
-          binanceSlAlgoId: isHedge ? null : slAlgoId,
-          binanceTpAlgoId: tpAlgoId,
-          status: "OPEN",
-          openedAt: new Date(),
-          aiSignalId: activeSignal?._id?.toString() || null,
-          isHedge,
-          parentTradeId,
-          hedgeCycle: isHedge ? 1 : undefined,
-          syncedFromBinance: true,
-          createdAt: new Date(),
-          updatedAt: new Date(),
-        }
+        // Try to find an existing CLOSED record to reopen (prevents duplicates)
+        const existingClosed = await db.collection("user_trades").findOne(
+          { telegramId, symbol: pos.symbol, direction: pos.direction, status: "CLOSED" },
+          { sort: { closedAt: -1 } },
+        )
 
-        await db.collection("user_trades").insertOne(tradeDoc)
-        console.log(`     ✅ Inserted UserTrade record (isHedge=${isHedge}, parentTradeId=${parentTradeId})`)
+        if (existingClosed) {
+          // Reopen existing CLOSED record — update with current Binance state
+          await db.collection("user_trades").updateOne(
+            { _id: existingClosed._id },
+            {
+              $set: {
+                status: "OPEN",
+                entryPrice: pos.entryPrice,
+                quantity: pos.quantity,
+                leverage: pos.leverage,
+                notionalUsdt: pos.notionalUsdt,
+                slPrice: isHedge ? 0 : slPrice,
+                tpPrice: isHedge ? (activeSignal?.takeProfitPrice ? pos.entryPrice * (signalDir === "LONG" ? 0.97 : 1.03) : 0) : (activeSignal?.takeProfitPrice || 0),
+                binanceSlAlgoId: isHedge ? null : slAlgoId,
+                binanceTpAlgoId: tpAlgoId,
+                aiSignalId: activeSignal?._id?.toString() || existingClosed.aiSignalId || null,
+                isHedge: !!isHedge,
+                parentTradeId,
+                syncedFromBinance: true,
+                openedAt: new Date(),
+                updatedAt: new Date(),
+              },
+              $unset: {
+                closeReason: 1, exitPrice: 1, pnlPercent: 1, pnlUsdt: 1, closedAt: 1,
+              },
+            },
+          )
+          console.log(`     ✅ Reopened existing CLOSED record ${existingClosed._id} (isHedge=${!!isHedge})`)
+        } else {
+          // No existing record — insert new
+          const tradeDoc = {
+            telegramId,
+            chatId,
+            symbol: pos.symbol,
+            direction: pos.direction,
+            entryPrice: pos.entryPrice,
+            quantity: pos.quantity,
+            leverage: pos.leverage,
+            notionalUsdt: pos.notionalUsdt,
+            slPrice: isHedge ? 0 : slPrice,
+            tpPrice: isHedge ? (activeSignal?.takeProfitPrice ? pos.entryPrice * (signalDir === "LONG" ? 0.97 : 1.03) : 0) : (activeSignal?.takeProfitPrice || 0),
+            binanceSlAlgoId: isHedge ? null : slAlgoId,
+            binanceTpAlgoId: tpAlgoId,
+            status: "OPEN",
+            openedAt: new Date(),
+            aiSignalId: activeSignal?._id?.toString() || null,
+            isHedge: !!isHedge,
+            parentTradeId,
+            hedgeCycle: isHedge ? 1 : undefined,
+            syncedFromBinance: true,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          }
+          await db.collection("user_trades").insertOne(tradeDoc)
+          console.log(`     ✅ Inserted new UserTrade record (isHedge=${!!isHedge})`)
+        }
 
         if (!isHedge && !slAlgoId) {
           console.log(
@@ -266,7 +301,7 @@ async function main() {
           )
         }
       } else {
-        console.log(`     [DRY RUN] Would insert UserTrade record (isHedge=${isHedge})`)
+        console.log(`     [DRY RUN] Would ${existingKeys.has ? "reopen" : "insert"} UserTrade record (isHedge=${!!isHedge})`)
       }
     }
 
