@@ -204,7 +204,9 @@ export class UserRealTradingService implements OnModuleInit {
       }
 
       // Atomic position slot reservation via Redis Lua script (prevents race condition)
-      const maxPos = sub.maxOpenPositions ?? 10;
+      // Cap maxOpenPositions to maxActiveSignals (sim controls signal count, real follows)
+      const cfgMaxSignals = this.tradingConfig.get().maxActiveSignals || 10;
+      const maxPos = Math.min(sub.maxOpenPositions ?? 10, cfgMaxSignals);
       const slotKey = POS_SLOT_KEY(sub.telegramId);
       const dbCount = await this.userTradeModel.countDocuments({ telegramId: sub.telegramId, status: "OPEN" });
       const reserved = await this.redisService.initAndIncr(slotKey, dbCount, 300);
