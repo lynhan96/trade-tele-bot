@@ -2,8 +2,8 @@ import { collectMarketContext } from "../utils/marketContext.js"
 import { getPrices } from "../utils/redis.js"
 import { getDb } from "../utils/db.js"
 import { buildMemoryContext, saveDecision, saveLearning } from "../utils/memory.js"
-import { updateTradingConfig } from "../actions/adminApi.js"
-import { runAllSkills } from "../actions/skills.js"
+import { updateTradingConfig, getTradingConfig } from "../actions/adminApi.js"
+import { getLastSkillResults } from "../actions/skills.js"
 import { logger } from "../utils/logger.js"
 import * as agentLog from "../utils/agentLogger.js"
 import { execSync } from "child_process"
@@ -20,7 +20,7 @@ const ALLOWED_ACTIONS = new Set(["UPDATE_CONFIG", "LEARNING", "NO_ACTION"])
 export async function runActiveTrader() {
   const db = await getDb()
 
-  // ═══ 1. Collect FULL context (prices from Redis, signals, orders, on-chain) ═══
+  // ═══ 1. Collect FULL context ═══
   const context = await collectFullContext(db)
   if (!context.activePositions.length) {
     logger.info("[Trader] No active positions")
@@ -55,7 +55,6 @@ export async function runActiveTrader() {
   // ═══ 3. Execute decisions (config + learning ONLY) ═══
   const results = []
   for (const d of (decisions || []).slice(0, 5)) {
-    // STRICT WHITELIST — reject any position execution attempts
     if (!ALLOWED_ACTIONS.has(d.action)) {
       logger.warn(`[Trader] REJECTED action: ${d.action} (not in whitelist)`)
       saveDecision({ ...d, outcome: "rejected", details: `Action ${d.action} not allowed` })
@@ -85,25 +84,19 @@ export async function runActiveTrader() {
 }
 
 async function collectFullContext(db) {
-  // ── Active signals with LIVE prices from Redis ──
+  // ── Active signals with LIVE prices ──
   const active = await db.collection("ai_signals").find({ status: "ACTIVE" }).toArray()
-  const positions = []
-
-  // Batch get all prices from Redis
   const symbols = active.map(s => s.symbol)
   const livePrices = await getPrices(symbols)
 
-  for (const s of active) {
+  const positions = active.map(s => {
     const livePrice = livePrices[s.symbol] || 0
     const entry = s.gridAvgEntry || s.entryPrice
     const mainPnlPct = livePrice && entry ? (
-      s.direction === "LONG"
-        ? ((livePrice - entry) / entry * 100)
-        : ((entry - livePrice) / entry * 100)
+      s.direction === "LONG" ? ((livePrice - entry) / entry * 100) : ((entry - livePrice) / entry * 100)
     ) : 0
     const mainPnlUsdt = (mainPnlPct / 100) * (s.simNotional || 1000)
 
-    // Hedge info
     let hedgePnlPct = 0, hedgePnlUsdt = 0
     if (s.hedgeActive && s.hedgeEntryPrice && livePrice) {
       hedgePnlPct = s.hedgeDirection === "LONG"
@@ -113,165 +106,164 @@ async function collectFullContext(db) {
     }
 
     const banked = (s.hedgeHistory || []).reduce((sum, h) => sum + (h.pnlUsdt || 0), 0)
-    const totalPnl = mainPnlUsdt + hedgePnlUsdt + banked
+    const gridFilled = (s.gridLevels || []).filter(g => g.status === "FILLED").length
+    const gridTotal = (s.gridLevels || []).length
 
-    positions.push({
-      id: s._id.toString(),
-      symbol: s.symbol,
-      direction: s.direction,
-      strategy: s.strategy,
-      entry: +entry.toFixed(6),
-      livePrice: +livePrice.toFixed(6),
-      tp: s.takeProfitPrice,
-      mainPnlPct: +mainPnlPct.toFixed(2),
-      mainPnlUsdt: +mainPnlUsdt.toFixed(2),
-      hedgeActive: s.hedgeActive || false,
-      hedgeDirection: s.hedgeDirection,
-      hedgeEntry: s.hedgeEntryPrice,
-      hedgePnlPct: +hedgePnlPct.toFixed(2),
-      hedgePnlUsdt: +hedgePnlUsdt.toFixed(2),
-      hedgeCycles: s.hedgeCycleCount || 0,
-      banked: +banked.toFixed(2),
-      totalPnl: +totalPnl.toFixed(2),
-      confidence: s.aiConfidence,
-      openedAt: s.executedAt
-    })
-  }
+    return {
+      symbol: s.symbol, direction: s.direction, strategy: s.strategy,
+      entry: +entry.toFixed(6), livePrice: +livePrice.toFixed(6), tp: s.takeProfitPrice,
+      mainPnlPct: +mainPnlPct.toFixed(2), mainPnlUsdt: +mainPnlUsdt.toFixed(2),
+      hedgeActive: s.hedgeActive || false, hedgeDirection: s.hedgeDirection,
+      hedgeEntry: s.hedgeEntryPrice, hedgePnlPct: +hedgePnlPct.toFixed(2),
+      hedgePnlUsdt: +hedgePnlUsdt.toFixed(2), hedgeCycles: s.hedgeCycleCount || 0,
+      banked: +banked.toFixed(2), totalPnl: +(mainPnlUsdt + hedgePnlUsdt + banked).toFixed(2),
+      confidence: s.aiConfidence, grid: `${gridFilled}/${gridTotal}`,
+      openedAt: s.executedAt,
+    }
+  })
 
-  // ── Recent closed orders (last 10) ──
-  const recentClosed = await db.collection("orders").find({ status: "CLOSED" })
-    .sort({ closedAt: -1 }).limit(10).toArray()
+  // ── Real trades (for sim/real comparison) ──
+  const realTrades = await db.collection("user_trades").find({ status: "OPEN" }).toArray()
+  const realInfo = realTrades.map(t => ({
+    symbol: t.symbol, direction: t.direction, isHedge: t.isHedge || false,
+    entry: +t.entryPrice.toFixed(6), qty: t.quantity,
+    notional: +(t.notionalUsdt || 0).toFixed(2),
+    sl: t.slPrice || 0, tp: t.tpPrice || 0,
+    grid: `${(t.gridLevels || []).filter(g => g.status === "FILLED").length}/${(t.gridLevels || []).length}`,
+    hasSL: !!t.binanceSlAlgoId,
+  }))
+
+  // ── Recent closed (30 days, limit 20) ──
+  const since30 = new Date(Date.now() - 30 * 86400000)
+  const recentClosed = await db.collection("orders").find({ status: "CLOSED", closedAt: { $gte: since30 } })
+    .sort({ closedAt: -1 }).limit(20).toArray()
   const recentInfo = recentClosed.map(o => ({
     symbol: o.symbol, type: o.type, direction: o.direction,
     pnl: +(o.pnlUsdt || 0).toFixed(2), reason: o.closeReason
   }))
 
-  // ── On-chain latest ──
-  const onchain = await db.collection("onchain_snapshots").find()
-    .sort({ snapshotAt: -1 }).limit(10).toArray()
-  const onchainInfo = onchain.map(s => ({
-    symbol: s.symbol?.replace("USDT", ""),
-    signal: s.direction, score: s.score,
-    fr: s.fundingRatePct, longPct: s.longPercent, taker: s.takerBuyRatio
-  }))
-
-  // ── Overall stats ──
-  const allClosed = await db.collection("orders").find({ status: "CLOSED" }).toArray()
+  // ── Stats (30 days only) ──
+  const allClosed30 = await db.collection("orders").find({ status: "CLOSED", closedAt: { $gte: since30 } }).toArray()
   let mainPnl = 0, hedgePnl = 0, wins = 0, losses = 0
-  for (const o of allClosed) {
+  for (const o of allClosed30) {
     if (o.type === "HEDGE") hedgePnl += (o.pnlUsdt || 0)
     else { mainPnl += (o.pnlUsdt || 0); if ((o.pnlUsdt || 0) > 0) wins++; else losses++ }
   }
 
-  // ── Memory ──
+  // ── Real trade stats (7 days) ──
+  const since7 = new Date(Date.now() - 7 * 86400000)
+  const realClosed = await db.collection("user_trades").find({ status: "CLOSED", closedAt: { $gte: since7 } }).toArray()
+  const realMainPnl = realClosed.filter(t => !t.isHedge).reduce((s, t) => s + (t.pnlUsdt || 0), 0)
+  const realHedgePnl = realClosed.filter(t => t.isHedge).reduce((s, t) => s + (t.pnlUsdt || 0), 0)
+
+  // ── Current config ──
+  let currentConfig = {}
+  try {
+    const cfgRes = await getTradingConfig()
+    currentConfig = cfgRes?.config || cfgRes || {}
+  } catch {}
+
+  // ── Cached skill findings (from last lightCheck — no double-run) ──
+  const skillResults = getLastSkillResults()
+  const skillFindings = Object.entries(skillResults)
+    .flatMap(([k, v]) => Array.isArray(v) ? v.map(f => `[${k}] ${f}`) : [])
+    .slice(0, 15)
+    .join("\n")
+
   const memory = buildMemoryContext()
   const market = await collectMarketContext()
 
-  // ── Skill findings (feed to Claude for adaptive tuning) ──
-  const skillResults = await runAllSkills(true) // silent — no dashboard spam
-  const skillFindings = Object.entries(skillResults)
-    .flatMap(([k, v]) => v.map(f => `[${k}] ${f}`))
-    .slice(0, 15) // cap to save tokens
-    .join("\n")
-
   return {
     activePositions: positions,
+    realTrades: realInfo,
     recentClosed: recentInfo,
-    onchain: onchainInfo,
     skillFindings,
+    currentConfig,
     stats: {
       wallet: +(1000 + mainPnl + hedgePnl).toFixed(2),
-      mainPnl: +mainPnl.toFixed(2),
-      hedgePnl: +hedgePnl.toFixed(2),
+      mainPnl: +mainPnl.toFixed(2), hedgePnl: +hedgePnl.toFixed(2),
       winRate: wins + losses > 0 ? +((wins / (wins + losses)) * 100).toFixed(1) : 0,
       totalPositions: positions.length,
-      unrealizedPnl: +positions.reduce((s, p) => s + p.totalPnl, 0).toFixed(2)
+      unrealizedPnl: +positions.reduce((s, p) => s + p.totalPnl, 0).toFixed(2),
+      real7d: { mainPnl: +realMainPnl.toFixed(2), hedgePnl: +realHedgePnl.toFixed(2), net: +(realMainPnl + realHedgePnl).toFixed(2) },
     },
-    memory,
-    market
+    memory, market,
   }
 }
 
 function buildTraderPrompt(ctx) {
-  // Compact position format (saves ~65% tokens vs JSON.stringify pretty-print)
   const posText = ctx.activePositions.map(p =>
-    `${p.symbol} ${p.direction} entry:${p.entry} price:${p.livePrice} pnl:${p.mainPnlPct}%($${p.mainPnlUsdt}) hedge:${p.hedgeActive}${p.hedgeActive ? ` hDir:${p.hedgeDirection} hEntry:${p.hedgeEntry} hPnl:${p.hedgePnlPct}%` : ''} cycles:${p.hedgeCycles} banked:$${p.banked} total:$${p.totalPnl} conf:${p.confidence} strat:${p.strategy}`
+    `${p.symbol} ${p.direction} entry:${p.entry} price:${p.livePrice} pnl:${p.mainPnlPct}%($${p.mainPnlUsdt}) hedge:${p.hedgeActive}${p.hedgeActive ? ` hDir:${p.hedgeDirection} hEntry:${p.hedgeEntry} hPnl:${p.hedgePnlPct}%` : ''} cycles:${p.hedgeCycles} banked:$${p.banked} total:$${p.totalPnl} grid:${p.grid} strat:${p.strategy}`
   ).join("\n")
 
-  // Regime-specific config guidelines for adaptive tuning
-  const regimeGuide = {
-    STRONG_BULL: "TP can be wider (3-5%), trail looser, maxActiveSignals higher (8-10), minConfidence lower (55-60), hedge threshold higher",
-    BULL: "Balanced TP (2.5-4%), moderate trail, maxActiveSignals 6-8, minConfidence 58-63",
-    NEUTRAL: "Conservative TP (2-3%), tighter trail, maxActiveSignals 5-6, minConfidence 60-65",
-    BEAR: "Tight TP (1.5-2.5%), aggressive trail, maxActiveSignals 5-6, minConfidence 63-68, favor SHORT",
-    STRONG_BEAR: "Very tight TP (1-2%), maxActiveSignals 5, minConfidence 65-68, mostly SHORT, reduce exposure",
-  }
-  const regime = ctx.market?.regime || "UNKNOWN"
-  const guide = regimeGuide[regime] || "Unknown regime — be conservative"
+  const realText = ctx.realTrades.length > 0
+    ? ctx.realTrades.map(t =>
+        `${t.symbol} ${t.direction} ${t.isHedge ? 'HEDGE' : 'MAIN'} entry:${t.entry} notional:$${t.notional} sl:${t.sl} tp:${t.tp} grid:${t.grid} hasSL:${t.hasSL}`
+      ).join("\n")
+    : "No real trades"
 
-  return `Bạn là SENIOR CRYPTO TRADER 10 năm kinh nghiệm, quản lý portfolio $1000 sim trên Binance Futures.
-Bạn là ADVISOR — KHÔNG thể mở/đóng lệnh. Bot tự quản lý TP/SL/hedge/grid. Bạn điều chỉnh CONFIG để tối ưu.
+  const cfgText = Object.entries(ctx.currentConfig)
+    .filter(([, v]) => v !== undefined && v !== null)
+    .map(([k, v]) => `${k}=${v}`)
+    .join(", ") || "all defaults"
+
+  const regime = ctx.market?.regime || "UNKNOWN"
+
+  return `Bạn là SENIOR CRYPTO TRADER, quản lý portfolio trên Binance Futures.
+ADVISOR ONLY — KHÔNG mở/đóng lệnh. Bot tự quản lý TP/SL/hedge/grid/FLIP. Bạn tối ưu CONFIG.
 
 ALLOWED: UPDATE_CONFIG | LEARNING | NO_ACTION (max 5 actions)
-Config fields: dcaTpPct, trailTrigger, trailKeepRatio, hedgePartialTriggerPct, maxActiveSignals, maxDailySignals, confidenceFloor, confidenceFloorRanging, enabledStrategies (format: "disable:STRAT1,STRAT2"), fundingDirectionalBlock, fundingExtremeBlock, btcPanic24hPct, btcBear4hPct, btcBull4hPct
+Config fields: tpMax, tpMin, dcaTpPct, trailTrigger, trailKeepRatio, hedgePartialTriggerPct, hedgeFullTriggerPct, maxActiveSignals, maxDailySignals, confidenceFloor, confidenceFloorRanging, riskScoreThreshold, enabledStrategies (format: "disable:STRAT1,STRAT2")
 
-═══ TƯ DUY TRADER CHUYÊN NGHIỆP ═══
+FIELD LIMITS (agent auto-clamps): hedgeTrigger 2-8%, confidence 55-75%, maxSignals 3-30, tpMax 1.5-6%, tpMin 1-4%, slMax 1.5-5%, riskScore 40-80
 
-1. ĐỌC THỊ TRƯỜNG NHƯ TRADER THỰC THỤ:
-   - BTC đang ở đâu trong cycle? Accumulation, markup, distribution, markdown?
-   - Volume confirm trend hay diverge? Funding rate báo hiệu gì?
-   - Altcoins follow BTC hay decouple? Rotation đang xảy ra không?
-   - Có tin tức/event lớn sắp tới không (FOMC, CPI, options expiry)?
+═══ HỆ THỐNG HIỆN TẠI ═══
 
-2. QUẢN LÝ RỦI RO NHƯ FUND MANAGER:
-   - KHÔNG BAO GIỜ risk >2% portfolio trên 1 trade ($20 max loss/trade)
-   - Khi drawdown >10%: CẮT SIZE, TĂNG CONFIDENCE, GIẢM maxActiveSignals
-   - Khi winning streak: KHÔNG tăng size (discipline > greed)
-   - Correlation check: >5 altcoins cùng hướng = quá tập trung
+PROTECTION LAYERS (đã implement, KHÔNG cần adjust):
+- Grid DCA: 4 levels cố định (0%/2%/4%/6%), weights 40/15/15/30%. DCA tiếp tục khi hedge active
+- Hedge: trigger ${ctx.currentConfig.hedgePartialTriggerPct || 3}%, floor 2%. TP + trail (activate +2%, keep 70%)
+- Progressive SL: cycle 1-2=40%, cycle 3=15%, cycle 4+=8% (chỉ khi recovery ratio <50%)
+- Circuit breaker: 3+ cycles AND recovery<50% AND price beyond SL → close
+- FLIP: khi main TP hit + hedge OPEN → giữ hedge làm main mới (không close cả hai)
+- Trail SL: đặt thật trên Binance (backup nếu bot crash)
+- NET_POSITIVE: close all khi total net PnL > 3% of filledVol
+- SIM→Real: tất cả sim actions sync cho real (SL move, TP boost, close, FLIP)
+- onTradeClose: filter by direction (hedge close không ảnh hưởng main)
 
-3. PATIENCE > FREQUENCY:
-   - Ít lệnh chất lượng hơn nhiều lệnh kém. WR 55%+ quan trọng hơn trade count
-   - Sideways market: GIẢM maxActiveSignals xuống 3-5, TĂNG confidence
-   - Trending market: NỚI maxActiveSignals lên 8-10, TP rộng hơn
-   - Chopppy/range: DISABLE grid DCA (chỉ tốn phí), TP chặt
+═══ TƯ DUY TRADER ═══
 
-4. HEDGE INTELLIGENCE:
-   - Hedge là BẢO HIỂM, không phải trade thứ 2. Đừng cố kiếm lời từ hedge
-   - Coin nào hedge kém 3 lần liên tiếp → tăng threshold hoặc disable
-   - Volatility cao → hedge trigger rộng hơn (tránh whipsaw)
-   - DEFENSIVE mode khi drawdown nặng → hedge trigger chặt hơn
+1. REGIME: ${regime}
+   - RANGE_BOUND/SIDEWAYS: TP chặt (1.5-2.5%), maxActive 3-5, confidence cao
+   - MIXED: TP 2-3%, maxActive 5-8
+   - STRONG_BULL/BEAR: TP rộng (3-5%), maxActive 8-10, follow trend
 
-5. PATTERN RECOGNITION:
-   - Xem lại 10 trade gần nhất: pattern nào lặp lại?
-   - Strategy nào đang hoạt động tốt/kém trong regime hiện tại?
-   - Session nào (ASIA/EU/US) đang có WR tốt nhất → ưu tiên
-   - Coin nào đang chạy tốt → giữ, coin nào kém → cold list
+2. RISK: max 2% per trade. Drawdown >10% → tăng confidence, giảm maxActive
 
-6. REGIME ADAPTATION:
-   Current: ${regime}. Guide: ${guide}
-   - STRONG_BULL: TP rộng 4-6%, hedge threshold cao 4%, maxActive 8-10
-   - BULL: TP 3-4%, hedge 3%, maxActive 6-8
-   - NEUTRAL/MIXED: TP 2-3%, hedge 3%, maxActive 5-6
-   - BEAR: TP chặt 1.5-2.5%, favor SHORT, maxActive 3-5
-   - STRONG_BEAR: TP rất chặt, chủ yếu SHORT, maxActive 2-4
+3. HEDGE: bảo hiểm, không trade. Coin hedge kém 3x → suggest disable. Vol cao → trigger rộng
 
-RULES: confidence cap MAX 68, SL stays 40% (safety net, hedge quản lý risk).
-Skills auto-adjust some config (drawdown, correlation, strategy rotation). Check FINDINGS trước khi adjust.
+4. STRATEGY: check WR per strategy. Disable strategy < 40% WR on 5+ trades
+
+5. TP/TRAIL GAP: trail trigger vs tpMax gap quá lớn → trail chốt lời trước TP → giảm tpMax
+
+CURRENT CONFIG: ${cfgText}
 
 SKILLS FINDINGS:
 ${ctx.skillFindings || "None"}
 
-POSITIONS (${ctx.activePositions.length}):
+SIM POSITIONS (${ctx.activePositions.length}):
 ${posText}
 
-STATS: ${JSON.stringify(ctx.stats)}
+REAL TRADES (${ctx.realTrades.length}):
+${realText}
+
+SIM STATS (30d): ${JSON.stringify(ctx.stats)}
+REAL 7d: ${JSON.stringify(ctx.stats.real7d)}
 RECENT CLOSED: ${JSON.stringify(ctx.recentClosed)}
-ON-CHAIN: ${JSON.stringify(ctx.onchain)}
 MARKET: ${JSON.stringify(ctx.market)}
 MEMORY: ${ctx.memory || "None"}
 
-Phân tích như trader 10 năm KN: đọc market structure, đánh giá từng vị thế, nhận diện pattern, đề xuất config.
-JSON: {"analysis":"Phân tích bằng tiếng Việt (chi tiết, sâu sắc)","decisions":[{"action":"...","reason":"...","data":{"field":"...","value":"..."}}],"learnings":[{"key":"...","insight":"..."}]}`
+Phân tích sâu, nhận diện pattern, đề xuất config adjustment.
+JSON: {"analysis":"...","decisions":[{"action":"...","reason":"...","data":{"field":"...","value":"..."}}],"learnings":[{"key":"...","insight":"..."}]}`
 }
 
 function parseResponse(output) {
@@ -289,7 +281,6 @@ function parseResponse(output) {
       logger.info(`[Trader] Analysis: ${parsed.analysis.slice(0, 200)}`)
       agentLog.decision("active_trader", parsed.analysis)
     }
-    // STRICT: only allow whitelisted actions
     const decisions = (parsed.decisions || []).filter(d => ALLOWED_ACTIONS.has(d.action))
     if (decisions.length < (parsed.decisions || []).length) {
       const rejected = (parsed.decisions || []).filter(d => !ALLOWED_ACTIONS.has(d.action))
@@ -311,13 +302,10 @@ async function executeAction(decision) {
       const result = await updateTradingConfig({ [field]: value })
       return { ok: !!result, message: `Config ${field}=${value}` }
     }
-
     case "LEARNING":
       return { ok: true, message: `Learned: ${decision.reason}` }
-
     case "NO_ACTION":
       return { ok: true, message: `Hold: ${decision.reason}` }
-
     default:
       return { ok: false, message: `REJECTED: ${decision.action}` }
   }

@@ -1140,6 +1140,10 @@ export async function runLiquidationRisk() {
 // ══════════════════════════════════════════════════════════
 // RUN ALL SKILLS
 // ══════════════════════════════════════════════════════════
+// Cache last skill results so activeTrader doesn't re-run skills
+let _lastSkillResults = {}
+export function getLastSkillResults() { return _lastSkillResults }
+
 export async function runAllSkills(silent = false) {
   const prevSilent = _silent
   _silent = silent
@@ -1166,6 +1170,7 @@ export async function runAllSkills(silent = false) {
     logger.warn(`[Skills] Gửi brain thất bại: ${err.message}`)
   }
 
+  _lastSkillResults = results
   const totalActions = Object.values(results).flat().length
   logger.info(`[Skills] Ran 12 skills — ${totalActions} total findings`)
   return results
