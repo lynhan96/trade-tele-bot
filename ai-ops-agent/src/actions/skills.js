@@ -17,9 +17,33 @@ const configCooldowns = new Map() // field → lastChangeTime
 const CONFIG_COOLDOWN_MS = 30 * 60 * 1000 // 30 min cooldown per field
 let _drawdownMode = "NORMAL" // NORMAL | CAUTIOUS | DEFENSIVE
 
+// Hard limits per field — prevents agent from setting destructive values
+const FIELD_LIMITS = {
+  hedgePartialTriggerPct: { min: 2, max: 8 },
+  hedgeFullTriggerPct:    { min: 2, max: 8 },
+  confidenceFloor:        { min: 55, max: 75 },
+  confidenceFloorRanging: { min: 60, max: 80 },
+  maxActiveSignals:       { min: 3, max: 30 },
+  riskScoreThreshold:     { min: 40, max: 80 },
+  hedgeTpPct:             { min: 1, max: 6 },
+  hedgeSafetySlPct:       { min: 5, max: 20 },
+  hedgeMaxCycles:         { min: 3, max: 10 },
+}
+
 async function autoConfig(field, value, reason) {
   const lastChange = configCooldowns.get(field) || 0
   if (Date.now() - lastChange < CONFIG_COOLDOWN_MS) return null
+
+  // Enforce hard limits — clamp value and warn if clamped
+  const limits = FIELD_LIMITS[field]
+  if (limits) {
+    const original = value
+    value = Math.max(limits.min, Math.min(limits.max, value))
+    if (value !== original) {
+      logger.warn(`[AutoConfig] ${field}=${original} CLAMPED to ${value} (limits: ${limits.min}-${limits.max})`)
+    }
+  }
+
   // Skip if value already matches current config (avoid redundant PATCHes)
   try {
     const current = await getTradingConfig()
@@ -239,14 +263,26 @@ export async function runHedgeManager() {
   }
   const avgVolatility = priceCount > 0 ? totalAbsPnl / priceCount : 0
 
+  // Auto-config hedgeTrigger based on volatility (with FIELD_LIMITS validation)
+  // High vol → wider trigger (prevent breakeven cycles on noise)
+  // Low vol → tighter trigger (capture smaller moves)
   if (avgVolatility > 6) {
-    actions.push(`📊 High volatility (avg ${avgVolatility.toFixed(1)}% move) — hedge activation should be higher`)
-    // In high vol, hedge triggers too early → more breakeven cycles
-    // Let Claude handle the exact threshold adjustment
-    saveLearning({ key: "hedge_vol_high", insight: `Avg position move ${avgVolatility.toFixed(1)}% — high vol environment, hedge activation 2% may be too tight` })
-  } else if (avgVolatility < 2) {
-    actions.push(`📊 Low volatility (avg ${avgVolatility.toFixed(1)}% move) — hedge activation can be tighter`)
-    saveLearning({ key: "hedge_vol_low", insight: `Avg position move ${avgVolatility.toFixed(1)}% — low vol, hedge activation can be 1.5-2%` })
+    const trigger = Math.min(Math.round(avgVolatility * 0.7), 8)
+    await autoConfig("hedgePartialTriggerPct", trigger, `High vol ${avgVolatility.toFixed(1)}% → trigger ${trigger}%`)
+    await autoConfig("hedgeFullTriggerPct", trigger, `High vol ${avgVolatility.toFixed(1)}% → trigger ${trigger}%`)
+    actions.push(`📊 High vol (${avgVolatility.toFixed(1)}%) → auto-set hedgeTrigger=${trigger}%`)
+  } else if (avgVolatility > 3) {
+    await autoConfig("hedgePartialTriggerPct", 4, `Medium vol ${avgVolatility.toFixed(1)}% → trigger 4%`)
+    await autoConfig("hedgeFullTriggerPct", 4, `Medium vol ${avgVolatility.toFixed(1)}% → trigger 4%`)
+    actions.push(`📊 Medium vol (${avgVolatility.toFixed(1)}%) → auto-set hedgeTrigger=4%`)
+  } else if (avgVolatility >= 1) {
+    await autoConfig("hedgePartialTriggerPct", 3, `Normal vol ${avgVolatility.toFixed(1)}% → trigger 3%`)
+    await autoConfig("hedgeFullTriggerPct", 3, `Normal vol ${avgVolatility.toFixed(1)}% → trigger 3%`)
+    actions.push(`📊 Normal vol (${avgVolatility.toFixed(1)}%) → hedgeTrigger=3% (default)`)
+  } else {
+    await autoConfig("hedgePartialTriggerPct", 2, `Low vol ${avgVolatility.toFixed(1)}% → trigger 2% (floor)`)
+    await autoConfig("hedgeFullTriggerPct", 2, `Low vol ${avgVolatility.toFixed(1)}% → trigger 2% (floor)`)
+    actions.push(`📊 Low vol (${avgVolatility.toFixed(1)}%) → hedgeTrigger=2% (floor)`)
   }
 
   const newActions = filterNewFindings("hedge", actions)
