@@ -393,10 +393,15 @@ export class BinanceService {
   async getOpenAlgoOrders(
     apiKey: string,
     apiSecret: string,
-  ): Promise<Map<string, { hasSl: boolean; hasTp: boolean; slAlgoId?: string; tpAlgoId?: string }> | null> {
-    const result = new Map<string, { hasSl: boolean; hasTp: boolean; slAlgoId?: string; tpAlgoId?: string }>();
+  ): Promise<Map<string, { hasSl: boolean; hasTp: boolean; slAlgoId?: string; tpAlgoId?: string; slCount: number; tpCount: number; allSlIds: string[]; allTpIds: string[] }> | null> {
+    const result = new Map<string, { hasSl: boolean; hasTp: boolean; slAlgoId?: string; tpAlgoId?: string; slCount: number; tpCount: number; allSlIds: string[]; allTpIds: string[] }>();
     const client = this.createClient(apiKey, apiSecret);
     let anySuccess = false;
+
+    const getEntry = (sym: string) => {
+      if (!result.has(sym)) result.set(sym, { hasSl: false, hasTp: false, slCount: 0, tpCount: 0, allSlIds: [], allTpIds: [] });
+      return result.get(sym)!;
+    };
 
     try {
       // 1. Algo orders (placed by setStopLoss/setTakeProfitAtPrice via /fapi/v1/algoOrder)
@@ -406,15 +411,19 @@ export class BinanceService {
           anySuccess = true;
           for (const o of algoOrders) {
             const sym = o.symbol as string;
-            if (!result.has(sym)) result.set(sym, { hasSl: false, hasTp: false });
-            const entry = result.get(sym)!;
+            const entry = getEntry(sym);
+            const id = o.algoId?.toString();
             if (o.orderType === 'STOP_MARKET' || o.orderType === 'STOP') {
               entry.hasSl = true;
-              entry.slAlgoId = o.algoId?.toString();
+              entry.slAlgoId = id;
+              entry.slCount++;
+              if (id) entry.allSlIds.push(id);
             }
             if (o.orderType === 'TAKE_PROFIT_MARKET' || o.orderType === 'TAKE_PROFIT') {
               entry.hasTp = true;
-              entry.tpAlgoId = o.algoId?.toString();
+              entry.tpAlgoId = id;
+              entry.tpCount++;
+              if (id) entry.allTpIds.push(id);
             }
           }
         }
@@ -431,15 +440,19 @@ export class BinanceService {
             const sym = o.symbol as string;
             const oType = o.type as string;
             if (oType !== 'STOP_MARKET' && oType !== 'STOP' && oType !== 'TAKE_PROFIT_MARKET' && oType !== 'TAKE_PROFIT') continue;
-            if (!result.has(sym)) result.set(sym, { hasSl: false, hasTp: false });
-            const entry = result.get(sym)!;
+            const entry = getEntry(sym);
+            const id = o.orderId?.toString();
             if (oType === 'STOP_MARKET' || oType === 'STOP') {
               entry.hasSl = true;
-              if (!entry.slAlgoId) entry.slAlgoId = o.orderId?.toString();
+              if (!entry.slAlgoId) entry.slAlgoId = id;
+              entry.slCount++;
+              if (id) entry.allSlIds.push(id);
             }
             if (oType === 'TAKE_PROFIT_MARKET' || oType === 'TAKE_PROFIT') {
               entry.hasTp = true;
-              if (!entry.tpAlgoId) entry.tpAlgoId = o.orderId?.toString();
+              if (!entry.tpAlgoId) entry.tpAlgoId = id;
+              entry.tpCount++;
+              if (id) entry.allTpIds.push(id);
             }
           }
         }

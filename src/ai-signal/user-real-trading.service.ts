@@ -1550,6 +1550,27 @@ export class UserRealTradingService implements OnModuleInit {
             const pp = await getPP(symbol);
             const round = (p: number) => parseFloat(p.toFixed(pp));
 
+            // ── Cleanup duplicate SL/TP orders on Binance ─────────────────
+            // If multiple SL or TP orders exist for same symbol, cancel extras (keep DB-tracked one)
+            if (algo && (algo.slCount > 1 || algo.tpCount > 1)) {
+              const dbSlId = (trade as any).binanceSlAlgoId;
+              const dbTpId = (trade as any).binanceTpAlgoId;
+              if (algo.slCount > 1) {
+                const extraSls = algo.allSlIds.filter(id => id !== dbSlId);
+                for (const id of extraSls) {
+                  await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, id).catch(() => {});
+                }
+                this.logger.warn(`[RealTrading] ${symbol} user ${telegramId}: cleaned ${extraSls.length} duplicate SL orders (kept ${dbSlId})`);
+              }
+              if (algo.tpCount > 1) {
+                const extraTps = algo.allTpIds.filter(id => id !== dbTpId);
+                for (const id of extraTps) {
+                  await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, id).catch(() => {});
+                }
+                this.logger.warn(`[RealTrading] ${symbol} user ${telegramId}: cleaned ${extraTps.length} duplicate TP orders (kept ${dbTpId})`);
+              }
+            }
+
             // ── Time-based stop for real trades: 24h+ stagnant → close ─────
             // Must match ai-signal.service.ts time-stop. Only close if truly flat (±0.5%).
             const tradeAgeMs = Date.now() - new Date((trade as any).createdAt).getTime();
