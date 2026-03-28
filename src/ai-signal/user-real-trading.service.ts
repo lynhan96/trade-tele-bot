@@ -2883,7 +2883,14 @@ export class UserRealTradingService implements OnModuleInit {
           }
 
           const hedgeDir = action.hedgeDirection || (mainTrade.direction === 'LONG' ? 'SHORT' : 'LONG');
-          const hedgeNotional = action.hedgeNotional || mainTrade.notionalUsdt * 0.75;
+          // Use filled grid notional (actual position size) for hedge sizing — matches sim
+          const mainEntry = (mainTrade as any).gridAvgEntry || mainTrade.entryPrice;
+          const filledGridNotional = (mainTrade as any).gridLevels?.length > 0
+            ? (mainTrade as any).gridLevels
+                .filter((g: any) => g.status === 'FILLED')
+                .reduce((s: number, g: any) => s + ((g.quantity || 0) * mainEntry), 0) || mainTrade.notionalUsdt
+            : mainTrade.notionalUsdt;
+          const hedgeNotional = action.hedgeNotional || filledGridNotional * 0.75;
           const [qtyPrec] = await Promise.all([this.getQuantityPrecision(mainTrade.symbol)]);
           const hedgeQty = parseFloat((hedgeNotional / currentPrice).toFixed(qtyPrec));
           if (hedgeQty <= 0) continue;
