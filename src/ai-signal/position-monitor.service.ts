@@ -993,14 +993,12 @@ export class PositionMonitorService implements OnModuleInit {
 
         let forceCloseReason: "NET_POSITIVE" | "CATASTROPHIC_STOP" | null = null;
 
-        // NET_POSITIVE: only trigger on BANKED profit (realized), not current hedge PnL
-        // Hedge should close via its own TP/trail — NET_POSITIVE is for banked recovery only
-        // Require banked net > 5% of filled volume to ensure meaningful profit
-        const bankedNetPnl = mainUnrealizedUsdt + bankedProfit;
-        const netPositiveThreshold = filledVol * 0.02; // 2% of position — ~$7 for $350 L0
-        if (bankedNetPnl > netPositiveThreshold) {
+        // NET_POSITIVE: total net PnL (main unrealized + banked hedge + current hedge) > 3% of filledVol
+        // Close everything when the TOTAL position is profitable enough
+        const netPositiveThreshold = filledVol * 0.03; // 3% of position
+        if (netPnlUsdt > netPositiveThreshold) {
           this.logger.log(
-            `[PositionMonitor] ${sigKey} NET POSITIVE EXIT | main=$${mainUnrealizedUsdt.toFixed(2)} banked=$${bankedProfit.toFixed(2)} hedge=$${currentHedgePnlUsdt.toFixed(2)} → bankedNet=$${bankedNetPnl.toFixed(2)}`,
+            `[PositionMonitor] ${sigKey} NET POSITIVE EXIT | main=$${mainUnrealizedUsdt.toFixed(2)} banked=$${bankedProfit.toFixed(2)} hedge=$${currentHedgePnlUsdt.toFixed(2)} → total=$${netPnlUsdt.toFixed(2)} > threshold=$${netPositiveThreshold.toFixed(2)}`,
           );
           forceCloseReason = "NET_POSITIVE";
         } else if (catastrophicPct <= -25) {
