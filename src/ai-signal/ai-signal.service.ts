@@ -130,6 +130,14 @@ export class AiSignalService implements OnModuleInit {
 
       await this.notifyPositionClosed(info).catch(() => {});
 
+      // Close real positions when signal closes (TP/SL/TRAIL_STOP)
+      const subscribers = await this.subscriptionService.findRealModeSubscribers();
+      for (const sub of subscribers) {
+        await this.userRealTradingService.closeRealPosition(
+          sub.telegramId, sub.chatId, info.symbol, info.closeReason,
+        ).catch((err) => this.logger.warn(`[AiSignal] Real close failed for ${sub.telegramId} ${info.symbol}: ${err?.message}`));
+      }
+
       if (info.queuedSignalActivated) {
         const newActive = await this.signalQueueService.getActiveSignal(
           signalKey,

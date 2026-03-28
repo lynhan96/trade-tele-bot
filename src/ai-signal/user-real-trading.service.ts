@@ -1972,7 +1972,10 @@ export class UserRealTradingService implements OnModuleInit {
                     const { RSI } = require("technicalindicators");
                     const rsiVals = RSI.calculate({ period: 14, values: closes });
                     const rsi = rsiVals[rsiVals.length - 1];
-                    const rsiExhausted = direction === "LONG" ? rsi < 40 : rsi > 60;
+                    // Level-based RSI softening (match sim: L1=48/52, L2=45/55, L3+=42/58)
+                    const level = grid.level || 0;
+                    const rsiThresh = level <= 1 ? 48 : level <= 2 ? 45 : 42;
+                    const rsiExhausted = direction === "LONG" ? rsi < rsiThresh : rsi > (100 - rsiThresh);
 
                     // Sustained momentum check: if last 3 closes are all declining (LONG) or rising (SHORT),
                     // selling/buying is still active — wait for at least 1 stabilization candle
@@ -1983,7 +1986,8 @@ export class UserRealTradingService implements OnModuleInit {
                         : last4[3] > last4[2] && last4[2] > last4[1] && last4[1] > last4[0] // 3 consecutive higher closes
                     );
 
-                    rsiOk = rsiExhausted && !sustainedAgainst;
+                    // Momentum check only for L3+ (match sim — L1-L2 use RSI only)
+                    rsiOk = rsiExhausted && (level < 3 || !sustainedAgainst);
                     if (!rsiOk) {
                       this.logger.log(
                         `[Grid] ${symbol} user ${telegramId} L${grid.level} RSI=${rsi.toFixed(1)} sustained=${sustainedAgainst} — skip DCA (waiting for exhaustion/stabilization)`,
@@ -2434,6 +2438,14 @@ export class UserRealTradingService implements OnModuleInit {
           });
           if (!parentTrade) continue;
 
+          // Cancel main trade SL on Binance — hedge manages risk now
+          const mainKeys = await this.userSettingsService.getApiKeys(sub.telegramId, 'binance');
+          if (mainKeys?.apiKey && (parentTrade as any).binanceSlAlgoId) {
+            await this.binanceService.cancelAlgoOrder(mainKeys.apiKey, mainKeys.apiSecret, (parentTrade as any).binanceSlAlgoId).catch(() => {});
+            await this.userTradeModel.updateOne({ _id: parentTrade._id }, { $set: { binanceSlAlgoId: null, slPrice: 0 } }).catch(() => {});
+            this.logger.log(`[UserRealTrading] Hedge open: cancelled main SL for ${sub.telegramId} ${signal.symbol}`);
+          }
+
           // Check if hedge trade already exists
           const existingHedge = await this.userTradeModel.findOne({
             telegramId: sub.telegramId,
@@ -2564,6 +2576,37 @@ export class UserRealTradingService implements OnModuleInit {
           this.logger.log(
             `[UserRealTrading] Hedge trade closed for ${hedge.telegramId} | ${signal.symbol} PnL: ${pnlPct.toFixed(2)}% ($${pnlUsdt}) reason=${closeReason}`,
           );
+
+          // Restore SL on main trade after hedge close (40% safety net)
+          if (!isFlip && keys?.apiKey) {
+            const mainTrd = await this.userTradeModel.findOne({
+              telegramId: hedge.telegramId, aiSignalId: signalId,
+              status: 'OPEN', isHedge: { $ne: true },
+            });
+            if (mainTrd) {
+              const mainEntry = (mainTrd as any).gridAvgEntry || mainTrd.entryPrice;
+              const slPct = 40;
+              const restoredSl = mainTrd.direction === 'LONG'
+                ? +(mainEntry * (1 - slPct / 100)).toFixed(6)
+                : +(mainEntry * (1 + slPct / 100)).toFixed(6);
+              const pp = await this.getPricePrecision(signal.symbol);
+              const roundedSl = parseFloat(restoredSl.toFixed(pp));
+              const slQty = mainTrd.gridLevels?.length > 0
+                ? mainTrd.gridLevels.filter((g: any) => g.status === 'FILLED').reduce((s: number, g: any) => s + (g.quantity || 0), 0) || mainTrd.quantity
+                : mainTrd.quantity;
+              try {
+                const slOrder = await this.binanceService.setStopLoss(
+                  keys.apiKey, keys.apiSecret, signal.symbol, roundedSl,
+                  mainTrd.direction as 'LONG' | 'SHORT', slQty,
+                );
+                const newSlId = slOrder?.algoId?.toString() ?? slOrder?.orderId?.toString();
+                await this.userTradeModel.updateOne({ _id: mainTrd._id }, { $set: { slPrice: roundedSl, binanceSlAlgoId: newSlId } });
+                this.logger.log(`[UserRealTrading] Hedge close: restored SL $${roundedSl} for ${hedge.telegramId} ${signal.symbol}`);
+              } catch (err) {
+                this.logger.error(`[UserRealTrading] Hedge close: SL restore FAILED ${signal.symbol}: ${err?.message}`);
+              }
+            }
+          }
 
           // FLIP: Close main trade (old direction) + open new main (flipped direction)
           if (isFlip) {

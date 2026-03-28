@@ -632,8 +632,8 @@ export class PositionMonitorService implements OnModuleInit {
           if (this.slMovedCallback) {
             await this.slMovedCallback(symbol, avgEntry).catch(() => {});
           }
-          // NOTE: Do NOT propagate trail SL to Binance — backend manages exit via protectOpenTrades
-          // Original SL on Binance stays as safety net
+          // Propagate break-even SL to Binance (cancel old 40% SL, place at entry)
+          this.propagateSlMove(sigKey, symbol, avgEntry, direction);
         }
 
         // Continuous trailing: keep 75% of peak profit (DB only — not pushed to Binance)
@@ -776,7 +776,8 @@ export class PositionMonitorService implements OnModuleInit {
             this.logger.warn(`[PositionMonitor] slMovedCallback error ${sigKey}: ${e?.message}`),
           );
         }
-        // NOTE: Do NOT propagate trail SL to Binance — backend manages exit via protectOpenTrades
+        // Propagate break-even SL to Binance
+        this.propagateSlMove(sigKey, symbol, currentEntry, direction);
       }
 
       // TP proximity lock: if price within 0.5% of TP → freeze trail, let TP execute
