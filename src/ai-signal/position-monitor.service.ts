@@ -108,10 +108,7 @@ export class PositionMonitorService implements OnModuleInit {
     this.hedgeCallback = cb;
   }
 
-  private realHedgeCallback?: (signal: AiSignalDocument, price: number, regime: string) => Promise<void>;
-  setRealHedgeCallback(cb: (signal: AiSignalDocument, price: number, regime: string) => Promise<void>): void {
-    this.realHedgeCallback = cb;
-  }
+  // realHedgeCallback REMOVED — real hedge follows sim via hedgeCallback → onHedgeEvent
 
   constructor(
     private readonly configService: ConfigService,
@@ -896,15 +893,7 @@ export class PositionMonitorService implements OnModuleInit {
     const hedgeActive = !!hedgeOrder; // derived from DB order at start of tick
 
     if (hedgeEnabled) {
-      // Independent real-side hedge check — always runs on every tick.
-      // Uses real UserTrade entry/notional (independent of sim state).
-      // Must run before sim checks so real hedge is never orphaned by sim early-return.
-      if (this.realHedgeCallback) {
-        const realtimeRegime = (signal as any).regime || "MIXED";
-        this.realHedgeCallback(signal, price, realtimeRegime).catch(err =>
-          this.logger.warn(`[PositionMonitor] realHedgeCallback error ${sigKey}: ${err?.message}`),
-        );
-      }
+      // Real hedge follows sim via hedgeCallback → onHedgeEvent (no independent check)
 
       if (!hedgeActive) {
         // Force open hedge (triggered by admin API)

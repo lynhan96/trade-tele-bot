@@ -2162,7 +2162,11 @@ export class UserRealTradingService implements OnModuleInit {
             }
 
           } else if (action.action === 'OPEN_FULL' || action.action === 'OPEN_PARTIAL') {
-            // Cancel main SL — hedge manages risk
+            // Orphan trades: do NOT open new hedges independently.
+            // Only sim-driven hedgeCallback → onHedgeEvent can open hedges.
+            this.logger.log(`[OrphanHedge] Skipping hedge OPEN for orphan ${trade.symbol} — no sim control`);
+            continue;
+            // Dead code below — kept for reference if re-enabling orphan hedge
             if ((trade as any).binanceSlAlgoId) {
               await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, (trade as any).binanceSlAlgoId).catch(() => {});
               await this.userTradeModel.updateOne({ _id: (trade as any)._id }, { $set: { binanceSlAlgoId: null, slPrice: 0 } }).catch(() => {});
@@ -2943,13 +2947,10 @@ export class UserRealTradingService implements OnModuleInit {
   // ─── Hedge Event Tracking (sim-driven, kept for backward compat) ────
 
   /**
-   * Sim hedge event handler — real hedge is managed independently by checkRealHedge().
-   * This method is kept as no-op for backward compat (hedgeCallback still calls it).
+   * SIM controls REAL: when sim opens/closes hedge, mirror to real Binance trades.
+   * This is the ONLY path for real hedge open/close (no independent checkRealHedge).
    */
   async onHedgeEvent(signal: any, action: any, price: number): Promise<void> {
-    // Real hedge open/close now handled by checkRealHedge() using real entry prices.
-    // No-op — sim notification handled by notifyHedgeEvent in ai-signal.service.ts.
-    return;
     if (!action || action.action === 'NONE') return;
 
     const signalId = signal._id?.toString();
@@ -2987,10 +2988,16 @@ export class UserRealTradingService implements OnModuleInit {
           if (existingHedge) continue;
 
           const hedgeDir = action.hedgeDirection || (signal.direction === 'LONG' ? 'SHORT' : 'LONG');
-          const hedgeNotional = action.hedgeNotional || 0;
+          // Use real trade's filled notional for hedge sizing (not sim notional)
+          const mainEntry = (parentTrade as any).gridAvgEntry || parentTrade.entryPrice;
+          const filledGridNotional = (parentTrade as any).gridLevels?.length > 0
+            ? (parentTrade as any).gridLevels
+                .filter((g: any) => g.status === 'FILLED')
+                .reduce((s: number, g: any) => s + ((g.quantity || 0) * mainEntry), 0) || parentTrade.notionalUsdt
+            : parentTrade.notionalUsdt;
+          const hedgeNotional = (filledGridNotional || parentTrade.notionalUsdt) * 0.75;
           if (hedgeNotional <= 0) continue;
 
-          // Place REAL Binance hedge order (Hedge Mode — opposite side)
           const keys = await this.userSettingsService.getApiKeys(sub.telegramId, 'binance');
           if (!keys?.apiKey) continue;
 
@@ -3016,13 +3023,15 @@ export class UserRealTradingService implements OnModuleInit {
             continue; // Don't create trade record if Binance order failed
           }
 
-          // Place TP order for hedge on Binance (if configured)
-          if (action.hedgeTpPrice) {
+          // Recalculate TP from actual fill price (slippage correction)
+          const regime = (signal as any).regime || 'MIXED';
+          const actualTpPrice = this.hedgeManager.getHedgeTpPrice(fillPrice, hedgeDir, regime);
+          if (actualTpPrice) {
             try {
               await this.binanceService.setTakeProfitAtPrice(
                 keys.apiKey, keys.apiSecret,
                 signal.symbol,
-                parseFloat(action.hedgeTpPrice.toFixed(pricePrec)),
+                parseFloat(actualTpPrice.toFixed(pricePrec)),
                 hedgeDir as 'LONG' | 'SHORT',
                 hedgeQty,
               );
@@ -3041,7 +3050,7 @@ export class UserRealTradingService implements OnModuleInit {
             leverage: parentTrade.leverage || 1,
             notionalUsdt: hedgeNotional,
             slPrice: 0,
-            tpPrice: action.hedgeTpPrice || 0,
+            tpPrice: actualTpPrice || 0,
             status: 'OPEN',
             openedAt: new Date(),
             aiSignalId: signalId,

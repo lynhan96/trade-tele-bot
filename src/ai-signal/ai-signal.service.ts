@@ -174,13 +174,9 @@ export class AiSignalService implements OnModuleInit {
 
     this.positionMonitorService.setHedgeCallback(async (signal, action, price) => {
       await this.notifyHedgeEvent(signal, action, price);
-      // Sim hedge notification only — real hedge managed independently by checkRealHedge
-    });
-
-    // Independent real-side hedge: uses real entry prices from UserTrade records
-    this.positionMonitorService.setRealHedgeCallback(async (signal, price, regime) => {
-      await this.userRealTradingService.checkRealHedge(signal, price, regime).catch((err) =>
-        this.logger.warn(`[AiSignal] realHedge error: ${err?.message}`),
+      // SIM controls REAL: mirror hedge open/close to real Binance trades
+      await this.userRealTradingService.onHedgeEvent(signal, action, price).catch((err) =>
+        this.logger.warn(`[AiSignal] onHedgeEvent error: ${err?.message}`),
       );
     });
 
