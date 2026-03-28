@@ -205,16 +205,18 @@ export class HedgeManagerService {
               return null;
             }
 
-            // 1h RSI confirmation
-            const closes1h = await this.marketDataService.getClosePrices(coin, '1h');
-            if (closes1h.length >= 14) {
-              const rsiVals1h = RSI.calculate({ period: 14, values: closes1h });
-              const rsi1h = rsiVals1h[rsiVals1h.length - 1];
-              const htfThresh = pnlPct < -triggerPct * 1.5 ? 50 : 45;
-              const htfOk = signal.direction === 'LONG' ? rsi1h < htfThresh : rsi1h > (100 - htfThresh);
-              if (!htfOk) {
-                this.logger.log(`[${signal.coin}] Hedge blocked: RSI1h=${rsi1h.toFixed(1)} (need <${htfThresh}) PnL=${pnlPct.toFixed(1)}%`);
-                return null;
+            // 1h RSI confirmation — skip when PnL critically negative (> 3x trigger = urgent)
+            if (pnlPct > -triggerPct * 3) {
+              const closes1h = await this.marketDataService.getClosePrices(coin, '1h');
+              if (closes1h.length >= 14) {
+                const rsiVals1h = RSI.calculate({ period: 14, values: closes1h });
+                const rsi1h = rsiVals1h[rsiVals1h.length - 1];
+                const htfThresh = pnlPct < -triggerPct * 1.5 ? 50 : 45;
+                const htfOk = signal.direction === 'LONG' ? rsi1h < htfThresh : rsi1h > (100 - htfThresh);
+                if (!htfOk) {
+                  this.logger.log(`[${signal.coin}] Hedge blocked: RSI1h=${rsi1h.toFixed(1)} (need <${htfThresh}) PnL=${pnlPct.toFixed(1)}%`);
+                  return null;
+                }
               }
             }
 
