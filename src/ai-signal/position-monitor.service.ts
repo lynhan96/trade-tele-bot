@@ -906,6 +906,16 @@ export class PositionMonitorService implements OnModuleInit {
     const hedgeActive = !!hedgeOrder; // derived from DB order at start of tick
 
     if (hedgeEnabled) {
+      // Independent real-side hedge check — always runs on every tick.
+      // Uses real UserTrade entry/notional (independent of sim state).
+      // Must run before sim checks so real hedge is never orphaned by sim early-return.
+      if (this.realHedgeCallback) {
+        const realtimeRegime = (signal as any).regime || "MIXED";
+        this.realHedgeCallback(signal, price, realtimeRegime).catch(err =>
+          this.logger.warn(`[PositionMonitor] realHedgeCallback error ${sigKey}: ${err?.message}`),
+        );
+      }
+
       if (!hedgeActive) {
         // Force open hedge (triggered by admin API)
         if ((signal as any).hedgeForceOpen) {
@@ -952,14 +962,6 @@ export class PositionMonitorService implements OnModuleInit {
             this.aiSignalModel.findByIdAndUpdate((signal as any)._id, updates).exec().catch(() => {});
           }
         }
-
-      // Independent real-side hedge check (uses real entry prices from UserTrade)
-      if (this.realHedgeCallback) {
-        const regime = (signal as any).regime || "MIXED";
-        this.realHedgeCallback(signal, price, regime).catch(err =>
-          this.logger.warn(`[PositionMonitor] realHedgeCallback error ${sigKey}: ${err?.message}`),
-        );
-      }
 
         // When hedge is active: NO SL — hedge IS the risk management
         // Only catastrophic stop at -25% (exchange issues, depeg, extreme events)
