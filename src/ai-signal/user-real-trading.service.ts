@@ -2012,9 +2012,24 @@ export class UserRealTradingService implements OnModuleInit {
               closedAt: new Date(),
             });
             // Restore main SL with progressive tightening (matches sim)
-            // Cycle 1-2: 40%, Cycle 3: 15%, Cycle 4+: 8%
-            const completedCycles = closedHedges.length + 1; // including the one just closed
-            const progressiveSlPct = completedCycles <= 2 ? 40 : completedCycles === 3 ? 15 : 8;
+            // Uses cycle count + hedge efficiency (recovery ratio)
+            const completedCycles = closedHedges.length + 1;
+            const allHedgePnl = [...closedHedges, { pnlUsdt: Math.round((hPnl / 100) * (hedgeTrade as any).notionalUsdt * 100) / 100 }];
+            const totalBanked = allHedgePnl.reduce((s: number, h: any) => s + (h.pnlUsdt || 0), 0);
+            const mainLossUsdt = Math.abs(Math.min(0, (realPnlPct / 100) * (filledGridNotional || trade.notionalUsdt)));
+            const recoveryRatio = mainLossUsdt > 0 ? totalBanked / mainLossUsdt : 1;
+
+            // High recovery (≥50%): hedge is working → keep 40% SL
+            // Low recovery (<50%) + 3+ cycles: direction wrong → tighten
+            let progressiveSlPct: number;
+            if (recoveryRatio >= 0.5 || completedCycles <= 2) {
+              progressiveSlPct = 40;
+            } else if (completedCycles === 3) {
+              progressiveSlPct = 15;
+            } else {
+              progressiveSlPct = 8;
+            }
+
             const restoredSl = trade.direction === 'LONG'
               ? +(entry * (1 - progressiveSlPct / 100)).toFixed(6) : +(entry * (1 + progressiveSlPct / 100)).toFixed(6);
             const pp = await this.getPricePrecision(trade.symbol);
@@ -2026,16 +2041,16 @@ export class UserRealTradingService implements OnModuleInit {
               const newSlId = slOrder?.algoId?.toString() ?? slOrder?.orderId?.toString();
               await this.userTradeModel.updateOne({ _id: (trade as any)._id }, { $set: { slPrice: restoredSl, binanceSlAlgoId: newSlId } });
             }
-            this.logger.log(`[OrphanHedge] Closed hedge ${trade.telegramId} ${trade.symbol} PnL=${hPnl.toFixed(2)}% SL=${restoredSl} (${progressiveSlPct}%) cycle=${completedCycles}`);
+            this.logger.log(`[OrphanHedge] Closed hedge ${trade.telegramId} ${trade.symbol} PnL=${hPnl.toFixed(2)}% SL=${restoredSl} (${progressiveSlPct}%) cycle=${completedCycles} recovery=${(recoveryRatio * 100).toFixed(0)}%`);
 
-            // Circuit breaker: if price already beyond progressive SL → close main immediately
-            if (completedCycles >= 3) {
+            // Circuit breaker: only close if hedge is ineffective AND price beyond SL
+            if (completedCycles >= 3 && recoveryRatio < 0.5) {
               const slBreached = trade.direction === 'LONG'
                 ? currentPrice <= restoredSl
                 : currentPrice >= restoredSl;
               if (slBreached) {
                 this.logger.warn(
-                  `[OrphanHedge] CIRCUIT BREAKER: ${trade.symbol} price ${currentPrice} beyond SL ${restoredSl} (${progressiveSlPct}%) after cycle ${completedCycles} → closing main`,
+                  `[OrphanHedge] CIRCUIT BREAKER: ${trade.symbol} price ${currentPrice} beyond SL ${restoredSl} (${progressiveSlPct}%) cycle=${completedCycles} recovery=${(recoveryRatio * 100).toFixed(0)}% → closing main`,
                 );
                 await this.closeRealPosition(trade.telegramId, (trade as any).chatId, trade.symbol, 'PROGRESSIVE_SL').catch(() => {});
               }

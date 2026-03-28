@@ -1902,11 +1902,34 @@ export class PositionMonitorService implements OnModuleInit {
       entryReason, // e.g. "PnL -19.52% | Cycle 1 (immediate) | regime: MIXED | banked: $147.36"
     };
 
-    // After hedge close: restore SL with PROGRESSIVE tightening based on cycle count.
-    // More cycles = direction likely wrong → tighter SL to limit damage.
-    // Cycle 1-2: 40% (give recovery chance), Cycle 3: 15%, Cycle 4+: 8%
+    // After hedge close: restore SL with PROGRESSIVE tightening.
+    // Uses BOTH cycle count AND hedge efficiency (banked / |mainLoss|).
+    // If hedge is working well (ratio >= 50%), keep wide SL regardless of cycles.
+    // If hedge is ineffective (ratio < 50% after 3+ cycles), tighten SL.
     const avgEntryForSl = (signal as any).gridAvgEntry || signal.entryPrice;
-    const progressiveSlPct = cycleCount <= 2 ? 40 : cycleCount === 3 ? 15 : 8;
+    const allHistory: any[] = [...((signal as any).hedgeHistory || []), historyEntry];
+    const totalBanked = allHistory.reduce((s: number, h: any) => s + (h.pnlUsdt || 0), 0);
+    const mainPnlPct = signal.direction === 'LONG'
+      ? ((currentPrice - avgEntryForSl) / avgEntryForSl) * 100
+      : ((avgEntryForSl - currentPrice) / avgEntryForSl) * 100;
+    const filledVol = (signal as any).simNotional ? (signal as any).simNotional * 0.4 : 400;
+    const mainLossUsdt = Math.abs(Math.min(0, (mainPnlPct / 100) * filledVol));
+    const recoveryRatio = mainLossUsdt > 0 ? totalBanked / mainLossUsdt : 1;
+
+    // Progressive SL: tighten only when hedge is INEFFECTIVE
+    // High recovery (≥50%): hedge is working → keep 40% SL (let it continue cycling)
+    // Low recovery (<50%) + 3+ cycles: direction is wrong → tighten
+    let progressiveSlPct: number;
+    if (recoveryRatio >= 0.5 || cycleCount <= 2) {
+      progressiveSlPct = 40; // hedge is working or too early to judge
+    } else if (cycleCount === 3) {
+      progressiveSlPct = 15;
+    } else {
+      progressiveSlPct = 8;
+    }
+    this.logger.log(
+      `[PositionMonitor] ${sigKey} Progressive SL: cycle=${cycleCount} banked=$${totalBanked.toFixed(2)} mainLoss=$${mainLossUsdt.toFixed(2)} recovery=${(recoveryRatio * 100).toFixed(0)}% → SL=${progressiveSlPct}%`,
+    );
     const updates: Record<string, any> = {};
     let finalSlPrice = signal.direction === 'LONG'
       ? +(avgEntryForSl * (1 - progressiveSlPct / 100)).toFixed(6)
@@ -2013,18 +2036,16 @@ export class PositionMonitorService implements OnModuleInit {
       );
     }
 
-    // Circuit breaker: if price already beyond progressive SL after hedge close → resolve immediately.
-    // This catches cases where direction is wrong and progressive SL tightened past current price.
-    if (cycleCount >= 3) {
+    // Circuit breaker: if price already beyond progressive SL AND hedge is ineffective → log warning.
+    // The tightened SL is already persisted — next tick's SL check will fire naturally.
+    if (cycleCount >= 3 && recoveryRatio < 0.5) {
       const slBreached = signal.direction === 'LONG'
         ? currentPrice <= finalSlPrice
         : currentPrice >= finalSlPrice;
       if (slBreached) {
         this.logger.warn(
-          `[PositionMonitor] ${sigKey} CIRCUIT BREAKER: price ${currentPrice} already beyond progressive SL ${finalSlPrice} (${progressiveSlPct}%) after cycle ${cycleCount} → resolving`,
+          `[PositionMonitor] ${sigKey} CIRCUIT BREAKER: price ${currentPrice} beyond SL ${finalSlPrice} (${progressiveSlPct}%) | cycle=${cycleCount} recovery=${(recoveryRatio * 100).toFixed(0)}% → next tick will close`,
         );
-        // Let the next tick's SL check handle the actual resolution (avoid duplicate close logic)
-        // The SL is already set tight — next tick will fire SL naturally
       }
     }
   }
