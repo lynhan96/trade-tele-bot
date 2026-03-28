@@ -782,9 +782,85 @@ export class UserRealTradingService implements OnModuleInit {
     if (!keys?.apiKey) return { success: false };
 
     try {
-      // Close any open hedge trades for this symbol first (prevent orphan hedge on Binance)
+      // Check for open hedge — if main is closing via TP and hedge exists, FLIP instead of closing both
       const openHedge = await this.userTradeModel.findOne({ telegramId, symbol, status: "OPEN", isHedge: true });
       if (openHedge) {
+        const isMainTp = reason === "TAKE_PROFIT" || reason === "TRAIL_STOP";
+        if (isMainTp) {
+          // FLIP: close main on Binance, promote hedge to new main in DB
+          // Hedge position stays open on Binance — it becomes the new main trade
+          const exitPrice = await this.marketDataService.getPrice(symbol) || trade.entryPrice;
+          const entryRef = (trade as any).gridAvgEntry || trade.entryPrice;
+          const mainPnlPct = trade.direction === "LONG"
+            ? ((exitPrice - entryRef) / entryRef) * 100
+            : ((entryRef - exitPrice) / entryRef) * 100;
+          const mainPnlUsdt = (mainPnlPct / 100) * trade.notionalUsdt;
+
+          // Close main position on Binance
+          await this.binanceService.closePosition(keys.apiKey, keys.apiSecret, symbol, trade.quantity, trade.direction).catch(() => {});
+
+          // Cancel main SL/TP algo orders
+          if (trade.binanceSlAlgoId) await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, trade.binanceSlAlgoId).catch(() => {});
+          if (trade.binanceTpAlgoId) await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, trade.binanceTpAlgoId).catch(() => {});
+
+          // Mark main as CLOSED with TP profit
+          await this.userTradeModel.findByIdAndUpdate((trade as any)._id, {
+            status: "CLOSED", closeReason: reason, exitPrice,
+            pnlPercent: Math.round(mainPnlPct * 100) / 100,
+            pnlUsdt: Math.round(mainPnlUsdt * 100) / 100,
+            closedAt: new Date(),
+          });
+
+          // Promote hedge to new main (FLIP)
+          const hedgeSl = openHedge.direction === "LONG"
+            ? +(openHedge.entryPrice * 0.60).toFixed(8)
+            : +(openHedge.entryPrice * 1.40).toFixed(8);
+          const hedgeTp = openHedge.direction === "LONG"
+            ? +(openHedge.entryPrice * 1.035).toFixed(8)
+            : +(openHedge.entryPrice * 0.965).toFixed(8);
+          await this.userTradeModel.findByIdAndUpdate(openHedge._id, {
+            isHedge: false, parentTradeId: null,
+            slPrice: hedgeSl, tpPrice: hedgeTp,
+          });
+
+          // Place SL/TP on Binance for the new main (ex-hedge)
+          const pp = await this.getPricePrecision(symbol);
+          const slOrder = await this.binanceService.setStopLoss(
+            keys.apiKey, keys.apiSecret, symbol,
+            parseFloat(hedgeSl.toFixed(pp)), openHedge.direction as 'LONG' | 'SHORT', openHedge.quantity,
+          ).catch(() => null);
+          const tpOrder = await this.binanceService.setTakeProfitAtPrice(
+            keys.apiKey, keys.apiSecret, symbol,
+            parseFloat(hedgeTp.toFixed(pp)), openHedge.direction as 'LONG' | 'SHORT', openHedge.quantity,
+          ).catch(() => null);
+          if (slOrder) {
+            const slId = slOrder?.algoId?.toString() ?? slOrder?.orderId?.toString();
+            await this.userTradeModel.updateOne({ _id: openHedge._id }, { $set: { binanceSlAlgoId: slId } });
+          }
+          if (tpOrder) {
+            const tpId = tpOrder?.algoId?.toString() ?? tpOrder?.orderId?.toString();
+            await this.userTradeModel.updateOne({ _id: openHedge._id }, { $set: { binanceTpAlgoId: tpId } });
+          }
+
+          this.logger.log(
+            `[RealTrading] FLIP ${symbol}: main ${trade.direction} TP +$${mainPnlUsdt.toFixed(2)} → hedge ${openHedge.direction} promoted to main (SL=${hedgeSl} TP=${hedgeTp})`,
+          );
+
+          // Notify user
+          const sign = mainPnlPct >= 0 ? "+" : "";
+          const fmtP = (p: number) => p >= 1 ? `$${p.toFixed(2)}` : `$${p.toFixed(4)}`;
+          await this.telegramService.sendTelegramMessage(chatId,
+            `🔄 *Real Mode: FLIP*\n━━━━━━━━━━━━━━━━━━\n\n` +
+            `${symbol} ${trade.direction} TP → ${sign}${mainPnlPct.toFixed(2)}% (${sign}$${mainPnlUsdt.toFixed(2)})\n` +
+            `Chuyen sang: *${openHedge.direction}* @ ${fmtP(openHedge.entryPrice)}\n` +
+            `SL: ${fmtP(hedgeSl)} | TP: ${fmtP(hedgeTp)}\n\n` +
+            `_Vi the hedge duoc giu lai lam lenh chinh moi._`
+          ).catch(() => {});
+
+          return { success: true, pnlPct: mainPnlPct };
+        }
+
+        // Non-TP close (SL, MANUAL, etc.) — close hedge first, then main
         await this.binanceService.closePosition(keys.apiKey, keys.apiSecret, symbol, openHedge.quantity, openHedge.direction).catch(() => {});
         const hExit = await this.marketDataService.getPrice(symbol) || 0;
         const hPnl = openHedge.direction === "LONG"
@@ -795,7 +871,7 @@ export class UserRealTradingService implements OnModuleInit {
           pnlUsdt: Math.round((hPnl / 100) * openHedge.notionalUsdt * 100) / 100,
           closeReason: "MAIN_CLOSED", closedAt: new Date(),
         });
-        this.logger.log(`[RealTrading] Closed orphan hedge ${symbol} ${openHedge.direction} for user ${telegramId} before main close`);
+        this.logger.log(`[RealTrading] Closed hedge ${symbol} ${openHedge.direction} for user ${telegramId} before main close (${reason})`);
       }
 
       if (trade.binanceSlAlgoId) {
