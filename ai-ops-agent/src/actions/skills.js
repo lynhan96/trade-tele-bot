@@ -553,7 +553,7 @@ export async function runPortfolioRisk() {
   const dominantDir = (sameDirAlts.LONG || 0) >= (sameDirAlts.SHORT || 0) ? "LONG" : "SHORT"
   if (maxSameDir >= 10) {
     actions.push(`🔴🔴 ${maxSameDir} altcoins ALL ${dominantDir} — extreme correlation risk`)
-    await autoConfig("maxActiveSignals", 3, `Correlation guard: ${maxSameDir} same-dir positions`)
+    await autoConfig("maxActiveSignals", 5, `Correlation guard: ${maxSameDir} same-dir positions`)
   } else if (maxSameDir >= 6) {
     actions.push(`🔴 ${maxSameDir} altcoins ALL ${dominantDir} — highly correlated, cascade risk`)
     await autoConfig("maxActiveSignals", 5, `Correlation guard: ${maxSameDir} same-dir positions`)
@@ -579,7 +579,7 @@ export async function runPortfolioRisk() {
     _drawdownMode = "DEFENSIVE"
     actions.push(`🔴🔴 DEFENSIVE MODE: drawdown $${totalUnrealized.toFixed(2)} — max protection`)
     await autoConfig("confidenceFloor", 68, `Defensive: drawdown $${totalUnrealized.toFixed(0)}`)
-    await autoConfig("maxActiveSignals", 3, `Defensive: drawdown $${totalUnrealized.toFixed(0)}`)
+    await autoConfig("maxActiveSignals", 5, `Defensive: drawdown $${totalUnrealized.toFixed(0)}`)
   } else if (totalUnrealized < -150) {
     _drawdownMode = "CAUTIOUS"
     actions.push(`🔴 CAUTIOUS MODE: drawdown $${totalUnrealized.toFixed(2)} — reduced risk`)
