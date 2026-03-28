@@ -28,6 +28,11 @@ const FIELD_LIMITS = {
   hedgeTpPct:             { min: 1, max: 6 },
   hedgeSafetySlPct:       { min: 5, max: 20 },
   hedgeMaxCycles:         { min: 3, max: 10 },
+  tpMax:                  { min: 1.5, max: 6 },
+  tpMin:                  { min: 1, max: 4 },
+  slMax:                  { min: 1.5, max: 5 },
+  slMin:                  { min: 1, max: 3 },
+  dcaTpPct:               { min: 2, max: 6 },
 }
 
 async function autoConfig(field, value, reason) {
