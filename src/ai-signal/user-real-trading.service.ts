@@ -161,18 +161,6 @@ export class UserRealTradingService implements OnModuleInit {
       return;
     }
 
-    // Regime gate: don't open counter-trend real trades
-    // LONG blocked in STRONG_BEAR, SHORT blocked in STRONG_BULL
-    const regime = (await this.redisService.get<string>('cache:ai:regime')) || 'MIXED';
-    if (direction === 'LONG' && regime === 'STRONG_BEAR') {
-      this.logger.log(`[RealTrading] ${symbol} LONG blocked — regime ${regime} (counter-trend)`);
-      return;
-    }
-    if (direction === 'SHORT' && regime === 'STRONG_BULL') {
-      this.logger.log(`[RealTrading] ${symbol} SHORT blocked — regime ${regime} (counter-trend)`);
-      return;
-    }
-
     const priceDeviation = Math.abs(currentPrice - entryPrice) / entryPrice;
     if (priceDeviation > ENTRY_PRICE_TOLERANCE) {
       this.logger.log(
