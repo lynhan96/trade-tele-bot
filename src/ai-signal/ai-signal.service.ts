@@ -523,6 +523,7 @@ export class AiSignalService implements OnModuleInit {
         `[AiSignal] ${coinUpper} ${signalResult.isLong ? "LONG" : "SHORT"} blocked — confidence ${params.confidence} < min ${params.minConfidenceToTrade} (${params.regime})`,
       );
       this.redisService.initAndIncr('cache:ai:filter:confidence_block', 0, 86400).catch(() => {});
+      this.logValidation(symbol, signalResult, params, false, `confidence ${params.confidence} < ${params.minConfidenceToTrade}`);
       return;
     }
 
@@ -555,6 +556,7 @@ export class AiSignalService implements OnModuleInit {
     if (risk.blocked) {
       this.logger.debug(`[AiSignal] ${coin} risk score ${risk.score} > threshold — skipped`);
       await this.redisService.initAndIncr('cache:ai:filter:risk_score', 0, 86400);
+      this.logValidation(symbol, signalResult, params, false, `risk_score ${risk.score} > threshold`);
       return;
     }
 
@@ -591,6 +593,8 @@ export class AiSignalService implements OnModuleInit {
 
     // ═══ Emit Signal ═══
     const isTestMode = await this.isTestModeEnabled();
+
+    this.logValidation(symbol, signalResult, params, true, undefined, fundingRate);
 
     this.logger.log(
       `[AiSignal]${isTestMode ? " [TEST]" : ""} Signal: ${symbol} ${signalResult.isLong ? "LONG" : "SHORT"} (${signalResult.strategy}) — ${signalResult.reason} [risk=${risk.score}]`,
@@ -1424,6 +1428,31 @@ export class AiSignalService implements OnModuleInit {
   async disableTestMode(): Promise<void> {
     await this.redisService.delete(AI_TEST_MODE_KEY);
     this.logger.log("[AiSignal] TEST MODE disabled — LIVE mode");
+  }
+
+  private logValidation(
+    symbol: string,
+    signalResult: { isLong: boolean; strategy: string; reason: string },
+    params: any,
+    approved: boolean,
+    rejectReason?: string,
+    fundingRate?: number,
+  ): void {
+    this.validationModel.create({
+      symbol,
+      direction: signalResult.isLong ? "LONG" : "SHORT",
+      strategy: signalResult.strategy,
+      regime: params.regime || "UNKNOWN",
+      confidence: params.confidence || 0,
+      stopLossPercent: params.stopLossPercent || 3,
+      takeProfitPercent: params.takeProfitPercent || 2.5,
+      approved,
+      model: "rule-engine",
+      reason: approved
+        ? `Rules passed: ${signalResult.reason}`
+        : `Rejected by: ${rejectReason} (${signalResult.reason})`,
+      rejectedBy: approved ? [] : [rejectReason || 'unknown'],
+    }).catch((err) => this.logger.debug(`[AiSignal] validation log error: ${err?.message}`));
   }
 
   async isTestModeEnabled(): Promise<boolean> {
