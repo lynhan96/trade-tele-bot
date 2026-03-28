@@ -201,8 +201,19 @@ async function main() {
       const slAlgoId = slBySymbol[pos.symbol]?.[0] || null
       const tpAlgoId = tpBySymbol[pos.symbol]?.[0] || null
 
+      // Detect if this is a hedge: same symbol, opposite direction also missing from DB,
+      // and this direction is opposite to the active signal direction
+      const signalDir = activeSignal?.direction
+      const isHedge = signalDir && pos.direction !== signalDir
+      // If both directions missing for same symbol, main = matches signal dir, hedge = opposite
+      const oppositeDir = pos.direction === "LONG" ? "SHORT" : "LONG"
+      const oppositeExistsOnBinance = binancePositions.some(
+        (p) => p.symbol === pos.symbol && p.direction === oppositeDir,
+      )
+      const oppositeAlreadyInDb = existingKeys.has(`${pos.symbol}:${oppositeDir}`)
+
       console.log(
-        `  🆕 ${pos.symbol} ${pos.direction}: MISSING from DB — creating trade record`,
+        `  🆕 ${pos.symbol} ${pos.direction}${isHedge ? " [HEDGE]" : " [MAIN]"}: MISSING from DB — creating trade record`,
       )
       console.log(
         `     Entry: $${pos.entryPrice} | Qty: ${pos.quantity} | Notional: $${pos.notionalUsdt.toFixed(2)} | Lev: ${pos.leverage}x`,
@@ -210,9 +221,18 @@ async function main() {
       console.log(
         `     PnL: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}% | SL: $${slPrice.toFixed(4)} (40% safety)`,
       )
-      console.log(`     Signal: ${activeSignal ? activeSignal._id : "none (orphan)"}`)
+      console.log(`     Signal: ${activeSignal ? activeSignal._id + " dir=" + activeSignal.direction : "none (orphan)"}`)
 
       if (!DRY_RUN) {
+        let parentTradeId = null
+        if (isHedge) {
+          // Find the main trade that was just inserted (or already in DB)
+          const mainTrade = await db.collection("user_trades").findOne({
+            telegramId, symbol: pos.symbol, direction: signalDir, status: "OPEN",
+          })
+          parentTradeId = mainTrade?._id?.toString() || null
+        }
+
         const tradeDoc = {
           telegramId,
           chatId,
@@ -222,31 +242,31 @@ async function main() {
           quantity: pos.quantity,
           leverage: pos.leverage,
           notionalUsdt: pos.notionalUsdt,
-          slPrice,
-          tpPrice: activeSignal?.takeProfitPrice || 0,
-          binanceSlAlgoId: slAlgoId,
+          slPrice: isHedge ? 0 : slPrice,  // hedge has no SL
+          tpPrice: isHedge ? (activeSignal?.takeProfitPrice ? pos.entryPrice * (signalDir === "LONG" ? 0.97 : 1.03) : 0) : (activeSignal?.takeProfitPrice || 0),
+          binanceSlAlgoId: isHedge ? null : slAlgoId,
           binanceTpAlgoId: tpAlgoId,
           status: "OPEN",
           openedAt: new Date(),
           aiSignalId: activeSignal?._id?.toString() || null,
-          isHedge: false,
-          // Sync note
+          isHedge,
+          parentTradeId,
+          hedgeCycle: isHedge ? 1 : undefined,
           syncedFromBinance: true,
           createdAt: new Date(),
           updatedAt: new Date(),
         }
 
         await db.collection("user_trades").insertOne(tradeDoc)
-        console.log(`     ✅ Inserted UserTrade record`)
+        console.log(`     ✅ Inserted UserTrade record (isHedge=${isHedge}, parentTradeId=${parentTradeId})`)
 
-        // If SL is missing on Binance, warn
-        if (!slAlgoId) {
+        if (!isHedge && !slAlgoId) {
           console.log(
             `     ⚠️  No SL algo order found on Binance — protectOpenTrades will place one within 1 min`,
           )
         }
       } else {
-        console.log(`     [DRY RUN] Would insert UserTrade record`)
+        console.log(`     [DRY RUN] Would insert UserTrade record (isHedge=${isHedge})`)
       }
     }
 
