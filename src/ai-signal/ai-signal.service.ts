@@ -154,11 +154,22 @@ export class AiSignalService implements OnModuleInit {
     // Register callback for SL-moved-to-entry notifications
     this.positionMonitorService.setSlMovedCallback(async (symbol, entryPrice) => {
       await this.notifySlMovedToEntry(symbol, entryPrice);
+      // Sync real: move SL to entry on Binance for all real-mode users
+      const signal = await this.signalQueueService.findActiveSignalBySymbol(symbol);
+      if (signal) {
+        await this.userRealTradingService.moveStopLossForRealUsers(symbol, entryPrice, signal.direction).catch((err) =>
+          this.logger.warn(`[AiSignal] Real SL move failed ${symbol}: ${err?.message}`),
+        );
+      }
     });
 
     // Register callback for TP boost on momentum
     this.positionMonitorService.setTpBoostedCallback(async (symbol, newTp, newTpPct, direction) => {
       await this.notifyTpBoosted(symbol, newTp, newTpPct, direction);
+      // Sync real: update TP on Binance for all real-mode users
+      await this.userRealTradingService.moveTpForRealUsers(symbol, newTp, direction).catch((err) =>
+        this.logger.warn(`[AiSignal] Real TP update failed ${symbol}: ${err?.message}`),
+      );
     });
 
     this.positionMonitorService.setHedgeCallback(async (signal, action, price) => {
