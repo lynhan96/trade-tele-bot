@@ -1767,16 +1767,42 @@ export class UserRealTradingService implements OnModuleInit {
                   }
                   continue;
                 } else {
-                  // Trail not breached — persist trail SL on trade for resilience
-                  if (trailSl !== (trade as any).trailSlPrice) {
+                  // Trail not breached — place/update real SL on Binance at trail floor
+                  const prevTrailSl = (trade as any).trailSlPrice || 0;
+                  const trailSlMoved = Math.abs(trailSl - prevTrailSl) / (prevTrailSl || 1) > 0.002; // >0.2% change
+                  if (trailSlMoved && trailSl > 0) {
+                    // Cancel old SL and place new one at trail floor
+                    const trailPP = await getPP(symbol);
+                    const roundedTrailSl = parseFloat(trailSl.toFixed(trailPP));
+                    try {
+                      if ((trade as any).binanceSlAlgoId) {
+                        await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, (trade as any).binanceSlAlgoId).catch(() => {});
+                      }
+                      const slQty = trade.gridLevels?.length > 0
+                        ? trade.gridLevels.filter((g: any) => g.status === "FILLED").reduce((sum: number, g: any) => sum + (g.quantity || 0), 0) || trade.quantity
+                        : trade.quantity;
+                      const slOrder = await this.binanceService.setStopLoss(
+                        keys.apiKey, keys.apiSecret, symbol, roundedTrailSl,
+                        direction as "LONG" | "SHORT", slQty,
+                      );
+                      const newSlId = slOrder?.algoId?.toString() ?? slOrder?.orderId?.toString();
+                      await this.userTradeModel.updateOne({ _id: trade._id }, {
+                        $set: { trailSlPrice: trailSl, peakPnlPct: peak, slPrice: roundedTrailSl, binanceSlAlgoId: newSlId },
+                      });
+                      const trailLockPct = direction === "LONG"
+                        ? ((roundedTrailSl - entry) / entry) * 100
+                        : ((entry - roundedTrailSl) / entry) * 100;
+                      this.logger.log(
+                        `[RealTrading] ${symbol} user ${telegramId}: trail SL placed on Binance @ ${fmtP(roundedTrailSl)} (+${trailLockPct.toFixed(1)}%) peak=${peak.toFixed(1)}%`,
+                      );
+                    } catch (err) {
+                      this.logger.warn(`[RealTrading] ${symbol} user ${telegramId}: trail SL place failed: ${err?.message}`);
+                      // Still persist to DB for next retry
+                      await this.userTradeModel.updateOne({ _id: trade._id }, { $set: { trailSlPrice: trailSl, peakPnlPct: peak } }).catch(() => {});
+                    }
+                  } else if (trailSl !== prevTrailSl) {
                     await this.userTradeModel.updateOne({ _id: trade._id }, { $set: { trailSlPrice: trailSl, peakPnlPct: peak } }).catch(() => {});
                   }
-                  const trailLockPct = direction === "LONG"
-                    ? ((dbTrailSl - entry) / entry) * 100
-                    : ((entry - dbTrailSl) / entry) * 100;
-                  this.logger.debug(
-                    `[RealTrading] ${symbol} user ${telegramId}: trail OK, lock=+${trailLockPct.toFixed(1)}% PnL=+${currentPnlPct.toFixed(1)}% peak=${peak.toFixed(1)}% (backend-managed)`,
-                  );
                 }
               }
             }
