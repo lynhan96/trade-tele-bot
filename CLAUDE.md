@@ -1,122 +1,73 @@
-# CLAUDE.md
-
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+# CLAUDE.md — Binance Trading Bot
 
 ## Commands
 
 ```bash
-# Development
-npm run start:dev       # Watch mode (logs to /tmp/bot.log)
+npm run start:dev       # Watch mode
 npm run build           # Compile TypeScript
 npm run start:prod      # Run compiled output
-npm run format          # Prettier format
-
-# Simulation / testing (no Jest — uses ts-node simulators)
-npm run test:safety     # run-simulator.ts
-npm run test:complete   # run-complete-simulator.ts
-npm run test:skills     # run-skills-simulator.ts
-npm run test:all        # run all simulators
+npm run test:all        # Run all simulators (no Jest)
 ```
-
-There are no unit tests. All testing is done via ts-node simulator scripts in the project root.
 
 ## Architecture
 
-NestJS monolith with polling Telegram bot. Key infrastructure: Redis (cache/session), MongoDB (persistence), Binance WebSocket streams (real-time market data).
+NestJS monolith: Telegram bot + AI signal scanner + real Binance Futures trading + hedge system + AI ops agent.
 
-### Module Map
+See [.claude/ARCHITECTURE.md](.claude/ARCHITECTURE.md) for full system diagram, data flows, and protection layers.
+See [src/ai-signal/CLAUDE.md](src/ai-signal/CLAUDE.md) for core trading module details.
 
-```
-AppModule
-├── LoggerModule          — Winston logger (daily rotate)
-├── RedisModule           — Redis client (prefix: binance-telebot:)
-├── BinanceModule         — Binance REST API client (node binance-api-node)
-├── TelegramModule        — TelegramBotService (node-telegram-bot-api, polling)
-├── AiSignalModule        — Core AI trading signal system (see below)
-│   ├── MarketDataModule  — WebSocket candle feeds + FuturesAnalyticsService
-│   ├── CoinFilterModule  — Filters tradeable coins by volume/volatility
-│   ├── StrategyModule    — Technical indicators + rule engine + AI optimizer
-│   └── UserModule        — User settings (MongoDB UserSettings schema)
-```
-
-### AiSignalModule Services
+### Key Services
 
 | Service | Role |
-|---|---|
-| `AiSignalService` | Cron-driven scanner; calls CoinFilter → Strategy → queues signals |
-| `SignalQueueService` | Manages queued/active signals in MongoDB |
-| `PositionMonitorService` | Monitors open positions; fires TP/SL on price events |
-| `UserRealTradingService` | Places/closes real Binance Futures orders per user |
-| `UserSignalSubscriptionService` | Manages user subscriptions (MongoDB) |
-| `UserDataStreamService` | Binance user data WebSocket (order fill events) |
-| `AiCommandService` | Handles all `/ai` Telegram commands |
-| `AiSignalStatsService` | Win rate / PnL stats |
+|---------|------|
+| `AiSignalService` | Cron scanner: CoinFilter → Strategy → RiskScore → Signal |
+| `PositionMonitorService` | Price tick: TP/SL/Trail/Grid DCA/Hedge (SIM) |
+| `UserRealTradingService` | Real Binance orders: mirrors sim logic exactly |
+| `HedgeManagerService` | Hedge entry/exit decisions (pure logic) |
+| `UserDataStreamService` | Binance WebSocket: ORDER_TRADE_UPDATE events |
+| `TradingConfigService` | Config with defaults + Redis override + hard floors |
 
-### Strategy Pipeline
+### SIM + Real Principle
+SIM and Real **MUST run identical logic**. Real only differs in order execution (Binance API vs DB-only). Never add gates/filters to real that don't exist in sim.
 
-`IndicatorService` (technicalindicators) → `RuleEngineService` (entry rules, 7 active strategies) → `AiOptimizerService` (GPT-4o for premium coins, fixed defaults for others, cached 6h in Redis)
+### Grid DCA (fixed)
+4 levels: L0=entry(40%), L1=2%(15%), L2=4%(15%), L3=6%(30%). DCA continues during hedge.
 
-### Market Data Flow
+### Hedge System
+- Entry: PnL < -hedgeTrigger% (2-8%, auto-tuned by agent)
+- Exit: TP OR trail (activate +2%, keep 70%) OR recovery close
+- Progressive SL: cycle 1-2=40%, cycle 3=15%, cycle 4+=8% (only when recovery <50%)
+- Trail SL: placed on Binance (not just backend check)
+- `onTradeClose` matches by direction (hedge close can't close main)
 
-`MarketDataService` maintains persistent WebSocket connections to `wss://fstream.binance.com` for multiple symbols/intervals (`5m`, `15m`, `1h`, `4h`, `1d`). Candles stored in MongoDB (`CandleHistory`). Real-time price events dispatched to registered listeners. `getPrice(symbol)` auto-subscribes if not already connected.
+### AI Ops Agent (separate process at `ai-ops-agent/`)
+- 12 skills/15min (free) + Claude Sonnet analysis/4h
+- Auto-configs: hedgeTrigger, confidence, maxSignals, riskScore
+- FIELD_LIMITS validation: hedgeTrigger 2-8%, confidence 55-75%
+- Cannot close/open positions
 
-### Dual Timeframe Strategy
+## Deployment
 
-`DUAL_TIMEFRAME_COINS = ["BTC", "ETH", "SOL", "BNB", "XRP"]` get both INTRADAY (15m) and SWING (4h) analysis. All other coins get SWING only.
+```bash
+# Bot
+npm run build && make deploy_develop
 
-### Redis Key Patterns
+# Agent (after bot deploy)
+ssh ubuntu@171.244.48.10 "source ~/.nvm/nvm.sh && cp -r ~/projects/binance-tele-bot/ai-ops-agent/src/* ~/ai-ops-agent/src/ && pm2 restart ai-ops-agent"
+```
 
-- `binance-telebot:user:{telegramId}` — user API keys
-- `binance-telebot:user:{telegramId}:tp` — take profit state
-- `cache:ai:paused` / `cache:ai:test-mode` / `cache:ai:scanning` — AI system flags
-- AI optimizer params cached with 4h TTL
-
-### AdminModule (`src/admin/`)
-
-REST API + WebSocket gateway for the admin frontend panel.
-
-| File | Role |
-|---|---|
-| `admin.module.ts` | Module registering all schemas, controller, services, gateway |
-| `admin.controller.ts` | REST endpoints under `/admin/` (auth + CRUD for all entities) |
-| `admin.service.ts` | Database queries: dashboard stats, paginated lists, updates |
-| `admin-auth.service.ts` | JWT login, token verification, password change, auto-seeds default admin |
-| `admin.guard.ts` | JWT Bearer token guard for protected routes |
-| `admin.gateway.ts` | Socket.IO gateway (`/admin` namespace), MongoDB Change Streams for real-time events |
-
-Auth: JWT tokens (env: `ADMIN_JWT_SECRET`, `ADMIN_JWT_EXPIRES_IN`). Default admin seeded on first boot (`ADMIN_DEFAULT_USERNAME`/`ADMIN_DEFAULT_PASSWORD`, defaults: admin/admin123).
-
-Schema: `AdminAccount` (`admin_accounts` collection) — username, passwordHash, role, isActive.
-
-### MongoDB Schemas (`src/schemas/`)
-
-`AiSignal`, `AiCoinProfile`, `AiRegimeHistory`, `UserSignalSubscription`, `DailyMarketSnapshot`, `UserTrade`, `UserSettings`, `AiMarketConfig`, `AdminAccount`
+- Server: `ubuntu@171.244.48.10` | PM2: `trade-tele-bot`
+- Git: `-c commit.gpgsign=false` required
 
 ## Environment
 
-Copy `.env.example` to `.env`. Required vars: `TELEGRAM_BOT_TOKEN`, `REDIS_*`, `MONGODB_URI`, `ANTHROPIC_API_KEY`, `AI_MONITOR_BINANCE_API_KEY/SECRET`. Optional: `OPENAI_API_KEY` (GPT-4o-mini fallback for AI tuning), `AI_ADMIN_TELEGRAM_ID` (comma-separated).
-
-AI tuning: GPT-4o for premium coins (BTC/ETH/SOL/BNB/XRP), fixed defaults for others. Validation gate: GPT-4o (100/hr). Regime: gpt-4o-mini (30min cache). Fallback: static ATR defaults.
-
-## Proxy
-
-`src/utils/proxy.ts` exports `getProxyAgent()` used in WebSocket and HTTP connections when `HTTPS_PROXY` / `HTTP_PROXY` env vars are set.
+Copy `.env.example` to `.env`. Required: `TELEGRAM_BOT_TOKEN`, `REDIS_*`, `MONGODB_URI`, `AI_MONITOR_BINANCE_API_KEY/SECRET`.
 
 ## Post-Change Checklist
 
-After completing ANY code change (feature, fix, refactor), ALWAYS:
-
-1. **Update Memory** — Update `/Users/elvislee/.claude/projects/-Users-elvislee-Workspace-DTS-elvis-binance-tele-bot/memory/MEMORY.md` to reflect:
-   - Changed strategy parameters (SL/TP values, thresholds, trailing stop config)
-   - New or modified schemas/fields
-   - Architecture changes (new services, removed features, changed flows)
-   - Cost/model config changes
-   - Any behavior that differs from what was previously documented
-2. **Keep memory accurate** — If the change contradicts existing memory, UPDATE the memory (don't add duplicates)
-3. **Keep under 200 lines** — Be concise, use bullet points
-
-This ensures future sessions have correct context and don't review based on outdated information.
+After ANY code change, update memory at:
+`/Users/elvislee/.claude/projects/-Users-elvislee-Workspace-DTS-elvis-binance-tele-bot/memory/MEMORY.md`
 
 ## Telegram Commands
 
-All user-facing commands are prefixed `/ai` and handled in `AiCommandService`. The `/start` welcome message (Vietnamese) is in `TelegramBotService.setupCommands()`.
+All user commands prefixed `/ai`, handled in `AiCommandService`.
