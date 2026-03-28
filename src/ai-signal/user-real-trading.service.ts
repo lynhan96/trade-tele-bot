@@ -2314,10 +2314,18 @@ export class UserRealTradingService implements OnModuleInit {
     const { telegramId, chatId, symbol, direction } = trade;
     const level = grid.level;
 
-    // Prevent duplicate grid placement
+    // Prevent duplicate grid placement — double check: Redis lock + DB status
     const lockKey = `cache:grid-lock:${telegramId}:${symbol}:${level}`;
-    const acquired = await this.redisService.setNX(lockKey, "1", 60);
+    const acquired = await this.redisService.setNX(lockKey, "1", 120);
     if (!acquired) return;
+
+    // Re-read from DB to verify grid is still PENDING (prevent race between 30s cron cycles)
+    const freshTrade = await this.userTradeModel.findById((trade as any)._id).lean();
+    const freshGrid = (freshTrade as any)?.gridLevels?.find((g: any) => g.level === level);
+    if (!freshGrid || freshGrid.status !== 'PENDING') {
+      this.logger.debug(`[Grid] ${symbol} L${level} already filled (DB check) — skip`);
+      return;
+    }
 
     const keys = await this.userSettingsService.getApiKeys(telegramId, "binance");
     if (!keys?.apiKey) return;
