@@ -142,10 +142,10 @@ export class PositionMonitorService implements OnModuleInit {
   // ─── Fee Helpers (Binance Futures sim) ────────────────────────────────────
 
   /** Calculate taker fee in USDT (market order — open/close) */
-  /** DCA volume weights: L0=40% base, remaining 60% linearly increasing (synced with real trading) */
+  /** DCA volume weights: L0=35% base, remaining 65% linearly increasing */
   private getDcaWeights(levelCount: number): number[] {
     if (levelCount <= 1) return [100];
-    const baseWeight = 40;
+    const baseWeight = 35;
     const remaining = 100 - baseWeight;
     const dcaCount = levelCount - 1;
     const raw = Array.from({ length: dcaCount }, (_, i) => i + 1);

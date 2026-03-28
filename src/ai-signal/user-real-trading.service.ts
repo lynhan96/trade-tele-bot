@@ -754,13 +754,30 @@ export class UserRealTradingService implements OnModuleInit {
     symbol: string,
     reason: string,
   ): Promise<{ success: boolean; pnlPct?: number }> {
-    const trade = await this.userTradeModel.findOne({ telegramId, symbol, status: "OPEN" }).lean();
+    // Find main trade (not hedge) — hedge has its own close flow via onHedgeEvent
+    const trade = await this.userTradeModel.findOne({ telegramId, symbol, status: "OPEN", isHedge: { $ne: true } }).lean();
     if (!trade) return { success: false };
 
     const keys = await this.userSettingsService.getApiKeys(telegramId, "binance");
     if (!keys?.apiKey) return { success: false };
 
     try {
+      // Close any open hedge trades for this symbol first (prevent orphan hedge on Binance)
+      const openHedge = await this.userTradeModel.findOne({ telegramId, symbol, status: "OPEN", isHedge: true });
+      if (openHedge) {
+        await this.binanceService.closePosition(keys.apiKey, keys.apiSecret, symbol, openHedge.quantity, openHedge.direction).catch(() => {});
+        const hExit = await this.marketDataService.getPrice(symbol) || 0;
+        const hPnl = openHedge.direction === "LONG"
+          ? ((hExit - openHedge.entryPrice) / openHedge.entryPrice) * 100
+          : ((openHedge.entryPrice - hExit) / openHedge.entryPrice) * 100;
+        await this.userTradeModel.findByIdAndUpdate(openHedge._id, {
+          status: "CLOSED", exitPrice: hExit, pnlPercent: Math.round(hPnl * 100) / 100,
+          pnlUsdt: Math.round((hPnl / 100) * openHedge.notionalUsdt * 100) / 100,
+          closeReason: "MAIN_CLOSED", closedAt: new Date(),
+        });
+        this.logger.log(`[RealTrading] Closed orphan hedge ${symbol} ${openHedge.direction} for user ${telegramId} before main close`);
+      }
+
       if (trade.binanceSlAlgoId) {
         await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, trade.binanceSlAlgoId).catch(() => {});
       }
@@ -1910,10 +1927,10 @@ export class UserRealTradingService implements OnModuleInit {
     return grids;
   }
 
-  /** DCA volume weights: L0=40% base, remaining 60% DCA-weighted for L1-L4. Sum = 100%. */
+  /** DCA volume weights: L0=35% base, remaining 65% linearly increasing (matches sim) */
   private getDcaWeights(levelCount: number): number[] {
     if (levelCount <= 1) return [100];
-    const baseWeight = 40;
+    const baseWeight = 35;
     const remaining = 100 - baseWeight;
     const dcaCount = levelCount - 1;
     // Linearly increasing weights for DCA levels

@@ -1047,7 +1047,7 @@ export class AiSignalService implements OnModuleInit {
       simPnlUsdt = Math.round((totalUsdt - totalFees) * 100) / 100;
     } else {
       // No grids = L0 only = 40% of simNotional
-      const filledVol = ((signal as any).simNotional || 1000) * 0.4;
+      const filledVol = ((signal as any).simNotional || 1000) * 0.35;
       const rawPnl = (pnl / 100) * filledVol;
       const fees = filledVol * takerFeePct * 2 + (cfg.simFundingEnabled ? filledVol * fundingRate * fundingIntervals : 0);
       simPnlUsdt = Math.round((rawPnl - fees) * 100) / 100;
