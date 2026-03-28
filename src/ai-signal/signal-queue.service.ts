@@ -97,9 +97,9 @@ export class SignalQueueService {
       );
       // Create MAIN order immediately — don't wait for first price tick
       // Fixes: signals closing before grid init → 0 orders
-      const simNotional = 1000;
+      const simNotional = this.tradingConfig?.get()?.simNotional || 1000;
       const entryPrice = signalResult.entryPrice;
-      const l0Vol = simNotional * 0.35; // L0 = 35% (matches DCA_WEIGHTS[0] in position-monitor)
+      const l0Vol = simNotional * 0.40; // L0 = 40% (matches getDcaWeights[0])
       const takerFeePct = this.tradingConfig?.get()?.simTakerFeePct || 0.05;
       const entryFee = +(l0Vol * takerFeePct / 100).toFixed(4);
       try {
@@ -969,8 +969,8 @@ export class SignalQueueService {
       params.rsiZone?.primaryKline ||
       (profile === "SWING" ? "4h" : "15m");
 
-    // Simulated volume for test mode: $1000 notional per trade
-    const simNotional = isTestMode ? 1000 : undefined;
+    // Simulated volume for test mode: configurable notional per trade
+    const simNotional = isTestMode ? (this.tradingConfig?.get()?.simNotional || 1000) : undefined;
     const simQuantity = isTestMode ? simNotional / entryPrice : undefined;
 
     const doc = await this.aiSignalModel.create({

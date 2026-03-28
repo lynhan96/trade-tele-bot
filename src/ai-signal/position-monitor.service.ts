@@ -356,7 +356,7 @@ export class PositionMonitorService implements OnModuleInit {
       const effectiveRange = hedgeTrigger > 0 ? hedgeTrigger : signalSlPct;
       const gridStep = effectiveRange / GRID_LEVEL_COUNT;
 
-      const simNotional = 1000;
+      const simNotional = cfg.simNotional || 1000;
       const simQuantity = simNotional / origEntry;
       const grids: any[] = [];
 

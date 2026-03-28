@@ -112,8 +112,9 @@ export interface TradingConfig {
   hedgeReEntryRsiLong: number;       // RSI threshold for LONG hedge re-entry (default 55)
   hedgeReEntryRsiShort: number;      // RSI threshold for SHORT hedge re-entry (default 45)
 
-  // ── Sim Trading Fees ─────────────────────────────────────────────────
-  simTakerFeePct: number;            // Taker fee % per side (default 0.05 = 0.05%)
+  // ── Sim Trading ──────────────────────────────────────────────────────
+  simNotional: number;               // Simulated volume per trade (default 1000)
+  simTakerFeePct: number;            // Taker fee % per side (default 0.04 = 0.04%)
   simMakerFeePct: number;            // Maker fee % per side (default 0.02 = 0.02%)
   simFundingEnabled: boolean;        // Apply funding fee in sim (default true)
 
@@ -218,7 +219,8 @@ export const DEFAULT_TRADING_CONFIG: TradingConfig = {
   hedgeReEntryRsiLong: 55,
   hedgeReEntryRsiShort: 45,
 
-  // Sim Trading Fees (matched to Binance Futures standard rates)
+  // Sim Trading
+  simNotional: 1000,       // Simulated volume per trade (default $1000, set to match real tradingBalance)
   simTakerFeePct: 0.04,   // 0.04% per side (market orders — Binance standard)
   simMakerFeePct: 0.02,   // 0.02% per side (limit orders)
   simFundingEnabled: true, // Apply funding fee from Binance API

@@ -885,8 +885,8 @@ export class AiSignalService implements OnModuleInit {
     const fmtP = this.fmtPrice;
     const time = new Date().toLocaleString("vi-VN", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "2-digit", timeZone: "Asia/Ho_Chi_Minh" });
 
-    // Simulated volume: $1000 notional per trade
-    const simNotional = 1000;
+    // Simulated volume from config (matches real tradingBalance)
+    const simNotional = this.tradingConfig.get().simNotional || 1000;
     const simQuantity = simNotional / signal.entryPrice;
 
     // Singapore filter info from signal metadata
