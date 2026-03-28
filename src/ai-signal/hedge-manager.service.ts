@@ -144,12 +144,11 @@ export class HedgeManagerService {
             const strongBounce = bounceSize > 1.0;
 
             if (signal.direction === 'LONG' && greenMoves >= 2 && strongBounce) {
-              // silent skip — fires every tick
-              return null;
+              // Bounce detected but PnL deeply negative → still hedge if PnL < -2x trigger
+              if (pnlPct > -triggerPct * 2) return null;
             }
             if (signal.direction !== 'LONG' && redMoves >= 2 && strongBounce) {
-              // silent skip — fires every tick
-              return null;
+              if (pnlPct > -triggerPct * 2) return null;
             }
           }
         } catch (err) { /* proceed without check */ }
