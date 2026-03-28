@@ -183,18 +183,9 @@ export class UserRealTradingService implements OnModuleInit {
     // Filter out subscribers who already have an open trade on this symbol + direction
     const eligibleSubs: typeof subscribers = [];
     for (const sub of subscribers) {
-      // Skip users whose cycle is paused (target hit — let existing positions ride)
-      if (sub.cyclePaused) {
-        this.logger.debug(`[RealTrading] ${symbol}: user ${sub.telegramId} cycle paused, skipping new trade`);
-        continue;
-      }
+      // cyclePaused check removed — user manages their own targets
 
-      // Skip if in post-TP cooldown (1h calm-down after all positions closed via TP)
-      const tpCooldown = await this.redisService.get(TP_CYCLE_COOLDOWN_KEY(sub.telegramId));
-      if (tpCooldown) {
-        this.logger.debug(`[RealTrading] ${symbol}: user ${sub.telegramId} in post-TP cooldown, skipping new trade`);
-        continue;
-      }
+      // TP cycle cooldown removed — user manages their own targets
 
       // Block same symbol + same direction (Binance one-way mode: can't have 2 independent positions same side)
       const existing = await this.userTradeModel.findOne({ telegramId: sub.telegramId, symbol, direction, status: "OPEN" }).lean();
@@ -1219,291 +1210,33 @@ export class UserRealTradingService implements OnModuleInit {
    * Profitable positions keep running with their SL/TP intact.
    * Returns count of closed positions.
    */
-  async closeLosingPositions(telegramId: number, chatId: number, reason: string, pnlThreshold = 0): Promise<number> {
-    const openTrades = await this.userTradeModel.find({ telegramId, status: "OPEN" }).lean();
-    if (openTrades.length === 0) return 0;
-
-    const keys = await this.userSettingsService.getApiKeys(telegramId, "binance");
-    if (!keys?.apiKey) return 0;
-
-    // Calculate current PnL for each trade and sort worst first
-    const tradesWithPnl: { trade: any; currentPnlPct: number }[] = [];
-    for (const trade of openTrades) {
-      const currentPrice = await this.marketDataService.getPrice(trade.symbol).catch(() => 0);
-      if (!currentPrice) continue;
-      const rawPnlPct = trade.direction === "LONG"
-        ? ((currentPrice - trade.entryPrice) / trade.entryPrice) * 100
-        : ((trade.entryPrice - currentPrice) / trade.entryPrice) * 100;
-      tradesWithPnl.push({ trade, currentPnlPct: rawPnlPct - BINANCE_FEE_PCT });
-    }
-
-    // Sort worst-performing first
-    tradesWithPnl.sort((a, b) => a.currentPnlPct - b.currentPnlPct);
-
-    let closed = 0;
-    for (const { trade, currentPnlPct } of tradesWithPnl) {
-      // Only close positions below threshold (default: losing positions only)
-      if (currentPnlPct >= pnlThreshold) {
-        this.logger.log(
-          `[RealTrading] closeLosingPositions: KEEPING ${trade.symbol} (PnL: ${currentPnlPct.toFixed(2)}% >= ${pnlThreshold}%) for user ${telegramId}`,
-        );
-        continue;
-      }
-
-      try {
-        closed += await this.closeSinglePosition(keys, trade, reason, telegramId);
-      } catch (err) {
-        this.logger.error(
-          `[RealTrading] closeLosingPositions error ${trade.symbol} for user ${telegramId}: ${err?.message}`,
-        );
-      }
-    }
-    return closed;
-  }
-
   private async closeSinglePosition(keys: any, trade: any, reason: string, telegramId: number): Promise<number> {
-    // Cancel existing SL algo order
     if (trade.binanceSlAlgoId) {
       await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, trade.binanceSlAlgoId).catch(() => {});
     }
-    // Cancel existing TP algo order
     if (trade.binanceTpAlgoId) {
       await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, trade.binanceTpAlgoId).catch(() => {});
     }
-
-    // Place reduce-only market order to close
     const closeOrder = await this.binanceService.closePosition(
       keys.apiKey, keys.apiSecret, trade.symbol, trade.quantity, trade.direction,
     );
     const exitPrice = parseFloat(closeOrder.avgPrice) || (await this.marketDataService.getPrice(trade.symbol)) || trade.entryPrice;
-
-    const entryRef3 = (trade as any).gridAvgEntry || trade.entryPrice;
+    const entryRef = (trade as any).gridAvgEntry || trade.entryPrice;
     const rawPnlPct = trade.direction === "LONG"
-      ? ((exitPrice - entryRef3) / entryRef3) * 100
-      : ((entryRef3 - exitPrice) / entryRef3) * 100;
+      ? ((exitPrice - entryRef) / entryRef) * 100
+      : ((entryRef - exitPrice) / entryRef) * 100;
     const pnlPct = rawPnlPct - BINANCE_FEE_PCT;
-    const rawPnlUsdt3 = trade.direction === "LONG"
-      ? (exitPrice - entryRef3) * trade.quantity
-      : (entryRef3 - exitPrice) * trade.quantity;
-    const pnlUsdt = rawPnlUsdt3 - (BINANCE_FEE_PCT / 100) * entryRef3 * trade.quantity;
-
+    const pnlUsdt = (trade.direction === "LONG" ? (exitPrice - entryRef) : (entryRef - exitPrice)) * trade.quantity
+      - (BINANCE_FEE_PCT / 100) * entryRef * trade.quantity;
     await this.userTradeModel.findByIdAndUpdate((trade as any)._id, {
-      status: "CLOSED",
-      closeReason: reason,
-      exitPrice,
-      pnlPercent: pnlPct,
-      pnlUsdt,
-      closedAt: new Date(),
+      status: "CLOSED", closeReason: reason, exitPrice, pnlPercent: pnlPct, pnlUsdt, closedAt: new Date(),
     });
-
     await this.subscriptionService.incrementTradePnl(telegramId, pnlUsdt);
-
-    this.logger.log(
-      `[RealTrading] closeSinglePosition: closed ${trade.symbol} ${trade.direction} @ ${exitPrice} pnl=${pnlPct.toFixed(2)}% for user ${telegramId} (${reason})`,
-    );
+    this.logger.log(`[RealTrading] closeSinglePosition: ${trade.symbol} ${trade.direction} @ ${exitPrice} pnl=${pnlPct.toFixed(2)}% (${reason})`);
     return 1;
   }
 
-  // ─── Cycle P&L limit crons ───────────────────────────────────────────────
-
-  /** Trailing floor ratio: 50% normally, 70% after target hit (paused). */
-
-  private readonly FLOOR_RATIO_TARGET = 0.7;
-
-  /**
-   * Every 1 minute: check cycle P&L limits for real-mode users.
-   * PAUSE: when PnL >= target → stop opening new trades, let existing ride
-   * LOCK:  when PnL drops to 60% of peak after PAUSE → close all, reset cycle
-   * SL:    when PnL <= -stopLoss → close all, disable real mode
-   */
-  @Cron("0 */1 * * * *")
-  async checkCycleLimits(): Promise<void> {
-    try {
-      const users = await this.subscriptionService.findRealModeSubscribersWithCycleLimits();
-      if (users.length === 0) return;
-
-      for (const user of users) {
-        try {
-          const stats = await this.getCycleStats(user.telegramId, user.cycleResetAt);
-          if (stats.totalNotionalUsdt === 0 && stats.openTrades.length === 0) continue;
-
-          const balance = user.tradingBalance || 1000;
-          const pnlPct = (stats.totalPnlUsdt / balance) * 100;
-          const target = user.realModeDailyTargetPct;
-          const slLimit = user.realModeDailyStopLossPct;
-          const peak = user.cyclePeakPct ?? 0;
-          const paused = user.cyclePaused === true;
-
-          // ── Always track peak (before target hit too) ──
-          if (pnlPct > peak && pnlPct > 0) {
-            await this.subscriptionService.setCyclePeakPct(user.telegramId, pnlPct);
-          }
-
-          // ── SL check (always active) ──
-          // Close only losing positions — keep profitable ones running with their own SL/TP
-          if (slLimit != null && pnlPct <= -slLimit) {
-            const closedCount = await this.closeLosingPositions(user.telegramId, user.chatId, "CYCLE_STOP_LOSS", 0.5);
-            await this.dailyLimitHistoryModel.create({
-              telegramId: user.telegramId, username: user.username,
-              type: "CYCLE_STOP_LOSS", pnlUsdt: stats.totalPnlUsdt, pnlPct,
-              limitPct: slLimit, positionsClosed: closedCount, triggeredAt: new Date(),
-            });
-            await this.subscriptionService.setRealMode(user.telegramId, false);
-            await this.subscriptionService.setRealModeDailyDisabled(user.telegramId, new Date());
-            await this.subscriptionService.setCycleResetAt(user.telegramId, null);
-
-            const remainingOpen = (await this.userTradeModel.countDocuments({ telegramId: user.telegramId, status: "OPEN" }));
-            const sign = stats.totalPnlUsdt >= 0 ? "+" : "";
-            const msg =
-              `🛑 *Cycle SL: Dung Lo*\n` +
-              `━━━━━━━━━━━━━━━━━━\n\n` +
-              `Cycle PnL: *${sign}${stats.totalPnlUsdt.toFixed(2)} USDT* (*${sign}${pnlPct.toFixed(2)}%*)\n` +
-              `Gioi han: *-${slLimit}%*\n` +
-              (closedCount > 0 ? `Da dong: *${closedCount} lenh lo*\n` : ``) +
-              (remainingOpen > 0 ? `Giu lai: *${remainingOpen} lenh dang lai* (tiep tuc TP/SL rieng)\n` : ``) +
-              `\nReal mode da *TAT*. Se tu dong BAT lai vao ngay mai 00:01 UTC.`;
-            await this.telegramService.sendTelegramMessage(user.chatId, msg).catch(() => {});
-            this.logger.log(`[RealTrading] Cycle SL for user ${user.telegramId}: ${pnlPct.toFixed(2)}%`);
-            continue;
-          }
-
-          if (target == null) continue;
-
-          const isCloseAllMode = user.cycleTargetMode === "CLOSE_ALL";
-
-          // ── Target hit ──
-          if (!paused && pnlPct >= target) {
-            if (isCloseAllMode) {
-              // CLOSE_ALL mode: immediately close all positions and reset cycle
-              const closedCount = await this.closeAllRealPositions(user.telegramId, user.chatId, "CYCLE_TARGET");
-              await this.dailyLimitHistoryModel.create({
-                telegramId: user.telegramId, username: user.username,
-                type: "CYCLE_TARGET", pnlUsdt: stats.totalPnlUsdt, pnlPct,
-                limitPct: target, positionsClosed: closedCount, triggeredAt: new Date(),
-              });
-              const resetAt = new Date(Date.now() + 1000);
-              await this.subscriptionService.setCycleResetAt(user.telegramId, resetAt);
-
-              const sign = stats.totalPnlUsdt >= 0 ? "+" : "";
-              const msg =
-                `🎯 *Cycle Target: Dat Muc Tieu!*\n` +
-                `━━━━━━━━━━━━━━━━━━\n\n` +
-                `Cycle PnL: *${sign}${stats.totalPnlUsdt.toFixed(2)} USDT* (*${sign}${pnlPct.toFixed(2)}%*)\n` +
-                `Muc tieu: *+${target}%* ✅\n` +
-                (closedCount > 0 ? `Da dong: *${closedCount} lenh*\n` : ``) +
-                `\nCycle moi bat dau — bot tiep tuc mo lenh.`;
-              await this.telegramService.sendTelegramMessage(user.chatId, msg).catch(() => {});
-              this.logger.log(`[RealTrading] Cycle CLOSE ALL for user ${user.telegramId}: ${pnlPct.toFixed(2)}% (target ${target}%)`);
-            } else {
-              // TRAILING mode: pause new trades, let existing ride with trailing floor
-              await this.subscriptionService.setCyclePaused(user.telegramId, true);
-
-              const sign = stats.totalPnlUsdt >= 0 ? "+" : "";
-              const floor = (pnlPct * this.FLOOR_RATIO_TARGET).toFixed(2);
-              const msg =
-                `🎯 *Cycle Target: Dat Muc Tieu!*\n` +
-                `━━━━━━━━━━━━━━━━━━\n\n` +
-                `Cycle PnL: *${sign}${stats.totalPnlUsdt.toFixed(2)} USDT* (*${sign}${pnlPct.toFixed(2)}%*)\n` +
-                `Muc tieu: *+${target}%* ✅\n\n` +
-                `Bot *NGUNG mo lenh moi*.\n` +
-                `Lenh dang mo se tiep tuc chay TP/SL rieng.\n` +
-                `Trailing floor: *+${floor}%* — dong tat ca neu PnL giam ve muc nay.`;
-              await this.telegramService.sendTelegramMessage(user.chatId, msg).catch(() => {});
-              this.logger.log(`[RealTrading] Cycle PAUSE for user ${user.telegramId}: ${pnlPct.toFixed(2)}% (target ${target}%)`);
-            }
-            continue;
-          }
-
-          // ── Already paused (TRAILING mode): check trailing floor at 70% of peak ──
-          if (paused) {
-            const floor = peak * this.FLOOR_RATIO_TARGET;
-            if (pnlPct <= floor) {
-              const closedCount = await this.closeAllRealPositions(user.telegramId, user.chatId, "CYCLE_TARGET");
-              await this.dailyLimitHistoryModel.create({
-                telegramId: user.telegramId, username: user.username,
-                type: "CYCLE_TARGET", pnlUsdt: stats.totalPnlUsdt, pnlPct,
-                limitPct: target, positionsClosed: closedCount, triggeredAt: new Date(),
-              });
-              const resetAt = new Date(Date.now() + 1000);
-              await this.subscriptionService.setCycleResetAt(user.telegramId, resetAt);
-
-              const sign = stats.totalPnlUsdt >= 0 ? "+" : "";
-              const msg =
-                `🔒 *Cycle Lock: Khoa Loi Nhuan*\n` +
-                `━━━━━━━━━━━━━━━━━━\n\n` +
-                `Cycle PnL: *${sign}${stats.totalPnlUsdt.toFixed(2)} USDT* (*${sign}${pnlPct.toFixed(2)}%*)\n` +
-                `Peak: *+${peak.toFixed(2)}%* · Floor: *+${floor.toFixed(2)}%*\n` +
-                (closedCount > 0 ? `Da dong: *${closedCount} lenh*\n` : ``) +
-                `\nCycle moi bat dau — bot tiep tuc mo lenh.`;
-              await this.telegramService.sendTelegramMessage(user.chatId, msg).catch(() => {});
-              this.logger.log(`[RealTrading] Cycle LOCK for user ${user.telegramId}: ${pnlPct.toFixed(2)}% (peak ${peak.toFixed(2)}%, floor ${floor.toFixed(2)}%)`);
-            }
-
-            // If all positions closed naturally (TP/SL) while paused, reset cycle
-            if (stats.openTrades.length === 0) {
-              const resetAt = new Date(Date.now() + 1000);
-              await this.subscriptionService.setCycleResetAt(user.telegramId, resetAt);
-
-              const sign = stats.totalPnlUsdt >= 0 ? "+" : "";
-              const msg =
-                `✅ *Cycle Hoan Tat*\n` +
-                `━━━━━━━━━━━━━━━━━━\n\n` +
-                `Tat ca lenh da dong.\n` +
-                `Cycle PnL: *${sign}${stats.totalPnlUsdt.toFixed(2)} USDT* (*${sign}${pnlPct.toFixed(2)}%*)\n` +
-                `Peak: *+${(peak).toFixed(2)}%*\n\n` +
-                `Cycle moi bat dau — bot tiep tuc mo lenh.`;
-              await this.telegramService.sendTelegramMessage(user.chatId, msg).catch(() => {});
-              this.logger.log(`[RealTrading] Cycle complete (all closed) for user ${user.telegramId}`);
-            }
-          }
-        } catch (err) {
-          this.logger.error(`[RealTrading] checkCycleLimits error for user ${user.telegramId}: ${err?.message}`);
-        }
-      }
-    } catch (err) {
-      this.logger.error(`[RealTrading] checkCycleLimits outer error: ${err?.message}`);
-    }
-  }
-
-  /**
-   * At 00:01 UTC daily: re-enable real mode for users who were auto-disabled by cycle SL yesterday.
-   * Also resets cycle so they start fresh.
-   */
-  @Cron("0 1 0 * * *")
-  async resetDailyLimits(): Promise<void> {
-    try {
-      const users = await this.subscriptionService.findUsersForDailyReset();
-      if (users.length === 0) return;
-
-      for (const user of users) {
-        try {
-          await this.subscriptionService.setRealMode(user.telegramId, true);
-          await this.subscriptionService.setRealModeDailyDisabled(user.telegramId, null);
-          await this.subscriptionService.setCycleResetAt(user.telegramId, new Date());
-
-          const targetLine = user.realModeDailyTargetPct != null
-            ? `Muc tieu: *+${user.realModeDailyTargetPct}%*\n` : ``;
-          const slLine = user.realModeDailyStopLossPct != null
-            ? `Gioi han lo: *-${user.realModeDailyStopLossPct}%*\n` : ``;
-
-          const msg =
-            `🌅 *Real Mode: Ngay Moi Bat Dau*\n` +
-            `━━━━━━━━━━━━━━━━━━\n\n` +
-            `Real mode da duoc *BAT lai* cho ngay hom nay.\n` +
-            `Cycle moi bat dau.\n` +
-            targetLine + slLine +
-            `\nDung /ai off de tat neu can.`;
-          await this.telegramService.sendTelegramMessage(user.chatId, msg).catch(() => {});
-
-          this.logger.log(`[RealTrading] Daily reset: re-enabled real mode for user ${user.telegramId}`);
-        } catch (err) {
-          this.logger.error(`[RealTrading] resetDailyLimits error for user ${user.telegramId}: ${err?.message}`);
-        }
-      }
-    } catch (err) {
-      this.logger.error(`[RealTrading] resetDailyLimits outer error: ${err?.message}`);
-    }
-  }
+  // Cycle PnL management REMOVED — user manages their own targets
 
   /**
    * Get daily limit history for a user (last N events).
