@@ -1902,15 +1902,16 @@ export class PositionMonitorService implements OnModuleInit {
       entryReason, // e.g. "PnL -19.52% | Cycle 1 (immediate) | regime: MIXED | banked: $147.36"
     };
 
-    // After hedge close: restore SL = 40% safety net
-    // Hedge will re-enter at -3% if needed, but SL protects against catastrophic moves
+    // After hedge close: restore SL with PROGRESSIVE tightening based on cycle count.
+    // More cycles = direction likely wrong → tighter SL to limit damage.
+    // Cycle 1-2: 40% (give recovery chance), Cycle 3: 15%, Cycle 4+: 8%
     const avgEntryForSl = (signal as any).gridAvgEntry || signal.entryPrice;
-    const defaultSlPct = 40;
+    const progressiveSlPct = cycleCount <= 2 ? 40 : cycleCount === 3 ? 15 : 8;
     const updates: Record<string, any> = {};
     let finalSlPrice = signal.direction === 'LONG'
-      ? +(avgEntryForSl * (1 - defaultSlPct / 100)).toFixed(6)
-      : +(avgEntryForSl * (1 + defaultSlPct / 100)).toFixed(6);
-    let finalSlPercent = defaultSlPct;
+      ? +(avgEntryForSl * (1 - progressiveSlPct / 100)).toFixed(6)
+      : +(avgEntryForSl * (1 + progressiveSlPct / 100)).toFixed(6);
+    let finalSlPercent = progressiveSlPct;
 
     // If hedge manager provided tighter safety SL → use it instead
     if (action.newSafetySlPrice && action.newSafetySlPrice > 0) {
@@ -2010,6 +2011,21 @@ export class PositionMonitorService implements OnModuleInit {
       await this.hedgeCallback(signal, action, currentPrice).catch((err) =>
         this.logger.warn(`[PositionMonitor] hedgeCallback error ${sigKey}: ${err?.message}`),
       );
+    }
+
+    // Circuit breaker: if price already beyond progressive SL after hedge close → resolve immediately.
+    // This catches cases where direction is wrong and progressive SL tightened past current price.
+    if (cycleCount >= 3) {
+      const slBreached = signal.direction === 'LONG'
+        ? currentPrice <= finalSlPrice
+        : currentPrice >= finalSlPrice;
+      if (slBreached) {
+        this.logger.warn(
+          `[PositionMonitor] ${sigKey} CIRCUIT BREAKER: price ${currentPrice} already beyond progressive SL ${finalSlPrice} (${progressiveSlPct}%) after cycle ${cycleCount} → resolving`,
+        );
+        // Let the next tick's SL check handle the actual resolution (avoid duplicate close logic)
+        // The SL is already set tight — next tick will fire SL naturally
+      }
     }
   }
 }

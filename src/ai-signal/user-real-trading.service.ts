@@ -2011,9 +2011,12 @@ export class UserRealTradingService implements OnModuleInit {
               closeReason: hPnl >= 0 ? 'HEDGE_TP' : 'HEDGE_CLOSE',
               closedAt: new Date(),
             });
-            // Restore main SL (40%)
+            // Restore main SL with progressive tightening (matches sim)
+            // Cycle 1-2: 40%, Cycle 3: 15%, Cycle 4+: 8%
+            const completedCycles = closedHedges.length + 1; // including the one just closed
+            const progressiveSlPct = completedCycles <= 2 ? 40 : completedCycles === 3 ? 15 : 8;
             const restoredSl = trade.direction === 'LONG'
-              ? +(entry * 0.60).toFixed(6) : +(entry * 1.40).toFixed(6);
+              ? +(entry * (1 - progressiveSlPct / 100)).toFixed(6) : +(entry * (1 + progressiveSlPct / 100)).toFixed(6);
             const pp = await this.getPricePrecision(trade.symbol);
             const slOrder = await this.binanceService.setStopLoss(
               keys.apiKey, keys.apiSecret, trade.symbol,
@@ -2023,7 +2026,20 @@ export class UserRealTradingService implements OnModuleInit {
               const newSlId = slOrder?.algoId?.toString() ?? slOrder?.orderId?.toString();
               await this.userTradeModel.updateOne({ _id: (trade as any)._id }, { $set: { slPrice: restoredSl, binanceSlAlgoId: newSlId } });
             }
-            this.logger.log(`[OrphanHedge] Closed hedge ${trade.telegramId} ${trade.symbol} PnL=${hPnl.toFixed(2)}% (${action.reason})`);
+            this.logger.log(`[OrphanHedge] Closed hedge ${trade.telegramId} ${trade.symbol} PnL=${hPnl.toFixed(2)}% SL=${restoredSl} (${progressiveSlPct}%) cycle=${completedCycles}`);
+
+            // Circuit breaker: if price already beyond progressive SL → close main immediately
+            if (completedCycles >= 3) {
+              const slBreached = trade.direction === 'LONG'
+                ? currentPrice <= restoredSl
+                : currentPrice >= restoredSl;
+              if (slBreached) {
+                this.logger.warn(
+                  `[OrphanHedge] CIRCUIT BREAKER: ${trade.symbol} price ${currentPrice} beyond SL ${restoredSl} (${progressiveSlPct}%) after cycle ${completedCycles} → closing main`,
+                );
+                await this.closeRealPosition(trade.telegramId, (trade as any).chatId, trade.symbol, 'PROGRESSIVE_SL').catch(() => {});
+              }
+            }
 
           } else if (action.action === 'OPEN_FULL' || action.action === 'OPEN_PARTIAL') {
             // Cancel main SL — hedge manages risk
@@ -2149,6 +2165,12 @@ export class UserRealTradingService implements OnModuleInit {
           const grids: any[] = trade.gridLevels ?? [];
           const { direction, symbol, telegramId } = trade;
           let gridChanged = false;
+
+          // Skip grid DCA fills when hedge is active (don't add to losing position — matches sim)
+          const hedgeTrade = await this.userTradeModel.findOne({
+            telegramId, symbol, status: "OPEN", isHedge: true,
+          }).select('_id').lean();
+          if (hedgeTrade) continue;
 
           // Check PENDING grids for fill triggers (DCA: add to position)
           // RSI guard: only DCA when RSI shows exhaustion (likely to bounce)

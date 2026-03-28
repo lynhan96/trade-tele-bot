@@ -285,7 +285,11 @@ export class TradingConfigService {
     if (Date.now() - this.lastLoad > 5 * 60 * 1000) {
       this.load().catch(() => {});
     }
-    return this.cached;
+    // Hard floors — prevent agent/config from setting destructive values
+    const cfg = this.cached;
+    if (cfg.hedgePartialTriggerPct < 2) cfg.hedgePartialTriggerPct = 2;
+    if (cfg.hedgeFullTriggerPct < 2) cfg.hedgeFullTriggerPct = 2;
+    return cfg;
   }
 
   /** Force load from Redis. */
