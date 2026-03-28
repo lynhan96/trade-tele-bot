@@ -402,7 +402,8 @@ export class AiSignalService implements OnModuleInit {
 
     // Cap total active signals
     const cfg = this.tradingConfig.get();
-    const maxSignals = Math.min(cfg.maxActiveSignals || MAX_ACTIVE_SIGNALS, MAX_ACTIVE_SIGNALS);
+    const MIN_ACTIVE_SIGNALS = 5;
+    const maxSignals = Math.min(Math.max(cfg.maxActiveSignals || MAX_ACTIVE_SIGNALS, MIN_ACTIVE_SIGNALS), MAX_ACTIVE_SIGNALS);
     let allActives;
     if (this.activeSignalsCache && Date.now() - this.activeSignalsCache.ts < this.ACTIVE_CACHE_TTL) {
       allActives = this.activeSignalsCache.data;
