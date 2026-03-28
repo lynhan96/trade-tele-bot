@@ -2809,8 +2809,19 @@ export class UserRealTradingService implements OnModuleInit {
         status: 'OPEN',
       });
 
+      // Safety: skip closing hedges opened < 30s ago (prevents instant-close race)
+      const MIN_HEDGE_AGE_MS = 30_000;
+      const now = Date.now();
+
       for (const hedge of openHedges) {
         try {
+          // Skip hedge opened < 30s ago — prevents instant-close from stale sim state
+          const hedgeAge = now - new Date(hedge.openedAt).getTime();
+          if (hedgeAge < MIN_HEDGE_AGE_MS && !isFlip) {
+            this.logger.warn(`[UserRealTrading] Hedge close SKIPPED: ${hedge.symbol} age=${Math.round(hedgeAge/1000)}s < 30s min`);
+            continue;
+          }
+
           // Close REAL Binance hedge position
           const keys = await this.userSettingsService.getApiKeys(hedge.telegramId, 'binance');
           if (keys?.apiKey) {

@@ -348,6 +348,13 @@ export class HedgeManagerService {
       const ctxId = ctx.id;
       if (!ctxId) return null;
 
+      // Minimum hedge age: don't evaluate exit until hedge is at least 30s old
+      // Prevents instant-close from stale flags, cache race conditions, or tick spam
+      if (ctx.hedgeOpenedAt) {
+        const ageMs = Date.now() - new Date(ctx.hedgeOpenedAt).getTime();
+        if (ageMs < 30_000) return null;
+      }
+
       const hedgeEntry = ctx.hedgeEntryPrice;
       const hedgeDir = ctx.hedgeDirection;
       const hedgeNotional = ctx.hedgeNotional ?? 0;
