@@ -203,8 +203,8 @@ function buildTraderPrompt(ctx) {
     STRONG_BULL: "TP can be wider (3-5%), trail looser, maxActiveSignals higher (8-10), minConfidence lower (55-60), hedge threshold higher",
     BULL: "Balanced TP (2.5-4%), moderate trail, maxActiveSignals 6-8, minConfidence 58-63",
     NEUTRAL: "Conservative TP (2-3%), tighter trail, maxActiveSignals 5-6, minConfidence 60-65",
-    BEAR: "Tight TP (1.5-2.5%), aggressive trail, maxActiveSignals 3-5, minConfidence 63-68, favor SHORT",
-    STRONG_BEAR: "Very tight TP (1-2%), maxActiveSignals 2-4, minConfidence 65-68, mostly SHORT, reduce exposure",
+    BEAR: "Tight TP (1.5-2.5%), aggressive trail, maxActiveSignals 5-6, minConfidence 63-68, favor SHORT",
+    STRONG_BEAR: "Very tight TP (1-2%), maxActiveSignals 5, minConfidence 65-68, mostly SHORT, reduce exposure",
   }
   const regime = ctx.market?.regime || "UNKNOWN"
   const guide = regimeGuide[regime] || "Unknown regime — be conservative"

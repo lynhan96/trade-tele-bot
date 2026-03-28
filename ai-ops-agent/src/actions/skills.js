@@ -1067,7 +1067,7 @@ export async function runLiquidationRisk() {
       // Auto-reduce maxActiveSignals if critically overleveraged
       const currentActive = activeSignals.length
       if (currentActive > 3) {
-        await autoConfig("maxActiveSignals", Math.max(3, currentActive - 2), `leverage ${effectiveLeverage.toFixed(1)}x > 8x`)
+        await autoConfig("maxActiveSignals", Math.max(5, currentActive - 2), `leverage ${effectiveLeverage.toFixed(1)}x > 8x`)
       }
     } else if (effectiveLeverage > 5) {
       alerts.push(`⚠️ High leverage ${effectiveLeverage.toFixed(1)}x ($${totalNotional.toFixed(0)} / $${WALLET_BALANCE}) — monitor closely`)
