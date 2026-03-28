@@ -13,6 +13,7 @@ import { UserTrade, UserTradeDocument } from "../schemas/user-trade.schema";
 import { DailyLimitHistory, DailyLimitHistoryDocument } from "../schemas/daily-limit-history.schema";
 import { AiSignal, AiSignalDocument } from "../schemas/ai-signal.schema";
 import { AiTunedParams } from "../strategy/ai-optimizer/ai-tuned-params.interface";
+import { HedgeManagerService, HedgePositionContext } from "./hedge-manager.service";
 import { TradingConfigService } from "./trading-config";
 import { getProxyAgent } from "../utils/proxy";
 
@@ -63,6 +64,7 @@ export class UserRealTradingService implements OnModuleInit {
     @InjectModel(AiSignal.name)
     private readonly aiSignalModel: Model<AiSignalDocument>,
     private readonly tradingConfig: TradingConfigService,
+    private readonly hedgeManager: HedgeManagerService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -2432,13 +2434,178 @@ export class UserRealTradingService implements OnModuleInit {
     return results;
   }
 
-  // ─── Hedge Event Tracking ──────────────────────────────────────────────
+  // ─── Independent Real Hedge Check ─────────────────────────────────────
 
   /**
-   * Track hedge open/close as UserTrade records for all subscribed real users.
-   * This creates sim-only tracking records (no real Binance orders for hedge).
+   * Check hedge independently for each real user based on THEIR actual entry/notional.
+   * Called from position-monitor on every price tick (via callback).
+   */
+  async checkRealHedge(signal: any, currentPrice: number, regime: string): Promise<void> {
+    const signalId = signal._id?.toString();
+    if (!signalId) return;
+
+    const subscribers = await this.subscriptionService.findRealModeSubscribers();
+    if (subscribers.length === 0) return;
+
+    for (const sub of subscribers) {
+      try {
+        // Find user's main trade for this signal
+        const mainTrade = await this.userTradeModel.findOne({
+          telegramId: sub.telegramId, aiSignalId: signalId,
+          status: 'OPEN', isHedge: { $ne: true },
+        }).lean();
+        if (!mainTrade) continue;
+
+        // Find user's open hedge trade (if any)
+        const hedgeTrade = await this.userTradeModel.findOne({
+          telegramId: sub.telegramId, aiSignalId: signalId,
+          status: 'OPEN', isHedge: true,
+        }).lean();
+
+        // Build hedge history from closed hedge trades
+        const closedHedges = await this.userTradeModel.find({
+          telegramId: sub.telegramId, aiSignalId: signalId,
+          status: 'CLOSED', isHedge: true,
+        }).lean();
+        const hedgeHistory = closedHedges.map((h: any) => ({
+          direction: h.direction, entryPrice: h.entryPrice, exitPrice: h.exitPrice,
+          pnlUsdt: h.pnlUsdt, closedAt: h.closedAt, reason: h.closeReason,
+        }));
+
+        // Calculate real PnL from user's actual entry
+        const entry = (mainTrade as any).gridAvgEntry || mainTrade.entryPrice;
+        const realPnlPct = mainTrade.direction === 'LONG'
+          ? ((currentPrice - entry) / entry) * 100
+          : ((entry - currentPrice) / entry) * 100;
+
+        // Build context from real trade data
+        const ctx: HedgePositionContext = {
+          id: `real:${sub.telegramId}:${signalId}`,
+          symbol: mainTrade.symbol,
+          coin: mainTrade.symbol.replace('USDT', ''),
+          direction: mainTrade.direction,
+          entryPrice: entry,
+          positionNotional: mainTrade.notionalUsdt || 0,
+          hedgeActive: !!hedgeTrade,
+          hedgeCycleCount: closedHedges.length,
+          hedgeHistory,
+          hedgeEntryPrice: hedgeTrade?.entryPrice,
+          hedgeDirection: hedgeTrade?.direction,
+          hedgeNotional: hedgeTrade?.notionalUsdt,
+          hedgeTpPrice: (hedgeTrade as any)?.tpPrice,
+          hedgeSlAtEntry: (hedgeTrade as any)?.hedgeSlAtEntry,
+          hedgeTrailActivated: (hedgeTrade as any)?.hedgeTrailActivated,
+          hedgeSafetySlPrice: (mainTrade as any)?.slPrice,
+          stopLossPrice: mainTrade.slPrice,
+        };
+
+        const action = await this.hedgeManager.checkHedge(ctx, currentPrice, realPnlPct, regime);
+        if (!action || action.action === 'NONE') {
+          // Update hedge flags on trade if needed
+          if (action?.hedgeSlAtEntry && hedgeTrade) {
+            await this.userTradeModel.updateOne({ _id: hedgeTrade._id }, { $set: { hedgeSlAtEntry: true } }).catch(() => {});
+          }
+          if (action?.hedgeTrailActivated && hedgeTrade) {
+            await this.userTradeModel.updateOne({ _id: hedgeTrade._id }, { $set: { hedgeTrailActivated: true } }).catch(() => {});
+          }
+          continue;
+        }
+
+        if (action.action === 'CLOSE_HEDGE' && hedgeTrade) {
+          // Close real hedge
+          const keys = await this.userSettingsService.getApiKeys(sub.telegramId, 'binance');
+          if (keys?.apiKey) {
+            await this.binanceService.closePosition(keys.apiKey, keys.apiSecret, mainTrade.symbol, hedgeTrade.quantity, hedgeTrade.direction).catch(() => {});
+            const hPnl = hedgeTrade.direction === 'LONG'
+              ? ((currentPrice - hedgeTrade.entryPrice) / hedgeTrade.entryPrice) * 100
+              : ((hedgeTrade.entryPrice - currentPrice) / hedgeTrade.entryPrice) * 100;
+            await this.userTradeModel.findByIdAndUpdate(hedgeTrade._id, {
+              status: 'CLOSED', exitPrice: currentPrice,
+              pnlPercent: Math.round(hPnl * 100) / 100,
+              pnlUsdt: Math.round((hPnl / 100) * hedgeTrade.notionalUsdt * 100) / 100,
+              closeReason: action.reason?.includes('trail') ? 'HEDGE_TRAIL' : hPnl >= 0 ? 'HEDGE_TP' : 'HEDGE_CLOSE',
+              closedAt: new Date(),
+            });
+            // Restore SL on main trade
+            const mainEntry = (mainTrade as any).gridAvgEntry || mainTrade.entryPrice;
+            const restoredSl = mainTrade.direction === 'LONG'
+              ? +(mainEntry * 0.60).toFixed(6) : +(mainEntry * 1.40).toFixed(6);
+            const pp = await this.getPricePrecision(mainTrade.symbol);
+            const roundedSl = parseFloat(restoredSl.toFixed(pp));
+            const slQty = mainTrade.quantity;
+            try {
+              const slOrder = await this.binanceService.setStopLoss(keys.apiKey, keys.apiSecret, mainTrade.symbol, roundedSl, mainTrade.direction as 'LONG' | 'SHORT', slQty);
+              const newSlId = slOrder?.algoId?.toString() ?? slOrder?.orderId?.toString();
+              await this.userTradeModel.updateOne({ _id: mainTrade._id }, { $set: { slPrice: roundedSl, binanceSlAlgoId: newSlId } });
+            } catch {}
+            this.logger.log(`[RealHedge] Closed hedge for ${sub.telegramId} ${mainTrade.symbol} PnL=${hPnl.toFixed(2)}% (${action.reason})`);
+          }
+        } else if (action.action === 'OPEN_FULL' || action.action === 'OPEN_PARTIAL') {
+          // Open real hedge
+          const keys = await this.userSettingsService.getApiKeys(sub.telegramId, 'binance');
+          if (!keys?.apiKey) continue;
+
+          // Cancel main SL (hedge manages risk)
+          if ((mainTrade as any).binanceSlAlgoId) {
+            await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, (mainTrade as any).binanceSlAlgoId).catch(() => {});
+            await this.userTradeModel.updateOne({ _id: mainTrade._id }, { $set: { binanceSlAlgoId: null, slPrice: 0 } }).catch(() => {});
+          }
+
+          const hedgeDir = action.hedgeDirection || (mainTrade.direction === 'LONG' ? 'SHORT' : 'LONG');
+          const hedgeNotional = action.hedgeNotional || mainTrade.notionalUsdt * 0.75;
+          const [qtyPrec] = await Promise.all([this.getQuantityPrecision(mainTrade.symbol)]);
+          const hedgeQty = parseFloat((hedgeNotional / currentPrice).toFixed(qtyPrec));
+          if (hedgeQty <= 0) continue;
+
+          try {
+            const order = await this.binanceService.openPosition(keys.apiKey, keys.apiSecret, {
+              symbol: mainTrade.symbol, side: hedgeDir as 'LONG' | 'SHORT',
+              quantity: hedgeQty, leverage: mainTrade.leverage || 1,
+            });
+            const fillPrice = parseFloat(order?.avgPrice) || currentPrice;
+
+            // Place TP for hedge
+            if (action.hedgeTpPrice) {
+              const pp = await this.getPricePrecision(mainTrade.symbol);
+              await this.binanceService.setTakeProfitAtPrice(
+                keys.apiKey, keys.apiSecret, mainTrade.symbol,
+                parseFloat(action.hedgeTpPrice.toFixed(pp)), hedgeDir as 'LONG' | 'SHORT', hedgeQty,
+              ).catch(() => {});
+            }
+
+            await this.userTradeModel.create({
+              telegramId: sub.telegramId, chatId: sub.chatId,
+              symbol: mainTrade.symbol, direction: hedgeDir,
+              entryPrice: fillPrice, quantity: hedgeQty,
+              leverage: mainTrade.leverage || 1, notionalUsdt: hedgeNotional,
+              slPrice: 0, tpPrice: action.hedgeTpPrice || 0,
+              status: 'OPEN', openedAt: new Date(),
+              aiSignalId: signalId, isHedge: true,
+              parentTradeId: mainTrade._id,
+              hedgeCycle: (closedHedges.length || 0) + 1,
+              hedgePhase: action.hedgePhase || 'FULL',
+            });
+            this.logger.log(`[RealHedge] Opened hedge for ${sub.telegramId} ${mainTrade.symbol} ${hedgeDir} $${hedgeNotional.toFixed(0)} @ ${fillPrice}`);
+          } catch (err) {
+            this.logger.error(`[RealHedge] Open FAILED for ${sub.telegramId} ${mainTrade.symbol}: ${err?.message}`);
+          }
+        }
+      } catch (err) {
+        this.logger.error(`[RealHedge] Error for ${sub.telegramId}: ${err?.message}`);
+      }
+    }
+  }
+
+  // ─── Hedge Event Tracking (sim-driven, kept for backward compat) ────
+
+  /**
+   * Sim hedge event handler — real hedge is managed independently by checkRealHedge().
+   * This method is kept as no-op for backward compat (hedgeCallback still calls it).
    */
   async onHedgeEvent(signal: any, action: any, price: number): Promise<void> {
+    // Real hedge open/close now handled by checkRealHedge() using real entry prices.
+    // No-op — sim notification handled by notifyHedgeEvent in ai-signal.service.ts.
+    return;
     if (!action || action.action === 'NONE') return;
 
     const signalId = signal._id?.toString();

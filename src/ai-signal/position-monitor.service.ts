@@ -108,6 +108,11 @@ export class PositionMonitorService implements OnModuleInit {
     this.hedgeCallback = cb;
   }
 
+  private realHedgeCallback?: (signal: AiSignalDocument, price: number, regime: string) => Promise<void>;
+  setRealHedgeCallback(cb: (signal: AiSignalDocument, price: number, regime: string) => Promise<void>): void {
+    this.realHedgeCallback = cb;
+  }
+
   constructor(
     private readonly configService: ConfigService,
     private readonly redisService: RedisService,
@@ -142,6 +147,43 @@ export class PositionMonitorService implements OnModuleInit {
   // ─── Fee Helpers (Binance Futures sim) ────────────────────────────────────
 
   /** Calculate taker fee in USDT (market order — open/close) */
+  /** Build HedgePositionContext from Order records (sim path) */
+  private buildSimHedgeContext(
+    signal: AiSignalDocument,
+    mainOrder: any,
+    hedgeOrder: any,
+  ): import('./hedge-manager.service').HedgePositionContext {
+    const orderMeta = mainOrder?.metadata || {};
+    const gridLevels = orderMeta.gridLevels ?? (signal as any).gridLevels ?? [];
+    const filledVolume = gridLevels
+      .filter((g: any) => g.status === 'FILLED')
+      .reduce((s: number, g: any) => s + (g.simNotional || 0), 0);
+
+    return {
+      id: (signal as any)._id?.toString(),
+      symbol: signal.symbol,
+      coin: (signal as any).coin || signal.symbol.replace('USDT', ''),
+      direction: signal.direction,
+      entryPrice: mainOrder?.entryPrice ?? (signal as any).gridAvgEntry ?? signal.entryPrice,
+      positionNotional: filledVolume > 0 ? filledVolume : ((signal as any).simNotional || 1000),
+      hedgeActive: !!hedgeOrder,
+      hedgeCycleCount: (signal as any).hedgeCycleCount || 0,
+      hedgeHistory: (signal as any).hedgeHistory || [],
+      hedgeEntryPrice: hedgeOrder?.entryPrice,
+      hedgeDirection: hedgeOrder?.direction,
+      hedgeNotional: hedgeOrder?.notional,
+      hedgeTpPrice: hedgeOrder?.takeProfitPrice,
+      hedgeSlAtEntry: (signal as any).hedgeSlAtEntry,
+      hedgeTrailActivated: (signal as any).hedgeTrailActivated,
+      hedgeSafetySlPrice: (signal as any).hedgeSafetySlPrice,
+      hedgeOpenedAt: hedgeOrder?.openedAt,
+      hedgePhase: (signal as any).hedgePhase,
+      hedgePeakPnlPct: (signal as any).hedgePeakPnlPct,
+      stopLossPrice: (signal as any).stopLossPrice,
+      fundingRate: (signal as any).fundingRate,
+    };
+  }
+
   /** DCA volume weights: L0=35% base, remaining 65% linearly increasing */
   private getDcaWeights(levelCount: number): number[] {
     if (levelCount <= 1) return [100];
@@ -871,7 +913,8 @@ export class PositionMonitorService implements OnModuleInit {
           await this.aiSignalModel.findByIdAndUpdate((signal as any)._id, { $unset: { hedgeForceOpen: 1 } }).exec();
           (signal as any).hedgeForceOpen = false;
           const regime = (signal as any).regime || "MIXED";
-          const action = await this.hedgeManager.checkHedge(signal, price, -999, regime); // -999 bypasses PnL threshold
+          const hedgeCtx = this.buildSimHedgeContext(signal, mainOrder, hedgeOrder);
+          const action = await this.hedgeManager.checkHedge(hedgeCtx, price, -999, regime);
           if (action && action.action !== "NONE") {
             await this.handleHedgeAction(signal, action, price);
             return; // Hedge just opened — skip SL/TP check this tick (mainOrder is stale)
@@ -880,17 +923,17 @@ export class PositionMonitorService implements OnModuleInit {
         // Check if PnL crosses hedge trigger
         else if (pnlPct <= -hedgeCfg.hedgePartialTriggerPct) {
           const regime = (signal as any).regime || "MIXED";
-          const action = await this.hedgeManager.checkHedge(signal, price, pnlPct, regime);
+          const hedgeCtx = this.buildSimHedgeContext(signal, mainOrder, hedgeOrder);
+          const action = await this.hedgeManager.checkHedge(hedgeCtx, price, pnlPct, regime);
           if (action && action.action !== "NONE") {
             await this.handleHedgeAction(signal, action, price);
-            return; // Hedge just opened — skip SL/TP check this tick (mainOrder is stale)
+            return;
           }
         }
       } else {
         // Hedge is active — check for exit
-        let closeReason: string | null = null;
-        let exitPrice: number | null = null;
-        const exitAction = this.hedgeManager.checkHedgeExit(signal, price, pnlPct, hedgeOrder);
+        const hedgeCtx = this.buildSimHedgeContext(signal, mainOrder, hedgeOrder);
+        const exitAction = this.hedgeManager.checkHedgeExit(hedgeCtx, price, pnlPct);
         if (exitAction && exitAction.action === "CLOSE_HEDGE") {
           await this.handleHedgeClose(signal, exitAction, price);
           return; // Hedge closed (TP/trail/recovery) — skip NET_POSITIVE, let next tick reassess
@@ -909,6 +952,14 @@ export class PositionMonitorService implements OnModuleInit {
             this.aiSignalModel.findByIdAndUpdate((signal as any)._id, updates).exec().catch(() => {});
           }
         }
+
+      // Independent real-side hedge check (uses real entry prices from UserTrade)
+      if (this.realHedgeCallback) {
+        const regime = (signal as any).regime || "MIXED";
+        this.realHedgeCallback(signal, price, regime).catch(err =>
+          this.logger.warn(`[PositionMonitor] realHedgeCallback error ${sigKey}: ${err?.message}`),
+        );
+      }
 
         // When hedge is active: NO SL — hedge IS the risk management
         // Only catastrophic stop at -25% (exchange issues, depeg, extreme events)
