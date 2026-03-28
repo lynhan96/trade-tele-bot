@@ -211,6 +211,7 @@ export class HedgeManagerService {
               const rsi1h = rsiVals1h[rsiVals1h.length - 1];
               const htfOk = signal.direction === 'LONG' ? rsi1h < 45 : rsi1h > 55;
               if (!htfOk) {
+                this.logger.log(`[${signal.coin}] Hedge blocked: RSI1h=${rsi1h.toFixed(1)} not confirmed (dir=${signal.direction})`);
                 return null;
               }
             }
