@@ -218,8 +218,8 @@ export const DEFAULT_TRADING_CONFIG: TradingConfig = {
   hedgeReEntryRsiLong: 55,
   hedgeReEntryRsiShort: 45,
 
-  // Sim Trading Fees
-  simTakerFeePct: 0.05,   // 0.05% per side (market orders)
+  // Sim Trading Fees (matched to Binance Futures standard rates)
+  simTakerFeePct: 0.04,   // 0.04% per side (market orders — Binance standard)
   simMakerFeePct: 0.02,   // 0.02% per side (limit orders)
   simFundingEnabled: true, // Apply funding fee from Binance API
 

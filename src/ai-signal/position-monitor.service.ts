@@ -142,6 +142,18 @@ export class PositionMonitorService implements OnModuleInit {
   // ─── Fee Helpers (Binance Futures sim) ────────────────────────────────────
 
   /** Calculate taker fee in USDT (market order — open/close) */
+  /** DCA volume weights: L0=40% base, remaining 60% linearly increasing (synced with real trading) */
+  private getDcaWeights(levelCount: number): number[] {
+    if (levelCount <= 1) return [100];
+    const baseWeight = 40;
+    const remaining = 100 - baseWeight;
+    const dcaCount = levelCount - 1;
+    const raw = Array.from({ length: dcaCount }, (_, i) => i + 1);
+    const total = raw.reduce((s, v) => s + v, 0);
+    const dcaWeights = raw.map((v) => Math.round((v / total) * remaining * 10) / 10);
+    return [baseWeight, ...dcaWeights];
+  }
+
   private calcTakerFee(notional: number): number {
     const cfg = this.tradingConfig.get();
     return +(notional * cfg.simTakerFeePct / 100).toFixed(4);
@@ -324,12 +336,8 @@ export class PositionMonitorService implements OnModuleInit {
     const orderMeta = (mainOrder as any)?.metadata || {};
 
     const GRID_LEVEL_COUNT = cfg.gridLevelCount || 4;
-    // DCA volume weights: L0=35% base, L1=20%, L2=25%, L3=20% (sum=100)
-    // L3 fills BEFORE hedge trigger — maximizes avg entry improvement
-    // Dynamic DCA weights: high volatility → smaller L0, bigger L3 (better avg on extensions)
-    const defaultWeights = [35, 20, 25, 20];
-    const highVolWeights = [25, 20, 25, 30]; // less initial exposure, more DCA firepower
-    const DCA_WEIGHTS = ((cfg as any).dcaWeightsProfile === 'HIGH_VOL') ? highVolWeights : ((cfg as any).dcaWeights || defaultWeights);
+    // DCA volume weights: L0=40% base, remaining 60% linearly increasing (matches real trading)
+    const DCA_WEIGHTS = this.getDcaWeights(GRID_LEVEL_COUNT);
 
     const gridLevels: any[] = orderMeta.gridLevels ?? (signal as any).gridLevels ?? [];
     const isGridSignal = gridLevels.length > 0;
@@ -747,11 +755,9 @@ export class PositionMonitorService implements OnModuleInit {
     // (grid signals handle trailing in the grid block above)
     // Skip trail SL when hedge is active — hedge manages risk
     if (!isGridSignal && !hedgeOrder) {
-      // Trail trigger: move SL to break-even at 2.5% profit (was 2%, caused early trail exits)
-      // Trail distance: keep 80% of peak profit (was 75%, avg win only $9)
-      // Example: peak 3% → SL at +2.4%, peak 5% → SL at +4%
-      const TRAIL_TRIGGER = cfg.trailTrigger || 2.5;
-      const TRAIL_KEEP_RATIO = cfg.trailKeepRatio || 0.80;
+      // Trail params: same as grid path + real trading for consistency
+      const TRAIL_TRIGGER = cfg.trailTrigger ?? 2.0;
+      const TRAIL_KEEP_RATIO = cfg.trailKeepRatio ?? 0.75;
 
       const prevPeak = orderMeta.peakPnlPct ?? (signal as any).peakPnlPct ?? 0;
       if (pnlPct > prevPeak) {

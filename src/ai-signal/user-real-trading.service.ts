@@ -1883,9 +1883,12 @@ export class UserRealTradingService implements OnModuleInit {
     stopLossPrice: number,
   ): Array<any> {
     const levelCount = sub.gridLevelCount ?? 5;
-    // Dynamic grid step: L(N-1) at 80% of SL range, 20% buffer before SL
+    // Grid spacing: use hedge trigger range so DCA fills BEFORE hedge opens (matches sim)
+    const cfg = this.tradingConfig.get();
+    const hedgeTrigger = cfg.hedgeEnabled ? (cfg.hedgePartialTriggerPct || 3) : 0;
     const slPct = Math.abs((stopLossPrice - fillPrice) / fillPrice) * 100;
-    const devStep = slPct / levelCount;
+    const effectiveRange = hedgeTrigger > 0 ? hedgeTrigger : (slPct < 1 ? 4 : slPct);
+    const devStep = effectiveRange / levelCount;
     const dcaWeights = this.getDcaWeights(levelCount);
     const grids: any[] = [];
 
