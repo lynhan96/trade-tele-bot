@@ -184,17 +184,21 @@ export class UserDataStreamService implements OnModuleInit, OnModuleDestroy {
     const fillPrice = parseFloat(order.ap || order.L || "0");
     if (!fillPrice) return;
 
+    // Determine which direction was closed: BUY reduce-only closes SHORT, SELL reduce-only closes LONG
+    const side: string = order.S; // BUY or SELL
+    const closedDirection = side === "BUY" ? "SHORT" : "LONG";
+
     const origOrderType: string = order.ot ?? order.o ?? "";
     const reason =
       origOrderType.includes("STOP") ? "STOP_LOSS" :
       origOrderType.includes("TAKE_PROFIT") ? "TAKE_PROFIT" : "MANUAL";
 
     this.logger.log(
-      `[UserDataStream] User ${telegramId} ${symbol} position closed @ ${fillPrice} — ${reason}`,
+      `[UserDataStream] User ${telegramId} ${symbol} ${closedDirection} position closed @ ${fillPrice} — ${reason}`,
     );
 
     this.userRealTradingService
-      .onTradeClose(telegramId, symbol, fillPrice, reason)
+      .onTradeClose(telegramId, symbol, fillPrice, reason, closedDirection)
       .catch((err) =>
         this.logger.error(`[UserDataStream] onTradeClose error: ${err?.message}`),
       );

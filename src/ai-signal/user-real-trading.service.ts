@@ -652,17 +652,20 @@ export class UserRealTradingService implements OnModuleInit {
     symbol: string,
     exitPrice: number,
     reason: string,
+    closedDirection?: string,
   ): Promise<void> {
     if (!Number.isFinite(exitPrice) || exitPrice <= 0) {
       this.logger.warn(`[RealTrading] onTradeClose: invalid exitPrice ${exitPrice} for ${symbol} user ${telegramId}`);
       return;
     }
-    // Also handle trades that were marked CLOSED by protectOpenTrades but without PnL
-    let trade = await this.userTradeModel.findOne({ telegramId, symbol, status: "OPEN" });
+    // Match by direction to prevent hedge close event from closing main trade (and vice versa)
+    const dirFilter = closedDirection ? { direction: closedDirection } : {};
+    let trade = await this.userTradeModel.findOne({ telegramId, symbol, status: "OPEN", ...dirFilter });
     if (!trade) {
       trade = await this.userTradeModel.findOne({
-        telegramId, symbol, status: "CLOSED", pnlUsdt: { $in: [null, undefined, 0] },
-        closedAt: { $gte: new Date(Date.now() - 5 * 60 * 1000) }, // within last 5 min
+        telegramId, symbol, status: "CLOSED", ...dirFilter,
+        pnlUsdt: { $in: [null, undefined, 0] },
+        closedAt: { $gte: new Date(Date.now() - 5 * 60 * 1000) },
       });
       if (!trade) return;
     }
