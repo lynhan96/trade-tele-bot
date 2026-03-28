@@ -1780,6 +1780,8 @@ export class PositionMonitorService implements OnModuleInit {
   /**
    * Handle hedge close action (sim mode — updates signal fields, pushes to history).
    */
+  private closingHedge = new Set<string>();
+
   private async handleHedgeClose(
     signal: AiSignalDocument,
     action: HedgeAction,
@@ -1788,6 +1790,23 @@ export class PositionMonitorService implements OnModuleInit {
     const sigKey = this.getSignalKey(signal);
     const signalId = (signal as any)._id?.toString();
     if (!signalId) return;
+
+    // Guard: prevent concurrent hedge close for same signal
+    if (this.closingHedge.has(sigKey)) return;
+    this.closingHedge.add(sigKey);
+    try { await this._handleHedgeCloseInner(signal, action, currentPrice, sigKey, signalId); }
+    finally { this.closingHedge.delete(sigKey); }
+  }
+
+  private async _handleHedgeCloseInner(
+    signal: AiSignalDocument,
+    action: HedgeAction,
+    currentPrice: number,
+    sigKey: string,
+    signalId: string,
+  ): Promise<void> {
+    // Double-check hedge is still active (may have been closed by concurrent tick)
+    if (!(signal as any).hedgeActive) return;
 
     const cycleCount = ((signal as any).hedgeCycleCount || 0) + 1;
 

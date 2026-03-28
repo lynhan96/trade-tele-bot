@@ -1329,7 +1329,7 @@ export class AiSignalService implements OnModuleInit {
         if (isProfit) {
           // --- Hedge close with profit ---
           const oldSl = signal.stopLossPrice;
-          const newSl = action.newSlPrice;
+          const newSl = action.newSlPrice || action.newSafetySlPrice || signal.stopLossPrice || 0;
           const totalBanked = action.bankedProfit ?? 0;
           const cooldown = cfg.hedgeReEntryCooldownMin || cfg.hedgeCooldownMin || 5;
 
