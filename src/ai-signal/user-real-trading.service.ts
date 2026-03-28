@@ -1645,19 +1645,26 @@ export class UserRealTradingService implements OnModuleInit {
                 } else {
                   this.logger.debug(`[RealTrading] ${symbol} user ${telegramId}: near TP (${distanceToTp.toFixed(2)}% away), SL ok (${slDistanceFromPrice.toFixed(2)}% from price) — trail frozen`);
                 }
-              } else if (currentPnlPct >= TRAIL_TRIGGER) {
+              } else if (currentPnlPct >= TRAIL_TRIGGER || (trade as any).peakPnlPct >= TRAIL_TRIGGER) {
                 // ── Backend-managed trail with momentum hold ──
                 // Instead of updating Binance SL: check if price has fallen below trail level
                 // and if momentum has faded → close via market order
-                const trailPct = currentPnlPct * TRAIL_KEEP_RATIO;
+
+                // Track peak on trade record (survives signal close)
+                const tradePeak = (trade as any).peakPnlPct || 0;
+                const peak = Math.max(tradePeak, currentPnlPct);
+                if (peak > tradePeak) {
+                  await this.userTradeModel.updateOne({ _id: trade._id }, { $set: { peakPnlPct: peak } }).catch(() => {});
+                }
+
+                const trailPct = peak * TRAIL_KEEP_RATIO;
                 const trailSl = direction === "LONG"
                   ? entry * (1 + trailPct / 100)
                   : entry * (1 - trailPct / 100);
 
-                // Read signal's peak and trail SL from DB (position-monitor tracks this)
+                // Use trade's own trail SL, fallback to signal if still active
                 const signal = await this.signalQueueService.findActiveSignalBySymbol(symbol);
-                const dbTrailSl = signal?.stopLossPrice || trailSl;
-                const peak = (signal as any)?.peakPnlPct || currentPnlPct;
+                const dbTrailSl = (trade as any).trailSlPrice || signal?.stopLossPrice || trailSl;
 
                 // Check if price crossed below the DB trail SL level
                 const trailBreached = direction === "LONG"
@@ -1718,12 +1725,15 @@ export class UserRealTradingService implements OnModuleInit {
                   }
                   continue;
                 } else {
-                  // Trail not breached — just log trail level, don't update Binance SL
+                  // Trail not breached — persist trail SL on trade for resilience
+                  if (trailSl !== (trade as any).trailSlPrice) {
+                    await this.userTradeModel.updateOne({ _id: trade._id }, { $set: { trailSlPrice: trailSl, peakPnlPct: peak } }).catch(() => {});
+                  }
                   const trailLockPct = direction === "LONG"
                     ? ((dbTrailSl - entry) / entry) * 100
                     : ((entry - dbTrailSl) / entry) * 100;
                   this.logger.debug(
-                    `[RealTrading] ${symbol} user ${telegramId}: trail OK, lock=+${trailLockPct.toFixed(1)}% PnL=+${currentPnlPct.toFixed(1)}% (backend-managed)`,
+                    `[RealTrading] ${symbol} user ${telegramId}: trail OK, lock=+${trailLockPct.toFixed(1)}% PnL=+${currentPnlPct.toFixed(1)}% peak=${peak.toFixed(1)}% (backend-managed)`,
                   );
                 }
               }
