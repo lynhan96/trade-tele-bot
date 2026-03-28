@@ -205,8 +205,8 @@ export class HedgeManagerService {
               return null;
             }
 
-            // 1h RSI confirmation — skip when PnL critically negative (> 3x trigger = urgent)
-            if (pnlPct > -triggerPct * 3) {
+            // 1h RSI confirmation — skip entirely when PnL > 1.5x trigger (urgent protection needed)
+            if (pnlPct > -triggerPct * 1.5) {
               const closes1h = await this.marketDataService.getClosePrices(coin, '1h');
               if (closes1h.length >= 14) {
                 const rsiVals1h = RSI.calculate({ period: 14, values: closes1h });
