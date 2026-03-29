@@ -180,36 +180,48 @@ export class HedgeManagerService {
       }
 
       // Cycle 2+: stricter conditions — prevent blind re-entry
+      // EXCEPTION: if price recovered (was positive) and dropped again, treat as fresh drop
       // Skip when isFirstCycle (after FLIP: hedgeCycleCount=0 → enter immediately for protection)
       // Skip FLIP_TP entries — they record main TP close, not real hedge exits
       const realHedges = (ctx.hedgeHistory || []).filter((h: any) => h.reason !== 'FLIP_TP');
       if (!isFirstCycle && realHedges.length > 0) {
         const lastHedge = realHedges[realHedges.length - 1];
 
-        // 1. Price should be near or worse than last hedge exit
-        // Allow small bounce (< 1%) if PnL still deeply negative (> 2x trigger)
+        // Check if this is a "fresh drop" — last hedge was profitable (price recovered)
+        // and enough time has passed (cooldown cleared = price moved meaningfully)
+        // Fresh drop = hedge worked last time, price recovered, now dropping again → normal trigger
         const lastExitPrice = lastHedge?.exitPrice || 0;
-        if (lastExitPrice > 0) {
-          const priceWorse = ctx.direction === 'LONG'
-            ? currentPrice < lastExitPrice
-            : currentPrice > lastExitPrice;
+        const lastHedgeWasProfit = (lastHedge?.pnlUsdt || 0) > 0;
+        const timeSinceLastClose = lastHedge?.closedAt
+          ? (Date.now() - new Date(lastHedge.closedAt).getTime()) / 60000 : 999;
+        const freshDrop = lastHedgeWasProfit && timeSinceLastClose > 30; // recovered for 30min+
+
+        if (!freshDrop) {
+          // 1. Price should be near or worse than last hedge exit
+          const priceWorse = lastExitPrice > 0 && (
+            ctx.direction === 'LONG'
+              ? currentPrice < lastExitPrice
+              : currentPrice > lastExitPrice
+          );
           if (!priceWorse && pnlPct > -triggerPct * 2) {
             return null;
           }
-        }
 
-        // 2. PnL must be worse than trigger * 1.2
-        if (pnlPct > -cfg.hedgePartialTriggerPct * 1.2) {
-          this.logger.log(`[${ctx.coin}] Hedge blocked: PnL ${pnlPct.toFixed(2)}% > -${(cfg.hedgePartialTriggerPct * 1.2).toFixed(2)}%`);
-          return null;
-        }
-
-        // 3. Last hedge was breakeven close → price bounced → need deeper trigger
-        if (lastHedge?.reason?.includes('breakeven')) {
-          if (pnlPct > -cfg.hedgePartialTriggerPct * 1.5) {
-            this.logger.debug(`[${ctx.coin}] Hedge re-entry after breakeven: need PnL < -${(cfg.hedgePartialTriggerPct * 1.5).toFixed(1)}%`);
+          // 2. PnL must be worse than trigger * 1.2
+          if (pnlPct > -cfg.hedgePartialTriggerPct * 1.2) {
+            this.logger.log(`[${ctx.coin}] Hedge blocked: PnL ${pnlPct.toFixed(2)}% > -${(cfg.hedgePartialTriggerPct * 1.2).toFixed(2)}%`);
             return null;
           }
+
+          // 3. Last hedge was breakeven close → price bounced → need deeper trigger
+          if (lastHedge?.reason?.includes('breakeven')) {
+            if (pnlPct > -cfg.hedgePartialTriggerPct * 1.5) {
+              this.logger.debug(`[${ctx.coin}] Hedge re-entry after breakeven: need PnL < -${(cfg.hedgePartialTriggerPct * 1.5).toFixed(1)}%`);
+              return null;
+            }
+          }
+        } else {
+          this.logger.log(`[${ctx.coin}] Fresh drop after recovery — using normal trigger (not stricter 1.2x)`);
         }
 
         // 4. RSI momentum confirmation — 15m + 1h HTF
