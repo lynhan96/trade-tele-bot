@@ -1358,12 +1358,13 @@ export class AiSignalService implements OnModuleInit {
           text += `\n\n_Chờ ${cooldown}p rồi vào lại... • ${modeLabel}_`;
           await this.notifyAdminOnly(text);
         } else {
-          // --- Hedge close with loss (recovery close — main recovered) ---
+          // --- Hedge close with loss ---
+          const closeReason = action.reason || 'unknown';
           let text =
             `🔄 *Hedge #${cycle} Đóng*\n` +
             `━━━━━━━━━━━━━━━━━━\n\n` +
             `${sym} — PnL: *${pnlPct.toFixed(2)}% (${pnlUsdt.toFixed(2)} USDT)*\n` +
-            `📊 Main recovered — hedge no longer needed`;
+            `📊 ${closeReason}`;
 
           text += `\n\n_Chờ vào lại nếu cần... • ${modeLabel}_`;
           await this.notifyAdminOnly(text);
