@@ -274,7 +274,7 @@ export class HedgeManagerService {
 
       // Fixed 75% notional — consistent hedge size across all cycles
       const cycle = (ctx.hedgeCycleCount || 0) + 1;
-      const maxCycles = cfg.hedgeMaxCycles ?? 7;
+      const maxCycles = cfg.hedgeMaxCycles ?? 999;
       if (cycle > maxCycles) {
         this.logger.log(`[${ctx.coin}] Hedge max cycles (${maxCycles}) reached — no more hedging`);
         return null;
@@ -511,6 +511,10 @@ export class HedgeManagerService {
     this.consecutiveLossMap.set(ctxId, 0);
     this.redisService.set(`cache:hedge:losses:${ctxId}`, 0, 86400).catch(() => {});
 
+    // Release hedge lock so next cycle can acquire it
+    const lockKey = `${HEDGE_LOCK_PREFIX}${ctxId}`;
+    this.redisService.delete(lockKey).catch(() => {});
+
     // Set in-memory cooldown + reset peak tracking
     const isBreakeven = reason.toLowerCase().includes('breakeven') || reason.toLowerCase().includes('protected');
     const cooldownMin = isBreakeven ? 15 : (cfg.hedgeReEntryCooldownMin || 5);
@@ -565,6 +569,10 @@ export class HedgeManagerService {
     hedgePnlPct: number, hedgePnlUsdt: number,
     cfg: any, reason: string,
   ): HedgeAction {
+    // Release hedge lock so next cycle can acquire it
+    const lockKey = `${HEDGE_LOCK_PREFIX}${ctxId}`;
+    this.redisService.delete(lockKey).catch(() => {});
+
     this.hedgeCooldownUntil.set(ctxId, Date.now() + 15 * 60 * 1000);
     this.hedgePeakMap.delete(ctxId);
 
