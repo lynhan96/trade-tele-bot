@@ -399,36 +399,41 @@ export class HedgeManagerService {
         }
       }
 
-      // ── Hedge breakeven SL: when hedge profitable > 1.5%, move SL to +0.5% ──
-      // Buffer: don't close at exact entry, keep 0.5% profit minimum
-      if (hedgePnlPct >= 1.5 && !ctx.hedgeSlAtEntry) {
-        this.logger.log(
-          `[${ctx.coin}] Hedge SL → +0.5% (protected) | PnL: +${hedgePnlPct.toFixed(2)}%`,
-        );
-        return {
-          action: 'NONE' as const,
-          reason: `Hedge SL moved to +0.5% at +${hedgePnlPct.toFixed(2)}%`,
-          hedgeSlAtEntry: true,
-        };
-      }
+      // ── Hedge breakeven SL — ONLY when trail NOT active ──
+      // Trail system (early trail keep 70% of peak) is better than breakeven +0.5%
+      // Only use breakeven as safety net when hedge never reached trail level (peak < 2%)
+      const peakForBE = this.hedgePeakMap.get(ctxId) || ctx.hedgePeakPnlPct || 0;
+      const trailActive = peakForBE >= 2.0; // early trail activates at +2%
 
-      // ── Hedge protected SL hit: price came back to +0.5% → close only if still profitable ──
-      if (ctx.hedgeSlAtEntry && hedgePnlPct <= 0.5 && hedgePnlUsdt >= 0) {
-        this.logger.log(
-          `[${ctx.coin}] Hedge protected SL hit | PnL: +${hedgePnlPct.toFixed(2)}% → close with min profit`,
-        );
-        return this.closeHedgeWithProfit(ctx, ctxId, hedgePnlPct, hedgePnlUsdt, cfg,
-          `Hedge protected SL: +${hedgePnlPct.toFixed(2)}%`);
+      if (!trailActive) {
+        // No trail yet — use breakeven as safety net
+        if (hedgePnlPct >= 1.5 && !ctx.hedgeSlAtEntry) {
+          this.logger.log(
+            `[${ctx.coin}] Hedge SL → +0.5% (no trail yet, peak ${peakForBE.toFixed(1)}%) | PnL: +${hedgePnlPct.toFixed(2)}%`,
+          );
+          return {
+            action: 'NONE' as const,
+            reason: `Hedge SL moved to +0.5% at +${hedgePnlPct.toFixed(2)}%`,
+            hedgeSlAtEntry: true,
+          };
+        }
+
+        if (ctx.hedgeSlAtEntry && hedgePnlPct <= 0.5 && hedgePnlUsdt >= 0) {
+          this.logger.log(
+            `[${ctx.coin}] Hedge protected SL hit | PnL: +${hedgePnlPct.toFixed(2)}% → close with min profit`,
+          );
+          return this.closeHedgeWithProfit(ctx, ctxId, hedgePnlPct, hedgePnlUsdt, cfg,
+            `Hedge protected SL: +${hedgePnlPct.toFixed(2)}%`);
+        }
       }
-      // If protected SL hit but hedge is losing → reset protection, let it ride
+      // When trail active (peak >= 2%): skip breakeven — trail handles exit better
+
+      // Reset protection if hedge went negative (regardless of trail)
       if (ctx.hedgeSlAtEntry && hedgePnlPct < 0) {
-        this.logger.log(
-          `[${ctx.coin}] Hedge protected SL skip — PnL ${hedgePnlPct.toFixed(2)}% losing → hold for TP/FLIP`,
-        );
         return {
           action: 'NONE' as const,
           reason: `Hedge SL reset — PnL ${hedgePnlPct.toFixed(2)}% losing, hold`,
-          hedgeSlAtEntry: false, // reset so it can re-activate later
+          hedgeSlAtEntry: false,
         };
       }
 
