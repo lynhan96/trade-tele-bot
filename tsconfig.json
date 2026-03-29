@@ -20,19 +20,8 @@
     "esModuleInterop": true
   },
   "exclude": [
-    "run-simulator.ts",
-    "run-complete-simulator.ts",
-    "run-skills-simulator.ts",
-    "run-all-simulators.ts",
-    "analyze-signals.ts",
-    "fix-user-pnl.ts",
-    "backfill-sim-volume.ts",
-    "migrate-grid-dca.ts",
-    "reset-grid-signals.ts",
-    "fix-pnl-usdt.ts",
-    "run-hedge-simulator.ts",
-    "run-order-refactor-simulator.ts",
-    "migrate-orders.ts",
+    "simulators",
+    "scripts",
     "dist",
     "node_modules"
   ]

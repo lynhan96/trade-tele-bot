@@ -960,6 +960,11 @@ export class PositionMonitorService implements OnModuleInit {
             (signal as any).hedgeTrailActivated = true;
             updates.hedgeTrailActivated = true;
           }
+          // Persist hedge peak PnL so it survives restarts
+          if ((exitAction as any).hedgePeakPnlPct && (exitAction as any).hedgePeakPnlPct > ((signal as any).hedgePeakPnlPct || 0)) {
+            (signal as any).hedgePeakPnlPct = (exitAction as any).hedgePeakPnlPct;
+            updates.hedgePeakPnlPct = (exitAction as any).hedgePeakPnlPct;
+          }
           if (Object.keys(updates).length > 0) {
             this.aiSignalModel.findByIdAndUpdate((signal as any)._id, updates).exec().catch(() => {});
           }
@@ -1007,7 +1012,8 @@ export class PositionMonitorService implements OnModuleInit {
 
         // NET_POSITIVE: total net PnL (main unrealized + banked hedge + current hedge) > 3% of filledVol
         // Close everything when the TOTAL position is profitable enough
-        const netPositiveThreshold = filledVol * 0.03; // 3% of position
+        // Min $20 floor: prevents closing too early on small positions (L0-only = $400 → old threshold $12)
+        const netPositiveThreshold = Math.max(filledVol * 0.03, 20); // 3% of position, min $20
         if (netPnlUsdt > netPositiveThreshold) {
           this.logger.log(
             `[PositionMonitor] ${sigKey} NET POSITIVE EXIT | main=$${mainUnrealizedUsdt.toFixed(2)} banked=$${bankedProfit.toFixed(2)} hedge=$${currentHedgePnlUsdt.toFixed(2)} → total=$${netPnlUsdt.toFixed(2)} > threshold=$${netPositiveThreshold.toFixed(2)}`,
@@ -1941,11 +1947,16 @@ export class PositionMonitorService implements OnModuleInit {
       : +(avgEntryForSl * (1 + progressiveSlPct / 100)).toFixed(6);
     let finalSlPercent = progressiveSlPct;
 
-    // If hedge manager provided tighter safety SL → use it instead
+    // If hedge manager provided tighter safety SL (from hedge profit improvement) → use if tighter
     if (action.newSafetySlPrice && action.newSafetySlPrice > 0) {
-      finalSlPrice = action.newSafetySlPrice;
-      finalSlPercent = Math.abs((finalSlPrice - avgEntryForSl) / avgEntryForSl * 100);
-      updates.hedgeSafetySlPrice = finalSlPrice;
+      const isTighter = signal.direction === 'LONG'
+        ? action.newSafetySlPrice > finalSlPrice  // LONG: higher SL = tighter
+        : action.newSafetySlPrice < finalSlPrice; // SHORT: lower SL = tighter
+      if (isTighter) {
+        finalSlPrice = action.newSafetySlPrice;
+        finalSlPercent = Math.abs((finalSlPrice - avgEntryForSl) / avgEntryForSl * 100);
+        updates.hedgeSafetySlPrice = finalSlPrice;
+      }
     }
     this.logger.log(`[PositionMonitor] ${sigKey} SL restored to ${finalSlPrice} (${finalSlPercent.toFixed(1)}%) after hedge close`);
 

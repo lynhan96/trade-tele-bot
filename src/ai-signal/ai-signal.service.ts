@@ -507,7 +507,7 @@ export class AiSignalService implements OnModuleInit {
       ? Math.max(rangingFloor, marketGuard.confidenceFloor)
       : Math.max(CONFIDENCE_FLOOR, marketGuard.confidenceFloor);
     params.minConfidenceToTrade = Math.max(params.minConfidenceToTrade ?? 0, effectiveFloor);
-    const MAX_CONFIDENCE_CAP = (cfg as any).maxConfidenceCap || 68;
+    const MAX_CONFIDENCE_CAP = (cfg as any).maxConfidenceCap || 75;
     if (params.minConfidenceToTrade > MAX_CONFIDENCE_CAP) {
       params.minConfidenceToTrade = MAX_CONFIDENCE_CAP;
     }

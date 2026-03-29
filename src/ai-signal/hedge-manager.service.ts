@@ -21,6 +21,7 @@ export interface HedgeAction {
   hedgePhase?: string;
   hedgeSlAtEntry?: boolean;
   hedgeTrailActivated?: boolean;
+  hedgePeakPnlPct?: number;
   reason: string;
 }
 
@@ -370,12 +371,11 @@ export class HedgeManagerService {
       // Do NOT duplicate here — PositionMonitor has full context to resolve the main signal.
 
       // ── 1. Recovery Close: 2 conditions ──
-      // A) Soft: main > 0.5% AND hedge >= 1.0% (both sides profitable — safe to close)
+      // A) Soft: main > 1.0% AND hedge >= 1.5% (both sides clearly profitable)
+      //    Previous: 0.5%+1.0% closed too early (~$6/cycle). Trail avg $11/cycle is better.
       // B) Banked total: accumulated hedge profits > $20 (already made money from this symbol)
-      // NOTE: hedgeRun ≥3% REMOVED — data shows HEDGE_TP+trail (avg $11/cycle, 4.3h hold)
-      //   outperforms instant close at 3% (avg $1.28). Let trail system ride the trend.
       const banked = (ctx.hedgeHistory || []).reduce((sum: number, h: any) => sum + (h.pnlUsdt || 0), 0);
-      const softClose = mainPnlPct !== undefined && mainPnlPct > 0.5 && hedgePnlPct >= 1.0;
+      const softClose = mainPnlPct !== undefined && mainPnlPct > 1.0 && hedgePnlPct >= 1.5;
       const bankedTotal = banked + hedgePnlUsdt > 20;
       if (softClose || bankedTotal) {
         const reason = softClose ? `Recovery soft: main +${mainPnlPct?.toFixed(2)}%`
@@ -387,7 +387,7 @@ export class HedgeManagerService {
         return this.closeHedgeWithProfit(ctx, ctxId, hedgePnlPct, hedgePnlUsdt, cfg, reason);
       }
       if (mainPnlPct !== undefined && mainPnlPct > 0) {
-        this.logger.debug(`[${ctx.coin}] Recovery skip: main +${mainPnlPct.toFixed(2)}% hedge +${hedgePnlPct.toFixed(2)}% — need soft(0.5%+1%) or banked>$20`);
+        this.logger.debug(`[${ctx.coin}] Recovery skip: main +${mainPnlPct.toFixed(2)}% hedge +${hedgePnlPct.toFixed(2)}% — need soft(1%+1.5%) or banked>$20`);
       }
       // Hedge losing or not covered enough → HOLD. Exits: HEDGE_TP+trail, NET_POSITIVE, FLIP
 
@@ -417,6 +417,7 @@ export class HedgeManagerService {
             reason: `Hedge trail activated at +${hedgePnlPct.toFixed(2)}%`,
             hedgeSlAtEntry: true,
             hedgeTrailActivated: true,
+            hedgePeakPnlPct: this.hedgePeakMap.get(ctxId) || hedgePnlPct,
           };
         }
 
@@ -482,6 +483,16 @@ export class HedgeManagerService {
         };
       }
 
+      // Return updated peak if changed (so caller can persist to DB)
+      const finalPeak = this.hedgePeakMap.get(ctxId) || 0;
+      if (finalPeak > (ctx.hedgePeakPnlPct || 0)) {
+        return {
+          action: 'NONE' as const,
+          reason: `Peak updated: ${finalPeak.toFixed(2)}%`,
+          hedgePeakPnlPct: finalPeak,
+        };
+      }
+
       return null;
     } catch (err) {
       this.logger.error(`[${ctx?.coin || '?'}] checkHedgeExit error: ${err.message}`, err.stack);
@@ -501,6 +512,7 @@ export class HedgeManagerService {
 
     // Reset consecutive losses on win
     this.consecutiveLossMap.set(ctxId, 0);
+    this.redisService.set(`cache:hedge:losses:${ctxId}`, 0, 86400).catch(() => {});
 
     // Set in-memory cooldown + reset peak tracking
     const isBreakeven = reason.toLowerCase().includes('breakeven') || reason.toLowerCase().includes('protected');
@@ -519,20 +531,28 @@ export class HedgeManagerService {
     const originalNotional = ctx.positionNotional;
     const avgEntry = ctx.entryPrice;
     const currentSl = ctx.hedgeSafetySlPrice || ctx.stopLossPrice || 0;
+    // Calculate SL improvement from hedge profit
+    // During hedge, currentSl=0 so we can't use it as base.
+    // Return improvement as newSafetySlPrice — position-monitor will use it
+    // only if tighter than its own progressive SL calculation.
+    const progressiveSlBase = ctx.direction === 'LONG'
+      ? avgEntry * (1 - 40 / 100) // 40% SL as base (worst case progressive)
+      : avgEntry * (1 + 40 / 100);
     const newSlPrice = this.calculateSlImprovement(
-      hedgePnlUsdt, originalNotional, avgEntry, currentSl, ctx.direction,
+      hedgePnlUsdt, originalNotional, avgEntry, progressiveSlBase, ctx.direction,
     );
 
     this.logger.log(
       `[${ctx.coin}] Hedge CLOSED PROFIT | ${reason} | PnL: ${hedgePnlPct.toFixed(2)}% ($${hedgePnlUsdt.toFixed(2)}) | ` +
-      `Banked total: $${newBanked.toFixed(2)} | SL stays 0 (hedge manages)`,
+      `Banked total: $${newBanked.toFixed(2)} | SL improvement: ${newSlPrice ? newSlPrice.toFixed(2) : 'none'}`,
     );
 
     return {
       action: 'CLOSE_HEDGE',
       hedgePnlPct,
       hedgePnlUsdt,
-      newSlPrice: 0, // SL stays disabled
+      newSlPrice: 0, // Progressive SL handled by position-monitor
+      newSafetySlPrice: newSlPrice, // SL improvement override (used if tighter than progressive)
       bankedProfit: newBanked,
       consecutiveLosses: 0,
       hedgePhase: ctx.hedgePhase,
@@ -551,10 +571,11 @@ export class HedgeManagerService {
     this.hedgeCooldownUntil.set(ctxId, Date.now() + 15 * 60 * 1000);
     this.hedgePeakMap.delete(ctxId);
 
-    // Increment consecutive losses
+    // Increment consecutive losses (persisted to Redis for restart survival)
     const prevLosses = this.consecutiveLossMap.get(ctxId) || 0;
     const newLosses = prevLosses + 1;
     this.consecutiveLossMap.set(ctxId, newLosses);
+    this.redisService.set(`cache:hedge:losses:${ctxId}`, newLosses, 86400).catch(() => {});
 
     const banked = (ctx.hedgeHistory || []).reduce((sum: number, h: any) => sum + (h.pnlUsdt || 0), 0);
 
@@ -642,9 +663,19 @@ export class HedgeManagerService {
     return this.bankedProfitMap.get(signalId) || 0;
   }
 
-  /** Get consecutive losses for a signal */
-  getConsecutiveLosses(signalId: string): number {
-    return this.consecutiveLossMap.get(signalId) || 0;
+  /** Get consecutive losses for a signal (in-memory + Redis fallback) */
+  async getConsecutiveLosses(signalId: string): Promise<number> {
+    const mem = this.consecutiveLossMap.get(signalId);
+    if (mem !== undefined) return mem;
+    // Fallback to Redis (survives restarts)
+    try {
+      const val = await this.redisService.get<number>(`cache:hedge:losses:${signalId}`);
+      if (val !== null && val !== undefined) {
+        this.consecutiveLossMap.set(signalId, val);
+        return val;
+      }
+    } catch {}
+    return 0;
   }
 
   async cleanupSignal(signalId: string): Promise<void> {
@@ -653,6 +684,9 @@ export class HedgeManagerService {
     this.hedgeCooldownUntil.delete(signalId);
     this.hedgePeakMap.delete(signalId);
     const lockKey = `${HEDGE_LOCK_PREFIX}${signalId}`;
-    try { await this.redisService.delete(lockKey); } catch {}
+    try {
+      await this.redisService.delete(lockKey);
+      await this.redisService.delete(`cache:hedge:losses:${signalId}`);
+    } catch {}
   }
 }

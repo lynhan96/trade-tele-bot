@@ -1718,9 +1718,7 @@ export class UserRealTradingService implements OnModuleInit {
                 await this.userTradeModel.updateOne({ _id: trade._id }, { $set: { binanceTpAlgoId: newId } });
                 // Set cooldown to prevent spam (10 minutes)
                 await this.redisService.set(tpCooldownKey, "1", 600);
-                await this.telegramService.sendTelegramMessage(chatId,
-                  `🛡️ *Bao Ve Vi The: TP Duoc Dat Lai*\n\n${symbol} ${direction}\nTP: *${fmtP(roundedTp)}*\n_TP bi mat — da tu dong dat lai._`
-                ).catch(() => {});
+                // Silent — no Telegram notification for TP re-placement
               } catch (err) {
                 const tpErr = err?.message ?? "";
                 // Position gone — don't keep retrying
