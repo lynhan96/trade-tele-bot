@@ -196,10 +196,11 @@ export class UserRealTradingService implements OnModuleInit {
 
       // Atomic position slot reservation via Redis Lua script (prevents race condition)
       // Cap maxOpenPositions to maxActiveSignals (sim controls signal count, real follows)
+      // Count MAIN trades only — hedge trades don't consume position slots
       const cfgMaxSignals = this.tradingConfig.get().maxActiveSignals || 10;
       const maxPos = Math.min(sub.maxOpenPositions ?? 10, cfgMaxSignals);
       const slotKey = POS_SLOT_KEY(sub.telegramId);
-      const dbCount = await this.userTradeModel.countDocuments({ telegramId: sub.telegramId, status: "OPEN" });
+      const dbCount = await this.userTradeModel.countDocuments({ telegramId: sub.telegramId, status: "OPEN", isHedge: { $ne: true } });
       const reserved = await this.redisService.initAndIncr(slotKey, dbCount, 300);
       if (reserved > maxPos) {
         await this.redisService.decr(slotKey);
