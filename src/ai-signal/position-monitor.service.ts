@@ -1878,23 +1878,32 @@ export class PositionMonitorService implements OnModuleInit {
     const hedgeOrderForClose = await this.orderModel.findOne({
       signalId: (signal as any)._id, type: 'HEDGE', status: 'OPEN',
     }).lean().catch(() => null);
+    if (!hedgeOrderForClose) {
+      this.logger.warn(`[PositionMonitor] ${sigKey} handleHedgeClose: NO HEDGE order found — using signal fallback (pre-migration signal)`);
+    }
 
-    // Use order fields as source of truth, fallback to signal fields for backward compat
-    // CRITICAL: if no order AND signal.hedgeEntryPrice is suspiciously close to gridAvgEntry,
-    // use currentPrice as entry (PnL=0) to avoid phantom profit from stale entry data
+    // Use HEDGE order as source of truth for close data
+    // If no order exists (pre-migration signal), validate signal.hedgeEntryPrice
     const hedgeNotionalForFees = (hedgeOrderForClose as any)?.notional ?? (signal as any).hedgeSimNotional ?? 0;
     const hedgeOpenedAtForFees = (hedgeOrderForClose as any)?.openedAt ?? (signal as any).hedgeOpenedAt;
     const hedgeDirForHistory = (hedgeOrderForClose as any)?.direction ?? (signal as any).hedgeDirection;
-    let hedgeEntryForHistory = (hedgeOrderForClose as any)?.entryPrice ?? (signal as any).hedgeEntryPrice;
-    // Guard: if no order and entry looks like gridAvgEntry (stale data), use currentPrice
-    if (!hedgeOrderForClose && hedgeEntryForHistory) {
+    let hedgeEntryForHistory: number;
+    if (hedgeOrderForClose?.entryPrice) {
+      // Order exists — use it (trusted source)
+      hedgeEntryForHistory = hedgeOrderForClose.entryPrice;
+    } else {
+      // No order — validate signal.hedgeEntryPrice
+      const signalEntry = (signal as any).hedgeEntryPrice;
       const avgEntry = (signal as any).gridAvgEntry || signal.entryPrice;
-      if (Math.abs(hedgeEntryForHistory - avgEntry) / avgEntry < 0.005) {
-        this.logger.warn(`[PositionMonitor] ${sigKey} Hedge entry ${hedgeEntryForHistory} matches gridAvgEntry ${avgEntry} — stale data, using currentPrice`);
+      if (signalEntry && avgEntry && Math.abs(signalEntry - avgEntry) / avgEntry >= 0.005) {
+        // Entry differs from gridAvgEntry → likely real
+        hedgeEntryForHistory = signalEntry;
+      } else {
+        // Entry missing or matches gridAvgEntry → stale/corrupted → use currentPrice (PnL≈0)
+        this.logger.warn(`[PositionMonitor] ${sigKey} No HEDGE order + stale entry (${signalEntry}) ≈ gridAvgEntry (${avgEntry}) — using currentPrice ${currentPrice}`);
         hedgeEntryForHistory = currentPrice;
       }
     }
-    if (!hedgeEntryForHistory) hedgeEntryForHistory = currentPrice; // absolute fallback
     const hedgePhaseForHistory = (hedgeOrderForClose as any)?.metadata?.phase ?? (signal as any).hedgePhase;
     const entryReason = (hedgeOrderForClose as any)?.metadata?.reason || '';
 
