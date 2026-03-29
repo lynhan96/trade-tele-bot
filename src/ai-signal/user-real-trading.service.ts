@@ -1391,7 +1391,8 @@ export class UserRealTradingService implements OnModuleInit {
             }
 
             // Use direction-specific key to distinguish main vs hedge TP/SL in hedge mode
-            const algo = algoMap.get(`${symbol}:${direction}`) || algoMap.get(symbol);
+            // Do NOT fallback to symbol-only key — that would mix main+hedge TP/SL status
+            const algo = algoMap.get(`${symbol}:${direction}`);
             const fmtP = (p: number) =>
               p >= 1000 ? `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :
               p >= 1 ? `$${p.toFixed(2)}` : `$${p.toFixed(4)}`;
