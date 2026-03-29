@@ -1880,10 +1880,21 @@ export class PositionMonitorService implements OnModuleInit {
     }).lean().catch(() => null);
 
     // Use order fields as source of truth, fallback to signal fields for backward compat
+    // CRITICAL: if no order AND signal.hedgeEntryPrice is suspiciously close to gridAvgEntry,
+    // use currentPrice as entry (PnL=0) to avoid phantom profit from stale entry data
     const hedgeNotionalForFees = (hedgeOrderForClose as any)?.notional ?? (signal as any).hedgeSimNotional ?? 0;
     const hedgeOpenedAtForFees = (hedgeOrderForClose as any)?.openedAt ?? (signal as any).hedgeOpenedAt;
     const hedgeDirForHistory = (hedgeOrderForClose as any)?.direction ?? (signal as any).hedgeDirection;
-    const hedgeEntryForHistory = (hedgeOrderForClose as any)?.entryPrice ?? (signal as any).hedgeEntryPrice;
+    let hedgeEntryForHistory = (hedgeOrderForClose as any)?.entryPrice ?? (signal as any).hedgeEntryPrice;
+    // Guard: if no order and entry looks like gridAvgEntry (stale data), use currentPrice
+    if (!hedgeOrderForClose && hedgeEntryForHistory) {
+      const avgEntry = (signal as any).gridAvgEntry || signal.entryPrice;
+      if (Math.abs(hedgeEntryForHistory - avgEntry) / avgEntry < 0.005) {
+        this.logger.warn(`[PositionMonitor] ${sigKey} Hedge entry ${hedgeEntryForHistory} matches gridAvgEntry ${avgEntry} — stale data, using currentPrice`);
+        hedgeEntryForHistory = currentPrice;
+      }
+    }
+    if (!hedgeEntryForHistory) hedgeEntryForHistory = currentPrice; // absolute fallback
     const hedgePhaseForHistory = (hedgeOrderForClose as any)?.metadata?.phase ?? (signal as any).hedgePhase;
     const entryReason = (hedgeOrderForClose as any)?.metadata?.reason || '';
 
