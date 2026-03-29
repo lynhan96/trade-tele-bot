@@ -369,17 +369,16 @@ export class HedgeManagerService {
       // NOTE: Net Positive Exit is handled in PositionMonitor.handlePriceTick (closes both hedge + main)
       // Do NOT duplicate here — PositionMonitor has full context to resolve the main signal.
 
-      // ── 1. Recovery Close: 3 conditions (any one triggers close) ──
-      // A) Soft: main > 0.5% AND hedge >= 1.0% (both sides slightly profitable)
-      // B) Hedge run: hedge >= 3.0% alone (great hedge run, bank it regardless)
-      // C) Banked total: accumulated hedge profits > $20 (already made money from this symbol)
+      // ── 1. Recovery Close: 2 conditions ──
+      // A) Soft: main > 0.5% AND hedge >= 1.0% (both sides profitable — safe to close)
+      // B) Banked total: accumulated hedge profits > $20 (already made money from this symbol)
+      // NOTE: hedgeRun ≥3% REMOVED — data shows HEDGE_TP+trail (avg $11/cycle, 4.3h hold)
+      //   outperforms instant close at 3% (avg $1.28). Let trail system ride the trend.
       const banked = (ctx.hedgeHistory || []).reduce((sum: number, h: any) => sum + (h.pnlUsdt || 0), 0);
       const softClose = mainPnlPct !== undefined && mainPnlPct > 0.5 && hedgePnlPct >= 1.0;
-      const hedgeRun = hedgePnlPct >= 3.0;
       const bankedTotal = banked + hedgePnlUsdt > 20;
-      if (softClose || hedgeRun || bankedTotal) {
+      if (softClose || bankedTotal) {
         const reason = softClose ? `Recovery soft: main +${mainPnlPct?.toFixed(2)}%`
-          : hedgeRun ? `Hedge run: +${hedgePnlPct.toFixed(2)}%`
           : `Banked total: $${(banked + hedgePnlUsdt).toFixed(2)}`;
         this.logger.log(
           `[${ctx.coin}] Hedge RECOVERY CLOSE | ${reason} | ` +
@@ -388,9 +387,9 @@ export class HedgeManagerService {
         return this.closeHedgeWithProfit(ctx, ctxId, hedgePnlPct, hedgePnlUsdt, cfg, reason);
       }
       if (mainPnlPct !== undefined && mainPnlPct > 0) {
-        this.logger.debug(`[${ctx.coin}] Recovery skip: main +${mainPnlPct.toFixed(2)}% hedge +${hedgePnlPct.toFixed(2)}% — need soft(0.5%+1%) or hedge≥3% or banked>$20`);
+        this.logger.debug(`[${ctx.coin}] Recovery skip: main +${mainPnlPct.toFixed(2)}% hedge +${hedgePnlPct.toFixed(2)}% — need soft(0.5%+1%) or banked>$20`);
       }
-      // Hedge losing → hold. Exits: trailing TP, NET_POSITIVE, FLIP (in PositionMonitor)
+      // Hedge losing or not covered enough → HOLD. Exits: HEDGE_TP+trail, NET_POSITIVE, FLIP
 
       // ── 2. Trailing TP — ride the trend ──
       // When hedge reaches TP level, don't close immediately — activate trail
