@@ -398,9 +398,16 @@ export class BinanceService {
     const client = this.createClient(apiKey, apiSecret);
     let anySuccess = false;
 
-    const getEntry = (sym: string) => {
-      if (!result.has(sym)) result.set(sym, { hasSl: false, hasTp: false, slCount: 0, tpCount: 0, allSlIds: [], allTpIds: [] });
-      return result.get(sym)!;
+    // Key by symbol:side to distinguish LONG vs SHORT TP/SL in hedge mode
+    // Side derived from order: BUY STOP_MARKET = SL for LONG, SELL STOP_MARKET = SL for SHORT
+    const getEntry = (sym: string, side?: string) => {
+      // When side is known, use symbol:side key for precision
+      // Fallback: also set symbol-only key for backward compat
+      const key = side ? `${sym}:${side}` : sym;
+      if (!result.has(key)) result.set(key, { hasSl: false, hasTp: false, slCount: 0, tpCount: 0, allSlIds: [], allTpIds: [] });
+      // Also populate symbol-only entry for backward compat
+      if (side && !result.has(sym)) result.set(sym, { hasSl: false, hasTp: false, slCount: 0, tpCount: 0, allSlIds: [], allTpIds: [] });
+      return result.get(key)!;
     };
 
     try {
@@ -411,19 +418,22 @@ export class BinanceService {
           anySuccess = true;
           for (const o of algoOrders) {
             const sym = o.symbol as string;
-            const entry = getEntry(sym);
+            // Derive position side from order side:
+            // BUY STOP/TP closes SHORT position, SELL STOP/TP closes LONG position
+            const orderSide = (o.side as string)?.toUpperCase();
+            const positionSide = orderSide === 'BUY' ? 'SHORT' : orderSide === 'SELL' ? 'LONG' : undefined;
+            const entry = getEntry(sym, positionSide);
+            const entryGeneric = getEntry(sym); // backward compat
             const id = o.algoId?.toString();
             if (o.orderType === 'STOP_MARKET' || o.orderType === 'STOP') {
-              entry.hasSl = true;
-              entry.slAlgoId = id;
-              entry.slCount++;
-              if (id) entry.allSlIds.push(id);
+              entry.hasSl = true; entryGeneric.hasSl = true;
+              entry.slAlgoId = id; entry.slCount++; if (id) entry.allSlIds.push(id);
+              entryGeneric.slCount++; if (id) entryGeneric.allSlIds.push(id);
             }
             if (o.orderType === 'TAKE_PROFIT_MARKET' || o.orderType === 'TAKE_PROFIT') {
-              entry.hasTp = true;
-              entry.tpAlgoId = id;
-              entry.tpCount++;
-              if (id) entry.allTpIds.push(id);
+              entry.hasTp = true; entryGeneric.hasTp = true;
+              entry.tpAlgoId = id; entry.tpCount++; if (id) entry.allTpIds.push(id);
+              entryGeneric.tpCount++; if (id) entryGeneric.allTpIds.push(id);
             }
           }
         }
