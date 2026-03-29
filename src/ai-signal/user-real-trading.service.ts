@@ -291,81 +291,17 @@ export class UserRealTradingService implements OnModuleInit {
       // GTE_GTC algo orders require an open position to exist
       await new Promise((r) => setTimeout(r, 1500));
 
-      // SL and TP — Grid DCA uses signal's own SL (grids fit within SL range). TP = signal's Fibo TP.
+      // MAIN trades: NO SL/TP on Binance — SIM controls close via market order
+      // This avoids conflict with hedge/FLIP/trail/NET_POSITIVE logic in SIM
+      // Only HEDGE trades get TP on Binance (to catch spikes)
       const roundPrice = (p: number) => parseFloat(p.toFixed(pricePrecision));
-
-      let effectiveSl = stopLossPrice;
-      let effectiveTp = takeProfitPrice;
-      // Grid: keep signal SL and TP as-is (no wider SL, no individual grid TP)
+      const effectiveSl = stopLossPrice;
+      const effectiveTp = takeProfitPrice;
       let roundedSl = roundPrice(effectiveSl);
       let roundedTp = effectiveTp ? roundPrice(effectiveTp) : undefined;
-
-      // Place SL algo order (with precision retry)
       let binanceSlAlgoId: string | undefined;
-      try {
-        const slOrder = await this.binanceService.setStopLoss(
-          keys.apiKey, keys.apiSecret, symbol, roundedSl, direction as "LONG" | "SHORT", quantity,
-        );
-        binanceSlAlgoId = slOrder?.algoId?.toString() ?? slOrder?.orderId?.toString();
-      } catch (err) {
-        if (err?.message?.includes("Precision")) {
-          // Precision stale — refresh and retry once
-          const freshPrec = await this.refreshPricePrecision(symbol);
-          const retriedSl = parseFloat(effectiveSl.toFixed(freshPrec));
-          this.logger.warn(`[RealTrading] ${symbol} SL precision retry: ${roundedSl} → ${retriedSl}`);
-          try {
-            const slOrder = await this.binanceService.setStopLoss(
-              keys.apiKey, keys.apiSecret, symbol, retriedSl, direction as "LONG" | "SHORT", quantity,
-            );
-            binanceSlAlgoId = slOrder?.algoId?.toString() ?? slOrder?.orderId?.toString();
-            roundedSl = retriedSl;
-          } catch (err2) {
-            this.logger.error(`[RealTrading] ${symbol} SL retry also failed for user ${telegramId}: ${err2?.message}`);
-            await this.telegramService.sendTelegramMessage(chatId,
-              `⚠️ *Real Mode: SL Order That Bai*\n\n${symbol} — SL tai $${retriedSl} khong duoc dat.\nLoi: ${err2?.message}\n\n_Hay tu dat SL tren Binance._`
-            ).catch(() => {});
-          }
-        } else {
-          this.logger.error(`[RealTrading] ${symbol} SL order failed for user ${telegramId}: ${err?.message}`);
-          await this.telegramService.sendTelegramMessage(chatId,
-            `⚠️ *Real Mode: SL Order That Bai*\n\n${symbol} — SL tai $${roundedSl} khong duoc dat.\nLoi: ${err?.message}\n\n_Hay tu dat SL tren Binance._`
-          ).catch(() => {});
-        }
-      }
-
-      // Place TP algo order (if signal has TP price, with precision retry)
       let binanceTpAlgoId: string | undefined;
-      if (roundedTp) {
-        try {
-          const tpOrder = await this.binanceService.setTakeProfitAtPrice(
-            keys.apiKey, keys.apiSecret, symbol, roundedTp, direction as "LONG" | "SHORT", quantity,
-          );
-          binanceTpAlgoId = tpOrder?.algoId?.toString() ?? tpOrder?.orderId?.toString();
-        } catch (err) {
-          if (err?.message?.includes("Precision")) {
-            const freshPrec = await this.refreshPricePrecision(symbol);
-            const retriedTp = parseFloat(effectiveTp!.toFixed(freshPrec));
-            this.logger.warn(`[RealTrading] ${symbol} TP precision retry: ${roundedTp} → ${retriedTp}`);
-            try {
-              const tpOrder = await this.binanceService.setTakeProfitAtPrice(
-                keys.apiKey, keys.apiSecret, symbol, retriedTp, direction as "LONG" | "SHORT", quantity,
-              );
-              binanceTpAlgoId = tpOrder?.algoId?.toString() ?? tpOrder?.orderId?.toString();
-              roundedTp = retriedTp;
-            } catch (err2) {
-              this.logger.warn(`[RealTrading] ${symbol} TP retry also failed for user ${telegramId}: ${err2?.message}`);
-              await this.telegramService.sendTelegramMessage(chatId,
-                `⚠️ *Real Mode: TP Order That Bai*\n\n${symbol} — TP tai $${retriedTp} khong duoc dat.\nLoi: ${err2?.message}\n\n_Lenh van mo, SL van hoat dong._`
-              ).catch(() => {});
-            }
-          } else {
-            this.logger.warn(`[RealTrading] ${symbol} TP order failed for user ${telegramId}: ${err?.message}`);
-            await this.telegramService.sendTelegramMessage(chatId,
-              `⚠️ *Real Mode: TP Order That Bai*\n\n${symbol} — TP tai $${roundedTp} khong duoc dat.\nLoi: ${err?.message}\n\n_Lenh van mo, SL van hoat dong._`
-            ).catch(() => {});
-          }
-        }
-      }
+      this.logger.log(`[RealTrading] ${symbol} user ${telegramId}: MAIN trade — SIM controls TP/SL (no Binance orders)`);
 
       // Save UserTrade to MongoDB
       const trade = await this.userTradeModel.create({
@@ -1437,9 +1373,13 @@ export class UserRealTradingService implements OnModuleInit {
               }
             }
 
-            // ── Trailing stop for real trades ─────────────────────────────
-            // Mirrors position-monitor logic: TRAIL_TRIGGER=2.0%, keep 60% of peak
-            // Runs every 2min as safety net + primary trailing for trades whose signal is no longer watched
+            // ── MAIN trades: SIM controls everything — skip trail/SL/TP management ──
+            if (!(trade as any).isHedge) {
+              continue; // SIM handles TP/SL/trail via market order on close
+            }
+
+            // ── Below: HEDGE trades only — trail + TP check ──
+            // Trailing stop for hedge trades (safety net, SIM also manages)
             if (currentPrice && trade.entryPrice && slPrice) {
               const tcfg = this.tradingConfig.get();
               const TRAIL_TRIGGER = tcfg.trailTrigger ?? 2.0;
@@ -1614,18 +1554,19 @@ export class UserRealTradingService implements OnModuleInit {
               }
             }
 
-            // ── SL missing ──────────────────────────────────────────────────
-            // Skip if a grid DCA fill is in progress — cancel/replace window causes false-positive
+            // ── HEDGE trades only from here (main already continued above) ──
+            // Hedge: NO SL on Binance, only TP (to catch spikes)
             const gridReplacing = await this.isGridReplacing(telegramId, symbol);
             if (gridReplacing) {
               this.logger.debug(`[RealTrading] ${symbol} user ${telegramId}: protectOpenTrades skipped — grid fill in progress`);
               continue;
             }
             const effectiveSlPrice = slPrice;
-            // Cooldown: skip if SL was recently placed (prevents spam when openAlgoOrders API fails)
+            // Hedge trades: skip SL — hedge has no SL, only TP
+            // SL cooldown check only for non-hedge (but we already skip main above)
             const slCooldownKey = `cache:sl-placed:${telegramId}:${symbol}`;
             const slRecentlyPlaced = await this.redisService.get(slCooldownKey);
-            if (!algo?.hasSl && effectiveSlPrice && !slRecentlyPlaced) {
+            if (false && !algo?.hasSl && effectiveSlPrice && !slRecentlyPlaced) { // DISABLED for hedge
               // Use grid total quantity if DCA enabled
               const slQty = trade.gridLevels?.length > 0
                 ? trade.gridLevels.filter((g: any) => g.status === "FILLED").reduce((sum: number, g: any) => sum + (g.quantity || 0), 0) || trade.quantity
