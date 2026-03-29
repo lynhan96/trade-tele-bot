@@ -373,10 +373,11 @@ export class HedgeManagerService {
       // ── 1. Recovery Close: 2 conditions ──
       // A) Soft: main > 1.0% AND hedge >= 1.5% (both sides clearly profitable)
       //    Previous: 0.5%+1.0% closed too early (~$6/cycle). Trail avg $11/cycle is better.
-      // B) Banked total: accumulated hedge profits > $20 (already made money from this symbol)
+      // B) Banked total: accumulated hedge profits > $20 AND current hedge profitable >= 1%
+      //    Without the 1% gate, high-banked positions ($29+) close instantly on +$0.01
       const banked = (ctx.hedgeHistory || []).reduce((sum: number, h: any) => sum + (h.pnlUsdt || 0), 0);
       const softClose = mainPnlPct !== undefined && mainPnlPct > 1.0 && hedgePnlPct >= 1.5;
-      const bankedTotal = banked + hedgePnlUsdt > 20;
+      const bankedTotal = banked + hedgePnlUsdt > 20 && hedgePnlPct >= 1.0;
       if (softClose || bankedTotal) {
         const reason = softClose ? `Recovery soft: main +${mainPnlPct?.toFixed(2)}%`
           : `Banked total: $${(banked + hedgePnlUsdt).toFixed(2)}`;
