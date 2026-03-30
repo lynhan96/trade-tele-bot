@@ -2292,14 +2292,19 @@ export class UserRealTradingService implements OnModuleInit {
           if (existingHedge) continue;
 
           const hedgeDir = action.hedgeDirection || (signal.direction === 'LONG' ? 'SHORT' : 'LONG');
-          // Use real trade's filled notional for hedge sizing (not sim notional)
-          const mainEntry = (parentTrade as any).gridAvgEntry || parentTrade.entryPrice;
-          const filledGridNotional = (parentTrade as any).gridLevels?.length > 0
-            ? (parentTrade as any).gridLevels
-                .filter((g: any) => g.status === 'FILLED')
-                .reduce((s: number, g: any) => s + ((g.quantity || 0) * mainEntry), 0) || parentTrade.notionalUsdt
-            : parentTrade.notionalUsdt;
-          const hedgeNotional = (filledGridNotional || parentTrade.notionalUsdt) * 0.75;
+          // Use actual Binance position size for hedge sizing (most accurate)
+          let filledGridNotional = parentTrade.notionalUsdt || 0;
+          try {
+            const binPositions = await this.binanceService.getOpenPositions(keys.apiKey, keys.apiSecret);
+            const mainPos = binPositions.find((p: any) => p.symbol === signal.symbol && (
+              (parentTrade.direction === 'LONG' && parseFloat(p.positionAmt) > 0) ||
+              (parentTrade.direction === 'SHORT' && parseFloat(p.positionAmt) < 0)
+            ));
+            if (mainPos) {
+              filledGridNotional = Math.abs(parseFloat(mainPos.positionAmt)) * parseFloat(mainPos.entryPrice);
+            }
+          } catch {}
+          const hedgeNotional = filledGridNotional * 0.75;
           if (hedgeNotional <= 0) continue;
 
           const keys = await this.userSettingsService.getApiKeys(sub.telegramId, 'binance');
