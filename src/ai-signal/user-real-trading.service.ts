@@ -1589,7 +1589,7 @@ export class UserRealTradingService implements OnModuleInit {
    * 1. PENDING grid fills (price dropped to trigger level → place additional market order)
    * 2. FILLED grid TP hits (price bounced to TP → partial close via reduce-only order)
    */
-  @Cron("*/30 * * * * *")
+  @Cron("*/15 * * * * *")
   async checkGridOrders(): Promise<void> {
     try {
       const gridTrades = await this.userTradeModel.find({
