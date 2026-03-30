@@ -1010,15 +1010,20 @@ export class PositionMonitorService implements OnModuleInit {
 
         let forceCloseReason: "NET_POSITIVE" | "CATASTROPHIC_STOP" | null = null;
 
-        // NET_POSITIVE: total net PnL (main unrealized + banked hedge + current hedge) > 3% of filledVol
-        // Close everything when the TOTAL position is profitable enough
-        // Min $20 floor: prevents closing too early on small positions (L0-only = $400 → old threshold $12)
-        const netPositiveThreshold = Math.max(filledVol * 0.03, 20); // 3% of position, min $20
+        // NET_POSITIVE: total net PnL > 3% of filledVol → close all (profitable)
+        const netPositiveThreshold = Math.max(filledVol * 0.03, 20);
+        // NET_NEGATIVE: total net PnL < -15% of filledVol → close all (cut loss)
+        const netNegativeThreshold = filledVol * -0.15;
         if (netPnlUsdt > netPositiveThreshold) {
           this.logger.log(
             `[PositionMonitor] ${sigKey} NET POSITIVE EXIT | main=$${mainUnrealizedUsdt.toFixed(2)} banked=$${bankedProfit.toFixed(2)} hedge=$${currentHedgePnlUsdt.toFixed(2)} → total=$${netPnlUsdt.toFixed(2)} > threshold=$${netPositiveThreshold.toFixed(2)}`,
           );
           forceCloseReason = "NET_POSITIVE";
+        } else if (netPnlUsdt < netNegativeThreshold) {
+          this.logger.warn(
+            `[PositionMonitor] ${sigKey} NET NEGATIVE EXIT | main=$${mainUnrealizedUsdt.toFixed(2)} banked=$${bankedProfit.toFixed(2)} hedge=$${currentHedgePnlUsdt.toFixed(2)} → total=$${netPnlUsdt.toFixed(2)} < threshold=$${netNegativeThreshold.toFixed(2)}`,
+          );
+          forceCloseReason = "NET_POSITIVE"; // reuse same close flow
         } else if (catastrophicPct <= -25) {
           this.logger.warn(
             `[PositionMonitor] ${sigKey} CATASTROPHIC STOP at ${price} (${catastrophicPct.toFixed(1)}%) while hedge active — force closing both`,
