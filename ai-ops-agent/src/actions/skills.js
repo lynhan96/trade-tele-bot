@@ -615,19 +615,33 @@ export async function runPortfolioRisk() {
   }
 
   // #2 Drawdown Recovery Mode — auto-adjust config based on drawdown severity
+  // BUT: if recent WR is high (>80%), system is winning — don't reduce slots
+  const recentSignals = await db.collection("ai_signals")
+    .find({ status: "COMPLETED", pnlUsdt: { $exists: true } })
+    .sort({ positionClosedAt: -1 }).limit(10).toArray()
+  const recentWins = recentSignals.filter(s => (s.pnlUsdt || 0) > 0).length
+  const recentWR = recentSignals.length >= 5 ? recentWins / recentSignals.length : 0
+  const systemWinning = recentWR >= 0.8 // 80%+ WR on last 10
+
   const prevMode = _drawdownMode
-  if (totalUnrealized < -300) {
+  if (totalUnrealized < -300 && !systemWinning) {
     _drawdownMode = "DEFENSIVE"
     actions.push(`🔴🔴 DEFENSIVE MODE: drawdown $${totalUnrealized.toFixed(2)} — max protection`)
     await autoConfig("confidenceFloor", 72, `Defensive: drawdown $${totalUnrealized.toFixed(0)}`)
     await autoConfig("maxActiveSignals", 3, `Defensive: drawdown $${totalUnrealized.toFixed(0)}`)
     await autoConfig("riskScoreThreshold", 45, `Defensive: tighter risk filter`)
-  } else if (totalUnrealized < -150) {
+  } else if (totalUnrealized < -150 && !systemWinning) {
     _drawdownMode = "CAUTIOUS"
     actions.push(`🔴 CAUTIOUS MODE: drawdown $${totalUnrealized.toFixed(2)} — reduced risk`)
     await autoConfig("confidenceFloor", 70, `Cautious: drawdown $${totalUnrealized.toFixed(0)}`)
     await autoConfig("maxActiveSignals", 5, `Cautious: drawdown $${totalUnrealized.toFixed(0)}`)
     await autoConfig("riskScoreThreshold", 50, `Cautious: tighter risk filter`)
+  } else if (systemWinning && _drawdownMode !== "NORMAL") {
+    _drawdownMode = "NORMAL"
+    actions.push(`🟢 NORMAL MODE: WR ${(recentWR*100).toFixed(0)}% (${recentWins}/${recentSignals.length}) — drawdown from bugs, not bad signals`)
+    await autoConfig("confidenceFloor", 68, `High WR override: system winning`)
+    await autoConfig("maxActiveSignals", 7, `High WR override: system winning`)
+    await autoConfig("riskScoreThreshold", 55, `High WR override: normal filter`)
   } else if (totalUnrealized > -50 && prevMode !== "NORMAL") {
     _drawdownMode = "NORMAL"
     actions.push(`🟢 NORMAL MODE restored: unrealized $${totalUnrealized.toFixed(2)}`)
