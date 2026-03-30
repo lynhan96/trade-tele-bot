@@ -3,6 +3,7 @@ import cron from "node-cron"
 import { collectLogs, hasAnomalies } from "../monitors/logMonitor.js"
 import { checkTradingHealth } from "../monitors/tradingMonitor.js"
 import { runActiveTrader } from "./activeTrader.js"
+import { runAiReview } from "./aiReview.js"
 import { restartBot, getCurrentCommit } from "../actions/executor.js"
 import { runAllSkills } from "../actions/skills.js"
 import { notifyAutoFixed, notifyTradingReport, notifySmartAlert } from "../notifications/telegram.js"
@@ -103,6 +104,10 @@ async function start() {
   // Claude analysis: every 2h — 12 calls/day using Sonnet 4.6
   // More frequent = faster adaptation to market regime changes
   cron.schedule("0 */2 * * *", () => runAnalysis())
+
+  // AI System Review: every 6h — Claude deep analysis + Telegram report
+  // 0:00, 6:00, 12:00, 18:00 UTC (7:00, 13:00, 19:00, 1:00 VN time)
+  cron.schedule("0 */6 * * *", () => runAiReview())
 
   logger.info("Agent running.")
 }
