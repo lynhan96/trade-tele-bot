@@ -162,24 +162,9 @@ export class HedgeManagerService {
       const freshDrop = !isFirstCycle && lastHedgeWasProfit;
 
       if (freshDrop) {
-        // Price recovered then dropped again → normal trigger (skip strict 1.2x + price worse)
         this.logger.log(`[${ctx.coin}] Fresh drop: last hedge profitable → normal trigger -${triggerPct}%`);
-      } else if (!isFirstCycle && realHedges.length > 0) {
-        // Continuous bleed: last hedge LOST → stricter conditions
-        const lastExitPrice = lastHedge?.exitPrice || 0;
-        if (lastExitPrice > 0) {
-          const priceWorse = ctx.direction === 'LONG'
-            ? currentPrice < lastExitPrice
-            : currentPrice > lastExitPrice;
-          if (!priceWorse && pnlPct > -triggerPct * 2) {
-            return null;
-          }
-        }
-        if (pnlPct > -cfg.hedgePartialTriggerPct * 1.2) {
-          this.logger.log(`[${ctx.coin}] Hedge blocked (bleed): PnL ${pnlPct.toFixed(2)}% > -${(cfg.hedgePartialTriggerPct * 1.2).toFixed(2)}%`);
-          return null;
-        }
       }
+      // No strict 1.2x / price-worse conditions — RSI + candle + overbought guard handles filtering
 
       // RSI confirmation for ALL cycle 2+ (including fresh drop)
       // Prevents blind entry when market reverses — must confirm momentum
