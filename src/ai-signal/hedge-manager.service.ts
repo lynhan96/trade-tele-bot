@@ -224,23 +224,34 @@ export class HedgeManagerService {
       const positionNotional = ctx.positionNotional;
       if (positionNotional <= 0) return null;
 
-      // Fixed 75% notional — consistent hedge size across all cycles
+      // Hedge size: 75% default, scale to 100% after 3+ consecutive wins
       const cycle = (ctx.hedgeCycleCount || 0) + 1;
       const maxCycles = cfg.hedgeMaxCycles ?? 999;
       if (cycle > maxCycles) {
         this.logger.log(`[${ctx.coin}] Hedge max cycles (${maxCycles}) reached — no more hedging`);
         return null;
       }
-      const hedgeNotional = positionNotional * 0.75;
+      const realHedgeHistory = (ctx.hedgeHistory || []).filter((h: any) => h.reason !== 'FLIP_TP');
+      const consecutiveWins = (() => {
+        let count = 0;
+        for (let i = realHedgeHistory.length - 1; i >= 0; i--) {
+          if ((realHedgeHistory[i].pnlUsdt || 0) > 0) count++;
+          else break;
+        }
+        return count;
+      })();
+      const hedgeSizeRatio = consecutiveWins >= 3 ? 1.0 : 0.75;
+      const hedgeNotional = positionNotional * hedgeSizeRatio;
       const hedgeTpPrice = this.getHedgeTpPrice(currentPrice, hedgeDirection, regime);
 
       // Build entry note with conditions
       const rsiNote = (ctx as any)._lastRsi15m ? ` RSI15m=${(ctx as any)._lastRsi15m.toFixed(1)}` : '';
       const entryNote = isFirstCycle ? 'Cycle 1 (immediate)' : `Cycle ${cycle} (RSI+price confirmed${rsiNote})`;
+      const sizeNote = hedgeSizeRatio === 1.0 ? `100% (${consecutiveWins} wins)` : '75%';
       const reasonDetail = `PnL ${pnlPct.toFixed(2)}% | ${entryNote} | regime: ${regime} | banked: $${banked.toFixed(2)}`;
 
       this.logger.log(
-        `[${ctx.coin}] HEDGE #${cycle} (75%) | PnL: ${pnlPct.toFixed(2)}% | ` +
+        `[${ctx.coin}] HEDGE #${cycle} (${sizeNote}) | PnL: ${pnlPct.toFixed(2)}% | ` +
         `${hedgeDirection} $${hedgeNotional.toFixed(0)} | TP: ${hedgeTpPrice} | ${entryNote} | Banked: $${banked.toFixed(2)}`,
       );
 

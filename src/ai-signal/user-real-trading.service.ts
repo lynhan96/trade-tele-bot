@@ -2303,7 +2303,7 @@ export class UserRealTradingService implements OnModuleInit {
             ? simGrids.filter((g: any) => g.status === 'FILLED').reduce((s: number, g: any) => s + (g.volumePct || 0), 0) / 100
             : 0.4; // L0 = 40% default
           const filledGridNotional = userFullVol * simFilledPct;
-          const hedgeNotional = filledGridNotional * 0.75;
+          const hedgeNotional = action.hedgeNotional || filledGridNotional * 0.75;
           if (hedgeNotional <= 0) continue;
 
           const [qtyPrec, pricePrec] = await Promise.all([
