@@ -1176,7 +1176,8 @@ export class PositionMonitorService implements OnModuleInit {
       }
     }
 
-    // ─── Time Stop: 12h + PnL > 0 or PnL < -1% → close stagnant signal ──
+    // ─── Time Stop: 12h + PnL > 0 → close stagnant signal with profit ──
+    // If hedge active → FLIP (promote hedge to main) instead of closing both
     if ((signal as any).executedAt && !this.resolvingSymbols.has(sigKey)) {
       const ageH = (Date.now() - new Date((signal as any).executedAt).getTime()) / 3600000;
       if (ageH >= 12) {
@@ -1184,10 +1185,18 @@ export class PositionMonitorService implements OnModuleInit {
         const timePnlPct = direction === "LONG"
           ? ((price - currentEntry) / currentEntry) * 100
           : ((currentEntry - price) / currentEntry) * 100;
-        // Close if profitable (any amount) or losing > 1% — don't hold stagnant positions
-        if (timePnlPct > 0 || timePnlPct < -1) {
-          this.logger.log(`[PositionMonitor] ${sigKey} TIME STOP: ${ageH.toFixed(0)}h held, PnL ${timePnlPct.toFixed(2)}% → closing`);
-          if (!this.resolvingSymbols.has(sigKey)) {
+        // Only close when profitable — don't cut losing positions (hedge system handles loss)
+        if (timePnlPct > 0) {
+          const hasActiveHedge = !!hedgeOrder;
+          if (hasActiveHedge) {
+            // Hedge active → this is like main TP hit → FLIP (promote hedge to main)
+            this.logger.log(`[PositionMonitor] ${sigKey} TIME STOP + HEDGE → FLIP: ${ageH.toFixed(0)}h held, PnL +${timePnlPct.toFixed(2)}%`);
+            // Fall through to normal TP/SL check which has FLIP logic
+            // Set takeProfitPrice to current price to trigger FLIP
+            (signal as any).takeProfitPrice = price;
+          } else {
+            // No hedge → close normally
+            this.logger.log(`[PositionMonitor] ${sigKey} TIME STOP: ${ageH.toFixed(0)}h held, PnL +${timePnlPct.toFixed(2)}% → closing`);
             this.resolvingSymbols.add(sigKey);
             this.unregisterListener(signal);
             try {
