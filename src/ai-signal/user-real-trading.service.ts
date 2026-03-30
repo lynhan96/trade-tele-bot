@@ -1326,354 +1326,8 @@ export class UserRealTradingService implements OnModuleInit {
               continue;
             }
 
-            // Use direction-specific key to distinguish main vs hedge TP/SL in hedge mode
-            // Do NOT fallback to symbol-only key — that would mix main+hedge TP/SL status
-            const algo = algoMap.get(`${symbol}:${direction}`);
-            const fmtP = (p: number) =>
-              p >= 1000 ? `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}` :
-              p >= 1 ? `$${p.toFixed(2)}` : `$${p.toFixed(4)}`;
-            const pp = await getPP(symbol);
-            const round = (p: number) => parseFloat(p.toFixed(pp));
-
-            // ── Cleanup duplicate SL/TP orders on Binance ─────────────────
-            // If multiple SL or TP orders exist for same symbol, cancel extras (keep DB-tracked one)
-            if (algo && (algo.slCount > 1 || algo.tpCount > 1)) {
-              const dbSlId = (trade as any).binanceSlAlgoId;
-              const dbTpId = (trade as any).binanceTpAlgoId;
-              if (algo.slCount > 1) {
-                const extraSls = algo.allSlIds.filter(id => id !== dbSlId);
-                for (const id of extraSls) {
-                  await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, id).catch(() => {});
-                }
-                this.logger.warn(`[RealTrading] ${symbol} user ${telegramId}: cleaned ${extraSls.length} duplicate SL orders (kept ${dbSlId})`);
-              }
-              if (algo.tpCount > 1) {
-                const extraTps = algo.allTpIds.filter(id => id !== dbTpId);
-                for (const id of extraTps) {
-                  await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, id).catch(() => {});
-                }
-                this.logger.warn(`[RealTrading] ${symbol} user ${telegramId}: cleaned ${extraTps.length} duplicate TP orders (kept ${dbTpId})`);
-              }
-            }
-
-            // ── Time-based stop for real trades: 24h+ stagnant → close ─────
-            // Must match ai-signal.service.ts time-stop. Only close if truly flat (±0.5%).
-            const tradeAgeMs = Date.now() - new Date((trade as any).createdAt).getTime();
-            const tradeAgeH = tradeAgeMs / 3600000;
-            const currentPrice = this.marketDataService.getLatestPrice(symbol);
-            if (currentPrice && trade.entryPrice && tradeAgeH >= 24) {
-              const currentPnl = direction === "LONG"
-                ? ((currentPrice - trade.entryPrice) / trade.entryPrice) * 100
-                : ((trade.entryPrice - currentPrice) / trade.entryPrice) * 100;
-              if (currentPnl < 0.5 && currentPnl > -0.5) {
-                const reason = `Time-stop ${currentPnl >= 0 ? "+" : ""}${currentPnl.toFixed(2)}% after ${tradeAgeH.toFixed(0)}h`;
-                this.logger.log(`[RealTrading] ${symbol} user ${telegramId}: ${reason}`);
-                await this.closeRealPosition(telegramId, chatId, symbol, reason).catch(() => {});
-                continue;
-              }
-            }
-
-            // ── MAIN trades: SIM controls everything — skip trail/SL/TP management ──
-            if (!(trade as any).isHedge) {
-              continue; // SIM handles TP/SL/trail via market order on close
-            }
-
-            // ── Below: HEDGE trades only — trail + TP check ──
-            // Trailing stop for hedge trades (safety net, SIM also manages)
-            if (currentPrice && trade.entryPrice && slPrice) {
-              const tcfg = this.tradingConfig.get();
-              const TRAIL_TRIGGER = tcfg.trailTrigger ?? 2.0;
-              const TRAIL_KEEP_RATIO = tcfg.trailKeepRatio ?? 0.75;
-              // Use grid avg entry if available
-              const entry = (trade as any).gridAvgEntry || trade.entryPrice;
-              const currentPnlPct = direction === "LONG"
-                ? ((currentPrice - entry) / entry) * 100
-                : ((entry - currentPrice) / entry) * 100;
-
-              // TP proximity lock: if within 0.5% of TP → freeze trail, let TP execute
-              const tpPrice = trade.tpPrice;
-              const distanceToTp = tpPrice
-                ? (direction === "LONG" ? (tpPrice - currentPrice) / currentPrice : (currentPrice - tpPrice) / currentPrice) * 100
-                : Infinity;
-              const nearTp = distanceToTp < 0.5;
-
-              if (nearTp) {
-                // Near TP: check if existing Binance SL order is dangerously tight
-                // (trail may have tightened it to within 0.4% of current price)
-                // If so, widen it back to break-even to give TP room to execute.
-                const slDistanceFromPrice = slPrice
-                  ? (direction === "LONG"
-                    ? (currentPrice - slPrice) / currentPrice
-                    : (slPrice - currentPrice) / currentPrice) * 100
-                  : Infinity;
-
-                const SL_TOO_TIGHT_THRESHOLD = 0.4; // SL within 0.4% of price = danger of premature fill
-                if (slDistanceFromPrice < SL_TOO_TIGHT_THRESHOLD && trade.binanceSlAlgoId) {
-                  // Widen SL back to break-even (entry price) — safe floor while TP is being hunted
-                  const safeSlPrice = round(entry);
-                  const isSafeSlBetter = direction === "LONG" ? safeSlPrice < slPrice : safeSlPrice > slPrice;
-                  if (isSafeSlBetter) {
-                    this.logger.log(
-                      `[RealTrading] 🎯 ${symbol} user ${telegramId}: nearTP (${distanceToTp.toFixed(2)}% away) + SL too tight (${slDistanceFromPrice.toFixed(2)}% from price) → widen SL to breakeven ${fmtP(safeSlPrice)}`,
-                    );
-                    try {
-                      await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, trade.binanceSlAlgoId);
-                      const tradeQty = trade.gridLevels?.length > 0
-                        ? trade.gridLevels.filter((g: any) => g.status === "FILLED").reduce((sum: number, g: any) => sum + (g.quantity || 0), 0) || trade.quantity
-                        : trade.quantity;
-                      const slOrder = await this.binanceService.setStopLoss(
-                        keys.apiKey, keys.apiSecret, symbol, safeSlPrice,
-                        direction as "LONG" | "SHORT", tradeQty,
-                      );
-                      const newId = slOrder?.algoId?.toString() ?? slOrder?.orderId?.toString();
-                      await this.userTradeModel.updateOne({ _id: trade._id }, { $set: { slPrice: safeSlPrice, binanceSlAlgoId: newId } });
-                    } catch (err) {
-                      this.logger.warn(`[RealTrading] ${symbol} user ${telegramId}: nearTP SL widen failed: ${err?.message}`);
-                    }
-                  }
-                } else {
-                  this.logger.debug(`[RealTrading] ${symbol} user ${telegramId}: near TP (${distanceToTp.toFixed(2)}% away), SL ok (${slDistanceFromPrice.toFixed(2)}% from price) — trail frozen`);
-                }
-              } else if (currentPnlPct >= TRAIL_TRIGGER || (trade as any).peakPnlPct >= TRAIL_TRIGGER) {
-                // ── Backend-managed trail with momentum hold ──
-                // Instead of updating Binance SL: check if price has fallen below trail level
-                // and if momentum has faded → close via market order
-
-                // Track peak on trade record (survives signal close)
-                const tradePeak = (trade as any).peakPnlPct || 0;
-                const peak = Math.max(tradePeak, currentPnlPct);
-                if (peak > tradePeak) {
-                  await this.userTradeModel.updateOne({ _id: trade._id }, { $set: { peakPnlPct: peak } }).catch(() => {});
-                }
-
-                const trailPct = peak * TRAIL_KEEP_RATIO;
-                const trailSl = direction === "LONG"
-                  ? entry * (1 + trailPct / 100)
-                  : entry * (1 - trailPct / 100);
-
-                // Use trade's own trail SL, fallback to signal if still active
-                const signal = await this.signalQueueService.findActiveSignalBySymbol(symbol);
-                const dbTrailSl = (trade as any).trailSlPrice || signal?.stopLossPrice || trailSl;
-
-                // Check if price crossed below the DB trail SL level
-                const trailBreached = direction === "LONG"
-                  ? currentPrice <= dbTrailSl
-                  : currentPrice >= dbTrailSl;
-
-                if (trailBreached) {
-                  // Trail SL level breached — check momentum before closing
-                  // If coin is still moving in our favor (strong candle), HOLD
-                  let momentumHold = false;
-                  try {
-                    const closes = await this.marketDataService.getClosePrices(symbol.replace("USDT", ""), "15m");
-                    if (closes.length >= 3) {
-                      const last = closes[closes.length - 1];
-                      const prev = closes[closes.length - 2];
-                      const candleGreen = last > prev;
-                      // Get RSI to check if still in favorable zone
-                      const { RSI } = require("technicalindicators");
-                      const rsiVals = RSI.calculate({ period: 14, values: closes });
-                      const rsi = rsiVals.length > 0 ? rsiVals[rsiVals.length - 1] : 50;
-
-                      if (direction === "LONG" && candleGreen && rsi < 70) {
-                        momentumHold = true; // Coin still pumping, hold
-                      } else if (direction === "SHORT" && !candleGreen && rsi > 30) {
-                        momentumHold = true; // Coin still dumping, hold
-                      }
-                    }
-                  } catch {
-                    // Fail-open: close if can't check momentum
-                  }
-
-                  if (momentumHold) {
-                    // Coin still moving favorably → skip, let it run
-                    this.logger.log(
-                      `[RealTrading] ${symbol} user ${telegramId}: trail breached but HOLDING (momentum favorable, PnL: +${currentPnlPct.toFixed(1)}%)`,
-                    );
-                    // Reset breach counter — momentum is still active
-                    await this.redisService.delete(`cache:trail-breach:${telegramId}:${symbol}`);
-                  } else {
-                    // Momentum faded — increment breach counter, close after 2 consecutive cycles (4min)
-                    const breachKey = `cache:trail-breach:${telegramId}:${symbol}`;
-                    const breachCount = parseInt(await this.redisService.get(breachKey) || "0", 10) + 1;
-                    await this.redisService.set(breachKey, String(breachCount), 300); // 5min TTL
-
-                    if (breachCount >= 2) {
-                      // 2 consecutive cycles (4min) below trail + no momentum → close
-                      this.logger.log(
-                        `[RealTrading] ${symbol} user ${telegramId}: trail breached ${breachCount}x + no momentum → closing (peak=${peak.toFixed(1)}% PnL=${currentPnlPct.toFixed(1)}%)`,
-                      );
-                      await this.redisService.delete(breachKey);
-                      await this.closeRealPosition(telegramId, chatId, symbol, "STOP_LOSS");
-                    } else {
-                      // First breach without momentum — wait 1 more cycle to confirm
-                      this.logger.log(
-                        `[RealTrading] ${symbol} user ${telegramId}: trail breached (${breachCount}/2), no momentum — waiting next cycle (PnL: +${currentPnlPct.toFixed(1)}%)`,
-                      );
-                    }
-                  }
-                  continue;
-                } else {
-                  // Trail not breached — place/update real SL on Binance at trail floor
-                  const prevTrailSl = (trade as any).trailSlPrice || 0;
-                  const trailSlMoved = Math.abs(trailSl - prevTrailSl) / (prevTrailSl || 1) > 0.002; // >0.2% change
-                  if (trailSlMoved && trailSl > 0) {
-                    // Cancel old SL and place new one at trail floor
-                    const trailPP = await getPP(symbol);
-                    const roundedTrailSl = parseFloat(trailSl.toFixed(trailPP));
-                    try {
-                      if ((trade as any).binanceSlAlgoId) {
-                        await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, (trade as any).binanceSlAlgoId).catch(() => {});
-                      }
-                      const slQty = trade.gridLevels?.length > 0
-                        ? trade.gridLevels.filter((g: any) => g.status === "FILLED").reduce((sum: number, g: any) => sum + (g.quantity || 0), 0) || trade.quantity
-                        : trade.quantity;
-                      const slOrder = await this.binanceService.setStopLoss(
-                        keys.apiKey, keys.apiSecret, symbol, roundedTrailSl,
-                        direction as "LONG" | "SHORT", slQty,
-                      );
-                      const newSlId = slOrder?.algoId?.toString() ?? slOrder?.orderId?.toString();
-                      await this.userTradeModel.updateOne({ _id: trade._id }, {
-                        $set: { trailSlPrice: trailSl, peakPnlPct: peak, slPrice: roundedTrailSl, binanceSlAlgoId: newSlId },
-                      });
-                      const trailLockPct = direction === "LONG"
-                        ? ((roundedTrailSl - entry) / entry) * 100
-                        : ((entry - roundedTrailSl) / entry) * 100;
-                      this.logger.log(
-                        `[RealTrading] ${symbol} user ${telegramId}: trail SL placed on Binance @ ${fmtP(roundedTrailSl)} (+${trailLockPct.toFixed(1)}%) peak=${peak.toFixed(1)}%`,
-                      );
-                    } catch (err) {
-                      this.logger.warn(`[RealTrading] ${symbol} user ${telegramId}: trail SL place failed: ${err?.message}`);
-                      // Still persist to DB for next retry
-                      await this.userTradeModel.updateOne({ _id: trade._id }, { $set: { trailSlPrice: trailSl, peakPnlPct: peak } }).catch(() => {});
-                    }
-                  } else if (trailSl !== prevTrailSl) {
-                    await this.userTradeModel.updateOne({ _id: trade._id }, { $set: { trailSlPrice: trailSl, peakPnlPct: peak } }).catch(() => {});
-                  }
-                }
-              }
-            }
-
-            // ── HEDGE trades only from here (main already continued above) ──
-            // Hedge: NO SL on Binance, only TP (to catch spikes)
-            const gridReplacing = await this.isGridReplacing(telegramId, symbol);
-            if (gridReplacing) {
-              this.logger.debug(`[RealTrading] ${symbol} user ${telegramId}: protectOpenTrades skipped — grid fill in progress`);
-              continue;
-            }
-            const effectiveSlPrice = slPrice;
-            // Hedge trades: skip SL — hedge has no SL, only TP
-            // SL cooldown check only for non-hedge (but we already skip main above)
-            const slCooldownKey = `cache:sl-placed:${telegramId}:${symbol}`;
-            const slRecentlyPlaced = await this.redisService.get(slCooldownKey);
-            if (false && !algo?.hasSl && effectiveSlPrice && !slRecentlyPlaced) { // DISABLED for hedge
-              // Use grid total quantity if DCA enabled
-              const slQty = trade.gridLevels?.length > 0
-                ? trade.gridLevels.filter((g: any) => g.status === "FILLED").reduce((sum: number, g: any) => sum + (g.quantity || 0), 0) || trade.quantity
-                : trade.quantity;
-              this.logger.warn(`[RealTrading] ${symbol} user ${telegramId}: SL missing — placing at $${effectiveSlPrice} qty=${slQty}`);
-              try {
-                // Cancel existing SL if we have an ID (prevent duplicates on Binance)
-                if (trade.binanceSlAlgoId) {
-                  await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, trade.binanceSlAlgoId).catch(() => {});
-                }
-                const roundedSl = round(effectiveSlPrice);
-                const slOrder = await this.binanceService.setStopLoss(
-                  keys.apiKey, keys.apiSecret, symbol, roundedSl,
-                  direction as "LONG" | "SHORT", slQty,
-                );
-                const newId = slOrder?.algoId?.toString() ?? slOrder?.orderId?.toString();
-                await this.userTradeModel.updateOne({ _id: trade._id }, { $set: { binanceSlAlgoId: newId } });
-                // Set cooldown to prevent spam (10 minutes)
-                await this.redisService.set(slCooldownKey, "1", 600);
-                await this.telegramService.sendTelegramMessage(chatId,
-                  `🛡️ *Bao Ve Vi The: SL Duoc Dat Lai*\n\n${symbol} ${direction}\nSL: *${fmtP(roundedSl)}*\n_SL bi mat — da tu dong dat lai de bao ve vi the._`
-                ).catch(() => {});
-              } catch (err) {
-                const errMsg = err?.message ?? "";
-                // Position is gone or SL already triggered — mark trade as closed
-                const isPositionGone = (errMsg.includes("GTE") && errMsg.includes("open positions"))
-                  || errMsg.includes("immediately trigger");
-                if (isPositionGone) {
-                  this.logger.log(`[RealTrading] ${symbol} user ${telegramId}: SL failed (${errMsg}) — position likely closed on Binance`);
-                  const exitP = this.marketDataService.getLatestPrice(symbol);
-                  let pnlP = 0, pnlU = 0;
-                  if (exitP && trade.entryPrice) {
-                    pnlP = direction === "LONG"
-                      ? ((exitP - trade.entryPrice) / trade.entryPrice) * 100
-                      : ((trade.entryPrice - exitP) / trade.entryPrice) * 100;
-                    pnlU = (pnlP / 100) * (trade.notionalUsdt || 0);
-                  }
-                  const updated = await this.userTradeModel.findOneAndUpdate(
-                    { _id: (trade as any)._id, status: "OPEN" },
-                    { $set: { status: "CLOSED", closeReason: "BINANCE_CLOSED", closedAt: new Date(),
-                      ...(exitP ? { exitPrice: exitP, pnlPercent: pnlP, pnlUsdt: pnlU } : {}) } },
-                    { new: true },
-                  );
-                  if (updated) {
-                    // Resolve the associated signal so it doesn't stay ACTIVE in app
-                    const closeR = pnlP >= 0 ? "TAKE_PROFIT" : "STOP_LOSS";
-                    await this.signalQueueService.resolveActiveSignal(symbol, exitP, closeR as any).catch(e =>
-                      this.logger.warn(`[RealTrading] ${symbol}: failed to resolve signal: ${e?.message}`),
-                    );
-                    const s = pnlP >= 0 ? "+" : "";
-                    const emoji = pnlP >= 0 ? "✅" : "❌";
-                    await this.telegramService.sendTelegramMessage(chatId,
-                      `${emoji} *Real Mode: Lenh Da Dong*\n━━━━━━━━━━━━━━━━━━\n\n${symbol} ${direction}\nPnL: *${s}${pnlP.toFixed(2)}% (${s}${pnlU.toFixed(2)} USDT)*\n_Vi the da dong tren Binance_`
-                    ).catch(() => {});
-                  }
-                  continue;
-                }
-                this.logger.error(`[RealTrading] ${symbol} user ${telegramId}: SL re-place FAILED: ${errMsg}`);
-                // Only warn once — set a Redis key to prevent spamming every 5 min
-                const warnKey = `cache:sl-warn:${telegramId}:${symbol}`;
-                const alreadyWarned = await this.redisService.get(warnKey);
-                if (!alreadyWarned) {
-                  await this.redisService.set(warnKey, "1", 3600); // 1h cooldown
-                  await this.telegramService.sendTelegramMessage(chatId,
-                    `🚨 *CANH BAO: ${symbol} Khong Co SL!*\n\nKhong the tu dong dat SL tai ${fmtP(slPrice)}.\n*Hay dong lenh hoac dat SL thu cong tren Binance ngay!*\nLoi: ${errMsg}`
-                  ).catch(() => {});
-                }
-              }
-            }
-
-            // ── TP missing ──────────────────────────────────────────────────
-            const effectiveTpPrice = tpPrice;
-            const tpCooldownKey = `cache:tp-placed:${telegramId}:${symbol}`;
-            const tpRecentlyPlaced = await this.redisService.get(tpCooldownKey);
-            if (effectiveTpPrice && !algo?.hasTp && !tpRecentlyPlaced) {
-              // Use grid total quantity if DCA enabled
-              const tpQty = trade.gridLevels?.length > 0
-                ? trade.gridLevels.filter((g: any) => g.status === "FILLED").reduce((sum: number, g: any) => sum + (g.quantity || 0), 0) || trade.quantity
-                : trade.quantity;
-              this.logger.warn(`[RealTrading] ${symbol} user ${telegramId}: TP missing — placing at $${effectiveTpPrice} qty=${tpQty}`);
-              try {
-                // Cancel existing TP if we have an ID (prevent duplicates on Binance)
-                if (trade.binanceTpAlgoId) {
-                  await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, trade.binanceTpAlgoId).catch(() => {});
-                }
-                const roundedTp = round(effectiveTpPrice);
-                const tpOrder = await this.binanceService.setTakeProfitAtPrice(
-                  keys.apiKey, keys.apiSecret, symbol, roundedTp,
-                  direction as "LONG" | "SHORT",
-                  tpQty,
-                );
-                const newId = tpOrder?.algoId?.toString() ?? tpOrder?.orderId?.toString();
-                await this.userTradeModel.updateOne({ _id: trade._id }, { $set: { binanceTpAlgoId: newId } });
-                // Set cooldown to prevent spam (10 minutes)
-                await this.redisService.set(tpCooldownKey, "1", 600);
-                // Silent — no Telegram notification for TP re-placement
-              } catch (err) {
-                const tpErr = err?.message ?? "";
-                // Position gone — don't keep retrying
-                if ((tpErr.includes("GTE") && tpErr.includes("open positions")) || tpErr.includes("immediately trigger")) {
-                  this.logger.log(`[RealTrading] ${symbol} user ${telegramId}: TP failed (${tpErr}) — position likely closed`);
-                  // SL handler above will close the trade on next cycle if not already
-                } else {
-                  this.logger.warn(`[RealTrading] ${symbol} user ${telegramId}: TP re-place failed: ${tpErr}`);
-                }
-              }
-            }
+            // SIM controls ALL trade management — no SL/TP/trail on Binance
+            // Position-gone detection (above) is the only safety check
           }
         } catch (err) {
           this.logger.error(`[RealTrading] protectOpenTrades error for user ${telegramId}: ${err?.message}`);
@@ -1857,20 +1511,13 @@ export class UserRealTradingService implements OnModuleInit {
               quantity: hedgeQty, leverage: trade.leverage || 1,
             });
             const fillPrice = parseFloat(order?.avgPrice) || currentPrice;
-            const actualTpPrice = this.hedgeManager.getHedgeTpPrice(fillPrice, hedgeDir, regime);
-            if (actualTpPrice) {
-              const pp = await this.getPricePrecision(trade.symbol);
-              await this.binanceService.setTakeProfitAtPrice(
-                keys.apiKey, keys.apiSecret, trade.symbol,
-                parseFloat(actualTpPrice.toFixed(pp)), hedgeDir as 'LONG' | 'SHORT', hedgeQty,
-              ).catch(() => {});
-            }
+            // NO TP/SL on Binance — SIM controls all exits
             await this.userTradeModel.create({
               telegramId: trade.telegramId, chatId: trade.chatId,
               symbol: trade.symbol, direction: hedgeDir,
               entryPrice: fillPrice, quantity: hedgeQty,
               leverage: trade.leverage || 1, notionalUsdt: hedgeNotional,
-              slPrice: 0, tpPrice: actualTpPrice || 0,
+              slPrice: 0, tpPrice: 0,
               status: 'OPEN', openedAt: new Date(),
               aiSignalId: trade.aiSignalId, isHedge: true,
               parentTradeId: (trade as any)._id,
@@ -2581,27 +2228,15 @@ export class UserRealTradingService implements OnModuleInit {
             });
             const fillPrice = parseFloat(order?.avgPrice) || currentPrice;
 
-            // Recalculate TP from actual fill price (not tick price) to correct for slippage
-            let actualTpPrice = action.hedgeTpPrice;
-            if (action.hedgeTpPrice && fillPrice !== currentPrice) {
-              actualTpPrice = this.hedgeManager.getHedgeTpPrice(fillPrice, hedgeDir, regime);
-            }
-
-            // Place TP for hedge
-            if (actualTpPrice) {
-              const pp = await this.getPricePrecision(mainTrade.symbol);
-              await this.binanceService.setTakeProfitAtPrice(
-                keys.apiKey, keys.apiSecret, mainTrade.symbol,
-                parseFloat(actualTpPrice.toFixed(pp)), hedgeDir as 'LONG' | 'SHORT', hedgeQty,
-              ).catch(() => {});
-            }
+            // NO TP/SL on Binance for hedge — SIM controls all exits via market order
+            // SIM trail/TP/recovery → hedgeCallback(CLOSE_HEDGE) → closePosition market order
 
             await this.userTradeModel.create({
               telegramId: sub.telegramId, chatId: sub.chatId,
               symbol: mainTrade.symbol, direction: hedgeDir,
               entryPrice: fillPrice, quantity: hedgeQty,
               leverage: mainTrade.leverage || 1, notionalUsdt: hedgeNotional,
-              slPrice: 0, tpPrice: actualTpPrice || 0,
+              slPrice: 0, tpPrice: 0,
               status: 'OPEN', openedAt: new Date(),
               aiSignalId: signalId, isHedge: true,
               parentTradeId: mainTrade._id,
@@ -2645,13 +2280,7 @@ export class UserRealTradingService implements OnModuleInit {
           });
           if (!parentTrade) continue;
 
-          // Cancel main trade SL on Binance — hedge manages risk now
-          const mainKeys = await this.userSettingsService.getApiKeys(sub.telegramId, 'binance');
-          if (mainKeys?.apiKey && (parentTrade as any).binanceSlAlgoId) {
-            await this.binanceService.cancelAlgoOrder(mainKeys.apiKey, mainKeys.apiSecret, (parentTrade as any).binanceSlAlgoId).catch(() => {});
-            await this.userTradeModel.updateOne({ _id: parentTrade._id }, { $set: { binanceSlAlgoId: null, slPrice: 0 } }).catch(() => {});
-            this.logger.log(`[UserRealTrading] Hedge open: cancelled main SL for ${sub.telegramId} ${signal.symbol}`);
-          }
+          // NO SL cancel needed — main has no SL on Binance (SIM controls all)
 
           // Check if hedge trade already exists
           const existingHedge = await this.userTradeModel.findOne({
@@ -2698,22 +2327,8 @@ export class UserRealTradingService implements OnModuleInit {
             continue; // Don't create trade record if Binance order failed
           }
 
-          // Recalculate TP from actual fill price (slippage correction)
-          const regime = (signal as any).regime || 'MIXED';
-          const actualTpPrice = this.hedgeManager.getHedgeTpPrice(fillPrice, hedgeDir, regime);
-          if (actualTpPrice) {
-            try {
-              await this.binanceService.setTakeProfitAtPrice(
-                keys.apiKey, keys.apiSecret,
-                signal.symbol,
-                parseFloat(actualTpPrice.toFixed(pricePrec)),
-                hedgeDir as 'LONG' | 'SHORT',
-                hedgeQty,
-              );
-            } catch (err) {
-              this.logger.warn(`[UserRealTrading] Hedge TP order failed: ${err?.message}`);
-            }
-          }
+          // No TP/SL on Binance — SIM controls hedge close via market order
+          // SIM trail/TP/recovery → onHedgeEvent(CLOSE_HEDGE) → market close
 
           await this.userTradeModel.create({
             telegramId: sub.telegramId,
@@ -2725,7 +2340,7 @@ export class UserRealTradingService implements OnModuleInit {
             leverage: parentTrade.leverage || 1,
             notionalUsdt: hedgeNotional,
             slPrice: 0,
-            tpPrice: actualTpPrice || 0,
+            tpPrice: 0,
             status: 'OPEN',
             openedAt: new Date(),
             aiSignalId: signalId,
@@ -2803,36 +2418,7 @@ export class UserRealTradingService implements OnModuleInit {
             `[UserRealTrading] Hedge trade closed for ${hedge.telegramId} | ${signal.symbol} PnL: ${pnlPct.toFixed(2)}% ($${pnlUsdt}) reason=${closeReason}`,
           );
 
-          // Restore SL on main trade after hedge close (40% safety net)
-          if (!isFlip && keys?.apiKey) {
-            const mainTrd = await this.userTradeModel.findOne({
-              telegramId: hedge.telegramId, aiSignalId: signalId,
-              status: 'OPEN', isHedge: { $ne: true },
-            });
-            if (mainTrd) {
-              const mainEntry = (mainTrd as any).gridAvgEntry || mainTrd.entryPrice;
-              const slPct = 40;
-              const restoredSl = mainTrd.direction === 'LONG'
-                ? +(mainEntry * (1 - slPct / 100)).toFixed(6)
-                : +(mainEntry * (1 + slPct / 100)).toFixed(6);
-              const pp = await this.getPricePrecision(signal.symbol);
-              const roundedSl = parseFloat(restoredSl.toFixed(pp));
-              const slQty = mainTrd.gridLevels?.length > 0
-                ? mainTrd.gridLevels.filter((g: any) => g.status === 'FILLED').reduce((s: number, g: any) => s + (g.quantity || 0), 0) || mainTrd.quantity
-                : mainTrd.quantity;
-              try {
-                const slOrder = await this.binanceService.setStopLoss(
-                  keys.apiKey, keys.apiSecret, signal.symbol, roundedSl,
-                  mainTrd.direction as 'LONG' | 'SHORT', slQty,
-                );
-                const newSlId = slOrder?.algoId?.toString() ?? slOrder?.orderId?.toString();
-                await this.userTradeModel.updateOne({ _id: mainTrd._id }, { $set: { slPrice: roundedSl, binanceSlAlgoId: newSlId } });
-                this.logger.log(`[UserRealTrading] Hedge close: restored SL $${roundedSl} for ${hedge.telegramId} ${signal.symbol}`);
-              } catch (err) {
-                this.logger.error(`[UserRealTrading] Hedge close: SL restore FAILED ${signal.symbol}: ${err?.message}`);
-              }
-            }
-          }
+          // NO SL/TP restore — SIM controls all exits via market order
 
           // FLIP: Close main trade (old direction) + open new main (flipped direction)
           if (isFlip) {
