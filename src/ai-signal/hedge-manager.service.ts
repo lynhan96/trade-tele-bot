@@ -261,7 +261,7 @@ export class HedgeManagerService {
         }
         return count;
       })();
-      const hedgeSizeRatio = consecutiveWins >= 3 ? 1.0 : 0.75;
+      const hedgeSizeRatio = consecutiveWins >= 7 ? 1.0 : 0.75;
       const hedgeNotional = positionNotional * hedgeSizeRatio;
       const hedgeTpPrice = this.getHedgeTpPrice(currentPrice, hedgeDirection, regime);
 
