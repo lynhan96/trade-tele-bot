@@ -200,11 +200,29 @@ export class HedgeManagerService {
               this.logger.log(`[${ctx.coin}] Hedge blocked: RSI15m=${rsi15m.toFixed(1)} (need ${ctx.direction === 'LONG' ? '<' : '>'}${rsiThresh})${freshDrop ? ' [fresh drop]' : ''}`);
               return null;
             }
+            // Candle color: last 2 candles must align with hedge direction
+            // Main LONG → hedge SHORT: need red candles (sellers in control)
+            // Main SHORT → hedge LONG: need green candles (buyers in control)
+            const last3 = closes15m.slice(-3);
+            if (last3.length >= 3) {
+              const candle1 = last3[2] - last3[1]; // latest candle
+              const candle2 = last3[1] - last3[0]; // previous candle
+              const hedgeNeedsDown = ctx.direction === 'LONG'; // hedge SHORT needs red
+              const candleAligned = hedgeNeedsDown
+                ? (candle1 < 0 || candle2 < 0) // at least 1 of last 2 red
+                : (candle1 > 0 || candle2 > 0); // at least 1 of last 2 green
+
+              if (!candleAligned) {
+                this.logger.log(`[${ctx.coin}] Hedge blocked: candles wrong color (need ${hedgeNeedsDown ? 'red' : 'green'})${freshDrop ? ' [fresh drop]' : ''}`);
+                return null;
+              }
+            }
+
             (ctx as any)._lastRsi15m = rsi15m;
-            this.logger.log(`[${coin}] Hedge RSI confirmed: 15m=${rsi15m.toFixed(1)}${freshDrop ? ' [fresh drop]' : ''}`);
+            this.logger.log(`[${coin}] Hedge confirmed: RSI=${rsi15m.toFixed(1)} candle=OK${freshDrop ? ' [fresh drop]' : ''}`);
           }
         } catch (err) {
-          this.logger.log(`[${ctx.coin}] RSI check FAILED — proceeding: ${err?.message}`);
+          this.logger.log(`[${ctx.coin}] RSI/candle check FAILED — proceeding: ${err?.message}`);
         }
       }
 
