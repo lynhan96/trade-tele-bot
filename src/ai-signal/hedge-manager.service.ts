@@ -162,11 +162,10 @@ export class HedgeManagerService {
       const freshDrop = !isFirstCycle && lastHedgeWasProfit;
 
       if (freshDrop) {
-        // Price recovered then dropped again → enter at normal trigger, no strict conditions
-        this.logger.log(`[${ctx.coin}] Fresh drop: last hedge profitable → enter at normal trigger -${triggerPct}%`);
+        // Price recovered then dropped again → normal trigger (skip strict 1.2x + price worse)
+        this.logger.log(`[${ctx.coin}] Fresh drop: last hedge profitable → normal trigger -${triggerPct}%`);
       } else if (!isFirstCycle && realHedges.length > 0) {
         // Continuous bleed: last hedge LOST → stricter conditions
-        // 1. Price should be near or worse than last hedge exit
         const lastExitPrice = lastHedge?.exitPrice || 0;
         if (lastExitPrice > 0) {
           const priceWorse = ctx.direction === 'LONG'
@@ -176,34 +175,38 @@ export class HedgeManagerService {
             return null;
           }
         }
-
-        // 2. PnL must be worse than trigger * 1.2
         if (pnlPct > -cfg.hedgePartialTriggerPct * 1.2) {
           this.logger.log(`[${ctx.coin}] Hedge blocked (bleed): PnL ${pnlPct.toFixed(2)}% > -${(cfg.hedgePartialTriggerPct * 1.2).toFixed(2)}%`);
           return null;
         }
+      }
 
-        // 3. RSI momentum confirmation — only for continuous bleed
+      // RSI confirmation for ALL cycle 2+ (including fresh drop)
+      // Prevents blind entry when market reverses — must confirm momentum
+      if (!isFirstCycle) {
         try {
           const coin = ctx.coin || ctx.symbol?.replace('USDT', '');
           const closes15m = await this.marketDataService.getClosePrices(coin, '15m');
           if (closes15m.length >= 14) {
             const rsiVals = RSI.calculate({ period: 14, values: closes15m });
             const rsi15m = rsiVals[rsiVals.length - 1];
-            const rsiThresh = pnlPct < -triggerPct * 1.5 ? 45 : 40;
+            // Count consecutive wins from history (for RSI relaxation)
+            const consWinsForRsi = (() => { let c = 0; for (let i = realHedges.length - 1; i >= 0; i--) { if ((realHedges[i].pnlUsdt || 0) > 0) c++; else break; } return c; })();
+            // Relax threshold when deeply negative or fresh drop with consecutive wins
+            const relaxed = pnlPct < -triggerPct * 1.5 || (freshDrop && consWinsForRsi >= 3);
+            const rsiThresh = relaxed ? 45 : 40;
             const rsiOk = ctx.direction === 'LONG' ? rsi15m < rsiThresh : rsi15m > (100 - rsiThresh);
             if (!rsiOk) {
-              this.logger.log(`[${ctx.coin}] Hedge blocked: RSI15m=${rsi15m.toFixed(1)} (need ${ctx.direction === 'LONG' ? '<' : '>'}${rsiThresh})`);
+              this.logger.log(`[${ctx.coin}] Hedge blocked: RSI15m=${rsi15m.toFixed(1)} (need ${ctx.direction === 'LONG' ? '<' : '>'}${rsiThresh})${freshDrop ? ' [fresh drop]' : ''}`);
               return null;
             }
             (ctx as any)._lastRsi15m = rsi15m;
-            this.logger.log(`[${coin}] Hedge re-entry RSI confirmed: 15m=${rsi15m.toFixed(1)}`);
+            this.logger.log(`[${coin}] Hedge RSI confirmed: 15m=${rsi15m.toFixed(1)}${freshDrop ? ' [fresh drop]' : ''}`);
           }
         } catch (err) {
           this.logger.log(`[${ctx.coin}] RSI check FAILED — proceeding: ${err?.message}`);
         }
       }
-      // Cycle 1 + freshDrop: enter immediately at normal trigger (no RSI, no strict conditions)
 
       // Double-check: DB might already have an OPEN hedge (concurrent tick race)
       const existingHedge = await this.orderModel.findOne({
