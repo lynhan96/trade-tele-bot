@@ -1120,13 +1120,22 @@ export async function runLiquidationRisk() {
 
     const effectiveLeverage = totalNotional / WALLET_BALANCE
 
-    if (effectiveLeverage > 8) {
-      alerts.push(`🚨 CRITICAL: Effective leverage ${effectiveLeverage.toFixed(1)}x ($${totalNotional.toFixed(0)} / $${WALLET_BALANCE}) — REDUCE exposure! Consider lowering maxActiveSignals`)
-      // Auto-reduce maxActiveSignals if critically overleveraged
-      const currentActive = activeSignals.length
-      if (currentActive > 3) {
-        await autoConfig("maxActiveSignals", Math.max(5, currentActive - 2), `leverage ${effectiveLeverage.toFixed(1)}x > 8x`)
+    // Note: gross leverage includes hedge (offsets main risk), so actual risk is lower
+    // Only auto-reduce when VERY high (>15x) AND system not winning
+    if (effectiveLeverage > 15) {
+      alerts.push(`🚨 CRITICAL: Gross leverage ${effectiveLeverage.toFixed(1)}x ($${totalNotional.toFixed(0)} / $${WALLET_BALANCE}) — very high exposure`)
+      const recentSigs = await db.collection("ai_signals").find({ status: "COMPLETED", pnlUsdt: { $exists: true } }).sort({ positionClosedAt: -1 }).limit(10).toArray()
+      const wr = recentSigs.length >= 5 ? recentSigs.filter(s => (s.pnlUsdt || 0) > 0).length / recentSigs.length : 0
+      if (wr < 0.7) {
+        const currentActive = activeSignals.length
+        if (currentActive > 3) {
+          await autoConfig("maxActiveSignals", Math.max(5, currentActive - 2), `leverage ${effectiveLeverage.toFixed(1)}x + WR ${(wr*100).toFixed(0)}%`)
+        }
+      } else {
+        alerts.push(`ℹ️ WR ${(wr*100).toFixed(0)}% — keeping slots despite leverage`)
       }
+    } else if (effectiveLeverage > 8) {
+      alerts.push(`⚠️ High gross leverage ${effectiveLeverage.toFixed(1)}x (includes hedge offset) — monitoring`)
     } else if (effectiveLeverage > 5) {
       alerts.push(`⚠️ High leverage ${effectiveLeverage.toFixed(1)}x ($${totalNotional.toFixed(0)} / $${WALLET_BALANCE}) — monitor closely`)
     }
