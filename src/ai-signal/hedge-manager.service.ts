@@ -200,6 +200,18 @@ export class HedgeManagerService {
               this.logger.log(`[${ctx.coin}] Hedge blocked: RSI15m=${rsi15m.toFixed(1)} (need ${ctx.direction === 'LONG' ? '<' : '>'}${rsiThresh})${freshDrop ? ' [fresh drop]' : ''}`);
               return null;
             }
+
+            // Overbought/Oversold guard — don't enter hedge at extreme RSI
+            // Hedge LONG (main SHORT): RSI > 70 = overbought = reversal likely → SKIP
+            // Hedge SHORT (main LONG): RSI < 30 = oversold = bounce likely → SKIP
+            const hedgeDir = ctx.direction === 'LONG' ? 'SHORT' : 'LONG';
+            const isOverbought = hedgeDir === 'LONG' && rsi15m > 70;
+            const isOversold = hedgeDir === 'SHORT' && rsi15m < 30;
+            if (isOverbought || isOversold) {
+              this.logger.log(`[${ctx.coin}] Hedge blocked: RSI ${rsi15m.toFixed(1)} ${isOverbought ? 'OVERBOUGHT (>70)' : 'OVERSOLD (<30)'} — reversal likely${freshDrop ? ' [fresh drop]' : ''}`);
+              return null;
+            }
+
             // Candle color: last 2 candles must align with hedge direction
             // Main LONG → hedge SHORT: need red candles (sellers in control)
             // Main SHORT → hedge LONG: need green candles (buyers in control)
