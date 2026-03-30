@@ -353,7 +353,7 @@ export class HedgeManagerService {
       // ── 0. Timeout: hedge held >4h, PnL < +0.5% but profitable → sideway, close ──
       if (ctx.hedgeOpenedAt) {
         const ageMs = Date.now() - new Date(ctx.hedgeOpenedAt).getTime();
-        if (ageMs > 4 * 3600_000 && hedgePnlPct < 0.5 && hedgePnlPct > 0) {
+        if (ageMs > 6 * 3600_000 && hedgePnlPct < 1.0 && hedgePnlPct > 0) {
           this.logger.log(
             `[${ctx.coin}] Hedge TIMEOUT | ${(ageMs / 3600_000).toFixed(1)}h held, PnL +${hedgePnlPct.toFixed(2)}% → sideway, closing`,
           );
