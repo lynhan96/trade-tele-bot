@@ -2295,20 +2295,14 @@ export class UserRealTradingService implements OnModuleInit {
           const keys = await this.userSettingsService.getApiKeys(sub.telegramId, 'binance');
           if (!keys?.apiKey) continue;
 
-          // Use actual Binance position size for hedge sizing (most accurate)
-          let filledGridNotional = parentTrade.notionalUsdt || 0;
-          try {
-            const binPositions = await this.binanceService.getOpenPositions(keys.apiKey, keys.apiSecret);
-            const mainPos = (binPositions as any[]).find((p: any) => p.symbol === signal.symbol && (
-              (parentTrade.direction === 'LONG' && parseFloat(p.positionAmt || p.positionAmount || '0') > 0) ||
-              (parentTrade.direction === 'SHORT' && parseFloat(p.positionAmt || p.positionAmount || '0') < 0)
-            ));
-            if (mainPos) {
-              const amt = Math.abs(parseFloat(mainPos.positionAmt || mainPos.positionAmount || '0'));
-              const entry = parseFloat(mainPos.entryPrice || '0');
-              if (amt > 0 && entry > 0) filledGridNotional = amt * entry;
-            }
-          } catch {}
+          // Hedge sizing: 75% of user's configured volume (from SIM signal filled vol)
+          // Use getVolForUser for the full configured volume, then calculate filled portion
+          const userFullVol = this.getVolForUser(signal.symbol, sub);
+          const simGrids: any[] = (signal as any).gridLevels || [];
+          const simFilledPct = simGrids.length > 0
+            ? simGrids.filter((g: any) => g.status === 'FILLED').reduce((s: number, g: any) => s + (g.volumePct || 0), 0) / 100
+            : 0.4; // L0 = 40% default
+          const filledGridNotional = userFullVol * simFilledPct;
           const hedgeNotional = filledGridNotional * 0.75;
           if (hedgeNotional <= 0) continue;
 
