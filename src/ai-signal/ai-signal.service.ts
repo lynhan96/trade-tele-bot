@@ -547,6 +547,52 @@ export class AiSignalService implements OnModuleInit {
       return;
     }
 
+    // ═══ TIER 2.5: BTC Trend + Price Position Filter ═══
+    // Block LONG when BTC 4h EMA bearish — altcoins dump with BTC
+    // Block SHORT when BTC 4h EMA bullish — altcoins pump with BTC
+    try {
+      const btcCloses = await this.marketDataService.getClosePrices('BTC', '4h');
+      if (btcCloses.length >= 50) {
+        const { EMA } = require('technicalindicators');
+        const ema21 = EMA.calculate({ period: 21, values: btcCloses });
+        const ema50 = EMA.calculate({ period: 50, values: btcCloses });
+        const btcBearish = ema21[ema21.length - 1] < ema50[ema50.length - 1];
+        const btcBullish = ema21[ema21.length - 1] > ema50[ema50.length - 1];
+        if (signalResult.isLong && btcBearish) {
+          this.logger.log(`[AiSignal] ${coinUpper} LONG blocked — BTC 4h EMA bearish (21 < 50)`);
+          return;
+        }
+        if (!signalResult.isLong && btcBullish) {
+          this.logger.log(`[AiSignal] ${coinUpper} SHORT blocked — BTC 4h EMA bullish (21 > 50)`);
+          return;
+        }
+      }
+    } catch {}
+
+    // Block entry at extreme price position in 24h range
+    // LONG at top (>70%) = buying high → likely dump. SHORT at bottom (<30%) = shorting low → likely bounce
+    try {
+      const candles1h = await this.marketDataService.getClosePrices(coin, '1h');
+      if (candles1h.length >= 24) {
+        const recent24 = candles1h.slice(-24);
+        const high24 = Math.max(...recent24);
+        const low24 = Math.min(...recent24);
+        const range = high24 - low24;
+        if (range > 0) {
+          const currentPrice = recent24[recent24.length - 1];
+          const posInRange = ((currentPrice - low24) / range) * 100;
+          if (signalResult.isLong && posInRange > 70) {
+            this.logger.log(`[AiSignal] ${coinUpper} LONG blocked — price at ${posInRange.toFixed(0)}% of 24h range (buying high)`);
+            return;
+          }
+          if (!signalResult.isLong && posInRange < 30) {
+            this.logger.log(`[AiSignal] ${coinUpper} SHORT blocked — price at ${posInRange.toFixed(0)}% of 24h range (shorting low)`);
+            return;
+          }
+        }
+      }
+    } catch {}
+
     // ═══ TIER 3: Risk Score ═══
     let signalFuturesData: { fundingRate?: number; longShortRatio?: number; takerBuyRatio?: number; openInterestUsd?: number } | undefined;
     try {

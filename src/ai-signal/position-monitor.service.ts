@@ -1176,6 +1176,32 @@ export class PositionMonitorService implements OnModuleInit {
       }
     }
 
+    // ─── Time Stop: 12h + PnL > 0 or PnL < -1% → close stagnant signal ──
+    if ((signal as any).executedAt && !this.resolvingSymbols.has(sigKey)) {
+      const ageH = (Date.now() - new Date((signal as any).executedAt).getTime()) / 3600000;
+      if (ageH >= 12) {
+        const currentEntry = (signal as any).gridAvgEntry || entryPrice;
+        const timePnlPct = direction === "LONG"
+          ? ((price - currentEntry) / currentEntry) * 100
+          : ((currentEntry - price) / currentEntry) * 100;
+        // Close if profitable (any amount) or losing > 1% — don't hold stagnant positions
+        if (timePnlPct > 0 || timePnlPct < -1) {
+          this.logger.log(`[PositionMonitor] ${sigKey} TIME STOP: ${ageH.toFixed(0)}h held, PnL ${timePnlPct.toFixed(2)}% → closing`);
+          if (!this.resolvingSymbols.has(sigKey)) {
+            this.resolvingSymbols.add(sigKey);
+            this.unregisterListener(signal);
+            try {
+              await this.signalQueueService.resolveActiveSignal(sigKey, price, "TIME_STOP" as any);
+              this.userRealTradingService.closeRealPosition(0, 0, symbol, "TIME_STOP").catch(() => {});
+            } finally {
+              this.resolvingSymbols.delete(sigKey);
+            }
+            return;
+          }
+        }
+      }
+    }
+
     // ─── Original TP/SL check (non-grid signals) ──────────────────────────
     // Re-read SL/TP from FRESH DB order (mainOrder loaded at tick start may be stale after grid init / hedge)
     const freshMainOrder = await this.orderModel.findOne({

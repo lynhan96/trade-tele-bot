@@ -174,7 +174,7 @@ export const DEFAULT_TRADING_CONFIG: TradingConfig = {
   pricePositionBlockLong: 70, pricePositionBlockShort: 30,
 
   // Time stop
-  timeStopHours: 24, timeStopPnlRange: 0.5,
+  timeStopHours: 12, timeStopPnlRange: 1.0,
 
   // DCA Grid — 4 levels to average down before hedge trigger
   gridLevelCount: 4, gridFillCooldownMin: 5,
