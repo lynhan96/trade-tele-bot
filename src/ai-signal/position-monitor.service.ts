@@ -970,8 +970,7 @@ export class PositionMonitorService implements OnModuleInit {
           }
         }
 
-        // When hedge is active: NO SL — hedge IS the risk management
-        // Safety net: NET_NEGATIVE (-15% net PnL) handles truly bad positions
+        // When hedge is active: NO SL — hedge cycles until recovery (NET_POSITIVE > 2%)
         if (this.resolvingSymbols.has(sigKey)) return; // Prevent concurrent hedge/FLIP/NET_POSITIVE
 
         // ── Net Positive/Negative Exit: banked hedge profit + main unrealized → close all ──
@@ -1004,22 +1003,16 @@ export class PositionMonitorService implements OnModuleInit {
         }
         const netPnlUsdt = mainUnrealizedUsdt + bankedProfit + currentHedgePnlUsdt;
 
-        let forceCloseReason: "NET_POSITIVE" | "NET_NEGATIVE" | null = null;
+        let forceCloseReason: "NET_POSITIVE" | null = null;
 
-        // NET_POSITIVE: total net PnL > 3% of filledVol → close all (profitable)
-        const netPositiveThreshold = Math.max(filledVol * 0.03, 20);
-        // NET_NEGATIVE: total net PnL < -15% of filledVol → close all (cut loss)
-        const netNegativeThreshold = filledVol * -0.15;
+        // Only close when total net PnL > 2% of filledVol — let hedge system cycle until recovery
+        // No NET_NEGATIVE: vol decay after FLIP naturally limits downside
+        const netPositiveThreshold = Math.max(filledVol * 0.02, 10);
         if (netPnlUsdt > netPositiveThreshold) {
           this.logger.log(
             `[PositionMonitor] ${sigKey} NET POSITIVE EXIT | main=$${mainUnrealizedUsdt.toFixed(2)} banked=$${bankedProfit.toFixed(2)} hedge=$${currentHedgePnlUsdt.toFixed(2)} → total=$${netPnlUsdt.toFixed(2)} > threshold=$${netPositiveThreshold.toFixed(2)}`,
           );
           forceCloseReason = "NET_POSITIVE";
-        } else if (netPnlUsdt < netNegativeThreshold) {
-          this.logger.warn(
-            `[PositionMonitor] ${sigKey} NET NEGATIVE EXIT | main=$${mainUnrealizedUsdt.toFixed(2)} banked=$${bankedProfit.toFixed(2)} hedge=$${currentHedgePnlUsdt.toFixed(2)} → total=$${netPnlUsdt.toFixed(2)} < threshold=$${netNegativeThreshold.toFixed(2)}`,
-          );
-          forceCloseReason = "NET_NEGATIVE";
         }
 
         // Check main TP hit while hedge active → FLIP takes priority over NET_POSITIVE
@@ -1038,7 +1031,7 @@ export class PositionMonitorService implements OnModuleInit {
 
         if (!forceCloseReason && !mainTpHitForFlip) return; // No event → skip
 
-        // ── Force close (NET_POSITIVE / NET_NEGATIVE) — NOT for FLIP ──
+        // ── Force close (NET_POSITIVE only) — NOT for FLIP ──
         // FLIP falls through to normal TP/SL check which has full FLIP logic
 
         if (mainTpHitForFlip) {
@@ -1804,11 +1797,11 @@ export class PositionMonitorService implements OnModuleInit {
     (signal as any).hedgePeakPnlPct = 0;
 
     // Disable SL when hedge active — hedge IS the risk management
-    // SL disabled — hedge IS the risk management. NET_NEGATIVE (-15% net) is the safety net.
+    // SL disabled — hedge cycles until recovery (NET_POSITIVE > 2% net).
     (signal as any).stopLossPrice = 0;
     (signal as any).stopLossPercent = 0;
     (signal as any).hedgeSafetySlPrice = 0;
-    this.logger.log(`[PositionMonitor] ${sigKey} SL DISABLED — hedge active, NET_NEGATIVE (-15% net) is safety net`);
+    this.logger.log(`[PositionMonitor] ${sigKey} SL DISABLED — hedge active, cycles until NET_POSITIVE > 2%`);
 
     // Update MAIN order SL to 0 (hedge manages risk)
     await this.orderModel.findOneAndUpdate(
@@ -1957,7 +1950,7 @@ export class PositionMonitorService implements OnModuleInit {
     };
 
     // After hedge close: restore wide SL (40%) — let hedge continue cycling.
-    // Safety net: NET_NEGATIVE (-15% net PnL) handles truly bad positions.
+    // No safety net cut-loss — hedge cycles until NET_POSITIVE > 2%. Vol decay limits downside.
     const avgEntryForSl = (signal as any).gridAvgEntry || signal.entryPrice;
     const allHistory: any[] = [...((signal as any).hedgeHistory || []), historyEntry];
     const totalBanked = allHistory.reduce((s: number, h: any) => s + (h.pnlUsdt || 0), 0);
