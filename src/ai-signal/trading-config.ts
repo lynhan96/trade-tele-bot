@@ -148,12 +148,13 @@ export interface TradingConfig {
 
 export const DEFAULT_TRADING_CONFIG: TradingConfig = {
   // SL/TP
-  slMin: 1.5, slMax: 2.5, tpMin: 2.0, tpMax: 3.0,
+  slMin: 1.5, slMax: 2.5, tpMin: 3.0, tpMax: 3.0,
   tpRrMultiplier: 1.5, dcaTpPct: 3.0,
 
-  // Trailing
-  trailTrigger: 2.5, trailKeepRatio: 0.80,
-  tpProximityLock: 0.5, tpBoostTrigger: 2.5, tpBoostExtend: 2.0, tpBoostCap: 4.0,
+  // Trailing — trail only AFTER TP boost (3.5% > default TP 3%)
+  // Before TP: breakeven lock at 2% protects. After TP boost: trail captures extended run.
+  trailTrigger: 3.5, trailKeepRatio: 0.85,
+  tpProximityLock: 0.5, tpBoostTrigger: 2.5, tpBoostExtend: 2.0, tpBoostCap: 6.0,
 
   // Confidence
   confidenceFloor: 68, confidenceFloorRanging: 70, confidenceFloorStrongBull: 80,

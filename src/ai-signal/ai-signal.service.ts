@@ -567,6 +567,28 @@ export class AiSignalService implements OnModuleInit {
       }
     } catch {}
 
+    // ═══ Coin-level 4h EMA trend filter ═══
+    // Block LONG when coin's own 4h EMA21 < EMA50 (downtrend) — prevents falling knife
+    // Block SHORT when coin's own 4h EMA21 > EMA50 (uptrend) — prevents shorting strength
+    try {
+      const coinCloses4h = await this.marketDataService.getClosePrices(coin, '4h');
+      if (coinCloses4h.length >= 50) {
+        const { EMA } = require('technicalindicators');
+        const coinEma21 = EMA.calculate({ period: 21, values: coinCloses4h });
+        const coinEma50 = EMA.calculate({ period: 50, values: coinCloses4h });
+        const coinBearish = coinEma21[coinEma21.length - 1] < coinEma50[coinEma50.length - 1];
+        const coinBullish = coinEma21[coinEma21.length - 1] > coinEma50[coinEma50.length - 1];
+        if (signalResult.isLong && coinBearish) {
+          this.logger.log(`[AiSignal] ${coinUpper} LONG blocked — coin 4h EMA bearish (21 < 50)`);
+          return;
+        }
+        if (!signalResult.isLong && coinBullish) {
+          this.logger.log(`[AiSignal] ${coinUpper} SHORT blocked — coin 4h EMA bullish (21 > 50)`);
+          return;
+        }
+      }
+    } catch {}
+
     // Block entry at extreme price position in 24h range
     // LONG at top (>70%) = buying high → likely dump. SHORT at bottom (<30%) = shorting low → likely bounce
     try {
