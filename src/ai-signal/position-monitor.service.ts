@@ -660,8 +660,8 @@ export class PositionMonitorService implements OnModuleInit {
       const skipTrailSl = !!hedgeOrder; // hedge manages risk when active, skip trail SL
       const filledGrids = grids.filter((g) => g.status === "FILLED");
       if (filledGrids.length > 0) {
-        const TRAIL_TRIGGER = cfg.trailTrigger ?? 3.5;
-        const TRAIL_KEEP_RATIO = cfg.trailKeepRatio ?? 0.85;
+        const TRAIL_TRIGGER = cfg.trailTrigger ?? 2.0;
+        const TRAIL_KEEP_RATIO = cfg.trailKeepRatio ?? 0.75;
         const pnlFromAvg = signal.direction === "LONG"
           ? ((price - avgEntry) / avgEntry) * 100
           : ((avgEntry - price) / avgEntry) * 100;
@@ -808,8 +808,8 @@ export class PositionMonitorService implements OnModuleInit {
     // Skip trail SL when hedge is active — hedge manages risk
     if (!isGridSignal && !hedgeOrder) {
       // Trail params: same as grid path + real trading for consistency
-      const TRAIL_TRIGGER = cfg.trailTrigger ?? 3.5;
-      const TRAIL_KEEP_RATIO = cfg.trailKeepRatio ?? 0.85;
+      const TRAIL_TRIGGER = cfg.trailTrigger ?? 2.0;
+      const TRAIL_KEEP_RATIO = cfg.trailKeepRatio ?? 0.75;
 
       const prevPeak = orderMeta.peakPnlPct ?? (signal as any).peakPnlPct ?? 0;
       if (pnlPct > prevPeak) {
