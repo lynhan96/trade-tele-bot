@@ -1370,29 +1370,21 @@ export class PositionMonitorService implements OnModuleInit {
       // so flipped signal starts fresh — prevents stale cooldown blocking new hedges
       await this.hedgeManager.cleanupSignal((signal as any)._id?.toString()).catch(() => {});
 
-      // 5. Re-init grid for new direction
-      // Keep original signal's simNotional (not hedge notional) — L0 = full hedge vol
-      const origSimNotional = signal.simNotional || 1000;
+      // 5. Re-init grid for new direction — NO DCA after FLIP to reduce vol exposure
       const hedgeVol = newNotional; // actual hedge volume (e.g. 750)
-      const hedgeVolPct = Math.round((hedgeVol / origSimNotional) * 100);
-      const remainingPct = 100 - hedgeVolPct;
-      const hedgeTriggerForFlip = hedgeCfgFlip.hedgePartialTriggerPct || 3;
-      const flipGridStep = hedgeCfgFlip.hedgeEnabled ? hedgeTriggerForFlip / 2 : Math.max(4, flipSlPct / 3);
       const newGrids: any[] = [
-        // L0 = full hedge volume, already filled
-        { level: 0, deviationPct: 0, fillPrice: newEntry, volumePct: hedgeVolPct, status: "FILLED", filledAt: new Date(), simNotional: hedgeVol, simQuantity: hedgeVol / newEntry },
+        // L0 = full hedge volume, already filled. No DCA levels — FLIP trades run at hedge vol only
+        { level: 0, deviationPct: 0, fillPrice: newEntry, volumePct: 100, status: "FILLED", filledAt: new Date(), simNotional: hedgeVol, simQuantity: hedgeVol / newEntry },
       ];
-      // Remaining volume split into DCA levels (if any remaining)
-      if (remainingPct > 0) {
-        newGrids.push({ level: 1, deviationPct: parseFloat(flipGridStep.toFixed(3)), fillPrice: 0, volumePct: remainingPct, status: "PENDING" });
-      }
       (signal as any).gridLevels = newGrids;
       (signal as any).gridFilledCount = 1;
       (signal as any).gridClosedCount = 0;
-      (signal as any).simNotional = origSimNotional;
+      (signal as any).simNotional = hedgeVol;
+      (signal as any).simQuantity = hedgeVol / newEntry;
 
       await this.signalQueueService.updateSignalGrid((signal as any)._id.toString(), newGrids, 1, 0);
       await this.signalQueueService.initGridSignal((signal as any)._id.toString(), newEntry, newSl, newEntry);
+      await this.signalQueueService.updateSimVolume((signal as any)._id.toString(), hedgeVol, hedgeVol / newEntry);
 
       // Write grid metadata to promoted FLIP_MAIN order
       if (flipHedgeOrderDoc) {

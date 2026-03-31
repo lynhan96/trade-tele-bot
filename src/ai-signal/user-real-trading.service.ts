@@ -1571,6 +1571,9 @@ export class UserRealTradingService implements OnModuleInit {
 
       for (const trade of gridTrades) {
         try {
+          // No DCA after FLIP — keep vol reduced
+          if ((trade as any).isFlipped) continue;
+
           const currentPrice = this.marketDataService.getLatestPrice(trade.symbol);
           if (!currentPrice) continue;
 
@@ -2351,8 +2354,61 @@ export class UserRealTradingService implements OnModuleInit {
             continue;
           }
 
-          // Close REAL Binance hedge position
           const keys = await this.userSettingsService.getApiKeys(hedge.telegramId, 'binance');
+
+          // FLIP: keep hedge open on Binance — promote to main (no close + reopen = saves fees)
+          if (isFlip) {
+            const mainTrade = await this.userTradeModel.findOne({
+              telegramId: hedge.telegramId,
+              aiSignalId: signalId,
+              status: 'OPEN',
+              isHedge: { $ne: true },
+            });
+            if (mainTrade && keys?.apiKey) {
+              // 1. Close old MAIN on Binance (main TP hit)
+              try {
+                await this.binanceService.closePosition(
+                  keys.apiKey, keys.apiSecret,
+                  mainTrade.symbol, mainTrade.quantity, mainTrade.direction,
+                );
+                this.logger.log(`[UserRealTrading] FLIP: closed main Binance position ${mainTrade.symbol} ${mainTrade.direction}`);
+              } catch (err) {
+                this.logger.error(`[UserRealTrading] FLIP: main close FAILED: ${err?.message}`);
+              }
+
+              // 2. Close main trade record with PnL
+              const mainEntry = (mainTrade as any).gridAvgEntry || mainTrade.entryPrice;
+              const mainPnlPct = mainTrade.direction === 'LONG'
+                ? ((price - mainEntry) / mainEntry) * 100
+                : ((mainEntry - price) / mainEntry) * 100;
+              const mainPnlUsdt = Math.round((mainPnlPct / 100) * mainTrade.notionalUsdt * 100) / 100;
+
+              await this.userTradeModel.findByIdAndUpdate(mainTrade._id, {
+                status: 'CLOSED',
+                exitPrice: price,
+                pnlPercent: Math.round(mainPnlPct * 100) / 100,
+                pnlUsdt: mainPnlUsdt,
+                closeReason: 'FLIP',
+                closedAt: new Date(),
+              });
+
+              // 3. Promote hedge → main IN DB ONLY (Binance position stays open, no new order)
+              await this.userTradeModel.findByIdAndUpdate(hedge._id, {
+                isHedge: false,
+                isFlipped: true,
+                parentTradeId: null,
+                slPrice: 0,
+                tpPrice: 0,
+              });
+
+              this.logger.log(
+                `[UserRealTrading] FLIP: ${signal.symbol} main ${mainTrade.direction} closed +$${mainPnlUsdt.toFixed(2)} → hedge ${hedge.direction} promoted to main (kept on Binance, no reopen)`,
+              );
+            }
+            continue; // Don't fall through to normal hedge close
+          }
+
+          // Normal hedge close (non-FLIP): close on Binance + mark CLOSED in DB
           if (keys?.apiKey) {
             try {
               await this.binanceService.closePosition(
@@ -2371,8 +2427,7 @@ export class UserRealTradingService implements OnModuleInit {
           const pnlUsdt = Math.round((pnlPct / 100) * hedge.notionalUsdt * 100) / 100;
 
           let closeReason = 'HEDGE_CLOSE';
-          if (isFlip) closeReason = 'HEDGE_FLIP';
-          else if (action.reason?.includes('Recovery')) closeReason = 'HEDGE_RECOVERY';
+          if (action.reason?.includes('Recovery')) closeReason = 'HEDGE_RECOVERY';
           else if (action.reason?.includes('trail')) closeReason = 'HEDGE_TRAIL';
           else if (action.reason?.includes('TP')) closeReason = 'HEDGE_TP';
           else if (pnlUsdt >= 0) closeReason = 'HEDGE_TP';
@@ -2389,87 +2444,6 @@ export class UserRealTradingService implements OnModuleInit {
           this.logger.log(
             `[UserRealTrading] Hedge trade closed for ${hedge.telegramId} | ${signal.symbol} PnL: ${pnlPct.toFixed(2)}% ($${pnlUsdt}) reason=${closeReason}`,
           );
-
-          // NO SL/TP restore — SIM controls all exits via market order
-
-          // FLIP: Close main trade (old direction) + open new main (flipped direction)
-          if (isFlip) {
-            const mainTrade = await this.userTradeModel.findOne({
-              telegramId: hedge.telegramId,
-              aiSignalId: signalId,
-              status: 'OPEN',
-              isHedge: { $ne: true },
-            });
-            if (mainTrade && keys?.apiKey) {
-              // Close old main position on Binance
-              try {
-                await this.binanceService.closePosition(
-                  keys.apiKey, keys.apiSecret,
-                  mainTrade.symbol, mainTrade.quantity, mainTrade.direction,
-                );
-                this.logger.log(`[UserRealTrading] FLIP: closed main Binance position ${mainTrade.symbol} ${mainTrade.direction}`);
-              } catch (err) {
-                this.logger.error(`[UserRealTrading] FLIP: main close FAILED: ${err?.message}`);
-              }
-
-              // Close main trade record
-              const mainPnlPct = mainTrade.direction === 'LONG'
-                ? ((price - mainTrade.entryPrice) / mainTrade.entryPrice) * 100
-                : ((mainTrade.entryPrice - price) / mainTrade.entryPrice) * 100;
-              const mainPnlUsdt = Math.round((mainPnlPct / 100) * mainTrade.notionalUsdt * 100) / 100;
-
-              await this.userTradeModel.findByIdAndUpdate(mainTrade._id, {
-                status: 'CLOSED',
-                exitPrice: price,
-                pnlPercent: Math.round(mainPnlPct * 100) / 100,
-                pnlUsdt: mainPnlUsdt,
-                closeReason: 'FLIP',
-                closedAt: new Date(),
-              });
-
-              // Open new main trade in flipped direction (hedge direction becomes new main)
-              const newDirection = hedge.direction; // hedge was opposite, now becomes main
-              const newNotional = mainTrade.notionalUsdt; // same volume as original main
-              const [qtyPrec] = await Promise.all([this.getQuantityPrecision(signal.symbol)]);
-              const newQty = parseFloat((newNotional / price).toFixed(qtyPrec));
-
-              if (newQty > 0) {
-                try {
-                  const flipOrder = await this.binanceService.openPosition(keys.apiKey, keys.apiSecret, {
-                    symbol: signal.symbol,
-                    side: newDirection as 'LONG' | 'SHORT',
-                    quantity: newQty,
-                    leverage: mainTrade.leverage || 1,
-                  });
-                  const flipFill = parseFloat(flipOrder?.avgPrice || flipOrder?.price) || price;
-
-                  await this.userTradeModel.create({
-                    telegramId: hedge.telegramId,
-                    chatId: mainTrade.chatId,
-                    symbol: signal.symbol,
-                    direction: newDirection,
-                    entryPrice: flipFill,
-                    quantity: newQty,
-                    leverage: mainTrade.leverage || 1,
-                    notionalUsdt: newNotional,
-                    slPrice: 0,
-                    tpPrice: 0,
-                    status: 'OPEN',
-                    openedAt: new Date(),
-                    aiSignalId: signalId,
-                    isHedge: false,
-                    isFlipped: true,
-                  });
-
-                  this.logger.log(
-                    `[UserRealTrading] FLIP: new main trade ${signal.symbol} ${newDirection} $${newNotional.toFixed(0)} @ ${flipFill}`,
-                  );
-                } catch (err) {
-                  this.logger.error(`[UserRealTrading] FLIP: new main open FAILED: ${err?.message}`);
-                }
-              }
-            }
-          }
         } catch (err) {
           this.logger.error(`[UserRealTrading] Hedge close error for ${hedge.telegramId}: ${err?.message}`);
         }
