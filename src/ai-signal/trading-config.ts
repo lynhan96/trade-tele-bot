@@ -167,7 +167,7 @@ export const DEFAULT_TRADING_CONFIG: TradingConfig = {
   fundingDirectionalBlock: 0.1, fundingExtremeBlock: 0.3,
 
   // Filters
-  enabledStrategies: '', maxDailySignals: 10, maxActiveSignals: 8,
+  enabledStrategies: '', maxDailySignals: 15, maxActiveSignals: 12,
   marketMomentumPnl: -0.7, marketMomentumSLs: 2,
   positionImbalancePct: 0.65, positionImbalanceMin: 4, riskScoreThreshold: 55,
 
@@ -222,7 +222,7 @@ export const DEFAULT_TRADING_CONFIG: TradingConfig = {
   hedgeReEntryRsiShort: 45,
 
   // Sim Trading
-  simNotional: 1000,       // Simulated volume per trade (default $1000, set to match real tradingBalance)
+  simNotional: 600,        // Simulated volume per trade ($600 × 12 slots = diversified)
   simTakerFeePct: 0.04,   // 0.04% per side (market orders — Binance standard)
   simMakerFeePct: 0.02,   // 0.02% per side (limit orders)
   simFundingEnabled: true, // Apply funding fee from Binance API
