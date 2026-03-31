@@ -47,10 +47,9 @@ export class RuleEngineService {
     currency: string,
     params: AiTunedParams,
   ): Promise<SignalResult | null> {
-    // Cap confidence threshold — read from config, hedge manages risk
+    // Confidence pre-check — use the threshold set by AiSignalService (regime-aware)
     const cfg = this.tradingConfig.get();
-    const maxConfThreshold = cfg.confidenceFloor ?? 68;
-    const confThreshold = Math.min(params.minConfidenceToTrade || 60, maxConfThreshold);
+    const confThreshold = params.minConfidenceToTrade || cfg.confidenceFloor || 68;
     if (params.confidence < confThreshold) {
       this.logger.debug(
         `[RuleEngine] ${coin} skipped — AI confidence ${params.confidence} < threshold ${confThreshold}`,
@@ -172,15 +171,14 @@ export class RuleEngineService {
     }
 
     // ── On-Chain Filters — FR, L/S ratio, Taker flow, OI ──
-    // On-chain only BLOCKS for OP_ONCHAIN strategy (has its own built-in on-chain logic)
-    // For other strategies: info-only (log but don't block)
+    // Hard block: on-chain data conflicts with signal direction → reject
     const ocResult = await this.onChainFilters.checkAll(coin, isLong);
     if (!ocResult.pass) {
       const failReasons = ocResult.reasons.filter(r => !r.includes('OK') && !r.includes('disabled') && !r.includes('skip'));
-      this.logger.debug(
-        `[RuleEngine] ${coin} ${isLong ? "LONG" : "SHORT"} on-chain warning (info-only): ${failReasons.join(' | ')}`,
+      this.logger.log(
+        `[RuleEngine] ${coin} ${isLong ? "LONG" : "SHORT"} blocked by on-chain filter: ${failReasons.join(' | ')}`,
       );
-      // Don't block — on-chain is advisory for non-OP_ONCHAIN strategies
+      return null;
     }
 
     // ── Agent Brain — comprehensive intelligence from AI Ops Agent ──
@@ -289,21 +287,12 @@ export class RuleEngineService {
       };
     }
 
-    // High-quality strategies allowed to fire ALONE (no confluence needed)
-    const HIGH_QUALITY_SOLO = ['STOCH_EMA_KDJ', 'OP_ONCHAIN'];
+    // Single strategy = NOT enough confluence → block
     const soloStrategy = winners[0]?.strategy;
-    if (soloStrategy && HIGH_QUALITY_SOLO.includes(soloStrategy)) {
-      this.logger.log(
-        `[RuleEngine] ${coin} ★ ${isLong ? "LONG" : "SHORT"} solo high-quality: ${soloStrategy}${agentNotes}`,
-      );
-      return { ...primary, reason: `Solo ${soloStrategy}: ${primary.reason}${agentNotes}`, sgFilters: sgResult.reasons, onChainFilters: ocResult.reasons };
-    }
-
-    // Other single strategies — still allowed but logged as weaker signal
-    this.logger.debug(
-      `[RuleEngine] ${coin} △ ${soloStrategy} fired alone (1/${strategies.length}) — allowed as single${agentNotes}`,
+    this.logger.log(
+      `[RuleEngine] ${coin} ✗ ${isLong ? "LONG" : "SHORT"} only 1 strategy (${soloStrategy}) — need ≥2 confluence, skipped`,
     );
-    return { ...primary, reason: `${primary.reason}${agentNotes}`, sgFilters: sgResult.reasons, onChainFilters: ocResult.reasons };
+    return null;
   }
 
   /**
@@ -428,13 +417,14 @@ export class RuleEngineService {
   ): Promise<SignalResult | null> {
     // Per-strategy confidence gates (from TradingConfig)
     const cfg = this.tradingConfig.get();
+    // Strategy gates use config values directly — no artificial cap
     const gates: Record<string, number> = {
       EMA_PULLBACK: cfg.gateEMAPullback || 78,
-      TREND_EMA: Math.min(cfg.gateTrendEMA || 68, 68),
-      STOCH_EMA_KDJ: Math.min(cfg.gateStochEMAKDJ || 68, 68),
-      RSI_CROSS: Math.min(cfg.gateRSICross || 65, 68),
-      SMC_FVG: Math.min((cfg as any).gateSMCFVG || 68, 68),
-      OP_ONCHAIN: Math.min((cfg as any).gateOpOnchain || 60, 68),
+      TREND_EMA: cfg.gateTrendEMA || 80,
+      STOCH_EMA_KDJ: cfg.gateStochEMAKDJ || 82,
+      RSI_CROSS: cfg.gateRSICross || 75,
+      SMC_FVG: (cfg as any).gateSMCFVG || 82,
+      OP_ONCHAIN: (cfg as any).gateOpOnchain || 65,
     };
     const gate = gates[strategy];
     if (gate && params.confidence < gate) {

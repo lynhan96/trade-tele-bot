@@ -971,14 +971,10 @@ export class PositionMonitorService implements OnModuleInit {
         }
 
         // When hedge is active: NO SL — hedge IS the risk management
-        // Only catastrophic stop at -25% (exchange issues, depeg, extreme events)
+        // Safety net: NET_NEGATIVE (-15% net PnL) handles truly bad positions
         if (this.resolvingSymbols.has(sigKey)) return; // Prevent concurrent hedge/FLIP/NET_POSITIVE
-        const currentEntry = (signal as any).gridAvgEntry || entryPrice;
-        const catastrophicPct = direction === "LONG"
-          ? ((price - currentEntry) / currentEntry) * 100
-          : ((currentEntry - price) / currentEntry) * 100;
 
-        // ── Net Positive Exit: banked hedge profit + main unrealized > 0 → close all ──
+        // ── Net Positive/Negative Exit: banked hedge profit + main unrealized → close all ──
         // Use closed HEDGE orders for accurate banked profit (fees already deducted)
         // After FLIP: only count hedges closed AFTER the flip (pre-flip profits already banked in FLIP_TP)
         const lastFlipAt = (signal as any).lastFlipAt;
@@ -1008,7 +1004,7 @@ export class PositionMonitorService implements OnModuleInit {
         }
         const netPnlUsdt = mainUnrealizedUsdt + bankedProfit + currentHedgePnlUsdt;
 
-        let forceCloseReason: "NET_POSITIVE" | "CATASTROPHIC_STOP" | null = null;
+        let forceCloseReason: "NET_POSITIVE" | "NET_NEGATIVE" | null = null;
 
         // NET_POSITIVE: total net PnL > 3% of filledVol → close all (profitable)
         const netPositiveThreshold = Math.max(filledVol * 0.03, 20);
@@ -1023,12 +1019,7 @@ export class PositionMonitorService implements OnModuleInit {
           this.logger.warn(
             `[PositionMonitor] ${sigKey} NET NEGATIVE EXIT | main=$${mainUnrealizedUsdt.toFixed(2)} banked=$${bankedProfit.toFixed(2)} hedge=$${currentHedgePnlUsdt.toFixed(2)} → total=$${netPnlUsdt.toFixed(2)} < threshold=$${netNegativeThreshold.toFixed(2)}`,
           );
-          forceCloseReason = "NET_POSITIVE"; // reuse same close flow
-        } else if (catastrophicPct <= -25) {
-          this.logger.warn(
-            `[PositionMonitor] ${sigKey} CATASTROPHIC STOP at ${price} (${catastrophicPct.toFixed(1)}%) while hedge active — force closing both`,
-          );
-          forceCloseReason = "CATASTROPHIC_STOP";
+          forceCloseReason = "NET_NEGATIVE";
         }
 
         // Check main TP hit while hedge active → FLIP takes priority over NET_POSITIVE
@@ -1047,7 +1038,7 @@ export class PositionMonitorService implements OnModuleInit {
 
         if (!forceCloseReason && !mainTpHitForFlip) return; // No event → skip
 
-        // ── Force close (NET_POSITIVE / CATASTROPHIC) — NOT for FLIP ──
+        // ── Force close (NET_POSITIVE / NET_NEGATIVE) — NOT for FLIP ──
         // FLIP falls through to normal TP/SL check which has full FLIP logic
 
         if (mainTpHitForFlip) {
@@ -1178,25 +1169,25 @@ export class PositionMonitorService implements OnModuleInit {
 
     // ─── Time Stop: 12h + PnL > 0 → close stagnant signal with profit ──
     // If hedge active → FLIP (promote hedge to main) instead of closing both
+    // PnL <= 0 → HOLD (hedge system handles loss recovery)
     if ((signal as any).executedAt && !this.resolvingSymbols.has(sigKey)) {
       const ageH = (Date.now() - new Date((signal as any).executedAt).getTime()) / 3600000;
-      if (ageH >= 12) {
+      const cfg = this.tradingConfig.get();
+      const timeStopH = cfg.timeStopHours || 12;
+      if (ageH >= timeStopH) {
         const currentEntry = (signal as any).gridAvgEntry || entryPrice;
         const timePnlPct = direction === "LONG"
           ? ((price - currentEntry) / currentEntry) * 100
           : ((currentEntry - price) / currentEntry) * 100;
-        // Only close when profitable — don't cut losing positions (hedge system handles loss)
         if (timePnlPct > 0) {
           const hasActiveHedge = !!hedgeOrder;
           if (hasActiveHedge) {
-            // Hedge active → this is like main TP hit → FLIP (promote hedge to main)
+            // Hedge active → FLIP (promote hedge to main)
             this.logger.log(`[PositionMonitor] ${sigKey} TIME STOP + HEDGE → FLIP: ${ageH.toFixed(0)}h held, PnL +${timePnlPct.toFixed(2)}%`);
-            // Fall through to normal TP/SL check which has FLIP logic
-            // Set takeProfitPrice to current price to trigger FLIP
             (signal as any).takeProfitPrice = price;
           } else {
             // No hedge → close normally
-            this.logger.log(`[PositionMonitor] ${sigKey} TIME STOP: ${ageH.toFixed(0)}h held, PnL +${timePnlPct.toFixed(2)}% → closing`);
+            this.logger.log(`[PositionMonitor] ${sigKey} TIME_STOP: ${ageH.toFixed(0)}h held, PnL +${timePnlPct.toFixed(2)}% → closing`);
             this.resolvingSymbols.add(sigKey);
             this.unregisterListener(signal);
             try {
@@ -1821,11 +1812,11 @@ export class PositionMonitorService implements OnModuleInit {
     (signal as any).hedgePeakPnlPct = 0;
 
     // Disable SL when hedge active — hedge IS the risk management
-    // Catastrophic stop at -25% remains as absolute safety net in handlePriceTick
+    // SL disabled — hedge IS the risk management. NET_NEGATIVE (-15% net) is the safety net.
     (signal as any).stopLossPrice = 0;
     (signal as any).stopLossPercent = 0;
     (signal as any).hedgeSafetySlPrice = 0;
-    this.logger.log(`[PositionMonitor] ${sigKey} SL DISABLED — hedge active, catastrophic stop at -25% remains`);
+    this.logger.log(`[PositionMonitor] ${sigKey} SL DISABLED — hedge active, NET_NEGATIVE (-15% net) is safety net`);
 
     // Update MAIN order SL to 0 (hedge manages risk)
     await this.orderModel.findOneAndUpdate(
@@ -1973,52 +1964,20 @@ export class PositionMonitorService implements OnModuleInit {
       entryReason, // e.g. "PnL -19.52% | Cycle 1 (immediate) | regime: MIXED | banked: $147.36"
     };
 
-    // After hedge close: restore SL with PROGRESSIVE tightening.
-    // Uses BOTH cycle count AND hedge efficiency (banked / |mainLoss|).
-    // If hedge is working well (ratio >= 50%), keep wide SL regardless of cycles.
-    // If hedge is ineffective (ratio < 50% after 3+ cycles), tighten SL.
+    // After hedge close: restore wide SL (40%) — let hedge continue cycling.
+    // Safety net: NET_NEGATIVE (-15% net PnL) handles truly bad positions.
     const avgEntryForSl = (signal as any).gridAvgEntry || signal.entryPrice;
     const allHistory: any[] = [...((signal as any).hedgeHistory || []), historyEntry];
     const totalBanked = allHistory.reduce((s: number, h: any) => s + (h.pnlUsdt || 0), 0);
-    const mainPnlPct = signal.direction === 'LONG'
-      ? ((currentPrice - avgEntryForSl) / avgEntryForSl) * 100
-      : ((avgEntryForSl - currentPrice) / avgEntryForSl) * 100;
-    const filledVol = (signal as any).simNotional ? (signal as any).simNotional * 0.4 : 400;
-    const mainLossUsdt = Math.abs(Math.min(0, (mainPnlPct / 100) * filledVol));
-    const recoveryRatio = mainLossUsdt > 0 ? totalBanked / mainLossUsdt : 1;
-
-    // Progressive SL: tighten only when hedge is INEFFECTIVE
-    // High recovery (≥50%): hedge is working → keep 40% SL (let it continue cycling)
-    // Low recovery (<50%) + 3+ cycles: direction is wrong → tighten
-    let progressiveSlPct: number;
-    if (recoveryRatio >= 0.5 || cycleCount <= 2) {
-      progressiveSlPct = 40; // hedge is working or too early to judge
-    } else if (cycleCount === 3) {
-      progressiveSlPct = 15;
-    } else {
-      progressiveSlPct = 8;
-    }
-    this.logger.log(
-      `[PositionMonitor] ${sigKey} Progressive SL: cycle=${cycleCount} banked=$${totalBanked.toFixed(2)} mainLoss=$${mainLossUsdt.toFixed(2)} recovery=${(recoveryRatio * 100).toFixed(0)}% → SL=${progressiveSlPct}%`,
-    );
     const updates: Record<string, any> = {};
+    const slPct = 40;
     let finalSlPrice = signal.direction === 'LONG'
-      ? +(avgEntryForSl * (1 - progressiveSlPct / 100)).toFixed(6)
-      : +(avgEntryForSl * (1 + progressiveSlPct / 100)).toFixed(6);
-    let finalSlPercent = progressiveSlPct;
-
-    // If hedge manager provided tighter safety SL (from hedge profit improvement) → use if tighter
-    if (action.newSafetySlPrice && action.newSafetySlPrice > 0) {
-      const isTighter = signal.direction === 'LONG'
-        ? action.newSafetySlPrice > finalSlPrice  // LONG: higher SL = tighter
-        : action.newSafetySlPrice < finalSlPrice; // SHORT: lower SL = tighter
-      if (isTighter) {
-        finalSlPrice = action.newSafetySlPrice;
-        finalSlPercent = Math.abs((finalSlPrice - avgEntryForSl) / avgEntryForSl * 100);
-        updates.hedgeSafetySlPrice = finalSlPrice;
-      }
-    }
-    this.logger.log(`[PositionMonitor] ${sigKey} SL restored to ${finalSlPrice} (${finalSlPercent.toFixed(1)}%) after hedge close`);
+      ? +(avgEntryForSl * (1 - slPct / 100)).toFixed(6)
+      : +(avgEntryForSl * (1 + slPct / 100)).toFixed(6);
+    let finalSlPercent = slPct;
+    this.logger.log(
+      `[PositionMonitor] ${sigKey} SL restored to ${finalSlPrice} (${finalSlPercent.toFixed(1)}%) after hedge close | cycle=${cycleCount} banked=$${totalBanked.toFixed(2)}`,
+    );
 
     // Restore SL on MAIN order
     await this.orderModel.findOneAndUpdate(
@@ -2026,7 +1985,8 @@ export class PositionMonitorService implements OnModuleInit {
       { stopLossPrice: finalSlPrice },
     ).catch(() => {});
 
-    // Update in-memory signal
+    // Update in-memory signal (hedgeHistory MUST be updated so next cycle's progressive SL sees all history)
+    (signal as any).hedgeHistory = allHistory;
     (signal as any).hedgeActive = false;
     (signal as any).hedgePhase = undefined;
     (signal as any).hedgeDirection = undefined;
@@ -2112,17 +2072,5 @@ export class PositionMonitorService implements OnModuleInit {
       );
     }
 
-    // Circuit breaker: if price already beyond progressive SL AND hedge is ineffective → log warning.
-    // The tightened SL is already persisted — next tick's SL check will fire naturally.
-    if (cycleCount >= 3 && recoveryRatio < 0.5) {
-      const slBreached = signal.direction === 'LONG'
-        ? currentPrice <= finalSlPrice
-        : currentPrice >= finalSlPrice;
-      if (slBreached) {
-        this.logger.warn(
-          `[PositionMonitor] ${sigKey} CIRCUIT BREAKER: price ${currentPrice} beyond SL ${finalSlPrice} (${progressiveSlPct}%) | cycle=${cycleCount} recovery=${(recoveryRatio * 100).toFixed(0)}% → next tick will close`,
-        );
-      }
-    }
   }
 }

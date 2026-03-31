@@ -507,10 +507,8 @@ export class AiSignalService implements OnModuleInit {
       ? Math.max(rangingFloor, marketGuard.confidenceFloor)
       : Math.max(CONFIDENCE_FLOOR, marketGuard.confidenceFloor);
     params.minConfidenceToTrade = Math.max(params.minConfidenceToTrade ?? 0, effectiveFloor);
-    const MAX_CONFIDENCE_CAP = (cfg as any).maxConfidenceCap || 75;
-    if (params.minConfidenceToTrade > MAX_CONFIDENCE_CAP) {
-      params.minConfidenceToTrade = MAX_CONFIDENCE_CAP;
-    }
+    // NOTE: maxConfidenceCap REMOVED — it was capping at 75 which made strategy gates
+    // (78/80/82) meaningless. Let each strategy gate enforce its own threshold.
 
     // Rule engine evaluate (confluence + agent brain + Singapore/on-chain filters)
     const signalResult = await this.ruleEngineService.evaluate(coin, currency, params);

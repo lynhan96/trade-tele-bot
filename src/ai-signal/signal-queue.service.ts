@@ -191,7 +191,7 @@ export class SignalQueueService {
   async resolveActiveSignal(
     symbol: string,
     exitPrice: number,
-    reason: "POSITION_CLOSED" | "TAKE_PROFIT" | "STOP_LOSS" | "TRAIL_STOP" | "AUTO_TAKE_PROFIT" | "MANUAL" | "NET_POSITIVE" | "CATASTROPHIC_STOP" = "POSITION_CLOSED",
+    reason: "POSITION_CLOSED" | "TAKE_PROFIT" | "STOP_LOSS" | "TRAIL_STOP" | "AUTO_TAKE_PROFIT" | "MANUAL" | "NET_POSITIVE" | "NET_NEGATIVE" = "POSITION_CLOSED",
   ): Promise<AiSignalDocument | null> {
     const activeId = await this.redisService.get<string>(ACTIVE_KEY(symbol));
     if (!activeId) return null;
@@ -939,7 +939,7 @@ export class SignalQueueService {
     const symbol = `${coin.toUpperCase()}${currency.toUpperCase()}`;
     const cfg = this.tradingConfig.get();
     // SL: when hedge enabled, use wide 40% safety net (not 0 — prevents instant close bugs)
-    // Hedge triggers at -3%, trail activates at +2%, catastrophic at -25%
+    // Hedge triggers at -3%, trail activates at +2%, NET_NEGATIVE at -15% net PnL
     const HEDGE_SAFETY_SL_PCT = 40;
     const rawSlPct = Math.min(cfg.slMax, Math.max(params.stopLossPercent, cfg.slMin));
     const stopLossPercent = cfg.hedgeEnabled ? HEDGE_SAFETY_SL_PCT : rawSlPct;

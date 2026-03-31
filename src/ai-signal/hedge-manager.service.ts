@@ -294,12 +294,12 @@ export class HedgeManagerService {
   getHedgeTpPrice(entryPrice: number, direction: string, regime: string): number {
     const cfg = this.tradingConfig.get();
 
-    // Hedge TP = 65% of main TP from regime config (scale together)
+    // Hedge TP = 85% of main TP from regime config (was 65% — too small, fees eat profit)
     const regimeSlTp = cfg.regimeSlTp?.[regime];
     if (regimeSlTp) {
       const mainTpPct = (regimeSlTp.tpMin + regimeSlTp.tpMax) / 2;
-      const tpPct = mainTpPct * 0.65;
-      this.logger.debug(`[HedgeManager] Hedge TP from regime ${regime}: main avg ${mainTpPct.toFixed(1)}% × 0.65 = ${tpPct.toFixed(1)}%`);
+      const tpPct = mainTpPct * 0.85;
+      this.logger.debug(`[HedgeManager] Hedge TP from regime ${regime}: main avg ${mainTpPct.toFixed(1)}% × 0.85 = ${tpPct.toFixed(1)}%`);
       return direction === 'LONG'
         ? +(entryPrice * (1 + tpPct / 100)).toFixed(6)
         : +(entryPrice * (1 - tpPct / 100)).toFixed(6);

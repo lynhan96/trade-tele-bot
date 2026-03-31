@@ -19,7 +19,7 @@ export type SignalCloseReason =
   | "REPLACED_BY_NEW"
   | "MANUAL"
   | "NET_POSITIVE"
-  | "CATASTROPHIC_STOP"
+  | "NET_NEGATIVE"
   | "HEDGE_TP"
   | "HEDGE_RECOVERY"
   | "HEDGE_TRAIL";
@@ -82,7 +82,7 @@ export class AiSignal {
       "REPLACED_BY_NEW",
       "MANUAL",
       "NET_POSITIVE",
-      "CATASTROPHIC_STOP",
+      "NET_NEGATIVE",
       "HEDGE_TP",
       "HEDGE_RECOVERY",
       "HEDGE_TRAIL",
