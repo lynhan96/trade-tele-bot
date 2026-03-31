@@ -1005,12 +1005,34 @@ export class PositionMonitorService implements OnModuleInit {
 
         let forceCloseReason: "NET_POSITIVE" | null = null;
 
-        // Only close when total net PnL > 2% of filledVol — let hedge system cycle until recovery
-        // No NET_NEGATIVE: vol decay after FLIP naturally limits downside
-        const netPositiveThreshold = Math.max(filledVol * 0.02, 10);
-        if (netPnlUsdt > netPositiveThreshold) {
+        // NET_POSITIVE trail: activate at 2%, lock floor at 0.5%
+        const netPnlPct = filledVol > 0 ? (netPnlUsdt / filledVol) * 100 : 0;
+        const NET_TRAIL_TRIGGER = 2.0; // activate trail when net PnL > 2%
+        const NET_TRAIL_FLOOR = 0.5;   // lock profit at 0.5% minimum
+
+        const prevNetPeak = (signal as any).netPeakPnlPct ?? 0;
+        const netTrailActivated = (signal as any).netTrailActivated ?? false;
+
+        // Track peak net PnL%
+        if (netPnlPct > prevNetPeak) {
+          (signal as any).netPeakPnlPct = netPnlPct;
+          await this.aiSignalModel.findByIdAndUpdate((signal as any)._id, { netPeakPnlPct: netPnlPct }).exec().catch(() => {});
+        }
+        const netPeak = (signal as any).netPeakPnlPct ?? 0;
+
+        // Activate trail when net PnL crosses 2%
+        if (netPeak >= NET_TRAIL_TRIGGER && !netTrailActivated) {
+          (signal as any).netTrailActivated = true;
+          await this.aiSignalModel.findByIdAndUpdate((signal as any)._id, { netTrailActivated: true }).exec().catch(() => {});
           this.logger.log(
-            `[PositionMonitor] ${sigKey} NET POSITIVE EXIT | main=$${mainUnrealizedUsdt.toFixed(2)} banked=$${bankedProfit.toFixed(2)} hedge=$${currentHedgePnlUsdt.toFixed(2)} → total=$${netPnlUsdt.toFixed(2)} > threshold=$${netPositiveThreshold.toFixed(2)}`,
+            `[PositionMonitor] ${sigKey} NET TRAIL ACTIVATED | net=${netPnlPct.toFixed(2)}% peak=${netPeak.toFixed(2)}% — floor locked at ${NET_TRAIL_FLOOR}%`,
+          );
+        }
+
+        // Close when trail activated AND net drops below floor
+        if (netTrailActivated && netPnlPct <= NET_TRAIL_FLOOR) {
+          this.logger.log(
+            `[PositionMonitor] ${sigKey} NET POSITIVE EXIT (trail) | net=${netPnlPct.toFixed(2)}% < floor=${NET_TRAIL_FLOOR}% | peak=${netPeak.toFixed(2)}% | main=$${mainUnrealizedUsdt.toFixed(2)} banked=$${bankedProfit.toFixed(2)} hedge=$${currentHedgePnlUsdt.toFixed(2)}`,
           );
           forceCloseReason = "NET_POSITIVE";
         }

@@ -710,11 +710,11 @@ export class UserRealTradingService implements OnModuleInit {
     if (!keys?.apiKey) return { success: false };
 
     try {
-      // Check for open hedge — if main is closing via TP and hedge exists, FLIP instead of closing both
+      // Check for open hedge — if main is closing (TP/trail/admin) and hedge exists, FLIP instead of closing both
       const openHedge = await this.userTradeModel.findOne({ telegramId, symbol, status: "OPEN", isHedge: true });
       if (openHedge) {
-        const isMainTp = reason === "TAKE_PROFIT" || reason === "TRAIL_STOP";
-        if (isMainTp) {
+        const shouldFlip = reason === "TAKE_PROFIT" || reason === "TRAIL_STOP" || reason === "ADMIN_CLOSE";
+        if (shouldFlip) {
           // FLIP: close main on Binance, promote hedge to new main in DB
           // Hedge position stays open on Binance — it becomes the new main trade
           const exitPrice = await this.marketDataService.getPrice(symbol) || trade.entryPrice;

@@ -952,6 +952,13 @@ export class AdminService {
     if (!trade) return { success: false, error: "Trade not found" };
     if (trade.status !== "OPEN") return { success: false, error: "Trade is not open" };
 
+    // Hedge trade → close hedge only (via forceCloseHedge on signal)
+    if (trade.isHedge && trade.aiSignalId) {
+      const result = await this.forceCloseHedge(trade.aiSignalId.toString());
+      return result;
+    }
+
+    // Main trade → closeRealPosition (will FLIP if hedge exists)
     const result = await this.userRealTradingService.closeRealPosition(
       trade.telegramId, trade.telegramId, trade.symbol, "ADMIN_CLOSE",
     );
