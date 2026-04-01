@@ -240,13 +240,17 @@ export class HedgeManagerService {
       const hedgeDirection = ctx.direction === 'LONG' ? 'SHORT' : 'LONG';
       // positionNotional pre-calculated by caller from Order/Trade records
       const positionNotional = ctx.positionNotional;
-      if (positionNotional <= 0) return null;
+      if (positionNotional <= 0) {
+        await this.redisService.delete(lockKey);
+        return null;
+      }
 
       // Hedge size: 75% default, scale to 100% after 3+ consecutive wins
       const cycle = (ctx.hedgeCycleCount || 0) + 1;
       const maxCycles = cfg.hedgeMaxCycles ?? 999;
       if (cycle > maxCycles) {
         this.logger.log(`[${ctx.coin}] Hedge max cycles (${maxCycles}) reached — no more hedging`);
+        await this.redisService.delete(lockKey);
         return null;
       }
       const realHedgeHistory = (ctx.hedgeHistory || []).filter((h: any) => h.reason !== 'FLIP_TP');
@@ -422,7 +426,7 @@ export class HedgeManagerService {
 
       // ── Early trail: similar to main trail — activate at +2%, keep 70% of peak ──
       if (hedgePnlPct >= 2.0 && !ctx.hedgeTrailActivated) {
-        const earlyPeak = this.hedgePeakMap.get(ctxId) || 0;
+        const earlyPeak = this.hedgePeakMap.get(ctxId) ?? ctx.hedgePeakPnlPct ?? 0;
         if (hedgePnlPct > earlyPeak) {
           this.hedgePeakMap.set(ctxId, hedgePnlPct);
         }
@@ -443,7 +447,7 @@ export class HedgeManagerService {
       // Trail system (early trail keep 70% of peak) is better than breakeven +0.5%
       // Only use breakeven as safety net when hedge never reached trail level (peak < 2%)
       const peakForBE = this.hedgePeakMap.get(ctxId) || ctx.hedgePeakPnlPct || 0;
-      const trailActive = peakForBE >= 2.0; // early trail activates at +2%
+      const trailActive = peakForBE >= 2.5; // early trail close requires peak >= 2.5
 
       if (!trailActive) {
         // No trail yet — use breakeven as safety net
@@ -471,10 +475,13 @@ export class HedgeManagerService {
 
       // Reset protection if hedge went negative (regardless of trail)
       if (ctx.hedgeSlAtEntry && hedgePnlPct < 0) {
+        // Also clear peak so trailActive becomes false → breakeven can re-apply on next upswing
+        this.hedgePeakMap.delete(ctxId);
         return {
           action: 'NONE' as const,
           reason: `Hedge SL reset — PnL ${hedgePnlPct.toFixed(2)}% losing, hold`,
           hedgeSlAtEntry: false,
+          hedgePeakPnlPct: 0,
         };
       }
 

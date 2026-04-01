@@ -719,9 +719,9 @@ export class UserRealTradingService implements OnModuleInit {
           // Hedge position stays open on Binance — it becomes the new main trade
           const exitPrice = await this.marketDataService.getPrice(symbol) || trade.entryPrice;
           const entryRef = (trade as any).gridAvgEntry || trade.entryPrice;
-          const mainPnlPct = trade.direction === "LONG"
+          const mainPnlPct = (trade.direction === "LONG"
             ? ((exitPrice - entryRef) / entryRef) * 100
-            : ((entryRef - exitPrice) / entryRef) * 100;
+            : ((entryRef - exitPrice) / entryRef) * 100) - BINANCE_FEE_PCT;
           const mainPnlUsdt = (mainPnlPct / 100) * trade.notionalUsdt;
 
           // Close main position on Binance
@@ -791,9 +791,9 @@ export class UserRealTradingService implements OnModuleInit {
         // Non-TP close (SL, MANUAL, etc.) — close hedge first, then main
         await this.binanceService.closePosition(keys.apiKey, keys.apiSecret, symbol, openHedge.quantity, openHedge.direction).catch(() => {});
         const hExit = await this.marketDataService.getPrice(symbol) || 0;
-        const hPnl = openHedge.direction === "LONG"
+        const hPnl = (openHedge.direction === "LONG"
           ? ((hExit - openHedge.entryPrice) / openHedge.entryPrice) * 100
-          : ((openHedge.entryPrice - hExit) / openHedge.entryPrice) * 100;
+          : ((openHedge.entryPrice - hExit) / openHedge.entryPrice) * 100) - BINANCE_FEE_PCT;
         await this.userTradeModel.findByIdAndUpdate(openHedge._id, {
           status: "CLOSED", exitPrice: hExit, pnlPercent: Math.round(hPnl * 100) / 100,
           pnlUsdt: Math.round((hPnl / 100) * openHedge.notionalUsdt * 100) / 100,
@@ -2378,9 +2378,9 @@ export class UserRealTradingService implements OnModuleInit {
 
               // 2. Close main trade record with PnL
               const mainEntry = (mainTrade as any).gridAvgEntry || mainTrade.entryPrice;
-              const mainPnlPct = mainTrade.direction === 'LONG'
+              const mainPnlPct = (mainTrade.direction === 'LONG'
                 ? ((price - mainEntry) / mainEntry) * 100
-                : ((mainEntry - price) / mainEntry) * 100;
+                : ((mainEntry - price) / mainEntry) * 100) - BINANCE_FEE_PCT;
               const mainPnlUsdt = Math.round((mainPnlPct / 100) * mainTrade.notionalUsdt * 100) / 100;
 
               await this.userTradeModel.findByIdAndUpdate(mainTrade._id, {
@@ -2392,17 +2392,45 @@ export class UserRealTradingService implements OnModuleInit {
                 closedAt: new Date(),
               });
 
-              // 3. Promote hedge → main IN DB ONLY (Binance position stays open, no new order)
+              // 3. Promote hedge → main + place safety SL/TP on Binance
+              const pp = await this.getPricePrecision(signal.symbol);
+              const hedgeSl = hedge.direction === "LONG"
+                ? +(hedge.entryPrice * 0.60).toFixed(pp)
+                : +(hedge.entryPrice * 1.40).toFixed(pp);
+              const hedgeTp = hedge.direction === "LONG"
+                ? +(hedge.entryPrice * 1.035).toFixed(pp)
+                : +(hedge.entryPrice * 0.965).toFixed(pp);
+
               await this.userTradeModel.findByIdAndUpdate(hedge._id, {
                 isHedge: false,
                 isFlipped: true,
                 parentTradeId: null,
-                slPrice: 0,
-                tpPrice: 0,
+                slPrice: hedgeSl,
+                tpPrice: hedgeTp,
               });
 
+              // Place SL on Binance for promoted main
+              const slOrder = await this.binanceService.setStopLoss(
+                keys.apiKey, keys.apiSecret, signal.symbol,
+                hedgeSl, hedge.direction as 'LONG' | 'SHORT', hedge.quantity,
+              ).catch(() => null);
+              // Place TP on Binance for promoted main
+              const tpOrder = await this.binanceService.setTakeProfitAtPrice(
+                keys.apiKey, keys.apiSecret, signal.symbol,
+                hedgeTp, hedge.direction as 'LONG' | 'SHORT', hedge.quantity,
+              ).catch(() => null);
+              // Save algo order IDs
+              if (slOrder) {
+                const slId = slOrder?.algoId?.toString() ?? slOrder?.orderId?.toString();
+                await this.userTradeModel.updateOne({ _id: hedge._id }, { $set: { binanceSlAlgoId: slId, slPrice: hedgeSl, tpPrice: hedgeTp } });
+              }
+              if (tpOrder) {
+                const tpId = tpOrder?.algoId?.toString() ?? tpOrder?.orderId?.toString();
+                await this.userTradeModel.updateOne({ _id: hedge._id }, { $set: { binanceTpAlgoId: tpId } });
+              }
+
               this.logger.log(
-                `[UserRealTrading] FLIP: ${signal.symbol} main ${mainTrade.direction} closed +$${mainPnlUsdt.toFixed(2)} → hedge ${hedge.direction} promoted to main (kept on Binance, no reopen)`,
+                `[UserRealTrading] FLIP: ${signal.symbol} main ${mainTrade.direction} closed +$${mainPnlUsdt.toFixed(2)} → hedge ${hedge.direction} promoted to main (SL=${hedgeSl} TP=${hedgeTp})`,
               );
             }
             continue; // Don't fall through to normal hedge close
@@ -2421,9 +2449,9 @@ export class UserRealTradingService implements OnModuleInit {
             }
           }
 
-          const pnlPct = hedge.direction === 'LONG'
+          const pnlPct = (hedge.direction === 'LONG'
             ? ((price - hedge.entryPrice) / hedge.entryPrice) * 100
-            : ((hedge.entryPrice - price) / hedge.entryPrice) * 100;
+            : ((hedge.entryPrice - price) / hedge.entryPrice) * 100) - BINANCE_FEE_PCT;
           const pnlUsdt = Math.round((pnlPct / 100) * hedge.notionalUsdt * 100) / 100;
 
           let closeReason = 'HEDGE_CLOSE';

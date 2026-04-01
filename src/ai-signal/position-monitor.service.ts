@@ -1363,6 +1363,8 @@ export class PositionMonitorService implements OnModuleInit {
       (signal as any).lastFlipAt = flipTime; // NET_POSITIVE only counts post-flip hedges
       (signal as any).hedgeTrailActivated = false; // Reset so new hedge trail works correctly
       (signal as any).hedgeSlAtEntry = false; // Reset so new hedge SL logic works correctly
+      (signal as any).netPeakPnlPct = 0; // Reset net trail state — prevent stale NET_POSITIVE on next cycle
+      (signal as any).netTrailActivated = false;
 
       // 4. Persist to DB
       await this.aiSignalModel.findByIdAndUpdate((signal as any)._id, {
@@ -1376,6 +1378,7 @@ export class PositionMonitorService implements OnModuleInit {
         hedgeActive: false, hedgeCycleCount: 0,
         hedgeHistory: flipHistory, // preserved + main TP profit banked
         slMovedToEntry: false, tpBoosted: false, peakPnlPct: 0,
+        netPeakPnlPct: 0, netTrailActivated: false, // Reset net trail state
         executedAt: flipTime, // Funding fees calculated from FLIP time, not original signal time
         lastFlipAt: flipTime, // NET_POSITIVE only counts hedge PnL after this timestamp
         $unset: { hedgePhase: 1, hedgeDirection: 1, hedgeEntryPrice: 1, hedgeSimNotional: 1, hedgeTpPrice: 1, hedgeOpenedAt: 1, hedgeSafetySlPrice: 1, hedgeSlAtEntry: 1, hedgeTrailActivated: 1, hedgePeakPnlPct: 1 },
@@ -2006,6 +2009,8 @@ export class PositionMonitorService implements OnModuleInit {
     (signal as any).stopLossPrice = finalSlPrice;
     (signal as any).stopLossPercent = finalSlPercent;
     (signal as any).hedgeSafetySlPrice = finalSlPrice || undefined;
+    (signal as any).netPeakPnlPct = 0; // Reset net trail state — prevent stale NET_POSITIVE on next cycle
+    (signal as any).netTrailActivated = false;
 
     // Persist to DB
     const unsetFields: Record<string, number> = {
@@ -2020,6 +2025,8 @@ export class PositionMonitorService implements OnModuleInit {
       hedgeCycleCount: cycleCount,
       stopLossPrice: finalSlPrice,
       stopLossPercent: finalSlPercent,
+      netPeakPnlPct: 0,
+      netTrailActivated: false,
       $push: { hedgeHistory: historyEntry },
       ...updates,
     });
