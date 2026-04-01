@@ -191,7 +191,6 @@ export class HedgeManagerService {
             // Overbought/Oversold guard — don't enter hedge at extreme RSI
             // Hedge LONG (main SHORT): RSI > 70 = overbought = reversal likely → SKIP
             // Hedge SHORT (main LONG): RSI < 30 = oversold = bounce likely → SKIP
-            const hedgeDir = ctx.direction === 'LONG' ? 'SHORT' : 'LONG';
             const isOverbought = hedgeDir === 'LONG' && rsi15m > 70;
             const isOversold = hedgeDir === 'SHORT' && rsi15m < 30;
             if (isOverbought || isOversold) {
