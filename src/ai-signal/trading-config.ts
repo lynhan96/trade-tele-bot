@@ -156,7 +156,7 @@ export const DEFAULT_TRADING_CONFIG: TradingConfig = {
   tpProximityLock: 0.5, tpBoostTrigger: 2.5, tpBoostExtend: 2.0, tpBoostCap: 6.0,
 
   // Confidence
-  confidenceFloor: 68, confidenceFloorRanging: 70, confidenceFloorStrongBull: 80,
+  confidenceFloor: 65, confidenceFloorRanging: 65, confidenceFloorStrongBull: 80,
   regimeCaps: { SIDEWAYS: 70, RANGE_BOUND: 70, MIXED: 68, VOLATILE: 70, BTC_CORRELATION: 68, STRONG_BULL: 80, STRONG_BEAR: 72 },
 
   // Strategy gates
