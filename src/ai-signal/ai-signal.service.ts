@@ -506,7 +506,13 @@ export class AiSignalService implements OnModuleInit {
     const effectiveFloor = isRanging
       ? Math.max(rangingFloor, marketGuard.confidenceFloor)
       : Math.max(CONFIDENCE_FLOOR, marketGuard.confidenceFloor);
-    params.minConfidenceToTrade = Math.max(params.minConfidenceToTrade ?? 0, effectiveFloor);
+    const prevMin = params.minConfidenceToTrade ?? 0;
+    params.minConfidenceToTrade = Math.max(prevMin, effectiveFloor);
+    if (coinUpper === 'REEF' || coinUpper === 'MILK') {
+      this.logger.debug(
+        `[AiSignal] ${coinUpper} floor debug: prevMin=${prevMin} effectiveFloor=${effectiveFloor} (cfgFloor=${CONFIDENCE_FLOOR} ranging=${isRanging} rangingFloor=${rangingFloor} guardFloor=${marketGuard.confidenceFloor}) → minConf=${params.minConfidenceToTrade} regime=${params.regime}`,
+      );
+    }
     // NOTE: maxConfidenceCap REMOVED — it was capping at 75 which made strategy gates
     // (78/80/82) meaningless. Let each strategy gate enforce its own threshold.
 
