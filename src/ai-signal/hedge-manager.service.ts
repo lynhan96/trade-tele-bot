@@ -447,18 +447,19 @@ export class HedgeManagerService {
 
       if (!trailActive) {
         // No trail yet — use breakeven as safety net
-        if (hedgePnlPct >= 1.5 && !ctx.hedgeSlAtEntry) {
+        // Floor at 1% to cover real fees (~0.08% taker × 2 + funding)
+        if (hedgePnlPct >= 2.0 && !ctx.hedgeSlAtEntry) {
           this.logger.log(
-            `[${ctx.coin}] Hedge SL → +0.5% (no trail yet, peak ${peakForBE.toFixed(1)}%) | PnL: +${hedgePnlPct.toFixed(2)}%`,
+            `[${ctx.coin}] Hedge SL → +1.0% (no trail yet, peak ${peakForBE.toFixed(1)}%) | PnL: +${hedgePnlPct.toFixed(2)}%`,
           );
           return {
             action: 'NONE' as const,
-            reason: `Hedge SL moved to +0.5% at +${hedgePnlPct.toFixed(2)}%`,
+            reason: `Hedge SL moved to +1.0% at +${hedgePnlPct.toFixed(2)}%`,
             hedgeSlAtEntry: true,
           };
         }
 
-        if (ctx.hedgeSlAtEntry && hedgePnlPct <= 0.5 && hedgePnlUsdt >= 0) {
+        if (ctx.hedgeSlAtEntry && hedgePnlPct <= 1.0 && hedgePnlUsdt >= 0) {
           this.logger.log(
             `[${ctx.coin}] Hedge protected SL hit | PnL: +${hedgePnlPct.toFixed(2)}% → close with min profit`,
           );
