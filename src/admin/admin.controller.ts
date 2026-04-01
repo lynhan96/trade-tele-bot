@@ -103,6 +103,12 @@ export class AdminController {
   }
 
   @UseGuards(AdminGuard)
+  @Post("signals/:id/close-main")
+  forceCloseMain(@Param("id") id: string) {
+    return this.adminService.forceCloseMain(id);
+  }
+
+  @UseGuards(AdminGuard)
   @Post("signals/:id/close-hedge")
   forceCloseHedge(@Param("id") id: string, @Headers("x-source") source?: string) {
     return this.adminService.forceCloseHedge(id, source);

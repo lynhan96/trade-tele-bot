@@ -1287,6 +1287,46 @@ export class AdminService {
   }
 
   /**
+   * Force close MAIN position for a signal.
+   * If hedge is active → sets TP to force trigger on next tick → FLIP.
+   * If no hedge → closes the entire signal.
+   */
+  async forceCloseMain(id: string): Promise<{ success: boolean; error?: string }> {
+    const signal = await this.signalModel.findById(id);
+    if (!signal) return { success: false, error: 'Signal not found' };
+    if (signal.status !== 'ACTIVE') return { success: false, error: `Signal is ${signal.status}` };
+
+    const hedgeOrder = await this.orderModel.findOne({ signalId: (signal as any)._id, type: 'HEDGE', status: 'OPEN' }).lean();
+    if (!hedgeOrder) {
+      // No hedge → close entire signal
+      return this.closeSignal(id);
+    }
+
+    // Force main TP to trigger FLIP on next tick
+    const mainOrder = await this.orderModel.findOne({
+      signalId: (signal as any)._id, type: { $in: ['MAIN', 'FLIP_MAIN'] }, status: 'OPEN',
+    }).lean();
+    if (!mainOrder) return { success: false, error: 'No OPEN main order found' };
+
+    const dir = mainOrder.direction;
+    const forceTP = dir === 'LONG' ? 0.0001 : 999999;
+    await this.signalModel.findByIdAndUpdate(id, { $set: { takeProfitPrice: forceTP } });
+    await this.orderModel.findByIdAndUpdate(mainOrder._id, { takeProfitPrice: forceTP });
+
+    this.logger.log(`[Admin] Force close MAIN requested for ${signal.symbol} → FLIP to hedge ${hedgeOrder.direction} (${id})`);
+
+    // Also trigger real close for all subscribers
+    const subscribers = await this.subscriptionModel.find({ realModeEnabled: true }).lean();
+    for (const sub of subscribers) {
+      await this.userRealTradingService.closeRealPosition(
+        sub.telegramId, sub.chatId || sub.telegramId, signal.symbol, 'ADMIN_CLOSE',
+      ).catch((err) => this.logger.warn(`[Admin] Real close failed for ${sub.telegramId}: ${err?.message}`));
+    }
+
+    return { success: true };
+  }
+
+  /**
    * Force close hedge for an active signal.
    * Sets hedgeTpPrice to trigger immediate TP on next tick.
    */
