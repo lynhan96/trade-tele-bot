@@ -180,7 +180,9 @@ export class HedgeManagerService {
             // Relax threshold when deeply negative or fresh drop with consecutive wins
             const relaxed = pnlPct < -triggerPct * 1.5 || (freshDrop && consWinsForRsi >= 3);
             const rsiThresh = relaxed ? 45 : 40;
-            const rsiOk = ctx.direction === 'LONG' ? rsi15m < rsiThresh : rsi15m > (100 - rsiThresh);
+            // Hedge is OPPOSITE of main: main LONG → hedge SHORT (need high RSI), main SHORT → hedge LONG (need low RSI)
+            const hedgeDir = ctx.direction === 'LONG' ? 'SHORT' : 'LONG';
+            const rsiOk = hedgeDir === 'LONG' ? rsi15m < rsiThresh : rsi15m > (100 - rsiThresh);
             if (!rsiOk) {
               this.logger.log(`[${ctx.coin}] Hedge blocked: RSI15m=${rsi15m.toFixed(1)} (need ${ctx.direction === 'LONG' ? '<' : '>'}${rsiThresh})${freshDrop ? ' [fresh drop]' : ''}`);
               return null;
