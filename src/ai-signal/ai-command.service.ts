@@ -12,7 +12,7 @@ import { UserDataStreamService } from "./user-data-stream.service";
 import { MarketDataService } from "../market-data/market-data.service";
 import { BinanceService } from "../binance/binance.service";
 
-const DUAL_TIMEFRAME_COINS = ["BTC", "ETH", "SOL", "BNB", "XRP"];
+import { DUAL_TIMEFRAME_COINS } from './constants';
 
 @Injectable()
 export class AiCommandService implements OnModuleInit {

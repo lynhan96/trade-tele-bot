@@ -597,7 +597,7 @@ export class StrategyAutoTunerService {
     }
   }
 
-  // AI Strategy Reviewer — disabled, handled by AI Ops Agent
+  // AI Strategy Reviewer — disabled
   async aiReviewStrategies(): Promise<void> {
     return;
   }

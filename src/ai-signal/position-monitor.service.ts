@@ -34,7 +34,7 @@ const MONITOR_POSITIONS_TTL = 60; // 60s
 const MAIN_ORDER_TYPES = { $in: ['MAIN', 'FLIP_MAIN'] };
 
 /** Coins that run BOTH INTRADAY and SWING strategies simultaneously. */
-const DUAL_TIMEFRAME_COINS = ["BTC", "ETH", "SOL", "BNB", "XRP"];
+import { DUAL_TIMEFRAME_COINS, GRID_DEVIATIONS, DCA_WEIGHTS } from './constants';
 
 @Injectable()
 export class PositionMonitorService implements OnModuleInit {
@@ -398,9 +398,7 @@ export class PositionMonitorService implements OnModuleInit {
     const orderMeta = (mainOrder as any)?.metadata || {};
 
     // Fixed 4 DCA grid levels at 0%, 2%, 4%, 6% deviation — same for sim + real
-    const GRID_LEVEL_COUNT = 4;
-    const GRID_DEVIATIONS = [0, 2, 4, 6]; // L0=entry, L1=2%, L2=4%, L3=6%
-    const DCA_WEIGHTS = [40, 15, 15, 30]; // L0=40%, L1=15%, L2=15%, L3=30%
+    const GRID_LEVEL_COUNT = GRID_DEVIATIONS.length;
 
     const gridLevels: any[] = orderMeta.gridLevels ?? (signal as any).gridLevels ?? [];
     const isGridSignal = gridLevels.length > 0;
@@ -1207,7 +1205,7 @@ export class PositionMonitorService implements OnModuleInit {
             this.unregisterListener(signal);
             try {
               await this.signalQueueService.resolveActiveSignal(sigKey, price, "TIME_STOP" as any);
-              this.userRealTradingService.closeRealPosition(0, 0, symbol, "TIME_STOP").catch(() => {});
+              this.userRealTradingService.closeRealPositionBySymbol(symbol, "TIME_STOP").catch(() => {});
             } finally {
               this.resolvingSymbols.delete(sigKey);
             }

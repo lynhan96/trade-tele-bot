@@ -43,7 +43,7 @@ export interface TradingConfig {
   fundingExtremeBlock: number;      // Block entirely if |funding| > this % (default 0.3)
 
   // ── Filters ──────────────────────────────────────────────────────────────
-  enabledStrategies: string;        // "disable:STRAT1,STRAT2" blacklist format (agent-managed)
+  enabledStrategies: string;        // "disable:STRAT1,STRAT2" blacklist format (admin-managed)
   maxDailySignals: number;          // Daily cap (default 35)
   maxActiveSignals: number;         // Max concurrent positions (default 25)
   marketMomentumPnl: number;        // Block direction if avg PnL < this % (default -0.7)
@@ -286,7 +286,7 @@ export class TradingConfigService {
     if (Date.now() - this.lastLoad > 5 * 60 * 1000) {
       this.load().catch(() => {});
     }
-    // Hard floors — prevent agent/config from setting destructive values
+    // Hard floors — prevent config from setting destructive values
     const cfg = this.cached;
     if (cfg.hedgePartialTriggerPct < 2) cfg.hedgePartialTriggerPct = 2;
     if (cfg.hedgeFullTriggerPct < 2) cfg.hedgeFullTriggerPct = 2;

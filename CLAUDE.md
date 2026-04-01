@@ -11,10 +11,11 @@ npm run test:all        # Run all simulators (no Jest)
 
 ## Architecture
 
-NestJS monolith: Telegram bot + AI signal scanner + real Binance Futures trading + hedge system + AI ops agent.
+NestJS monolith: Telegram bot + AI signal scanner + real Binance Futures trading + hedge system.
 
 See [.claude/ARCHITECTURE.md](.claude/ARCHITECTURE.md) for full system diagram, data flows, and protection layers.
 See [src/ai-signal/CLAUDE.md](src/ai-signal/CLAUDE.md) for core trading module details.
+See [TRADING_LOGIC.md](TRADING_LOGIC.md) for complete trading logic reference.
 
 ### Key Services
 
@@ -34,26 +35,15 @@ SIM and Real **MUST run identical logic**. Real only differs in order execution 
 4 levels: L0=entry(40%), L1=2%(15%), L2=4%(15%), L3=6%(30%). DCA continues during hedge.
 
 ### Hedge System
-- Entry: PnL < -hedgeTrigger% (2-8%, auto-tuned by agent)
+- Entry: PnL < -hedgeTriggerPct% (default 3%, hard floor 2%)
 - Exit: TP OR trail (activate +2%, keep 70%) OR recovery close
-- Progressive SL: cycle 1-2=40%, cycle 3=15%, cycle 4+=8% (only when recovery <50%)
-- Trail SL: placed on Binance (not just backend check)
+- SL disabled during hedge — cycles until NET_POSITIVE > 2%
 - `onTradeClose` matches by direction (hedge close can't close main)
-
-### AI Ops Agent (separate process at `ai-ops-agent/`)
-- 12 skills/15min (free) + Claude Sonnet analysis/4h
-- Auto-configs: hedgeTrigger, confidence, maxSignals, riskScore
-- FIELD_LIMITS validation: hedgeTrigger 2-8%, confidence 55-75%
-- Cannot close/open positions
 
 ## Deployment
 
 ```bash
-# Bot
 npm run build && make deploy_develop
-
-# Agent (after bot deploy)
-ssh ubuntu@171.244.48.10 "source ~/.nvm/nvm.sh && cp -r ~/projects/binance-tele-bot/ai-ops-agent/src/* ~/ai-ops-agent/src/ && pm2 restart ai-ops-agent"
 ```
 
 - Server: `ubuntu@171.244.48.10` | PM2: `trade-tele-bot`

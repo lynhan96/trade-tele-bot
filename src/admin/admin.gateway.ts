@@ -60,10 +60,6 @@ export class AdminGateway
     }
   }
 
-  emitAgentEvent(event: any) {
-    this.server.emit('agent:event', event);
-  }
-
   private watchCollections() {
     this.watchCollection("ai_signals", "signal");
     this.watchCollection("user_trades", "trade");

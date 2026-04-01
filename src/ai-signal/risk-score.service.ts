@@ -24,7 +24,6 @@ export class RiskScoreService {
     isLong: boolean,
     globalRegime: string,
     marketGuard: any,
-    agentBrain: any,
     fundingRate: number,
     cfg: any,
   ): Promise<RiskScoreResult> {
@@ -55,17 +54,9 @@ export class RiskScoreService {
       regimeScore = 20;
       regimeReason.push('ranging');
     }
-    // Sentiment override — reduce regime score if strong counter-sentiment
-    try {
-      const sentiment = agentBrain?.marketSentiment || 0;
-      if (isLong && sentiment > 30)
-        regimeScore = Math.max(0, regimeScore - 40);
-      if (!isLong && sentiment < -30)
-        regimeScore = Math.max(0, regimeScore - 40);
-    } catch {}
     breakdown.regime = {
       score: regimeScore,
-      weight: 25,
+      weight: 30,
       reason: regimeReason.join(', ') || 'aligned',
     };
 
@@ -94,7 +85,7 @@ export class RiskScoreService {
       reason: fundingReason.join(', ') || 'neutral',
     };
 
-    // 3. EMA trend (weight 20%)
+    // 3. EMA trend (weight 25%)
     // Check 4h EMA21 vs EMA50 spread — against trend = high risk
     let emaScore = 0;
     const emaReason = [];
@@ -118,42 +109,11 @@ export class RiskScoreService {
     } catch {}
     breakdown.emaTrend = {
       score: Math.round(emaScore),
-      weight: 20,
+      weight: 25,
       reason: emaReason.join(', ') || 'aligned',
     };
 
-    // 4. Agent brain (weight 15%)
-    let agentScore = 0;
-    const agentReason = [];
-    if (agentBrain) {
-      if (isLong && agentBrain.blockLong) {
-        agentScore = 80;
-        agentReason.push('agent blocks LONG');
-      }
-      if (!isLong && agentBrain.blockShort) {
-        agentScore = 80;
-        agentReason.push('agent blocks SHORT');
-      }
-      // Taker pressure conflict
-      if (agentBrain.takerPressure) {
-        const tp = agentBrain.takerPressure;
-        if (isLong && tp === 'SELL') {
-          agentScore = Math.max(agentScore, 40);
-          agentReason.push('taker sell pressure');
-        }
-        if (!isLong && tp === 'BUY') {
-          agentScore = Math.max(agentScore, 40);
-          agentReason.push('taker buy pressure');
-        }
-      }
-    }
-    breakdown.agentBrain = {
-      score: agentScore,
-      weight: 15,
-      reason: agentReason.join(', ') || 'neutral',
-    };
-
-    // 5. Market Guard (weight 20%)
+    // 4. Market Guard (weight 25%)
     let mgScore = 0;
     const mgReason = [];
     if (marketGuard) {
@@ -168,7 +128,7 @@ export class RiskScoreService {
     }
     breakdown.marketGuard = {
       score: mgScore,
-      weight: 20,
+      weight: 25,
       reason: mgReason.join(', ') || 'clear',
     };
 

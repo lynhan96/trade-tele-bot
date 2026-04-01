@@ -126,25 +126,7 @@ export class HedgeManagerService {
       // Calculate banked profit from hedgeHistory (survives restart)
       const banked = (ctx.hedgeHistory || []).reduce((sum: number, h: any) => sum + (h.pnlUsdt || 0), 0);
 
-      // ── Agent Brain hedge intelligence ──
-      let triggerPct = cfg.hedgePartialTriggerPct;
-      try {
-        const brain = await this.redisService.get<any>('cache:agent:brain');
-        if (brain) {
-          if ((brain.hedgeSkipCoins || []).includes(ctx.symbol)) {
-            this.logger.log(`[${ctx.coin}] Hedge skip: agent đánh dấu hedge kém hiệu quả`);
-            return null;
-          }
-          if (brain.hedgeTriggerSuggestion && brain.hedgeTriggerSuggestion > 0) {
-            triggerPct = brain.hedgeTriggerSuggestion;
-            this.logger.debug(`[${ctx.coin}] Hedge trigger điều chỉnh theo agent: ${triggerPct}% (vol=${brain.avgVolatility}%)`);
-          }
-          if (brain.drawdownMode === 'DEFENSIVE' && triggerPct > 2) {
-            triggerPct = 2;
-            this.logger.debug(`[${ctx.coin}] Hedge trigger giảm xuống 2% do DEFENSIVE mode`);
-          }
-        }
-      } catch {}
+      const triggerPct = cfg.hedgePartialTriggerPct;
 
       // ── Entry conditions ──
       // PnL must be bad enough to hedge

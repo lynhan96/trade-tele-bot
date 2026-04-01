@@ -254,8 +254,7 @@ export class OnChainScannerService {
 
     msg += `_${new Date().toISOString().slice(11, 16)} UTC • On-Chain Scanner_`;
 
-    // On-chain alerts disabled — AI Ops Agent handles notifications now
-    // Data still saved to MongoDB for agent analysis
+    // On-chain alerts disabled — data saved to MongoDB for analysis
 
     await this.redisService.set(ALERT_COOLDOWN_KEY, cooldownMap, 7200);
     this.logger.log(`[OnChainScanner] Sent ${toAlert.length} alerts`);

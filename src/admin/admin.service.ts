@@ -14,15 +14,13 @@ import { DailyLimitHistory, DailyLimitHistoryDocument } from '../schemas/daily-l
 import { AiReview, AiReviewDocument } from '../schemas/ai-review.schema';
 import { Order, OrderDocument } from '../schemas/order.schema';
 import { OnChainSnapshot, OnChainSnapshotDocument } from '../schemas/onchain-snapshot.schema';
-import { AgentEvent, AgentEventDocument } from '../schemas/agent-event.schema';
 import { UserRealTradingService } from '../ai-signal/user-real-trading.service';
 import { AdminGateway } from './admin.gateway';
 
 /** Must match the key in SignalQueueService. */
 const ACTIVE_KEY = (signalKey: string) => `cache:ai-signal:active:${signalKey}`;
 
-/** Coins that run BOTH INTRADAY and SWING strategies simultaneously. */
-const DUAL_TIMEFRAME_COINS = ['BTC', 'ETH', 'SOL', 'BNB', 'XRP'];
+import { DUAL_TIMEFRAME_COINS } from '../ai-signal/constants';
 
 @Injectable()
 export class AdminService {
@@ -41,7 +39,6 @@ export class AdminService {
     @InjectModel(AiReview.name) private aiReviewModel: Model<AiReviewDocument>,
     @InjectModel(Order.name) private orderModel: Model<OrderDocument>,
     @InjectModel(OnChainSnapshot.name) private onChainSnapshotModel: Model<OnChainSnapshotDocument>,
-    @InjectModel(AgentEvent.name) private agentEventModel: Model<AgentEventDocument>,
     private readonly redisService: RedisService,
     private readonly userRealTradingService: UserRealTradingService,
     private readonly adminGateway: AdminGateway,
@@ -839,14 +836,6 @@ export class AdminService {
       ? ((exitPrice - entryForPnl) / entryForPnl) * 100
       : ((entryForPnl - exitPrice) / entryForPnl) * 100;
 
-    // SAFETY GATE: agent cannot close losing positions
-    if (source === 'agent' && pnlPercent <= 0) {
-      this.logger.warn(
-        `[Admin] BLOCKED agent close: ${signal.symbol} PnL=${pnlPercent.toFixed(2)}% — only bot or admin can close losing positions`,
-      );
-      return { success: false, error: `BLOCKED: cannot close losing position (PnL: ${pnlPercent.toFixed(2)}%)` };
-    }
-
     // Calculate USDT PnL from grid volumes
     const grids: any[] = (signal as any).gridLevels || [];
     let pnlUsdt: number | undefined;
@@ -1154,116 +1143,6 @@ export class AdminService {
     return { data, total, page, totalPages: Math.ceil(total / limit) };
   }
 
-  // ─── Agent Dashboard ──────────────────────────────────────────────────────
-
-  async getAgentEvents(query: any) {
-    const { agent, type, limit = 50, page = 1 } = query;
-    const filter: any = {};
-    if (agent) filter.agent = agent;
-    if (type) filter.type = type;
-    const skip = (parseInt(page) - 1) * parseInt(limit);
-    const [events, total] = await Promise.all([
-      this.agentEventModel.find(filter).sort({ eventAt: -1 }).skip(skip).limit(parseInt(limit)).lean(),
-      this.agentEventModel.countDocuments(filter),
-    ]);
-    return { events, total, page: parseInt(page), limit: parseInt(limit) };
-  }
-
-  async getAgentStatus() {
-    const lastEvent = await this.agentEventModel.findOne().sort({ eventAt: -1 }).lean();
-    const lastHour = new Date(Date.now() - 3600000);
-    const recentEvents = await this.agentEventModel.countDocuments({ eventAt: { $gte: lastHour } });
-    const recentActions = await this.agentEventModel.countDocuments({ type: 'ACTION', eventAt: { $gte: lastHour } });
-    const recentErrors = await this.agentEventModel.countDocuments({ type: 'ERROR', eventAt: { $gte: lastHour } });
-
-    const agents = ['market_analyzer', 'position_manager', 'bug_detector', 'strategy_tuner', 'active_trader', 'signal_filter', 'portfolio_risk', 'post_trade', 'smart_alert'];
-    const agentStatus = {};
-    for (const a of agents) {
-      const last = await this.agentEventModel.findOne({ agent: a }).sort({ eventAt: -1 }).lean();
-      agentStatus[a] = {
-        lastSeen: last?.eventAt,
-        lastStatus: last?.status,
-        lastMessage: last?.message,
-      };
-    }
-
-    return {
-      online: lastEvent && (Date.now() - new Date(lastEvent.eventAt).getTime()) < 20 * 60 * 1000,
-      lastEvent: lastEvent?.eventAt,
-      recentEvents,
-      recentActions,
-      recentErrors,
-      agents: agentStatus,
-    };
-  }
-
-  async getAgentLearnings() {
-    return this.agentEventModel.find({ type: 'LEARNING' }).sort({ eventAt: -1 }).limit(50).lean();
-  }
-
-  async createAgentEvent(dto: any) {
-    // Server-side dedup: skip if same agent+message within 14 min (skills run every 15 min)
-    const since = new Date(Date.now() - 14 * 60 * 1000);
-    const dup = await this.agentEventModel.findOne({
-      agent: dto.agent,
-      message: dto.message,
-      eventAt: { $gte: since },
-    }).lean();
-    if (dup) return dup; // already exists, return existing
-
-    const event = await this.agentEventModel.create({ ...dto, eventAt: new Date() });
-    this.adminGateway.emitAgentEvent(event);
-    return event;
-  }
-
-  // ── Market Hints (from Agent → Bot strategy) ──
-  private readonly MARKET_HINTS_KEY = 'cache:agent:market-hints';
-
-  async setMarketHints(dto: { takerBuyCoins?: string[]; takerSellCoins?: string[]; takerDetails?: Record<string, number> }) {
-    const hints = {
-      takerBuyCoins: dto.takerBuyCoins || [],
-      takerSellCoins: dto.takerSellCoins || [],
-      takerDetails: dto.takerDetails || {},
-      updatedAt: new Date().toISOString(),
-    };
-    await this.redisService.set(this.MARKET_HINTS_KEY, hints, 20 * 60); // 20min TTL
-    return { ok: true, hints };
-  }
-
-  async getMarketHints(): Promise<any> {
-    const hints = await this.redisService.get<any>(this.MARKET_HINTS_KEY);
-    return hints || { takerBuyCoins: [], takerSellCoins: [], takerDetails: {}, updatedAt: null };
-  }
-
-  // ── Agent Brain (comprehensive insights → Bot strategy) ──
-  private readonly AGENT_BRAIN_KEY = 'cache:agent:brain';
-
-  async setAgentBrain(dto: any) {
-    const brain = { ...dto, updatedAt: new Date().toISOString() };
-    await this.redisService.set(this.AGENT_BRAIN_KEY, brain, 25 * 60); // 25min TTL (agent runs every 15min)
-    return { ok: true };
-  }
-
-  async getAgentBrain(): Promise<any> {
-    return await this.redisService.get<any>(this.AGENT_BRAIN_KEY) || {
-      drawdownMode: 'NORMAL',
-      blockLong: false,
-      blockShort: false,
-      riskLevel: 'NORMAL',
-      sessionWR: {},
-      hotCoins: [],
-      coldCoins: [],
-      takerBuyCoins: [],
-      takerSellCoins: [],
-      takerDetails: {},
-      fundingExtreme: null,
-      altPulse: null,
-      consecutiveLosses: 0,
-      tpSuggestion: null,
-      updatedAt: null,
-    };
-  }
-
   /**
    * Force open hedge for an active signal.
    * Sets flags so PositionMonitor triggers hedge on next tick.
@@ -1342,23 +1221,6 @@ export class AdminService {
     const hedgeEntry = hedgeOrder.entryPrice;
     const hedgeDir = hedgeOrder.direction;
 
-    // SAFETY GATE: agent cannot close hedge with low PnL
-    if (source === 'agent') {
-      if (hedgeEntry) {
-        const livePrice = await this.fetchBinancePrice(signal.symbol);
-        if (livePrice) {
-          const hedgePnlPct = hedgeDir === 'LONG'
-            ? ((livePrice - hedgeEntry) / hedgeEntry) * 100
-            : ((hedgeEntry - livePrice) / hedgeEntry) * 100;
-          if (hedgePnlPct < 1.5) {
-            this.logger.warn(
-              `[Admin] BLOCKED agent hedge close: ${signal.symbol} hedgePnl=${hedgePnlPct.toFixed(2)}% (need >= 1.5%)`,
-            );
-            return { success: false, error: `BLOCKED: hedge PnL ${hedgePnlPct.toFixed(2)}% < 1.5%` };
-          }
-        }
-      }
-    }
 
     // Force hedge TP by setting price to immediate trigger
     // SHORT hedge: set TP very high (any price triggers)

@@ -13,6 +13,7 @@ import { UserTrade, UserTradeDocument } from "../schemas/user-trade.schema";
 import { DailyLimitHistory, DailyLimitHistoryDocument } from "../schemas/daily-limit-history.schema";
 import { AiSignal, AiSignalDocument } from "../schemas/ai-signal.schema";
 import { AiTunedParams } from "../strategy/ai-optimizer/ai-tuned-params.interface";
+import { GRID_DEVIATIONS, DCA_WEIGHTS } from './constants';
 import { HedgeManagerService, HedgePositionContext } from "./hedge-manager.service";
 import { TradingConfigService } from "./trading-config";
 import { getProxyAgent } from "../utils/proxy";
@@ -268,7 +269,7 @@ export class UserRealTradingService implements OnModuleInit {
       // Grid: base order = 1/gridLevelCount of full volume (rest reserved for grid levels)
       const isGrid = sub.gridEnabled === true;
       // DCA: L0 gets 30% of volume, L1=30%, L2=40% (fixed 3 levels at 2/4/6%)
-      const vol = isGrid ? fullVol * (UserRealTradingService.GRID_DCA_WEIGHTS[0] / 100) : fullVol;
+      const vol = isGrid ? fullVol * (DCA_WEIGHTS[0] / 100) : fullVol;
       const rawQty = vol / currentPrice;
       const quantity = parseFloat(rawQty.toFixed(quantityPrecision));
       if (quantity <= 0) {
@@ -1143,6 +1144,18 @@ export class UserRealTradingService implements OnModuleInit {
   }
 
   /**
+   * Close real position for ALL real-mode subscribers by symbol.
+   * Used by PositionMonitor (TIME_STOP, NET_POSITIVE, etc.) which doesn't have telegramId.
+   */
+  async closeRealPositionBySymbol(symbol: string, reason: string): Promise<void> {
+    const subscribers = await this.subscriptionService.findRealModeSubscribers();
+    for (const sub of subscribers) {
+      await this.closeRealPosition(sub.telegramId, sub.chatId, symbol, reason)
+        .catch((err) => this.logger.warn(`[RealTrading] closeBySymbol failed ${sub.telegramId} ${symbol}: ${err?.message}`));
+    }
+  }
+
+  /**
    * Close only losing positions (PnL < threshold).
    * Profitable positions keep running with their SL/TP intact.
    * Returns count of closed positions.
@@ -1512,10 +1525,7 @@ export class UserRealTradingService implements OnModuleInit {
    * Build grid levels array for a new trade.
    * Level 0 = base (FILLED at entry), levels 1-N = PENDING at deviation steps.
    */
-  // Fixed 4 DCA grid levels at 0%, 2%, 4%, 6% — matches sim exactly
-  private static readonly GRID_DEVIATIONS = [0, 2, 4, 6];
-  private static readonly GRID_DCA_WEIGHTS = [40, 15, 15, 30]; // L0=40%, L1=15%, L2=15%, L3=30%
-  private static readonly GRID_LEVEL_COUNT = 4;
+  // Grid constants imported from shared constants.ts
 
   private buildGridLevels(
     fillPrice: number,
@@ -1524,9 +1534,9 @@ export class UserRealTradingService implements OnModuleInit {
     _stopLossPrice: number,
   ): Array<any> {
     const grids: any[] = [];
-    for (let i = 0; i < UserRealTradingService.GRID_LEVEL_COUNT; i++) {
-      const dev = UserRealTradingService.GRID_DEVIATIONS[i];
-      const volumePct = UserRealTradingService.GRID_DCA_WEIGHTS[i];
+    for (let i = 0; i < GRID_DEVIATIONS.length; i++) {
+      const dev = GRID_DEVIATIONS[i];
+      const volumePct = DCA_WEIGHTS[i];
       if (i === 0) {
         grids.push({
           level: 0, deviationPct: 0, fillPrice, quantity: 0,
@@ -1732,7 +1742,7 @@ export class UserRealTradingService implements OnModuleInit {
       if (!sub || !sub.gridEnabled) return;
 
       const fullVol = this.getVolForUser(symbol, sub);
-      const gridVol = fullVol * (UserRealTradingService.GRID_DCA_WEIGHTS[grid.level] / 100);
+      const gridVol = fullVol * (DCA_WEIGHTS[grid.level] / 100);
 
       const [qtyPrec, pricePrec] = await Promise.all([
         this.getQuantityPrecision(symbol),

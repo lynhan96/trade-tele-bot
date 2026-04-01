@@ -1,7 +1,0 @@
-node_modules/
-.env
-logs/*.log
-ai-ops-agent/node_modules/
-ai-ops-agent/.env
-ai-ops-agent/logs/
-ai-ops-agent/memory/*.json

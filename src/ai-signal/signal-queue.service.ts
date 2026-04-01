@@ -16,8 +16,7 @@ export interface SignalHandleResult {
 const ACTIVE_KEY = (signalKey: string) => `cache:ai-signal:active:${signalKey}`;
 const QUEUED_KEY = (signalKey: string) => `cache:ai-signal:queued:${signalKey}`;
 
-/** Coins that run BOTH INTRADAY and SWING strategies simultaneously. */
-const DUAL_TIMEFRAME_COINS = ["BTC", "ETH", "SOL", "BNB", "XRP"];
+import { DUAL_TIMEFRAME_COINS } from './constants';
 
 // TTLs per timeframe profile
 const INTRADAY_QUEUED_TTL = 4 * 60 * 60; // 4h

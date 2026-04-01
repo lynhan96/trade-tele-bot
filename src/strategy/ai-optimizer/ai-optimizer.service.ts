@@ -739,8 +739,8 @@ export class AiOptimizerService {
     rsiValue?: number;
     htfRsiValue?: number;
   }): Promise<{ approved: boolean; reason: string; model: string }> {
-    // AI validation disabled — AI Ops Agent handles gating externally
-    return { approved: true, reason: "Rule-based only (AI Ops Agent)", model: "rule-engine" };
+    // AI validation disabled — rule engine handles gating
+    return { approved: true, reason: "Rule-based only", model: "rule-engine" };
 
   }
 

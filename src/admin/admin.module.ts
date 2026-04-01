@@ -21,8 +21,6 @@ import { DailyLimitHistory, DailyLimitHistorySchema } from "../schemas/daily-lim
 import { AiReview, AiReviewSchema } from "../schemas/ai-review.schema";
 import { Order, OrderSchema } from "../schemas/order.schema";
 import { OnChainSnapshot, OnChainSnapshotSchema } from "../schemas/onchain-snapshot.schema";
-import { AgentEvent, AgentEventSchema } from "../schemas/agent-event.schema";
-
 @Module({
   imports: [
     MongooseModule.forFeature([
@@ -40,7 +38,6 @@ import { AgentEvent, AgentEventSchema } from "../schemas/agent-event.schema";
       { name: AiReview.name, schema: AiReviewSchema },
       { name: Order.name, schema: OrderSchema },
       { name: OnChainSnapshot.name, schema: OnChainSnapshotSchema },
-      { name: AgentEvent.name, schema: AgentEventSchema },
     ]),
     RedisModule,
     AiSignalModule,

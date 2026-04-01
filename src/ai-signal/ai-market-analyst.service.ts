@@ -4,9 +4,7 @@ import { RedisService } from "../redis/redis.service";
 /**
  * AI Market Analyst — lightweight wrapper over Redis-cached data.
  *
- * All AI analysis (market regime, signal gating, strategy weights) is now
- * handled by the AI Ops Agent. This service just reads cached results from
- * Redis for use by other services (AiSignalService, etc.).
+ * Reads cached analysis results from Redis for use by other services.
  */
 
 // Redis keys
@@ -56,7 +54,7 @@ export class AiMarketAnalystService {
     private readonly redisService: RedisService,
   ) {}
 
-  // DEPRECATED: always returns APPROVE (Anthropic API disabled, AI Ops Agent handles gating externally)
+  // DEPRECATED: always returns APPROVE (rule engine handles gating)
   async evaluateSignal(_params: {
     symbol: string;
     direction: "LONG" | "SHORT";
@@ -67,10 +65,10 @@ export class AiMarketAnalystService {
     takeProfitPercent: number;
     regime: string;
   }): Promise<SignalGateResult> {
-    return { action: "APPROVE", reason: "AI Ops Agent manages gating" };
+    return { action: "APPROVE", reason: "Rule engine manages gating" };
   }
 
-  /** Get cached analysis (written by AI Ops Agent) */
+  /** Get cached analysis */
   async getAnalysis(): Promise<AiMarketAnalysis | null> {
     return this.redisService.get<AiMarketAnalysis>(ANALYSIS_KEY);
   }

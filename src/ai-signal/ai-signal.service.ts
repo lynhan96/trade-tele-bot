@@ -39,16 +39,13 @@ const AI_TEST_MODE_KEY = "cache:ai:test-mode";
 const AI_SCANNING_KEY = "cache:ai:scanning";
 const AI_MARKET_COOLDOWN_KEY = "cache:ai:market-cooldown"; // market-wide pause after consecutive SLs
 const AI_SL_COUNTER_KEY = "cache:ai:sl-hits"; // rolling SL hit counter (1h window)
-const MARKET_COOLDOWN_DURATION = 30 * 60; // 30 min cooldown after too many SLs
-const MAX_SL_BEFORE_COOLDOWN = 3; // trigger cooldown after 3 SL hits in 1 hour
 const AI_LAST_REGIME_KEY = "cache:ai:last-regime-for-reversal"; // track regime for reversal detection
 const AI_PENDING_REVERSAL_KEY = "cache:ai:pending-regime-reversal"; // 15-min cooldown before acting
 const REGIME_REVERSAL_COOLDOWN_SEC = 15 * 60; // 15 minutes confirmation window
-const MAX_ACTIVE_SIGNALS = 25; // Cap concurrent positions to reduce correlated risk
 
 /** Coins that run BOTH INTRADAY (15m) and SWING (4h) strategies simultaneously.
  * Top 5 by market cap — 15m catches more frequent signals than 4h alone. */
-const DUAL_TIMEFRAME_COINS = ["BTC", "ETH", "SOL", "BNB", "XRP"];
+import { DUAL_TIMEFRAME_COINS } from './constants';
 
 @Injectable()
 export class AiSignalService implements OnModuleInit {
@@ -413,8 +410,7 @@ export class AiSignalService implements OnModuleInit {
 
     // Cap total active signals
     const cfg = this.tradingConfig.get();
-    const MIN_ACTIVE_SIGNALS = 5;
-    const maxSignals = Math.min(Math.max(cfg.maxActiveSignals || MAX_ACTIVE_SIGNALS, MIN_ACTIVE_SIGNALS), MAX_ACTIVE_SIGNALS);
+    const maxSignals = Math.max(cfg.maxActiveSignals || 12, 5);
     let allActives;
     if (this.activeSignalsCache && Date.now() - this.activeSignalsCache.ts < this.ACTIVE_CACHE_TTL) {
       allActives = this.activeSignalsCache.data;
@@ -510,7 +506,7 @@ export class AiSignalService implements OnModuleInit {
     // NOTE: maxConfidenceCap REMOVED — it was capping at 75 which made strategy gates
     // (78/80/82) meaningless. Let each strategy gate enforce its own threshold.
 
-    // Rule engine evaluate (confluence + agent brain + Singapore/on-chain filters)
+    // Rule engine evaluate (confluence + Singapore/on-chain filters)
     const signalResult = await this.ruleEngineService.evaluate(coin, currency, params);
     if (!signalResult) return;
 
@@ -635,25 +631,14 @@ export class AiSignalService implements OnModuleInit {
     }
 
     const fundingRate = signalFuturesData?.fundingRate || fa?.fundingRate || 0;
-    const agentBrain = await this.redisService.get<any>('cache:agent:brain');
     const risk = await this.riskScoreService.computeRiskScore(
-      coin, signalResult.isLong, globalRegime, marketGuard, agentBrain, fundingRate, cfg,
+      coin, signalResult.isLong, globalRegime, marketGuard, fundingRate, cfg,
     );
     if (risk.blocked) {
       this.logger.debug(`[AiSignal] ${coin} risk score ${risk.score} > threshold — skipped`);
       await this.redisService.initAndIncr('cache:ai:filter:risk_score', 0, 86400);
       this.logValidation(symbol, signalResult, params, false, `risk_score ${risk.score} > threshold`);
       return;
-    }
-
-    // Agent strategy blacklist (enabledStrategies = "disable:X,Y")
-    const enabledStrats = cfg.enabledStrategies || '';
-    if (enabledStrats.startsWith('disable:')) {
-      const disabled = enabledStrats.replace('disable:', '').split(',').map(s => s.trim()).filter(Boolean);
-      if (disabled.some(d => signalResult.strategy.includes(d))) {
-        this.logger.debug(`[AiSignal] ${signalKey} BLOCKED — strategy ${signalResult.strategy} disabled by agent (${enabledStrats})`);
-        return;
-      }
     }
 
     // Strategy weight check (deterministic disable only — weight <= 0)
@@ -766,27 +751,31 @@ export class AiSignalService implements OnModuleInit {
    * Prevents the bot from opening new positions into a crash.
    */
   private async trackSlHitAndMaybeCooldown(): Promise<void> {
+    const cfg = this.tradingConfig.get();
+    const maxSlBeforeCooldown = cfg.maxSLBeforeCooldown || 3;
+    const cooldownSec = (cfg.marketCooldownMin || 30) * 60;
+
     // Increment rolling SL counter (1h window)
     const current = ((await this.redisService.get<number>(AI_SL_COUNTER_KEY)) || 0) + 1;
     await this.redisService.set(AI_SL_COUNTER_KEY, current, 60 * 60); // 1h TTL
 
-    this.logger.log(`[AiSignal] SL hit #${current}/${MAX_SL_BEFORE_COOLDOWN} in rolling 1h window`);
+    this.logger.log(`[AiSignal] SL hit #${current}/${maxSlBeforeCooldown} in rolling 1h window`);
 
-    if (current >= MAX_SL_BEFORE_COOLDOWN) {
-      await this.redisService.set(AI_MARKET_COOLDOWN_KEY, true, MARKET_COOLDOWN_DURATION);
+    if (current >= maxSlBeforeCooldown) {
+      await this.redisService.set(AI_MARKET_COOLDOWN_KEY, true, cooldownSec);
       // Reset counter so cooldown doesn't re-trigger immediately after expiry
       await this.redisService.delete(AI_SL_COUNTER_KEY);
 
       // Force regime reassessment — market conditions have changed
       await this.redisService.delete("cache:ai:regime");
 
+      const cooldownMin = cooldownSec / 60;
       this.logger.warn(
-        `[AiSignal] ⚠️ Market cooldown activated — ${current} SL hits in 1h. Pausing new signals for ${MARKET_COOLDOWN_DURATION / 60} min.`,
+        `[AiSignal] ⚠️ Market cooldown activated — ${current} SL hits in 1h. Pausing new signals for ${cooldownMin} min.`,
       );
 
       // Notify subscribers about cooldown
       const subscribers = await this.subscriptionService.findRealModeSubscribers();
-      const cooldownMin = MARKET_COOLDOWN_DURATION / 60;
       const text =
         `⏸️ *Tạm Dừng Tín Hiệu*\n` +
         `━━━━━━━━━━━━━━━━━━\n\n` +
