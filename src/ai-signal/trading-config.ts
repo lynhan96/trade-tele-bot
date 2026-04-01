@@ -148,7 +148,7 @@ export interface TradingConfig {
 
 export const DEFAULT_TRADING_CONFIG: TradingConfig = {
   // SL/TP
-  slMin: 1.5, slMax: 2.5, tpMin: 2.5, tpMax: 2.5,
+  slMin: 1.5, slMax: 2.5, tpMin: 3.0, tpMax: 3.0,
   tpRrMultiplier: 1.5, dcaTpPct: 3.0,
 
   // Trailing — match market amplitude (~2% avg peak)
