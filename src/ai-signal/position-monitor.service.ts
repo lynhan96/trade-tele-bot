@@ -1025,6 +1025,14 @@ export class PositionMonitorService implements OnModuleInit {
             (signal as any).hedgePeakPnlPct = (exitAction as any).hedgePeakPnlPct;
             updates.hedgePeakPnlPct = (exitAction as any).hedgePeakPnlPct;
           }
+          // Hedge TP boost: update TP price on signal + hedge order
+          if ((exitAction as any).hedgeTpPrice && (exitAction as any).hedgeTpPrice !== (signal as any).hedgeTpPrice) {
+            (signal as any).hedgeTpPrice = (exitAction as any).hedgeTpPrice;
+            updates.hedgeTpPrice = (exitAction as any).hedgeTpPrice;
+            if (hedgeOrder) {
+              this.orderModel.findByIdAndUpdate(hedgeOrder._id, { takeProfitPrice: (exitAction as any).hedgeTpPrice }).catch(() => {});
+            }
+          }
           if (Object.keys(updates).length > 0) {
             this.aiSignalModel.findByIdAndUpdate((signal as any)._id, updates).exec().catch(() => {});
           }

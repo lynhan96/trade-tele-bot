@@ -64,6 +64,7 @@ export class HedgeManagerService {
   private hedgeCooldownUntil = new Map<string, number>();
   /** Peak PnL tracking for trailing TP */
   private hedgePeakMap = new Map<string, number>();
+  private hedgePeakTimestamp = new Map<string, number>();
 
   constructor(
     private readonly redisService: RedisService,
@@ -148,9 +149,16 @@ export class HedgeManagerService {
       }
       // No strict 1.2x / price-worse conditions — RSI + candle + overbought guard handles filtering
 
+      // Emergency hedge bypass: at deep loss (< -8%), skip ALL RSI/candle guards
+      // Risk of NOT hedging at -8%+ far outweighs risk of bounce
+      const emergencyBypass = pnlPct < -8;
+      if (emergencyBypass) {
+        this.logger.log(`[${ctx.coin}] EMERGENCY hedge bypass: PnL ${pnlPct.toFixed(1)}% < -8% — skip RSI/candle guards`);
+      }
+
       // RSI confirmation for ALL cycle 2+ (including fresh drop)
       // Prevents blind entry when market reverses — must confirm momentum
-      if (!isFirstCycle) {
+      if (!isFirstCycle && !emergencyBypass) {
         try {
           const coin = ctx.coin || ctx.symbol?.replace('USDT', '');
           const closes15m = await this.marketDataService.getClosePrices(coin, '15m');
@@ -368,77 +376,107 @@ export class HedgeManagerService {
       }
       // Hedge losing or not covered enough → HOLD. Exits: HEDGE_TP+trail, NET_POSITIVE, FLIP
 
-      // ── 2. Trailing TP — ride the trend ──
-      // When hedge reaches TP level, don't close immediately — activate trail
-      // Track peak PnL, close when pullback > 1% from peak
+      // ── 2. Peak tracking + decay ──
+      const currentPeak = this.hedgePeakMap.get(ctxId) || ctx.hedgePeakPnlPct || 0;
+      if (hedgePnlPct > currentPeak) {
+        this.hedgePeakMap.set(ctxId, hedgePnlPct);
+        this.hedgePeakTimestamp.set(ctxId, Date.now());
+      }
+      let peak = this.hedgePeakMap.get(ctxId) || 0;
+
+      // Peak decay: after 1h without new peak, decay 40%/h toward current PnL
+      const peakTs = this.hedgePeakTimestamp.get(ctxId) || 0;
+      if (peak > 0 && peakTs > 0) {
+        const minSincePeak = (Date.now() - peakTs) / 60000;
+        if (minSincePeak > 60) { // 1h for hedge (faster than main's 2h)
+          const hoursOver = (minSincePeak - 60) / 60;
+          const decayed = hedgePnlPct + (peak - hedgePnlPct) * Math.pow(0.60, hoursOver);
+          if (decayed < peak) {
+            peak = Math.max(decayed, hedgePnlPct);
+            this.hedgePeakMap.set(ctxId, peak);
+          }
+        }
+      }
+
+      // ── 3. Dynamic keep ratio based on main loss depth ──
+      // Deeper main loss → ride hedge longer (need more recovery)
+      const mainLoss = Math.abs(mainPnlPct ?? 0);
+      const baseKeepRatio = cfg.hedgeTrailKeepRatio || 0.70;
+      // main -5% → keep 60% (exit faster, take profit), main -10% → keep 80% (ride longer)
+      const dynamicKeepRatio = mainLoss >= 10 ? 0.80
+        : mainLoss >= 7 ? 0.75
+        : mainLoss >= 5 ? baseKeepRatio
+        : 0.60; // main healthy (<-5%) → exit quick
+
+      // ── 4. Trailing TP — ride the trend ──
       const hedgeTpPrice = ctx.hedgeTpPrice;
       if (hedgeTpPrice) {
         const tpHit = hedgeDir === 'LONG'
           ? currentPrice >= hedgeTpPrice
           : currentPrice <= hedgeTpPrice;
 
-        // Track peak PnL for trailing — persist to signal so it survives restart
-        const currentPeak = this.hedgePeakMap.get(ctxId) || ctx.hedgePeakPnlPct || 0;
-        if (hedgePnlPct > currentPeak) {
-          this.hedgePeakMap.set(ctxId, hedgePnlPct);
-        }
-        const peak = this.hedgePeakMap.get(ctxId) || 0;
-
         if (tpHit && !ctx.hedgeTrailActivated) {
-          // TP reached — activate trailing mode (one-time)
           this.logger.log(
-            `[${ctx.coin}] Hedge TRAIL activated | PnL: +${hedgePnlPct.toFixed(2)}% | Peak: ${peak.toFixed(2)}% | Riding trend...`,
+            `[${ctx.coin}] Hedge TRAIL activated | PnL: +${hedgePnlPct.toFixed(2)}% | Peak: ${peak.toFixed(2)}% | keepRatio: ${dynamicKeepRatio}`,
           );
           return {
             action: 'NONE' as const,
             reason: `Hedge trail activated at +${hedgePnlPct.toFixed(2)}%`,
             hedgeSlAtEntry: true,
             hedgeTrailActivated: true,
-            hedgePeakPnlPct: this.hedgePeakMap.get(ctxId) || hedgePnlPct,
+            hedgePeakPnlPct: peak,
           };
         }
 
-        // Trail close: pullback > 1% from peak (only after trail activated or peak > TP%)
-        if (peak >= (cfg.hedgeTpPctDefault || 3.0) && hedgePnlPct < peak - 1.0) {
+        // Dynamic trail pullback: 1% for peak<4%, 1.5% for peak≥4%
+        const pullbackThresh = peak >= 4.0 ? 1.5 : 1.0;
+        if (peak >= (cfg.hedgeTpPctDefault || 3.0) && hedgePnlPct < peak - pullbackThresh) {
           this.logger.log(
-            `[${ctx.coin}] Hedge TRAIL close | Peak: ${peak.toFixed(2)}% → Current: ${hedgePnlPct.toFixed(2)}% (pullback ${(peak - hedgePnlPct).toFixed(2)}%)`,
+            `[${ctx.coin}] Hedge TRAIL close | Peak: ${peak.toFixed(2)}% → ${hedgePnlPct.toFixed(2)}% (pullback ${(peak - hedgePnlPct).toFixed(2)}% > ${pullbackThresh}%)`,
           );
           return this.closeHedgeWithProfit(ctx, ctxId, hedgePnlPct, hedgePnlUsdt, cfg,
             `Hedge trail: peak ${peak.toFixed(2)}% → ${hedgePnlPct.toFixed(2)}%`);
         }
+
+        // Hedge TP boost: if peak > hedgeTP + 2% and still trending → extend TP
+        const hedgeTpPct = Math.abs(hedgeTpPrice - hedgeEntry) / hedgeEntry * 100;
+        if (peak > hedgeTpPct + 2.0 && hedgePnlPct > hedgeTpPct + 1.0) {
+          const newHedgeTpPct = Math.min(hedgeTpPct + 2.0, 8.0); // cap at 8%
+          const newHedgeTp = hedgeDir === 'LONG'
+            ? hedgeEntry * (1 + newHedgeTpPct / 100)
+            : hedgeEntry * (1 - newHedgeTpPct / 100);
+          this.logger.log(
+            `[${ctx.coin}] Hedge TP boosted: ${hedgeTpPct.toFixed(1)}% → ${newHedgeTpPct.toFixed(1)}% | peak ${peak.toFixed(1)}%`,
+          );
+          return {
+            action: 'NONE' as const,
+            reason: `Hedge TP boost to ${newHedgeTpPct.toFixed(1)}%`,
+            hedgePeakPnlPct: peak,
+            hedgeTpPrice: newHedgeTp,
+          } as any;
+        }
       }
 
-      // ── Early trail: similar to main trail — activate at +2%, keep 70% of peak ──
+      // ── 5. Early trail: activate at +2%, dynamic keep ratio ──
       if (hedgePnlPct >= 2.0 && !ctx.hedgeTrailActivated) {
-        const earlyPeak = this.hedgePeakMap.get(ctxId) ?? ctx.hedgePeakPnlPct ?? 0;
-        if (hedgePnlPct > earlyPeak) {
-          this.hedgePeakMap.set(ctxId, hedgePnlPct);
-        }
-        const peak = this.hedgePeakMap.get(ctxId) || hedgePnlPct;
-        const keepRatio = cfg.hedgeTrailKeepRatio || 0.70;
-        const trailSl = peak * keepRatio;
+        const trailSl = peak * dynamicKeepRatio;
 
         if (peak >= 2.5 && hedgePnlPct <= trailSl && hedgePnlPct >= 1.0) {
           this.logger.log(
-            `[${ctx.coin}] Hedge EARLY TRAIL close | Peak: ${peak.toFixed(2)}% → Current: ${hedgePnlPct.toFixed(2)}% (trail SL: ${trailSl.toFixed(2)}%)`,
+            `[${ctx.coin}] Hedge EARLY TRAIL close | Peak: ${peak.toFixed(2)}% → ${hedgePnlPct.toFixed(2)}% (trail: ${trailSl.toFixed(2)}%, keep: ${dynamicKeepRatio})`,
           );
           return this.closeHedgeWithProfit(ctx, ctxId, hedgePnlPct, hedgePnlUsdt, cfg,
             `Early trail: peak ${peak.toFixed(2)}% → ${hedgePnlPct.toFixed(2)}%`);
         }
       }
 
-      // ── Hedge breakeven SL — ONLY when trail NOT active ──
-      // Trail system (early trail keep 70% of peak) is better than breakeven +0.5%
-      // Only use breakeven as safety net when hedge never reached trail level (peak < 2%)
-      const peakForBE = this.hedgePeakMap.get(ctxId) || ctx.hedgePeakPnlPct || 0;
-      const trailActive = peakForBE >= 2.5; // early trail close requires peak >= 2.5
+      // ── 6. Hedge breakeven SL — ONLY when trail NOT active ──
+      const trailActive = peak >= 2.5;
 
       if (!trailActive) {
-        // No trail yet — use breakeven as safety net
-        // Floor at 1% to cover real fees (~0.08% taker × 2 + funding)
         if (hedgePnlPct >= 2.0 && !ctx.hedgeSlAtEntry) {
           this.logger.log(
-            `[${ctx.coin}] Hedge SL → +1.0% (no trail yet, peak ${peakForBE.toFixed(1)}%) | PnL: +${hedgePnlPct.toFixed(2)}%`,
+            `[${ctx.coin}] Hedge SL → +1.0% (no trail yet, peak ${peak.toFixed(1)}%) | PnL: +${hedgePnlPct.toFixed(2)}%`,
           );
           return {
             action: 'NONE' as const,
@@ -455,12 +493,11 @@ export class HedgeManagerService {
             `Hedge protected SL: +${hedgePnlPct.toFixed(2)}%`);
         }
       }
-      // When trail active (peak >= 2%): skip breakeven — trail handles exit better
 
-      // Reset protection if hedge went negative (regardless of trail)
+      // Reset protection if hedge went negative
       if (ctx.hedgeSlAtEntry && hedgePnlPct < 0) {
-        // Also clear peak so trailActive becomes false → breakeven can re-apply on next upswing
         this.hedgePeakMap.delete(ctxId);
+        this.hedgePeakTimestamp.delete(ctxId);
         return {
           action: 'NONE' as const,
           reason: `Hedge SL reset — PnL ${hedgePnlPct.toFixed(2)}% losing, hold`,
@@ -469,7 +506,7 @@ export class HedgeManagerService {
         };
       }
 
-      // Return updated peak if changed (so caller can persist to DB)
+      // Return updated peak if changed
       const finalPeak = this.hedgePeakMap.get(ctxId) || 0;
       if (finalPeak > (ctx.hedgePeakPnlPct || 0)) {
         return {
@@ -509,6 +546,7 @@ export class HedgeManagerService {
     const cooldownMin = isBreakeven ? 15 : (cfg.hedgeReEntryCooldownMin || 5);
     this.hedgeCooldownUntil.set(ctxId, Date.now() + cooldownMin * 60 * 1000);
     this.hedgePeakMap.delete(ctxId);
+    this.hedgePeakTimestamp.delete(ctxId);
 
     const hedgeNotional = ctx.hedgeNotional || 0;
     const feePct = (this.tradingConfig.get().simTakerFeePct || 0.04) / 100;
