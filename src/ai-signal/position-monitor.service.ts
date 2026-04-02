@@ -273,7 +273,7 @@ export class PositionMonitorService implements OnModuleInit {
 
     // Restore persisted flags from DB so they survive bot restarts
     if ((signal as any).slMovedToEntry) (signal as any).slMovedToEntry = true;
-    if ((signal as any).tpBoosted) (signal as any).tpBoosted = true;
+    if ((signal as any).tpBoostLevel) (signal as any).tpBoostLevel = (signal as any).tpBoostLevel;
     // peakPnlPct is already restored from DB via signal object
 
     // When hedge enabled: ensure SL > hedge trigger so hedge has room to open
@@ -479,7 +479,7 @@ export class PositionMonitorService implements OnModuleInit {
             'metadata.simNotional': simNotional,
             'metadata.peakPnlPct': 0,
             'metadata.slMovedToEntry': false,
-            'metadata.tpBoosted': false,
+            'metadata.tpBoostLevel': 0,
             'metadata.originalSlPrice': (signal as any).originalSlPrice || effectiveSl,
           },
           $setOnInsert: {
@@ -658,8 +658,13 @@ export class PositionMonitorService implements OnModuleInit {
       const skipTrailSl = !!hedgeOrder; // hedge manages risk when active, skip trail SL
       const filledGrids = grids.filter((g) => g.status === "FILLED");
       if (filledGrids.length > 0) {
-        const TRAIL_TRIGGER = cfg.trailTrigger ?? 2.0;
-        const TRAIL_KEEP_RATIO = cfg.trailKeepRatio ?? 0.75;
+        const signalRegime = (signal as any).regime || 'MIXED';
+        const regimeSlTp = cfg.regimeSlTp?.[signalRegime];
+        // #3 Fix: trail trigger must be below tpMax to be meaningful
+        const baseTrigger = cfg.trailTrigger ?? 2.0;
+        const TRAIL_TRIGGER = regimeSlTp?.tpMax ? Math.min(regimeSlTp.tpMax * 0.7, baseTrigger) : baseTrigger;
+        // #1: Dynamic trail keep ratio per regime
+        const TRAIL_KEEP_RATIO = cfg.regimeTrailKeepRatio?.[signalRegime] ?? cfg.trailKeepRatio ?? 0.75;
         const pnlFromAvg = signal.direction === "LONG"
           ? ((price - avgEntry) / avgEntry) * 100
           : ((avgEntry - price) / avgEntry) * 100;
@@ -667,9 +672,27 @@ export class PositionMonitorService implements OnModuleInit {
         const prevPeak = orderMeta.peakPnlPct ?? (signal as any).peakPnlPct ?? 0;
         if (pnlFromAvg > prevPeak) {
           (signal as any).peakPnlPct = pnlFromAvg;
-          if (mainOrder) await this.orderModel.findByIdAndUpdate(mainOrder._id, { 'metadata.peakPnlPct': pnlFromAvg }).catch(() => {});
+          (signal as any).peakUpdatedAt = Date.now();
+          if (mainOrder) await this.orderModel.findByIdAndUpdate(mainOrder._id, { 'metadata.peakPnlPct': pnlFromAvg, 'metadata.peakUpdatedAt': Date.now() }).catch(() => {});
         }
-        const peak = (signal as any).peakPnlPct || 0;
+        // #4: Peak decay — if no new peak for N minutes, decay toward current PnL
+        let peak = (signal as any).peakPnlPct || 0;
+        const peakUpdatedAt = orderMeta.peakUpdatedAt ?? (signal as any).peakUpdatedAt ?? 0;
+        if (peak > 0 && peakUpdatedAt > 0) {
+          const minutesSincePeak = (Date.now() - peakUpdatedAt) / 60000;
+          const decayAfter = cfg.peakDecayAfterMin ?? 120;
+          if (minutesSincePeak > decayAfter) {
+            const hoursOverdue = (minutesSincePeak - decayAfter) / 60;
+            const decayRate = cfg.peakDecayPerHour ?? 0.35;
+            const decayFactor = Math.pow(1 - decayRate, hoursOverdue);
+            const decayedPeak = pnlFromAvg + (peak - pnlFromAvg) * decayFactor;
+            if (decayedPeak < peak) {
+              peak = Math.max(decayedPeak, pnlFromAvg); // never below current PnL
+              (signal as any).peakPnlPct = peak;
+              if (mainOrder) await this.orderModel.findByIdAndUpdate(mainOrder._id, { 'metadata.peakPnlPct': peak }).catch(() => {});
+            }
+          }
+        }
 
         // Move SL to avg entry (break-even) at 2% from avg — skip when hedge active
         const slAlreadyMoved = orderMeta.slMovedToEntry ?? (signal as any).slMovedToEntry;
@@ -729,30 +752,38 @@ export class PositionMonitorService implements OnModuleInit {
           }
         }
 
-        // TP boost at 2% peak from avg entry
-        const tpAlreadyBoosted = orderMeta.tpBoosted ?? (signal as any).tpBoosted;
-        if (pnlFromAvg >= 2.5 && !tpAlreadyBoosted && signalTp) {
-          (signal as any).tpBoosted = true;
-          if (mainOrder) await this.orderModel.findByIdAndUpdate(mainOrder._id, { 'metadata.tpBoosted': true }).catch(() => {});
+        // Stepped TP boost: peak ≥2.5% → +2% | peak ≥4% → +1.5% | peak ≥5.5% → lock
+        const tpBoostLevel = orderMeta.tpBoostLevel ?? (signal as any).tpBoostLevel ?? 0;
+        const tpBoostSteps = [
+          { peakThreshold: 2.5, extend: 2.0, level: 1 },
+          { peakThreshold: 4.0, extend: 1.5, level: 2 },
+          { peakThreshold: 5.5, extend: 0,   level: 3 }, // lock — no more extension
+        ];
+        const nextStep = tpBoostSteps.find(s => s.level === tpBoostLevel + 1);
+        if (nextStep && pnlFromAvg >= nextStep.peakThreshold && signalTp) {
           try {
-            const hasMomentum = await this.marketDataService.hasVolumeMomentum(symbol);
+            const hasMomentum = nextStep.level === 1
+              ? await this.marketDataService.hasVolumeMomentum(symbol)
+              : true; // step 2+ already confirmed momentum
             if (hasMomentum) {
-              const currentTpPct = Math.abs(signalTp - avgEntry) / avgEntry * 100;
-              const tpBoostCap = this.tradingConfig.get().tpBoostCap || 6;
-              const boostedTpPct = Math.min(tpBoostCap, Math.max(currentTpPct, pnlFromAvg + 2.0));
-              const newTpPrice = direction === "LONG"
-                ? avgEntry * (1 + boostedTpPct / 100)
-                : avgEntry * (1 - boostedTpPct / 100);
-              (signal as any).takeProfitPrice = newTpPrice;
-              await this.signalQueueService.extendTakeProfit(
-                (signal as any)._id.toString(), newTpPrice, boostedTpPct,
-              );
-              if (mainOrder) await this.orderModel.findByIdAndUpdate(mainOrder._id, { takeProfitPrice: newTpPrice }).catch(() => {});
-              gridChanged = true;
-              this.logger.log(
-                `[PositionMonitor] 🚀 Grid ${sigKey} TP boosted to ${boostedTpPct.toFixed(1)}% from avgEntry (${newTpPrice.toFixed(4)})`,
-              );
-              this.propagateTpMove(sigKey, symbol, newTpPrice, direction);
+              (signal as any).tpBoostLevel = nextStep.level;
+              if (mainOrder) await this.orderModel.findByIdAndUpdate(mainOrder._id, { 'metadata.tpBoostLevel': nextStep.level }).catch(() => {});
+              if (nextStep.extend > 0) {
+                const currentTpPct = Math.abs(signalTp - avgEntry) / avgEntry * 100;
+                const tpBoostCap = cfg.tpBoostCap || 6;
+                const boostedTpPct = Math.min(tpBoostCap, currentTpPct + nextStep.extend);
+                const newTpPrice = direction === "LONG"
+                  ? avgEntry * (1 + boostedTpPct / 100)
+                  : avgEntry * (1 - boostedTpPct / 100);
+                (signal as any).takeProfitPrice = newTpPrice;
+                await this.signalQueueService.extendTakeProfit((signal as any)._id.toString(), newTpPrice, boostedTpPct);
+                if (mainOrder) await this.orderModel.findByIdAndUpdate(mainOrder._id, { takeProfitPrice: newTpPrice }).catch(() => {});
+                gridChanged = true;
+                this.logger.log(`[PositionMonitor] 🚀 Grid ${sigKey} TP boost L${nextStep.level}: +${nextStep.extend}% → ${boostedTpPct.toFixed(1)}% (${newTpPrice.toFixed(4)})`);
+                this.propagateTpMove(sigKey, symbol, newTpPrice, direction);
+              } else {
+                this.logger.log(`[PositionMonitor] 🔒 Grid ${sigKey} TP locked at L${nextStep.level} — peak ${pnlFromAvg.toFixed(1)}%`);
+              }
             }
           } catch (err) {
             this.logger.warn(`[PositionMonitor] Grid TP boost error ${sigKey}: ${err?.message}`);
@@ -805,16 +836,37 @@ export class PositionMonitorService implements OnModuleInit {
     // (grid signals handle trailing in the grid block above)
     // Skip trail SL when hedge is active — hedge manages risk
     if (!isGridSignal && !hedgeOrder) {
-      // Trail params: same as grid path + real trading for consistency
-      const TRAIL_TRIGGER = cfg.trailTrigger ?? 2.0;
-      const TRAIL_KEEP_RATIO = cfg.trailKeepRatio ?? 0.75;
+      // Trail params: regime-aware
+      const signalRegime = (signal as any).regime || 'MIXED';
+      const regimeSlTp = cfg.regimeSlTp?.[signalRegime];
+      const baseTrigger = cfg.trailTrigger ?? 2.0;
+      const TRAIL_TRIGGER = regimeSlTp?.tpMax ? Math.min(regimeSlTp.tpMax * 0.7, baseTrigger) : baseTrigger;
+      const TRAIL_KEEP_RATIO = cfg.regimeTrailKeepRatio?.[signalRegime] ?? cfg.trailKeepRatio ?? 0.75;
 
       const prevPeak = orderMeta.peakPnlPct ?? (signal as any).peakPnlPct ?? 0;
       if (pnlPct > prevPeak) {
         (signal as any).peakPnlPct = pnlPct;
-        if (mainOrder) await this.orderModel.findByIdAndUpdate(mainOrder._id, { 'metadata.peakPnlPct': pnlPct }).catch(() => {});
+        (signal as any).peakUpdatedAt = Date.now();
+        if (mainOrder) await this.orderModel.findByIdAndUpdate(mainOrder._id, { 'metadata.peakPnlPct': pnlPct, 'metadata.peakUpdatedAt': Date.now() }).catch(() => {});
       }
-      const peak = (signal as any).peakPnlPct || 0;
+      // #4: Peak decay
+      let peak = (signal as any).peakPnlPct || 0;
+      const peakUpdatedAt = orderMeta.peakUpdatedAt ?? (signal as any).peakUpdatedAt ?? 0;
+      if (peak > 0 && peakUpdatedAt > 0) {
+        const minutesSincePeak = (Date.now() - peakUpdatedAt) / 60000;
+        const decayAfter = cfg.peakDecayAfterMin ?? 120;
+        if (minutesSincePeak > decayAfter) {
+          const hoursOverdue = (minutesSincePeak - decayAfter) / 60;
+          const decayRate = cfg.peakDecayPerHour ?? 0.35;
+          const decayFactor = Math.pow(1 - decayRate, hoursOverdue);
+          const decayedPeak = pnlPct + (peak - pnlPct) * decayFactor;
+          if (decayedPeak < peak) {
+            peak = Math.max(decayedPeak, pnlPct);
+            (signal as any).peakPnlPct = peak;
+            if (mainOrder) await this.orderModel.findByIdAndUpdate(mainOrder._id, { 'metadata.peakPnlPct': peak }).catch(() => {});
+          }
+        }
+      }
 
       const slMovedNonGrid = orderMeta.slMovedToEntry ?? (signal as any).slMovedToEntry;
       if (peak >= TRAIL_TRIGGER && !slMovedNonGrid) {
@@ -868,39 +920,45 @@ export class PositionMonitorService implements OnModuleInit {
       }
     }
 
-    // ─── Dynamic TP boost: extend TP on strong momentum ─────────────────
+    // ─── Stepped TP boost: extend TP on strong momentum ─────────────────
     // Base cap 6% (was 4%), extend up to 10% if hedge loss is significant
     const tpCap = hedgeLoss > mainNotional * 0.05
       ? Math.min(10, 6 + (hedgeLoss / mainNotional) * 100 * 0.3)
       : 6;
 
-    const tpBoostedNonGrid = orderMeta.tpBoosted ?? (signal as any).tpBoosted;
-    if (pnlPct >= 2.5 && !tpBoostedNonGrid && takeProfitPrice) {
-      (signal as any).tpBoosted = true;
-      if (mainOrder) await this.orderModel.findByIdAndUpdate(mainOrder._id, { 'metadata.tpBoosted': true }).catch(() => {});
+    const tpBoostLevel = orderMeta.tpBoostLevel ?? (signal as any).tpBoostLevel ?? 0;
+    const tpBoostSteps = [
+      { peakThreshold: 2.5, extend: 2.0, level: 1 },
+      { peakThreshold: 4.0, extend: 1.5, level: 2 },
+      { peakThreshold: 5.5, extend: 0,   level: 3 }, // lock
+    ];
+    const nextStep = tpBoostSteps.find(s => s.level === tpBoostLevel + 1);
+    if (nextStep && pnlPct >= nextStep.peakThreshold && takeProfitPrice) {
       try {
-        const hasMomentum = await this.marketDataService.hasVolumeMomentum(symbol);
+        const hasMomentum = nextStep.level === 1
+          ? await this.marketDataService.hasVolumeMomentum(symbol)
+          : true;
         if (hasMomentum) {
-          const currentTpPct = Math.abs(takeProfitPrice - currentEntry) / currentEntry * 100;
-          const boostedTpPct = Math.min(tpCap, Math.max(currentTpPct, pnlPct + 2.0));
-          const newTpPrice = direction === "LONG"
-            ? currentEntry * (1 + boostedTpPct / 100)
-            : currentEntry * (1 - boostedTpPct / 100);
-          (signal as any).takeProfitPrice = newTpPrice;
-          await this.signalQueueService.extendTakeProfit(
-            (signal as any)._id.toString(), newTpPrice, boostedTpPct,
-          );
-          if (mainOrder) await this.orderModel.findByIdAndUpdate(mainOrder._id, { takeProfitPrice: newTpPrice }).catch(() => {});
-          this.logger.log(
-            `[PositionMonitor] 🚀 ${sigKey} TP boosted to ${boostedTpPct.toFixed(1)}% (${newTpPrice.toFixed(4)}) — volume momentum detected`,
-          );
-          // Propagate TP change to real Binance orders (with retry)
-          this.propagateTpMove(sigKey, symbol, newTpPrice, direction);
-          // Notify via callback
-          if (this.tpBoostedCallback) {
-            await this.tpBoostedCallback(symbol, newTpPrice, boostedTpPct, direction).catch((e) =>
-              this.logger.warn(`[PositionMonitor] tpBoostedCallback error ${sigKey}: ${e?.message}`),
-            );
+          (signal as any).tpBoostLevel = nextStep.level;
+          if (mainOrder) await this.orderModel.findByIdAndUpdate(mainOrder._id, { 'metadata.tpBoostLevel': nextStep.level }).catch(() => {});
+          if (nextStep.extend > 0) {
+            const currentTpPct = Math.abs(takeProfitPrice - currentEntry) / currentEntry * 100;
+            const boostedTpPct = Math.min(tpCap, currentTpPct + nextStep.extend);
+            const newTpPrice = direction === "LONG"
+              ? currentEntry * (1 + boostedTpPct / 100)
+              : currentEntry * (1 - boostedTpPct / 100);
+            (signal as any).takeProfitPrice = newTpPrice;
+            await this.signalQueueService.extendTakeProfit((signal as any)._id.toString(), newTpPrice, boostedTpPct);
+            if (mainOrder) await this.orderModel.findByIdAndUpdate(mainOrder._id, { takeProfitPrice: newTpPrice }).catch(() => {});
+            this.logger.log(`[PositionMonitor] 🚀 ${sigKey} TP boost L${nextStep.level}: +${nextStep.extend}% → ${boostedTpPct.toFixed(1)}% (${newTpPrice.toFixed(4)})`);
+            this.propagateTpMove(sigKey, symbol, newTpPrice, direction);
+            if (this.tpBoostedCallback) {
+              await this.tpBoostedCallback(symbol, newTpPrice, boostedTpPct, direction).catch((e) =>
+                this.logger.warn(`[PositionMonitor] tpBoostedCallback error ${sigKey}: ${e?.message}`),
+              );
+            }
+          } else {
+            this.logger.log(`[PositionMonitor] 🔒 ${sigKey} TP locked at L${nextStep.level} — peak ${pnlPct.toFixed(1)}%`);
           }
         }
       } catch (err) {
@@ -1309,7 +1367,7 @@ export class PositionMonitorService implements OnModuleInit {
           type: 'FLIP_MAIN', stopLossPrice: newSl, takeProfitPrice: newTp, cycleNumber: 0,
           'metadata.peakPnlPct': 0,
           'metadata.slMovedToEntry': false,
-          'metadata.tpBoosted': false,
+          'metadata.tpBoostLevel': 0,
           'metadata.originalSlPrice': newSl,
           'metadata.originalEntryPrice': newEntry,
           'metadata.simNotional': signal.simNotional || 1000,
@@ -1355,7 +1413,7 @@ export class PositionMonitorService implements OnModuleInit {
       (signal as any).hedgeCycleCount = 0;
       (signal as any).hedgeHistory = flipHistory;
       (signal as any).slMovedToEntry = false;
-      (signal as any).tpBoosted = false;
+      (signal as any).tpBoostLevel = 0;
       (signal as any).peakPnlPct = 0;
       (signal as any).executedAt = flipTime; // Reset for correct funding fee calc
       (signal as any).lastFlipAt = flipTime; // NET_POSITIVE only counts post-flip hedges
@@ -1375,7 +1433,7 @@ export class PositionMonitorService implements OnModuleInit {
         originalSlPrice: newSl,
         hedgeActive: false, hedgeCycleCount: 0,
         hedgeHistory: flipHistory, // preserved + main TP profit banked
-        slMovedToEntry: false, tpBoosted: false, peakPnlPct: 0,
+        slMovedToEntry: false, tpBoostLevel: 0, peakPnlPct: 0, peakUpdatedAt: 0,
         netPeakPnlPct: 0, netTrailActivated: false, // Reset net trail state
         executedAt: flipTime, // Funding fees calculated from FLIP time, not original signal time
         lastFlipAt: flipTime, // NET_POSITIVE only counts hedge PnL after this timestamp

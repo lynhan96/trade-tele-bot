@@ -400,7 +400,7 @@ export class SignalQueueService {
     await this.aiSignalModel.findByIdAndUpdate(signalId, {
       takeProfitPrice: newTpPrice,
       takeProfitPercent: newTpPct,
-      tpBoosted: true,
+      tpBoosted: true, // legacy compat
     });
     this.logger.log(
       `[SignalQueue] ${signal.symbol} TP extended to ${newTpPrice.toFixed(4)} (${newTpPct.toFixed(1)}%) — momentum boost`,

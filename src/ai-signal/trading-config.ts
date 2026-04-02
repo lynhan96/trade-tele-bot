@@ -24,6 +24,9 @@ export interface TradingConfig {
   tpBoostTrigger: number;     // Boost TP at this % from entry (default 2.5)
   tpBoostExtend: number;      // Extend TP by this % on boost (default 2.0)
   tpBoostCap: number;         // Max TP after boost (default 4.0)
+  regimeTrailKeepRatio: Record<string, number>; // Per-regime trail keep ratio
+  peakDecayAfterMin: number;  // Start peak decay after N min without new peak
+  peakDecayPerHour: number;   // Decay ratio per hour
 
   // ── Confidence ───────────────────────────────────────────────────────────
   confidenceFloor: number;         // Base floor (default 63)
@@ -154,6 +157,17 @@ export const DEFAULT_TRADING_CONFIG: TradingConfig = {
   // Trailing — match market amplitude (~2% avg peak)
   trailTrigger: 2.0, trailKeepRatio: 0.75,
   tpProximityLock: 0.5, tpBoostTrigger: 2.5, tpBoostExtend: 2.0, tpBoostCap: 6.0,
+
+  // Dynamic trail keep ratio per regime (override trailKeepRatio)
+  regimeTrailKeepRatio: {
+    STRONG_BULL: 0.85, STRONG_BEAR: 0.85,
+    MIXED: 0.75, RANGE_BOUND: 0.75, SIDEWAYS: 0.75,
+    VOLATILE: 0.65,
+  } as Record<string, number>,
+
+  // Peak decay: after N minutes without new peak, decay ratio per hour
+  peakDecayAfterMin: 120,   // Start decaying after 2h without new peak
+  peakDecayPerHour: 0.35,   // Lose 35% of (peak - current) per hour
 
   // Confidence
   confidenceFloor: 65, confidenceFloorRanging: 65, confidenceFloorStrongBull: 80,
