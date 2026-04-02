@@ -478,6 +478,7 @@ export class PositionMonitorService implements OnModuleInit {
             'metadata.gridClosedCount': 0,
             'metadata.simNotional': simNotional,
             'metadata.peakPnlPct': 0,
+            'metadata.peakUpdatedAt': 0,
             'metadata.slMovedToEntry': false,
             'metadata.tpBoostLevel': 0,
             'metadata.originalSlPrice': (signal as any).originalSlPrice || effectiveSl,
@@ -920,7 +921,9 @@ export class PositionMonitorService implements OnModuleInit {
       }
     }
 
-    // ─── Stepped TP boost: extend TP on strong momentum ─────────────────
+    // ─── Stepped TP boost: extend TP on strong momentum (non-grid only) ──
+    // Grid signals handle TP boost in the grid block above
+    if (!isGridSignal) {
     // Base cap 6% (was 4%), extend up to 10% if hedge loss is significant
     const tpCap = hedgeLoss > mainNotional * 0.05
       ? Math.min(10, 6 + (hedgeLoss / mainNotional) * 100 * 0.3)
@@ -965,6 +968,7 @@ export class PositionMonitorService implements OnModuleInit {
         this.logger.warn(`[PositionMonitor] TP boost check error for ${sigKey}: ${err?.message}`);
       }
     }
+    } // end !isGridSignal TP boost
 
     // ─── Auto-Hedge Logic ──────────────────────────────────────────────────
     const hedgeCfg = this.tradingConfig.get();
@@ -1366,6 +1370,7 @@ export class PositionMonitorService implements OnModuleInit {
         await this.orderModel.findByIdAndUpdate(flipHedgeOrderDoc._id, {
           type: 'FLIP_MAIN', stopLossPrice: newSl, takeProfitPrice: newTp, cycleNumber: 0,
           'metadata.peakPnlPct': 0,
+          'metadata.peakUpdatedAt': 0,
           'metadata.slMovedToEntry': false,
           'metadata.tpBoostLevel': 0,
           'metadata.originalSlPrice': newSl,
@@ -1415,6 +1420,7 @@ export class PositionMonitorService implements OnModuleInit {
       (signal as any).slMovedToEntry = false;
       (signal as any).tpBoostLevel = 0;
       (signal as any).peakPnlPct = 0;
+      (signal as any).peakUpdatedAt = 0;
       (signal as any).executedAt = flipTime; // Reset for correct funding fee calc
       (signal as any).lastFlipAt = flipTime; // NET_POSITIVE only counts post-flip hedges
       (signal as any).hedgeTrailActivated = false; // Reset so new hedge trail works correctly
