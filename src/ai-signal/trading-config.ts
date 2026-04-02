@@ -166,7 +166,7 @@ export const DEFAULT_TRADING_CONFIG: TradingConfig = {
   fundingDirectionalBlock: 0.1, fundingExtremeBlock: 0.3,
 
   // Filters
-  enabledStrategies: '', maxDailySignals: 15, maxActiveSignals: 12,
+  enabledStrategies: '', maxDailySignals: 15, maxActiveSignals: 7,
   marketMomentumPnl: -0.7, marketMomentumSLs: 2,
   positionImbalancePct: 0.65, positionImbalanceMin: 4, riskScoreThreshold: 55,
 
@@ -227,7 +227,7 @@ export const DEFAULT_TRADING_CONFIG: TradingConfig = {
   simFundingEnabled: true, // Apply funding fee from Binance API
 
   // Singapore Strategy Filters
-  opLineEnabled: true,           // Daily Open Price bias
+  opLineEnabled: false,          // Daily Open Price bias — DISABLED: redundant with EMA trend + on-chain
   volumeAnalysisEnabled: true,   // Smart money vs retail volume
   srLevelEnabled: true,          // Support/Resistance levels
 
