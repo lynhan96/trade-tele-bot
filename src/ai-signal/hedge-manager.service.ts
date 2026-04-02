@@ -253,7 +253,7 @@ export class HedgeManagerService {
         }
         return count;
       })();
-      const hedgeSizeRatio = consecutiveWins >= 7 ? 1.0 : 0.75;
+      const hedgeSizeRatio = 1.0; // full hedge — 75% doesn't cover main loss
       const hedgeNotional = positionNotional * hedgeSizeRatio;
       const hedgeTpPrice = this.getHedgeTpPrice(currentPrice, hedgeDirection, regime);
 
