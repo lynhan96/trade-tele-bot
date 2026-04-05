@@ -238,16 +238,8 @@ export class HedgeManagerService {
         await this.redisService.delete(lockKey);
         return null;
       }
-      const realHedgeHistory = (ctx.hedgeHistory || []).filter((h: any) => h.reason !== 'FLIP_TP');
-      const consecutiveWins = (() => {
-        let count = 0;
-        for (let i = realHedgeHistory.length - 1; i >= 0; i--) {
-          if ((realHedgeHistory[i].pnlUsdt || 0) > 0) count++;
-          else break;
-        }
-        return count;
-      })();
-      const hedgeSizeRatio = consecutiveWins >= 7 ? 1.0 : 0.75;
+      // Hedge size: 65% of main filled notional (reduced from 75% — less exposure)
+      const hedgeSizeRatio = 0.65;
       const hedgeNotional = positionNotional * hedgeSizeRatio;
       const hedgeTpPrice = this.getHedgeTpPrice(currentPrice, hedgeDirection, regime);
 
