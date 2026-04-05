@@ -253,7 +253,7 @@ export class HedgeManagerService {
 
       // Build entry note with conditions
       const rsiNote = (ctx as any)._lastRsi15m ? ` RSI15m=${(ctx as any)._lastRsi15m.toFixed(1)}` : '';
-      const entryNote = isFirstCycle ? 'Cycle 1 (immediate)' : `Cycle ${cycle} (RSI+price confirmed${rsiNote})`;
+      const entryNote = `Cycle ${cycle} (RSI+candle confirmed${rsiNote})`;
       const sizeNote = hedgeSizeRatio === 1.0 ? `100% (${consecutiveWins} wins)` : '75%';
       const reasonDetail = `PnL ${pnlPct.toFixed(2)}% | ${entryNote} | regime: ${regime} | banked: $${banked.toFixed(2)}`;
 
@@ -343,7 +343,7 @@ export class HedgeManagerService {
       // Floor at 1% to cover real fees (~0.08% round-trip + funding)
       if (ctx.hedgeOpenedAt) {
         const ageMs = Date.now() - new Date(ctx.hedgeOpenedAt).getTime();
-        if (ageMs > 6 * 3600_000 && hedgePnlPct >= 1.0 && hedgePnlPct < 2.0) {
+        if (ageMs > 6 * 3600_000 && hedgePnlPct >= 1.5 && hedgePnlPct < 3.0) {
           this.logger.log(
             `[${ctx.coin}] Hedge TIMEOUT | ${(ageMs / 3600_000).toFixed(1)}h held, PnL +${hedgePnlPct.toFixed(2)}% → sideway, closing`,
           );
@@ -452,9 +452,8 @@ export class HedgeManagerService {
       }
 
       // ── 5. Early trail: activate at +2%, dynamic keep ratio ──
-      // No separate breakeven SL — trail handles all exits above +2%
-      // This prevents premature close at +1% when price consolidates
-      if (hedgePnlPct >= 2.0) {
+      // Only when TP trail (section 4) hasn't activated — prevents double trail logic
+      if (hedgePnlPct >= 2.0 && !ctx.hedgeTrailActivated) {
         const trailSl = peak * dynamicKeepRatio;
         const minProfit = 1.5; // floor: never close below +1.5% (covers fees)
 
