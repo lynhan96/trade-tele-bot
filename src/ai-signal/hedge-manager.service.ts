@@ -246,7 +246,7 @@ export class HedgeManagerService {
       // Build entry note with conditions
       const rsiNote = (ctx as any)._lastRsi15m ? ` RSI15m=${(ctx as any)._lastRsi15m.toFixed(1)}` : '';
       const entryNote = `Cycle ${cycle} (RSI+candle confirmed${rsiNote})`;
-      const sizeNote = hedgeSizeRatio === 1.0 ? `100% (${consecutiveWins} wins)` : '75%';
+      const sizeNote = `${(hedgeSizeRatio * 100).toFixed(0)}%`;
       const reasonDetail = `PnL ${pnlPct.toFixed(2)}% | ${entryNote} | regime: ${regime} | banked: $${banked.toFixed(2)}`;
 
       this.logger.log(
