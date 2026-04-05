@@ -209,8 +209,8 @@ export const DEFAULT_TRADING_CONFIG: TradingConfig = {
   // Auto-Hedge
   hedgeEnabled: true,
   hedgeSafetySlPct: 10.0,
-  hedgePartialTriggerPct: 3.0,
-  hedgeFullTriggerPct: 3.0,        // Same as partial — always go FULL immediately
+  hedgePartialTriggerPct: 4.0,       // Trigger at -4% (was -3%, too sensitive to noise)
+  hedgeFullTriggerPct: 4.0,        // Same as partial — always go FULL immediately
   hedgePartialSizeRatio: 1.0,      // Always 100% — partial was too weak
   hedgeFullSizeRatio: 1.0,
   hedgeTpPctTrend: 3.5,               // TP for trends

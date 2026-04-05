@@ -150,64 +150,58 @@ export class HedgeManagerService {
       // No strict 1.2x / price-worse conditions — RSI + candle + overbought guard handles filtering
 
       // Emergency hedge bypass: at deep loss (< -8%), skip ALL RSI/candle guards
-      // Risk of NOT hedging at -8%+ far outweighs risk of bounce
       const emergencyBypass = pnlPct < -8;
       if (emergencyBypass) {
         this.logger.log(`[${ctx.coin}] EMERGENCY hedge bypass: PnL ${pnlPct.toFixed(1)}% < -8% — skip RSI/candle guards`);
       }
 
-      // RSI confirmation for ALL cycle 2+ (including fresh drop)
-      // Prevents blind entry when market reverses — must confirm momentum
-      if (!isFirstCycle && !emergencyBypass) {
+      // RSI + candle confirmation for ALL cycles (including cycle 1)
+      // Prevents entering hedge at bounce/reversal points
+      if (!emergencyBypass) {
         try {
           const coin = ctx.coin || ctx.symbol?.replace('USDT', '');
           const closes15m = await this.marketDataService.getClosePrices(coin, '15m');
           if (closes15m.length >= 14) {
             const rsiVals = RSI.calculate({ period: 14, values: closes15m });
             const rsi15m = rsiVals[rsiVals.length - 1];
-            // Count consecutive wins from history (for RSI relaxation)
-            const consWinsForRsi = (() => { let c = 0; for (let i = realHedges.length - 1; i >= 0; i--) { if ((realHedges[i].pnlUsdt || 0) > 0) c++; else break; } return c; })();
-            // Relax threshold when deeply negative or fresh drop with consecutive wins
-            const relaxed = pnlPct < -triggerPct * 1.5 || (freshDrop && consWinsForRsi >= 3);
-            const rsiThresh = relaxed ? 45 : 40;
-            // Hedge is OPPOSITE of main: main LONG → hedge SHORT (need high RSI), main SHORT → hedge LONG (need low RSI)
             const hedgeDir = ctx.direction === 'LONG' ? 'SHORT' : 'LONG';
+
+            // RSI threshold: cycle 1 uses softer 50, cycle 2+ uses 40/45
+            const consWinsForRsi = (() => { let c = 0; for (let i = realHedges.length - 1; i >= 0; i--) { if ((realHedges[i].pnlUsdt || 0) > 0) c++; else break; } return c; })();
+            const relaxed = pnlPct < -triggerPct * 1.5 || (freshDrop && consWinsForRsi >= 3);
+            const rsiThresh = isFirstCycle ? 50 : (relaxed ? 45 : 40);
             const rsiOk = hedgeDir === 'LONG' ? rsi15m < rsiThresh : rsi15m > (100 - rsiThresh);
             if (!rsiOk) {
-              this.logger.log(`[${ctx.coin}] Hedge blocked: RSI15m=${rsi15m.toFixed(1)} (need ${ctx.direction === 'LONG' ? '<' : '>'}${rsiThresh})${freshDrop ? ' [fresh drop]' : ''}`);
+              this.logger.log(`[${ctx.coin}] Hedge blocked: RSI15m=${rsi15m.toFixed(1)} (need ${hedgeDir === 'LONG' ? '<' : '>'}${hedgeDir === 'LONG' ? rsiThresh : 100 - rsiThresh}) cycle=${isFirstCycle ? '1' : '2+'}`);
               return null;
             }
 
-            // Overbought/Oversold guard — don't enter hedge at extreme RSI
-            // Hedge LONG (main SHORT): RSI > 70 = overbought = reversal likely → SKIP
-            // Hedge SHORT (main LONG): RSI < 30 = oversold = bounce likely → SKIP
+            // Overbought/Oversold guard
             const isOverbought = hedgeDir === 'LONG' && rsi15m > 70;
             const isOversold = hedgeDir === 'SHORT' && rsi15m < 30;
             if (isOverbought || isOversold) {
-              this.logger.log(`[${ctx.coin}] Hedge blocked: RSI ${rsi15m.toFixed(1)} ${isOverbought ? 'OVERBOUGHT (>70)' : 'OVERSOLD (<30)'} — reversal likely${freshDrop ? ' [fresh drop]' : ''}`);
+              this.logger.log(`[${ctx.coin}] Hedge blocked: RSI ${rsi15m.toFixed(1)} ${isOverbought ? 'OVERBOUGHT (>70)' : 'OVERSOLD (<30)'} — reversal likely`);
               return null;
             }
 
-            // Candle color: last 2 candles must align with hedge direction
-            // Main LONG → hedge SHORT: need red candles (sellers in control)
-            // Main SHORT → hedge LONG: need green candles (buyers in control)
+            // Candle momentum: last 2 candles must align with hedge direction
             const last3 = closes15m.slice(-3);
             if (last3.length >= 3) {
-              const candle1 = last3[2] - last3[1]; // latest candle
-              const candle2 = last3[1] - last3[0]; // previous candle
-              const hedgeNeedsDown = ctx.direction === 'LONG'; // hedge SHORT needs red
+              const candle1 = last3[2] - last3[1];
+              const candle2 = last3[1] - last3[0];
+              const hedgeNeedsDown = ctx.direction === 'LONG';
               const candleAligned = hedgeNeedsDown
-                ? (candle1 < 0 || candle2 < 0) // at least 1 of last 2 red
-                : (candle1 > 0 || candle2 > 0); // at least 1 of last 2 green
+                ? (candle1 < 0 || candle2 < 0)
+                : (candle1 > 0 || candle2 > 0);
 
               if (!candleAligned) {
-                this.logger.log(`[${ctx.coin}] Hedge blocked: candles wrong color (need ${hedgeNeedsDown ? 'red' : 'green'})${freshDrop ? ' [fresh drop]' : ''}`);
+                this.logger.log(`[${ctx.coin}] Hedge blocked: candles wrong color (need ${hedgeNeedsDown ? 'red' : 'green'}) cycle=${isFirstCycle ? '1' : '2+'}`);
                 return null;
               }
             }
 
             (ctx as any)._lastRsi15m = rsi15m;
-            this.logger.log(`[${coin}] Hedge confirmed: RSI=${rsi15m.toFixed(1)} candle=OK${freshDrop ? ' [fresh drop]' : ''}`);
+            this.logger.log(`[${coin}] Hedge confirmed: RSI=${rsi15m.toFixed(1)} candle=OK cycle=${isFirstCycle ? '1' : '2+'}`);
           }
         } catch (err) {
           this.logger.log(`[${ctx.coin}] RSI/candle check FAILED — proceeding: ${err?.message}`);
