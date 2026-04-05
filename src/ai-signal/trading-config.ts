@@ -235,7 +235,7 @@ export const DEFAULT_TRADING_CONFIG: TradingConfig = {
   hedgeReEntryRsiShort: 45,
 
   // Sim Trading
-  simNotional: 600,        // Simulated volume per trade ($600 × 12 slots = diversified)
+  simNotional: 1000,       // Simulated volume per trade (match real tradingBalance)
   simTakerFeePct: 0.04,   // 0.04% per side (market orders — Binance standard)
   simMakerFeePct: 0.02,   // 0.02% per side (limit orders)
   simFundingEnabled: true, // Apply funding fee from Binance API

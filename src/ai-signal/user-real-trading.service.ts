@@ -1599,11 +1599,20 @@ export class UserRealTradingService implements OnModuleInit {
           let rsiOk: boolean | null = null;
           const coin = symbol.replace("USDT", "");
 
+          // Calculate current avg entry for rolling trigger
+          const filledGridsForAvg = grids.filter((g: any) => g.status === "FILLED" && g.quantity > 0);
+          const totalQtyForAvg = filledGridsForAvg.reduce((s: number, g: any) => s + g.quantity, 0);
+          const currentAvgEntry = totalQtyForAvg > 0
+            ? filledGridsForAvg.reduce((s: number, g: any) => s + g.fillPrice * g.quantity, 0) / totalQtyForAvg
+            : origEntry;
+
           for (const grid of grids) {
             if (grid.status !== "PENDING") continue;
+            // Rolling avg trigger: each DCA triggers at 2% from current avg entry
+            const DCA_STEP_PCT = 2.0;
             const triggerPrice = direction === "LONG"
-              ? origEntry * (1 - grid.deviationPct / 100)
-              : origEntry * (1 + grid.deviationPct / 100);
+              ? currentAvgEntry * (1 - DCA_STEP_PCT / 100)
+              : currentAvgEntry * (1 + DCA_STEP_PCT / 100);
             const triggered = direction === "LONG" ? currentPrice <= triggerPrice : currentPrice >= triggerPrice;
             if (triggered) {
               // Cooldown: skip if last grid filled < 5 min ago

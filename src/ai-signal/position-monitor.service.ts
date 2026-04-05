@@ -517,9 +517,12 @@ export class PositionMonitorService implements OnModuleInit {
 
       for (const grid of grids) {
         if (grid.status !== "PENDING") continue;
+        // Rolling avg trigger: each DCA triggers at 2% from current avg entry
+        // After each fill, avg entry shifts → next level always 2% away from new avg
+        const DCA_STEP_PCT = 2.0; // fixed 2% step from avg
         const triggerPrice = direction === "LONG"
-          ? origEntry * (1 - grid.deviationPct / 100)
-          : origEntry * (1 + grid.deviationPct / 100);
+          ? avgEntry * (1 - DCA_STEP_PCT / 100)
+          : avgEntry * (1 + DCA_STEP_PCT / 100);
         const triggered = direction === "LONG" ? price <= triggerPrice : price >= triggerPrice;
         if (triggered) {
           // Guard against concurrent tick processing (async RSI check window)
