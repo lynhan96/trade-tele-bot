@@ -1236,22 +1236,44 @@ export class AdminService {
     return { success: true };
   }
 
-  /** Get filter rejection funnel — counts of signals blocked at each filter stage (24h rolling). */
-  async getFilterFunnel(): Promise<Record<string, number>> {
-    const keys = [
-      'regime_block',
-      'funding_block',
-      'confidence_block',
-      'extreme_move',
-      'ai_gate_reject',
-      'cooldown',
+  /** Get pipeline funnel — per-coin filter results from last scan cycle + aggregate counters. */
+  async getFilterFunnel(): Promise<any> {
+    // Aggregate 24h counters
+    const counterKeys = [
+      'extreme_move', 'cooldown', 'atr_cap', 'auto_blacklist',
+      'confidence_block', 'risk_score',
     ];
-    const result: Record<string, number> = {};
-    for (const key of keys) {
-      const val = await this.redisService.get<number>(`cache:ai:filter:${key}`);
-      result[key] = val || 0;
+    const counters: Record<string, number> = {};
+    for (const key of counterKeys) {
+      counters[key] = (await this.redisService.get<number>(`cache:ai:filter:${key}`)) || 0;
     }
-    return result;
+
+    // Per-coin scan log from last cycle
+    const meta = await this.redisService.get<any>('cache:ai:pipeline:meta') || {};
+    const lastCycle = await this.redisService.get<Record<string, any>>('cache:ai:pipeline:last-cycle') || {};
+
+    // Build funnel stages from per-coin data
+    const coins = Object.values(lastCycle);
+    const tiers = ['TIER_1', 'TIER_1_5', 'TIER_2', 'TIER_2_5', 'TIER_3'];
+    const funnel = tiers.map(tier => {
+      const blocked = coins.filter((c: any) => c.blockedAt === tier);
+      const reasons: Record<string, number> = {};
+      blocked.forEach((c: any) => { const r = c.reason || 'unknown'; reasons[r] = (reasons[r] || 0) + 1; });
+      return { tier, blocked: blocked.length, reasons };
+    });
+    const passed = coins.filter((c: any) => !c.blockedAt).length;
+
+    return {
+      meta: { ...meta, totalCoins: coins.length, passed },
+      funnel,
+      counters,
+      coinDetails: coins.sort((a: any, b: any) => {
+        // passed first, then by tier depth (deepest first)
+        if (!a.blockedAt && b.blockedAt) return -1;
+        if (a.blockedAt && !b.blockedAt) return 1;
+        return (tiers.indexOf(b.blockedAt) - tiers.indexOf(a.blockedAt)) || (a.coin || '').localeCompare(b.coin || '');
+      }),
+    };
   }
 
   /** Get all orders for a signal (for admin panel signal detail). */

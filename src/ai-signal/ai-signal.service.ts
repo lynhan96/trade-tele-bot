@@ -54,6 +54,9 @@ export class AiSignalService implements OnModuleInit {
   // Track coins being processed in current scan to prevent race conditions
   private readonly processingCoins = new Set<string>();
 
+  // Pipeline scan log: per-coin filter results for the current scan cycle
+  private scanCycleLog = new Map<string, { coin: string; blockedAt?: string; reason?: string; passedTiers: string[]; direction?: string; confidence?: number; strategy?: string }>();
+
   // Cache getAllActiveSignals to avoid 150 identical DB queries per scan cycle
   private activeSignalsCache: { data: any[]; ts: number } | null = null;
   private readonly ACTIVE_CACHE_TTL = 15000; // 15s
@@ -240,6 +243,7 @@ export class AiSignalService implements OnModuleInit {
     if (scanning) return;
 
     await this.redisService.set(AI_SCANNING_KEY, true, 300); // 5 min safety TTL
+    this.scanCycleLog.clear(); // reset for new cycle
     try {
       const shortlist = await this.coinFilterService.getShortlist();
       if (shortlist.length === 0) return;
@@ -293,6 +297,12 @@ export class AiSignalService implements OnModuleInit {
         // Yield to event loop so Telegram commands don't hang during long scans
         await new Promise((r) => setImmediate(r));
       }
+      // Persist pipeline scan log for admin dashboard
+      const scanMeta = { shortlistCount: shortlist.length, filteredCount: filtered.length, scannedAt: new Date().toISOString(), regime: globalRegime };
+      await this.redisService.set('cache:ai:pipeline:meta', scanMeta, 600).catch(() => {});
+      const logObj: Record<string, any> = {};
+      this.scanCycleLog.forEach((v, k) => { logObj[k] = v; });
+      await this.redisService.set('cache:ai:pipeline:last-cycle', logObj, 600).catch(() => {});
     } catch (err) {
       this.logger.error(`[AiSignal] runSignalScan error: ${err?.message}`);
     } finally {
@@ -401,12 +411,16 @@ export class AiSignalService implements OnModuleInit {
     // Coin blacklist (auto-tuner disabled due to poor PnL)
     const coinBlacklist = await this.strategyAutoTuner.getCoinBlacklist();
     if (coinBlacklist.has(coin.toUpperCase())) {
+      this.scanCycleLog.set(signalKey, { coin, blockedAt: 'TIER_1', reason: 'blacklisted', passedTiers: [] });
       return { pass: false, reason: 'blacklisted' };
     }
 
     // Active signal check
     const hasActive = await this.signalQueueService.getActiveSignal(signalKey);
-    if (hasActive) return { pass: false, reason: 'has_active' };
+    if (hasActive) {
+      this.scanCycleLog.set(signalKey, { coin, blockedAt: 'TIER_1', reason: 'has_active', passedTiers: [] });
+      return { pass: false, reason: 'has_active' };
+    }
 
     // Cap total active signals
     const cfg = this.tradingConfig.get();
@@ -420,6 +434,7 @@ export class AiSignalService implements OnModuleInit {
     }
     if (allActives.length >= maxSignals) {
       this.logger.debug(`[AiSignal] Active cap reached (${allActives.length}/${maxSignals}${cfg.maxActiveSignals ? ' [config]' : ' [default]'}) — skipping`);
+      this.scanCycleLog.set(signalKey, { coin, blockedAt: 'TIER_1', reason: 'active_cap', passedTiers: [] });
       return { pass: false, reason: 'active_cap' };
     }
 
@@ -499,6 +514,8 @@ export class AiSignalService implements OnModuleInit {
         const ATR_CAP = 3.0; // max 3% ATR on 4h
         if (atrPct > ATR_CAP) {
           this.logger.debug(`[AiSignal] ${coinUpper} blocked — ATR4h ${atrPct.toFixed(1)}% > ${ATR_CAP}% (too volatile)`);
+          this.scanCycleLog.set(signalKey, { coin, blockedAt: 'TIER_1_5', reason: `atr_cap (${atrPct.toFixed(1)}%)`, passedTiers: ['TIER_1'] });
+          this.redisService.initAndIncr('cache:ai:filter:atr_cap', 0, 86400).catch(() => {});
           return;
         }
       }
@@ -508,6 +525,8 @@ export class AiSignalService implements OnModuleInit {
       const isAutoBlacklisted = await this.redisService.get<boolean>(autoBlacklistKey);
       if (isAutoBlacklisted) {
         this.logger.debug(`[AiSignal] ${coinUpper} auto-blacklisted (recent loss > $50)`);
+        this.scanCycleLog.set(signalKey, { coin, blockedAt: 'TIER_1_5', reason: 'auto_blacklist', passedTiers: ['TIER_1'] });
+        this.redisService.initAndIncr('cache:ai:filter:auto_blacklist', 0, 86400).catch(() => {});
         return;
       }
     } catch (err) {
@@ -532,7 +551,10 @@ export class AiSignalService implements OnModuleInit {
 
     // Rule engine evaluate (confluence + Singapore/on-chain filters)
     const signalResult = await this.ruleEngineService.evaluate(coin, currency, params);
-    if (!signalResult) return;
+    if (!signalResult) {
+      this.scanCycleLog.set(signalKey, { coin, blockedAt: 'TIER_2', reason: 'no_confluence', passedTiers: ['TIER_1', 'TIER_1_5'] });
+      return;
+    }
 
     // Futures analytics: confidence adjustment (boost/penalize based on direction alignment)
     const cachedAnalytics = await this.futuresAnalyticsService.getCachedAnalytics();
@@ -562,6 +584,7 @@ export class AiSignalService implements OnModuleInit {
       );
       this.redisService.initAndIncr('cache:ai:filter:confidence_block', 0, 86400).catch(() => {});
       this.logValidation(symbol, signalResult, params, false, `confidence ${params.confidence} < ${params.minConfidenceToTrade}`);
+      this.scanCycleLog.set(signalKey, { coin, blockedAt: 'TIER_2', reason: `confidence ${params.confidence} < ${params.minConfidenceToTrade}`, passedTiers: ['TIER_1', 'TIER_1_5'], direction: signalResult.isLong ? 'LONG' : 'SHORT', confidence: params.confidence, strategy: signalResult.strategy });
       return;
     }
 
@@ -578,10 +601,12 @@ export class AiSignalService implements OnModuleInit {
         const btcBullish = ema21[ema21.length - 1] > ema50[ema50.length - 1];
         if (signalResult.isLong && btcBearish) {
           this.logger.log(`[AiSignal] ${coinUpper} LONG blocked — BTC 4h EMA bearish (21 < 50)`);
+          this.scanCycleLog.set(signalKey, { coin, blockedAt: 'TIER_2_5', reason: 'btc_ema_bearish', passedTiers: ['TIER_1', 'TIER_1_5', 'TIER_2'], direction: 'LONG', confidence: params.confidence, strategy: signalResult.strategy });
           return;
         }
         if (!signalResult.isLong && btcBullish) {
           this.logger.log(`[AiSignal] ${coinUpper} SHORT blocked — BTC 4h EMA bullish (21 > 50)`);
+          this.scanCycleLog.set(signalKey, { coin, blockedAt: 'TIER_2_5', reason: 'btc_ema_bullish', passedTiers: ['TIER_1', 'TIER_1_5', 'TIER_2'], direction: 'SHORT', confidence: params.confidence, strategy: signalResult.strategy });
           return;
         }
       }
@@ -600,10 +625,12 @@ export class AiSignalService implements OnModuleInit {
         const coinBullish = coinEma21[coinEma21.length - 1] > coinEma50[coinEma50.length - 1];
         if (signalResult.isLong && coinBearish) {
           this.logger.log(`[AiSignal] ${coinUpper} LONG blocked — coin 4h EMA bearish (21 < 50)`);
+          this.scanCycleLog.set(signalKey, { coin, blockedAt: 'TIER_2_5', reason: 'coin_ema_bearish', passedTiers: ['TIER_1', 'TIER_1_5', 'TIER_2'], direction: 'LONG', confidence: params.confidence, strategy: signalResult.strategy });
           return;
         }
         if (!signalResult.isLong && coinBullish) {
           this.logger.log(`[AiSignal] ${coinUpper} SHORT blocked — coin 4h EMA bullish (21 > 50)`);
+          this.scanCycleLog.set(signalKey, { coin, blockedAt: 'TIER_2_5', reason: 'coin_ema_bullish', passedTiers: ['TIER_1', 'TIER_1_5', 'TIER_2'], direction: 'SHORT', confidence: params.confidence, strategy: signalResult.strategy });
           return;
         }
       }
@@ -623,10 +650,12 @@ export class AiSignalService implements OnModuleInit {
           const posInRange = ((currentPrice - low24) / range) * 100;
           if (signalResult.isLong && posInRange > 70) {
             this.logger.log(`[AiSignal] ${coinUpper} LONG blocked — price at ${posInRange.toFixed(0)}% of 24h range (buying high)`);
+            this.scanCycleLog.set(signalKey, { coin, blockedAt: 'TIER_2_5', reason: `price_position ${posInRange.toFixed(0)}%`, passedTiers: ['TIER_1', 'TIER_1_5', 'TIER_2'], direction: 'LONG', confidence: params.confidence, strategy: signalResult.strategy });
             return;
           }
           if (!signalResult.isLong && posInRange < 30) {
             this.logger.log(`[AiSignal] ${coinUpper} SHORT blocked — price at ${posInRange.toFixed(0)}% of 24h range (shorting low)`);
+            this.scanCycleLog.set(signalKey, { coin, blockedAt: 'TIER_2_5', reason: `price_position ${posInRange.toFixed(0)}%`, passedTiers: ['TIER_1', 'TIER_1_5', 'TIER_2'], direction: 'SHORT', confidence: params.confidence, strategy: signalResult.strategy });
             return;
           }
         }
@@ -662,6 +691,7 @@ export class AiSignalService implements OnModuleInit {
       this.logger.debug(`[AiSignal] ${coin} risk score ${risk.score} > threshold — skipped`);
       await this.redisService.initAndIncr('cache:ai:filter:risk_score', 0, 86400);
       this.logValidation(symbol, signalResult, params, false, `risk_score ${risk.score} > threshold`);
+      this.scanCycleLog.set(signalKey, { coin, blockedAt: 'TIER_3', reason: `risk_score ${risk.score}`, passedTiers: ['TIER_1', 'TIER_1_5', 'TIER_2', 'TIER_2_5'], direction: signalResult.isLong ? 'LONG' : 'SHORT', confidence: params.confidence, strategy: signalResult.strategy });
       return;
     }
 
