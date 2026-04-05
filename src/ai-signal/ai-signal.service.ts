@@ -511,7 +511,7 @@ export class AiSignalService implements OnModuleInit {
       const ohlc4h = await this.indicatorService.getOhlc(coin, '4h');
       if (ohlc4h.closes.length >= 14) {
         const atrPct = this.indicatorService.getAtrPercent(ohlc4h.highs, ohlc4h.lows, ohlc4h.closes, 14);
-        const ATR_CAP = 3.0; // max 3% ATR on 4h
+        const ATR_CAP = 5.0; // max 5% ATR on 4h (3% was too strict, blocked 35%)
         if (atrPct > ATR_CAP) {
           this.logger.debug(`[AiSignal] ${coinUpper} blocked — ATR4h ${atrPct.toFixed(1)}% > ${ATR_CAP}% (too volatile)`);
           this.scanCycleLog.set(signalKey, { coin, blockedAt: 'TIER_1_5', reason: `atr_cap (${atrPct.toFixed(1)}%)`, passedTiers: ['TIER_1'] });
