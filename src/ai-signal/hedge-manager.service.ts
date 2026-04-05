@@ -458,39 +458,18 @@ export class HedgeManagerService {
       }
 
       // ── 5. Early trail: activate at +2%, dynamic keep ratio ──
-      if (hedgePnlPct >= 2.0 && !ctx.hedgeTrailActivated) {
+      // No separate breakeven SL — trail handles all exits above +2%
+      // This prevents premature close at +1% when price consolidates
+      if (hedgePnlPct >= 2.0) {
         const trailSl = peak * dynamicKeepRatio;
+        const minProfit = 1.5; // floor: never close below +1.5% (covers fees)
 
-        if (peak >= 2.5 && hedgePnlPct <= trailSl && hedgePnlPct >= 1.0) {
+        if (peak >= 3.0 && hedgePnlPct <= trailSl && hedgePnlPct >= minProfit) {
           this.logger.log(
-            `[${ctx.coin}] Hedge EARLY TRAIL close | Peak: ${peak.toFixed(2)}% → ${hedgePnlPct.toFixed(2)}% (trail: ${trailSl.toFixed(2)}%, keep: ${dynamicKeepRatio})`,
+            `[${ctx.coin}] Hedge TRAIL close | Peak: ${peak.toFixed(2)}% → ${hedgePnlPct.toFixed(2)}% (trail: ${trailSl.toFixed(2)}%, keep: ${dynamicKeepRatio})`,
           );
           return this.closeHedgeWithProfit(ctx, ctxId, hedgePnlPct, hedgePnlUsdt, cfg,
-            `Early trail: peak ${peak.toFixed(2)}% → ${hedgePnlPct.toFixed(2)}%`);
-        }
-      }
-
-      // ── 6. Hedge breakeven SL — ONLY when trail NOT active ──
-      const trailActive = peak >= 2.5;
-
-      if (!trailActive) {
-        if (hedgePnlPct >= 2.0 && !ctx.hedgeSlAtEntry) {
-          this.logger.log(
-            `[${ctx.coin}] Hedge SL → +1.0% (no trail yet, peak ${peak.toFixed(1)}%) | PnL: +${hedgePnlPct.toFixed(2)}%`,
-          );
-          return {
-            action: 'NONE' as const,
-            reason: `Hedge SL moved to +1.0% at +${hedgePnlPct.toFixed(2)}%`,
-            hedgeSlAtEntry: true,
-          };
-        }
-
-        if (ctx.hedgeSlAtEntry && hedgePnlPct <= 1.0 && hedgePnlUsdt >= 0) {
-          this.logger.log(
-            `[${ctx.coin}] Hedge protected SL hit | PnL: +${hedgePnlPct.toFixed(2)}% → close with min profit`,
-          );
-          return this.closeHedgeWithProfit(ctx, ctxId, hedgePnlPct, hedgePnlUsdt, cfg,
-            `Hedge protected SL: +${hedgePnlPct.toFixed(2)}%`);
+            `Hedge trail: peak ${peak.toFixed(2)}% → ${hedgePnlPct.toFixed(2)}%`);
         }
       }
 
