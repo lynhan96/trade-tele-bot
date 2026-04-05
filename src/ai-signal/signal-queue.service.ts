@@ -309,6 +309,14 @@ export class SignalQueueService {
       `[SignalQueue] ${symbol} COMPLETED — exitPrice=${exitPrice} pnl=${pnlPercent.toFixed(2)}% orders=${openOrders.length}`,
     );
 
+    // Auto-blacklist: coin with net loss > $50 → block for 7 days
+    if (netPnlUsdt < -50) {
+      const coinName = symbol.replace('USDT', '');
+      const blacklistKey = `cache:ai:auto-blacklist:${coinName}`;
+      await this.redisService.set(blacklistKey, true, 7 * 86400); // 7 days TTL
+      this.logger.log(`[SignalQueue] ${coinName} AUTO-BLACKLISTED for 7 days (loss $${netPnlUsdt.toFixed(2)})`);
+    }
+
     return active;
   }
 

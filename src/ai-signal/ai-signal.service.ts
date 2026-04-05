@@ -490,6 +490,30 @@ export class AiSignalService implements OnModuleInit {
     const marketGuard = pre.marketGuard;
     const cfg = this.tradingConfig.get();
 
+    // ═══ TIER 1.5: Coin Quality Filters (ATR + auto-blacklist) ═══
+    try {
+      // 1. ATR Volatility Cap: block coins with ATR% > 3% on 4h (too volatile = shit coin)
+      const ohlc4h = await this.indicatorService.getOhlc(coin, '4h');
+      if (ohlc4h.closes.length >= 14) {
+        const atrPct = this.indicatorService.getAtrPercent(ohlc4h.highs, ohlc4h.lows, ohlc4h.closes, 14);
+        const ATR_CAP = 3.0; // max 3% ATR on 4h
+        if (atrPct > ATR_CAP) {
+          this.logger.debug(`[AiSignal] ${coinUpper} blocked — ATR4h ${atrPct.toFixed(1)}% > ${ATR_CAP}% (too volatile)`);
+          return;
+        }
+      }
+
+      // 2. Auto-blacklist: coins that caused > $50 loss in last 7 days → skip
+      const autoBlacklistKey = `cache:ai:auto-blacklist:${coinUpper}`;
+      const isAutoBlacklisted = await this.redisService.get<boolean>(autoBlacklistKey);
+      if (isAutoBlacklisted) {
+        this.logger.debug(`[AiSignal] ${coinUpper} auto-blacklisted (recent loss > $50)`);
+        return;
+      }
+    } catch (err) {
+      this.logger.debug(`[AiSignal] ${coinUpper} coin quality check failed: ${err?.message}`);
+    }
+
     // ═══ TIER 2: Strategy + Confluence ═══
     const params = await this.aiOptimizerService.tuneParamsForSymbol(
       coin, currency, globalRegime, forceProfile,
