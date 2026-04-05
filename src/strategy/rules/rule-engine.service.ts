@@ -181,7 +181,10 @@ export class RuleEngineService {
       return null;
     }
 
-    if (winners.length >= 2) {
+    // Dynamic confluence: trending markets need 2+, ranging/mixed accept 1
+    const regime = params.regime || 'MIXED';
+    const minConfluence = (regime === 'STRONG_BULL' || regime === 'STRONG_BEAR') ? 2 : 1;
+    if (winners.length >= minConfluence) {
       const names = winners.map(w => w.strategy).join("+");
       const reasons = winners.map(w => w.result.reason).join(" | ");
       const ocInfo = ocResult.reasons.filter(r => r.includes('OK') || r.includes('SURGE') || r.includes('BUY') || r.includes('SELL')).join(', ');
@@ -198,10 +201,10 @@ export class RuleEngineService {
       };
     }
 
-    // Single strategy = NOT enough confluence → block
-    const soloStrategy = winners[0]?.strategy;
+    // Not enough confluence → block
+    const soloStrategy = winners.map(w => w.strategy).join('+') || 'none';
     this.logger.log(
-      `[RuleEngine] ${coin} ✗ ${isLong ? "LONG" : "SHORT"} only 1 strategy (${soloStrategy}) — need ≥2 confluence, skipped`,
+      `[RuleEngine] ${coin} ✗ ${isLong ? "LONG" : "SHORT"} only ${winners.length} strategy (${soloStrategy}) — need ≥${minConfluence} confluence (${regime}), skipped`,
     );
     return null;
   }
