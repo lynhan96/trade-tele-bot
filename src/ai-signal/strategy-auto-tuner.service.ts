@@ -37,7 +37,7 @@ const STRATEGY_GATES_TTL = 5 * 60 * 60; // 5h (re-evaluated every 4h)
 const MARKET_GUARD_TTL = 35 * 60; // 35min (re-evaluated every 15min)
 const MIN_TRADES_TO_EVALUATE = 5; // need 5+ trades to evaluate (was 15, too conservative)
 const MIN_COIN_TRADES = 2; // need 2+ trades per coin to judge (was 1)
-const LOOKBACK_DAYS = 7; // 7-day window — more data, less noise (was 3)
+const LOOKBACK_DAYS = 14; // 14-day window — need more data for evaluation (was 7)
 const MIN_BLOCK_HOURS = 12; // minimum hours a coin stays blocked before re-evaluation
 
 
