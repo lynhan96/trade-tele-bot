@@ -35,7 +35,7 @@ const COIN_BLOCKED_AT_KEY = "cache:coin-blocked-at"; // Record<string, isoString
 const MARKET_GUARD_KEY = "cache:ai:market-guard"; // auto market condition guard
 const STRATEGY_GATES_TTL = 5 * 60 * 60; // 5h (re-evaluated every 4h)
 const MARKET_GUARD_TTL = 35 * 60; // 35min (re-evaluated every 15min)
-const MIN_TRADES_TO_EVALUATE = 15; // need 15+ trades to reduce false disabling (was 8)
+const MIN_TRADES_TO_EVALUATE = 5; // need 5+ trades to evaluate (was 15, too conservative)
 const MIN_COIN_TRADES = 2; // need 2+ trades per coin to judge (was 1)
 const LOOKBACK_DAYS = 7; // 7-day window — more data, less noise (was 3)
 const MIN_BLOCK_HOURS = 12; // minimum hours a coin stays blocked before re-evaluation
@@ -470,6 +470,7 @@ export class StrategyAutoTunerService {
    * Cron: evaluate all strategies every 4 hours.
    */
   @Cron("0 0 */4 * * *") // every 4h
+  @Cron("0 10 */4 * * *") // every 4h — auto-disable/enable strategies based on rolling performance
   async evaluateStrategies(): Promise<void> {
     try {
       const lookbackDate = new Date(Date.now() - LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
@@ -520,15 +521,15 @@ export class StrategyAutoTunerService {
         if (n >= MIN_TRADES_TO_EVALUATE) {
           // USDT-first disable criteria (profit matters more than WR)
           const rr = avgWin > 0 && losses > 0 ? avgWin / Math.abs(avgLoss) : 99;
-          if (totalUsdt < -15) {
+          if (totalUsdt < -10) {
             enabled = false;
-            reason = `PnL ${totalUsdt.toFixed(0)}$ < -$15 (${n} trades)`;
+            reason = `PnL ${totalUsdt.toFixed(0)}$ < -$10 (${n} trades)`;
           } else if (rr < 0.5 && n >= 5) {
             enabled = false;
             reason = `R:R ${rr.toFixed(2)}:1 < 0.5 — avg loss $${Math.abs(avgLoss).toFixed(0)} > 2× avg win $${avgWin.toFixed(0)}`;
-          } else if (wr < 35) {
+          } else if (wr < 40) {
             enabled = false;
-            reason = `WR ${wr.toFixed(0)}% < 35% (${n} trades)`;
+            reason = `WR ${wr.toFixed(0)}% < 40% (${n} trades)`;
           }
 
           // Stricter re-enable: last 5 trades PnL > +$10 AND WR >= 60%
