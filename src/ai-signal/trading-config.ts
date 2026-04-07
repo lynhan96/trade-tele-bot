@@ -180,7 +180,7 @@ export const DEFAULT_TRADING_CONFIG: TradingConfig = {
   fundingDirectionalBlock: 0.1, fundingExtremeBlock: 0.3,
 
   // Filters
-  enabledStrategies: '', maxDailySignals: 15, maxActiveSignals: 7,
+  enabledStrategies: '', maxDailySignals: 15, maxActiveSignals: 6,
   marketMomentumPnl: -0.7, marketMomentumSLs: 2,
   positionImbalancePct: 0.65, positionImbalanceMin: 4, riskScoreThreshold: 55,
 
