@@ -174,13 +174,13 @@ export const DEFAULT_TRADING_CONFIG: TradingConfig = {
   regimeCaps: { SIDEWAYS: 70, RANGE_BOUND: 70, MIXED: 68, VOLATILE: 70, BTC_CORRELATION: 68, STRONG_BULL: 80, STRONG_BEAR: 72 },
 
   // Strategy gates
-  gateEMAPullback: 78, gateTrendEMA: 80, gateStochEMAKDJ: 82, gateRSICross: 75, gateSMCFVG: 82,
+  gateEMAPullback: 78, gateTrendEMA: 80, gateStochEMAKDJ: 82, gateRSICross: 75, gateSMCFVG: 75,
 
   // Funding
   fundingDirectionalBlock: 0.1, fundingExtremeBlock: 0.3,
 
   // Filters
-  enabledStrategies: '', maxDailySignals: 15, maxActiveSignals: 6,
+  enabledStrategies: '', maxDailySignals: 15, maxActiveSignals: 9,
   marketMomentumPnl: -0.7, marketMomentumSLs: 2,
   positionImbalancePct: 0.65, positionImbalanceMin: 4, riskScoreThreshold: 55,
 
