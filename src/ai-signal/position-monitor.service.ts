@@ -1265,7 +1265,7 @@ export class PositionMonitorService implements OnModuleInit {
         const timePnlPct = direction === "LONG"
           ? ((price - currentEntry) / currentEntry) * 100
           : ((currentEntry - price) / currentEntry) * 100;
-        if (timePnlPct > 1.0) { // only close if profitable > 1% (cover fees)
+        if (timePnlPct > 1.5) { // only close if profitable > 1.5% (cover fees)
           const hasActiveHedge = !!hedgeOrder;
           if (hasActiveHedge) {
             // Hedge active → FLIP (promote hedge to main)
