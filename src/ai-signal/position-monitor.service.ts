@@ -997,8 +997,8 @@ export class PositionMonitorService implements OnModuleInit {
             return; // Hedge just opened — skip SL/TP check this tick (mainOrder is stale)
           }
         }
-        // Check if PnL crosses hedge trigger
-        else if (pnlPct <= -hedgeCfg.hedgePartialTriggerPct) {
+        // Check if PnL crosses hedge trigger (cycle 1 uses -3%, cycle 2+ uses config)
+        else if (pnlPct <= -Math.min(hedgeCfg.hedgePartialTriggerPct, 3.0)) {
           const regime = (signal as any).regime || "MIXED";
           const hedgeCtx = this.buildSimHedgeContext(signal, mainOrder, hedgeOrder);
           const action = await this.hedgeManager.checkHedge(hedgeCtx, price, pnlPct, regime);

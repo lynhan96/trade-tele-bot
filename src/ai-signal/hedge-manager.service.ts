@@ -127,7 +127,11 @@ export class HedgeManagerService {
       // Calculate banked profit from hedgeHistory (survives restart)
       const banked = (ctx.hedgeHistory || []).reduce((sum: number, h: any) => sum + (h.pnlUsdt || 0), 0);
 
-      const triggerPct = cfg.hedgePartialTriggerPct;
+      const baseTriggerPct = cfg.hedgePartialTriggerPct;
+      // Cycle 1: easier entry at -3% (catch drawdown early), cycle 2+: use configured trigger
+      const realHedgesForTrigger = (ctx.hedgeHistory || []).filter((h: any) => h.reason !== 'FLIP_TP');
+      const isCycle1 = !realHedgesForTrigger.length || (ctx.hedgeCycleCount || 0) === 0;
+      const triggerPct = isCycle1 ? Math.min(baseTriggerPct, 3.0) : baseTriggerPct;
 
       // ── Entry conditions ──
       // PnL must be bad enough to hedge
