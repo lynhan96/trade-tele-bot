@@ -2324,6 +2324,17 @@ export class UserRealTradingService implements OnModuleInit {
           // No TP/SL on Binance — SIM controls hedge close via market order
           // SIM trail/TP/recovery → onHedgeEvent(CLOSE_HEDGE) → market close
 
+          // Cancel main TP on Binance during hedge — SIM controls all exits
+          if ((parentTrade as any).binanceTpAlgoId) {
+            try {
+              await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, (parentTrade as any).binanceTpAlgoId);
+              await this.userTradeModel.findByIdAndUpdate(parentTrade._id, { $unset: { binanceTpAlgoId: 1 } });
+              this.logger.log(`[UserRealTrading] Hedge open → cancelled main TP on Binance: ${signal.symbol}`);
+            } catch (err) {
+              this.logger.warn(`[UserRealTrading] Failed to cancel main TP on hedge open ${signal.symbol}: ${err?.message}`);
+            }
+          }
+
           await this.userTradeModel.create({
             telegramId: sub.telegramId,
             chatId: sub.chatId,
@@ -2491,6 +2502,31 @@ export class UserRealTradingService implements OnModuleInit {
           this.logger.log(
             `[UserRealTrading] Hedge trade closed for ${hedge.telegramId} | ${signal.symbol} PnL: ${pnlPct.toFixed(2)}% ($${pnlUsdt}) reason=${closeReason}`,
           );
+
+          // Restore main TP on Binance after hedge close
+          try {
+            const mainTrade = await this.userTradeModel.findOne({
+              telegramId: hedge.telegramId,
+              aiSignalId: signalId,
+              status: 'OPEN',
+              isHedge: { $ne: true },
+            });
+            if (mainTrade && keys?.apiKey && mainTrade.tpPrice > 0 && !(mainTrade as any).binanceTpAlgoId) {
+              const pp = await this.getPricePrecision(signal.symbol);
+              const roundedTp = parseFloat(mainTrade.tpPrice.toFixed(pp));
+              const tpOrder = await this.binanceService.setTakeProfitAtPrice(
+                keys.apiKey, keys.apiSecret, signal.symbol,
+                roundedTp, mainTrade.direction as 'LONG' | 'SHORT', mainTrade.quantity,
+              ).catch(() => null);
+              if (tpOrder) {
+                const tpId = tpOrder?.algoId?.toString() ?? tpOrder?.orderId?.toString();
+                await this.userTradeModel.findByIdAndUpdate(mainTrade._id, { $set: { binanceTpAlgoId: tpId } });
+                this.logger.log(`[UserRealTrading] Hedge closed → restored main TP on Binance: ${signal.symbol} TP=${roundedTp}`);
+              }
+            }
+          } catch (err) {
+            this.logger.warn(`[UserRealTrading] Failed to restore main TP after hedge close ${signal.symbol}: ${err?.message}`);
+          }
         } catch (err) {
           this.logger.error(`[UserRealTrading] Hedge close error for ${hedge.telegramId}: ${err?.message}`);
         }
