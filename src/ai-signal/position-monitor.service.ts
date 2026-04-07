@@ -749,7 +749,8 @@ export class PositionMonitorService implements OnModuleInit {
               this.logger.log(
                 `[PositionMonitor] 📈 Grid ${sigKey} trail SL → +${trailPct.toFixed(1)}% (${trailSl.toFixed(4)}) peak=${peak.toFixed(2)}%`,
               );
-              // NOTE: Trail SL stays in DB only — protectOpenTrades handles real mode exit with momentum check
+              // Propagate trail SL to Binance
+              this.propagateSlMove(sigKey, symbol, trailSl, direction);
             }
           } else if (nearTp) {
             this.logger.debug(`[PositionMonitor] 🎯 Grid ${sigKey} near TP (${distanceToTp.toFixed(2)}% away) — trail SL frozen`);
@@ -917,7 +918,8 @@ export class PositionMonitorService implements OnModuleInit {
           this.logger.log(
             `[PositionMonitor] 📈 ${sigKey} trailing SL → +${trailPct.toFixed(1)}% (${trailSl.toFixed(4)}) peak: ${peak.toFixed(2)}%`,
           );
-          // NOTE: Trail SL stays in DB only — protectOpenTrades handles real mode exit with momentum check
+          // Propagate trail SL to Binance
+          this.propagateSlMove(sigKey, symbol, trailSl, direction);
         }
       } else if (nearTp) {
         this.logger.debug(`[PositionMonitor] 🎯 ${sigKey} near TP (${distanceToTp.toFixed(2)}% away) — trail SL frozen`);

@@ -2324,15 +2324,21 @@ export class UserRealTradingService implements OnModuleInit {
           // No TP/SL on Binance — SIM controls hedge close via market order
           // SIM trail/TP/recovery → onHedgeEvent(CLOSE_HEDGE) → market close
 
-          // Cancel main TP on Binance during hedge — SIM controls all exits
-          if ((parentTrade as any).binanceTpAlgoId) {
+          // Cancel main TP + SL on Binance during hedge — SIM controls all exits
+          const cancelIds: string[] = [];
+          if ((parentTrade as any).binanceTpAlgoId) cancelIds.push('TP:' + (parentTrade as any).binanceTpAlgoId);
+          if ((parentTrade as any).binanceSlAlgoId) cancelIds.push('SL:' + (parentTrade as any).binanceSlAlgoId);
+          for (const idTag of cancelIds) {
+            const [tag, algoId] = idTag.split(':');
             try {
-              await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, (parentTrade as any).binanceTpAlgoId);
-              await this.userTradeModel.findByIdAndUpdate(parentTrade._id, { $unset: { binanceTpAlgoId: 1 } });
-              this.logger.log(`[UserRealTrading] Hedge open → cancelled main TP on Binance: ${signal.symbol}`);
+              await this.binanceService.cancelAlgoOrder(keys.apiKey, keys.apiSecret, algoId);
+              this.logger.log(`[UserRealTrading] Hedge open → cancelled main ${tag} on Binance: ${signal.symbol}`);
             } catch (err) {
-              this.logger.warn(`[UserRealTrading] Failed to cancel main TP on hedge open ${signal.symbol}: ${err?.message}`);
+              this.logger.warn(`[UserRealTrading] Failed to cancel main ${tag} on hedge open ${signal.symbol}: ${err?.message}`);
             }
+          }
+          if (cancelIds.length) {
+            await this.userTradeModel.findByIdAndUpdate(parentTrade._id, { $unset: { binanceTpAlgoId: 1, binanceSlAlgoId: 1 } });
           }
 
           await this.userTradeModel.create({
@@ -2503,7 +2509,8 @@ export class UserRealTradingService implements OnModuleInit {
             `[UserRealTrading] Hedge trade closed for ${hedge.telegramId} | ${signal.symbol} PnL: ${pnlPct.toFixed(2)}% ($${pnlUsdt}) reason=${closeReason}`,
           );
 
-          // Restore main TP on Binance after hedge close
+          // Restore main TP + SL on Binance after hedge close
+          // Use SIM signal's latest SL (may have been trailed during hedge)
           try {
             const mainTrade = await this.userTradeModel.findOne({
               telegramId: hedge.telegramId,
@@ -2511,21 +2518,42 @@ export class UserRealTradingService implements OnModuleInit {
               status: 'OPEN',
               isHedge: { $ne: true },
             });
-            if (mainTrade && keys?.apiKey && mainTrade.tpPrice > 0 && !(mainTrade as any).binanceTpAlgoId) {
+            if (mainTrade && keys?.apiKey) {
               const pp = await this.getPricePrecision(signal.symbol);
-              const roundedTp = parseFloat(mainTrade.tpPrice.toFixed(pp));
-              const tpOrder = await this.binanceService.setTakeProfitAtPrice(
-                keys.apiKey, keys.apiSecret, signal.symbol,
-                roundedTp, mainTrade.direction as 'LONG' | 'SHORT', mainTrade.quantity,
-              ).catch(() => null);
-              if (tpOrder) {
-                const tpId = tpOrder?.algoId?.toString() ?? tpOrder?.orderId?.toString();
-                await this.userTradeModel.findByIdAndUpdate(mainTrade._id, { $set: { binanceTpAlgoId: tpId } });
-                this.logger.log(`[UserRealTrading] Hedge closed → restored main TP on Binance: ${signal.symbol} TP=${roundedTp}`);
+              const dir = mainTrade.direction as 'LONG' | 'SHORT';
+              const qty = mainTrade.quantity;
+
+              // Get latest SL/TP from SIM signal (source of truth — may differ from trade record)
+              const simSl = (signal as any).stopLossPrice || (signal as any).gridGlobalSlPrice || mainTrade.slPrice;
+              const simTp = (signal as any).takeProfitPrice || mainTrade.tpPrice;
+
+              // Restore TP
+              if (simTp > 0 && !(mainTrade as any).binanceTpAlgoId) {
+                const roundedTp = parseFloat(simTp.toFixed(pp));
+                const tpOrder = await this.binanceService.setTakeProfitAtPrice(
+                  keys.apiKey, keys.apiSecret, signal.symbol, roundedTp, dir, qty,
+                ).catch(() => null);
+                if (tpOrder) {
+                  const tpId = tpOrder?.algoId?.toString() ?? tpOrder?.orderId?.toString();
+                  await this.userTradeModel.findByIdAndUpdate(mainTrade._id, { $set: { binanceTpAlgoId: tpId, tpPrice: roundedTp } });
+                  this.logger.log(`[UserRealTrading] Hedge closed → restored main TP: ${signal.symbol} TP=${roundedTp}`);
+                }
+              }
+              // Restore SL (use SIM's trailed SL, not original)
+              if (simSl > 0 && !(mainTrade as any).binanceSlAlgoId) {
+                const roundedSl = parseFloat(simSl.toFixed(pp));
+                const slOrder = await this.binanceService.setStopLoss(
+                  keys.apiKey, keys.apiSecret, signal.symbol, roundedSl, dir, qty,
+                ).catch(() => null);
+                if (slOrder) {
+                  const slId = slOrder?.algoId?.toString() ?? slOrder?.orderId?.toString();
+                  await this.userTradeModel.findByIdAndUpdate(mainTrade._id, { $set: { binanceSlAlgoId: slId, slPrice: roundedSl } });
+                  this.logger.log(`[UserRealTrading] Hedge closed → restored main SL: ${signal.symbol} SL=${roundedSl} (from SIM trail)`);
+                }
               }
             }
           } catch (err) {
-            this.logger.warn(`[UserRealTrading] Failed to restore main TP after hedge close ${signal.symbol}: ${err?.message}`);
+            this.logger.warn(`[UserRealTrading] Failed to restore main TP/SL after hedge close ${signal.symbol}: ${err?.message}`);
           }
         } catch (err) {
           this.logger.error(`[UserRealTrading] Hedge close error for ${hedge.telegramId}: ${err?.message}`);
