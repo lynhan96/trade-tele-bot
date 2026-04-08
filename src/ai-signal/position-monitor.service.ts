@@ -227,41 +227,53 @@ export class PositionMonitorService implements OnModuleInit {
       );
     }
 
-    // Recover orphan orders: OPEN orders whose signal is missing from aisignals
-    // This happens when signal gets deleted but order persists (e.g., after FLIP + DB clean)
+    // Recover orphan orders: OPEN orders whose signal is missing or not ACTIVE
+    // This happens when signal gets deleted/completed but order persists (e.g., after FLIP + protectOpenTrades)
     try {
       const openOrders = await this.orderModel.find({
         status: 'OPEN', type: { $in: ['MAIN', 'FLIP_MAIN'] },
       }).lean();
+      this.logger.log(`[PositionMonitor] Orphan check: ${openOrders.length} OPEN main orders found`);
       for (const order of openOrders) {
         if (!order.signalId) continue;
-        const signalExists = await this.aiSignalModel.exists({ _id: order.signalId });
-        if (!signalExists) {
-          // Recreate signal from order data
-          const meta = (order as any).metadata || {};
-          const gridLevels = meta.gridLevels || [{ level: 0, status: 'FILLED', triggerPct: 0, volumePct: 100, simNotional: order.notional }];
-          await this.aiSignalModel.create({
-            _id: order.signalId,
-            symbol: order.symbol,
-            coin: order.symbol.replace('USDT', ''),
-            direction: order.direction,
-            entryPrice: order.entryPrice,
-            gridAvgEntry: order.entryPrice,
-            originalEntryPrice: order.entryPrice,
-            stopLossPrice: order.stopLossPrice,
-            takeProfitPrice: order.takeProfitPrice,
-            stopLossPercent: 40,
-            takeProfitPercent: this.tradingConfig.get().tpMax || 4,
-            status: 'ACTIVE',
-            simNotional: meta.simNotional || order.notional || 1000,
-            executedAt: order.openedAt || new Date(),
-            hedgeCycleCount: 0, hedgeHistory: [],
-            slMovedToEntry: meta.slMovedToEntry || false,
-            peakPnlPct: meta.peakPnlPct || 0,
-            tpBoostLevel: 0,
-            gridLevels,
-          });
-          this.logger.warn(`[PositionMonitor] Recovered orphan order → recreated signal ${order.symbol} ${order.direction} (${order.signalId})`);
+        const existingSignal = await this.aiSignalModel.findById(order.signalId);
+        if (existingSignal && existingSignal.status === 'ACTIVE') continue; // Signal OK
+
+        // Signal missing or not ACTIVE — recover it
+        const meta = (order as any).metadata || {};
+        const gridLevels = meta.gridLevels || [{ level: 0, status: 'FILLED', triggerPct: 0, volumePct: 100, simNotional: order.notional }];
+        const signalData = {
+          symbol: order.symbol,
+          coin: order.symbol.replace('USDT', ''),
+          direction: order.direction,
+          entryPrice: order.entryPrice,
+          gridAvgEntry: order.entryPrice,
+          originalEntryPrice: order.entryPrice,
+          stopLossPrice: order.stopLossPrice,
+          takeProfitPrice: order.takeProfitPrice,
+          stopLossPercent: 40,
+          takeProfitPercent: this.tradingConfig.get().tpMax || 4,
+          status: 'ACTIVE' as const,
+          simNotional: meta.simNotional || order.notional || 1000,
+          executedAt: order.openedAt || new Date(),
+          hedgeCycleCount: 0, hedgeHistory: [],
+          slMovedToEntry: meta.slMovedToEntry || false,
+          peakPnlPct: meta.peakPnlPct || 0,
+          tpBoostLevel: 0,
+          gridLevels,
+        };
+        try {
+          if (existingSignal) {
+            // Signal exists but not ACTIVE (e.g., COMPLETED) — reactivate
+            await this.aiSignalModel.findByIdAndUpdate(order.signalId, { $set: signalData });
+            this.logger.warn(`[PositionMonitor] Reactivated signal ${order.symbol} ${order.direction} (was ${existingSignal.status})`);
+          } else {
+            // Signal completely missing — create new
+            await this.aiSignalModel.create({ _id: order.signalId, ...signalData });
+            this.logger.warn(`[PositionMonitor] Recovered orphan → created signal ${order.symbol} ${order.direction} (${order.signalId})`);
+          }
+        } catch (createErr) {
+          this.logger.error(`[PositionMonitor] Failed to recover ${order.symbol}: ${(createErr as any)?.message}`);
         }
       }
     } catch (err) {
