@@ -201,6 +201,15 @@ export class SignalQueueService {
       return null;
     }
 
+    // Guard: don't resolve if there are still OPEN MAIN/FLIP_MAIN orders (FLIP in progress)
+    const openMainOrders = await this.orderModel.countDocuments({
+      signalId: active._id, type: { $in: ['MAIN', 'FLIP_MAIN'] }, status: 'OPEN',
+    });
+    if (openMainOrders > 0 && reason !== 'NET_POSITIVE' && reason !== 'NET_NEGATIVE' && reason !== 'MANUAL') {
+      this.logger.warn(`[SignalQueue] ${symbol} resolve BLOCKED: ${openMainOrders} OPEN main order(s) — FLIP may be active`);
+      return null;
+    }
+
     // Use gridAvgEntry for grid signals (weighted avg of filled grids)
     const entryForPnl = (active as any).gridAvgEntry || active.entryPrice;
     const pnlPercent =

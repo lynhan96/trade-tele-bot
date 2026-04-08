@@ -1529,23 +1529,32 @@ export class PositionMonitorService implements OnModuleInit {
       (signal as any).netPeakPnlPct = 0; // Reset net trail state — prevent stale NET_POSITIVE on next cycle
       (signal as any).netTrailActivated = false;
 
-      // 4. Persist to DB
-      await this.aiSignalModel.findByIdAndUpdate((signal as any)._id, {
+      // 4. Persist to DB — use upsert to guarantee signal survives even if deleted mid-flight
+      const flipData = {
+        symbol, coin: symbol.replace('USDT', ''),
         direction: newDirection,
         entryPrice: newEntry,
         gridAvgEntry: newEntry,
         originalEntryPrice: newEntry,
         stopLossPrice: newSl, stopLossPercent: flipSlPct,
         takeProfitPrice: newTp, takeProfitPercent: flipTpPct,
-        originalSlPrice: newSl,
+        originalSlPrice: newSl, status: 'ACTIVE' as const,
         hedgeActive: false, hedgeCycleCount: 0,
-        hedgeHistory: flipHistory, // preserved + main TP profit banked
+        hedgeHistory: flipHistory,
         slMovedToEntry: false, tpBoostLevel: 0, peakPnlPct: 0, peakUpdatedAt: 0,
-        netPeakPnlPct: 0, netTrailActivated: false, // Reset net trail state
-        executedAt: flipTime, // Funding fees calculated from FLIP time, not original signal time
-        lastFlipAt: flipTime, // NET_POSITIVE only counts hedge PnL after this timestamp
-        $unset: { hedgePhase: 1, hedgeDirection: 1, hedgeEntryPrice: 1, hedgeSimNotional: 1, hedgeTpPrice: 1, hedgeOpenedAt: 1, hedgeSafetySlPrice: 1, hedgeSlAtEntry: 1, hedgeTrailActivated: 1, hedgePeakPnlPct: 1 },
-      });
+        netPeakPnlPct: 0, netTrailActivated: false,
+        executedAt: flipTime,
+        lastFlipAt: flipTime,
+        simNotional: newNotional,
+      };
+      const flipResult = await this.aiSignalModel.findByIdAndUpdate(
+        (signal as any)._id,
+        { $set: flipData, $unset: { hedgePhase: 1, hedgeDirection: 1, hedgeEntryPrice: 1, hedgeSimNotional: 1, hedgeTpPrice: 1, hedgeOpenedAt: 1, hedgeSafetySlPrice: 1, hedgeSlAtEntry: 1, hedgeTrailActivated: 1, hedgePeakPnlPct: 1 } },
+        { upsert: true, new: true },
+      );
+      if (!flipResult) {
+        this.logger.error(`[PositionMonitor] ${sigKey} FLIP failed: signal update returned null — signal may be orphaned`);
+      }
 
       // Clean up hedge manager in-memory maps (cooldown, peak, banked profit)
       // so flipped signal starts fresh — prevents stale cooldown blocking new hedges
