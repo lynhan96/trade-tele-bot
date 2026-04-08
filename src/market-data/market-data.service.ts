@@ -37,8 +37,8 @@ export class MarketDataService implements OnModuleInit, OnModuleDestroy {
   private wsSockets = new Map<string, any>();
   // Current subscribed coins
   private subscribedCoins = new Set<string>();
-  // Intervals to subscribe per coin (5m/15m/1h for intraday, 4h/1d for swing)
-  private readonly intervals = ["5m", "15m", "1h", "4h", "1d"];
+  // Intervals to subscribe per coin (1m/5m/15m/1h for intraday, 4h/1d for swing)
+  private readonly intervals = ["1m", "5m", "15m", "1h", "4h", "1d"];
 
   // Reconnect timers
   private reconnectTimers = new Map<string, NodeJS.Timeout>();

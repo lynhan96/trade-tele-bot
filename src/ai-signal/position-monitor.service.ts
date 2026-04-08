@@ -179,6 +179,7 @@ export class PositionMonitorService implements OnModuleInit {
       hedgeOpenedAt: hedgeOrder?.openedAt,
       hedgePhase: (signal as any).hedgePhase,
       hedgePeakPnlPct: (signal as any).hedgePeakPnlPct,
+      hedgePeakUpdatedAt: (signal as any).hedgePeakUpdatedAt,
       stopLossPrice: (signal as any).stopLossPrice,
       fundingRate: (signal as any).fundingRate,
     };
@@ -717,8 +718,7 @@ export class PositionMonitorService implements OnModuleInit {
           if (this.slMovedCallback) {
             await this.slMovedCallback(symbol, avgEntry).catch(() => {});
           }
-          // Propagate break-even SL to Binance (cancel old 40% SL, place at entry)
-          this.propagateSlMove(sigKey, symbol, avgEntry, direction);
+          // Break-even SL stays in DB — SIM controls exit with RSI+candle confirm
         }
 
         // Continuous trailing: keep 75% of peak profit (DB only — not pushed to Binance)
@@ -888,8 +888,7 @@ export class PositionMonitorService implements OnModuleInit {
             this.logger.warn(`[PositionMonitor] slMovedCallback error ${sigKey}: ${e?.message}`),
           );
         }
-        // Propagate break-even SL to Binance
-        this.propagateSlMove(sigKey, symbol, currentEntry, direction);
+        // Break-even SL stays in DB — SIM controls exit with RSI+candle confirm
       }
 
       // TP proximity lock: if price within 0.5% of TP → freeze trail, let TP execute
@@ -1023,10 +1022,12 @@ export class PositionMonitorService implements OnModuleInit {
             (signal as any).hedgeTrailActivated = true;
             updates.hedgeTrailActivated = true;
           }
-          // Persist hedge peak PnL so it survives restarts
+          // Persist hedge peak PnL + timestamp so it survives restarts
           if ((exitAction as any).hedgePeakPnlPct && (exitAction as any).hedgePeakPnlPct > ((signal as any).hedgePeakPnlPct || 0)) {
             (signal as any).hedgePeakPnlPct = (exitAction as any).hedgePeakPnlPct;
+            (signal as any).hedgePeakUpdatedAt = Date.now();
             updates.hedgePeakPnlPct = (exitAction as any).hedgePeakPnlPct;
+            updates.hedgePeakUpdatedAt = Date.now();
           }
           // Hedge TP boost: update TP price on signal + hedge order
           if ((exitAction as any).hedgeTpPrice && (exitAction as any).hedgeTpPrice !== (signal as any).hedgeTpPrice) {
@@ -1318,34 +1319,40 @@ export class PositionMonitorService implements OnModuleInit {
       try {
         const coin = symbol.replace('USDT', '');
         const closes1m = await this.marketDataService.getClosePrices(coin, '1m');
-        if (closes1m.length >= 14) {
-          // 1. Candle close confirm: last closed 1m candle must be below SL (LONG) or above SL (SHORT)
-          const lastClose = closes1m[closes1m.length - 2]; // -2 = last CLOSED candle (-1 is current/open)
-          const candleConfirm = direction === "LONG"
-            ? lastClose <= stopLossPrice
-            : lastClose >= stopLossPrice;
-
-          // 2. RSI confirm: momentum continuing against position
-          const rsiVals = RSI.calculate({ period: 14, values: closes1m });
-          const rsi1m = rsiVals[rsiVals.length - 1];
-          // LONG trail SL: confirm if RSI < 45 (bearish momentum)
-          // SHORT trail SL: confirm if RSI > 55 (bullish momentum)
-          const rsiConfirm = direction === "LONG" ? rsi1m < 45 : rsi1m > 55;
-
-          if (!candleConfirm && !rsiConfirm) {
-            // Neither confirmed — likely a wick, skip this tick
-            this.logger.log(
-              `[PositionMonitor] ⏸️ ${sigKey} trail SL touched but NOT confirmed | candle=${lastClose?.toFixed(4)} SL=${stopLossPrice} RSI1m=${rsi1m?.toFixed(1)} — waiting`,
-            );
-            return;
-          }
-          // At least one confirmed — proceed with close
-          this.logger.log(
-            `[PositionMonitor] ✅ ${sigKey} trail SL CONFIRMED | candle=${candleConfirm ? 'YES' : 'no'} RSI=${rsiConfirm ? 'YES' : 'no'} (RSI1m=${rsi1m?.toFixed(1)})`,
-          );
+        if (closes1m.length < 14) {
+          // Not enough data — HOLD, don't close without confirmation
+          this.logger.log(`[PositionMonitor] ⏸️ ${sigKey} trail SL touched but insufficient 1m data (${closes1m.length} candles) — holding`);
+          return;
         }
+
+        // 1. Candle close confirm: last closed 1m candle must be below SL (LONG) or above SL (SHORT)
+        const lastClose = closes1m[closes1m.length - 2]; // -2 = last CLOSED candle (-1 is current/open)
+        const candleConfirm = direction === "LONG"
+          ? lastClose <= stopLossPrice
+          : lastClose >= stopLossPrice;
+
+        // 2. RSI confirm: momentum continuing against position (1m RSI)
+        const rsiVals = RSI.calculate({ period: 14, values: closes1m });
+        const rsi1m = rsiVals[rsiVals.length - 1];
+        // LONG trail SL: confirm if RSI < 45 (bearish momentum)
+        // SHORT trail SL: confirm if RSI > 55 (bullish momentum)
+        const rsiConfirm = direction === "LONG" ? rsi1m < 45 : rsi1m > 55;
+
+        if (!candleConfirm && !rsiConfirm) {
+          // Neither confirmed — likely a wick, skip this tick
+          this.logger.log(
+            `[PositionMonitor] ⏸️ ${sigKey} trail SL touched but NOT confirmed | candle1m=${lastClose?.toFixed(4)} SL=${stopLossPrice} RSI1m=${rsi1m?.toFixed(1)} — waiting`,
+          );
+          return;
+        }
+        // At least one confirmed — proceed with close
+        this.logger.log(
+          `[PositionMonitor] ✅ ${sigKey} trail SL CONFIRMED | candle=${candleConfirm ? 'YES' : 'no'} RSI=${rsiConfirm ? 'YES' : 'no'} (RSI1m=${rsi1m?.toFixed(1)})`,
+        );
       } catch (err) {
-        this.logger.warn(`[PositionMonitor] ${sigKey} trail SL confirm check failed — proceeding: ${err?.message}`);
+        // Data unavailable — HOLD, don't close without confirmation
+        this.logger.warn(`[PositionMonitor] ${sigKey} trail SL confirm check failed — holding: ${err?.message}`);
+        return;
       }
     }
 
@@ -1406,8 +1413,8 @@ export class PositionMonitorService implements OnModuleInit {
       const newEntry = hedgeEntry;
       const newNotional = hedgeNotional;
       const hedgeCfgFlip = this.tradingConfig.get();
-      const flipTpPct = 3.5; // TP for flipped position
-      const flipSlPct = 40; // Safety net — hedge manages risk, not SL (same as original signal)
+      const flipTpPct = hedgeCfgFlip.tpMax || 4.0; // TP from config
+      const flipSlPct = 40; // Safety net — hedge manages risk, not SL
       const newTp = newDirection === 'LONG'
         ? +(newEntry * (1 + flipTpPct / 100)).toFixed(6)
         : +(newEntry * (1 - flipTpPct / 100)).toFixed(6);

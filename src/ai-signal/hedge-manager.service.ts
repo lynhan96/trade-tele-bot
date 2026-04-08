@@ -50,6 +50,7 @@ export interface HedgePositionContext {
   hedgeOpenedAt?: Date;
   hedgePhase?: string;
   hedgePeakPnlPct?: number;
+  hedgePeakUpdatedAt?: number;
   stopLossPrice?: number;
   regime?: string;
   fundingRate?: number;
@@ -375,6 +376,10 @@ export class HedgeManagerService {
       let peak = this.hedgePeakMap.get(ctxId) || 0;
 
       // Peak decay: after 1h without new peak, decay 40%/h toward current PnL
+      // Restore timestamp from DB if not in memory (after restart)
+      if (!this.hedgePeakTimestamp.has(ctxId) && ctx.hedgePeakUpdatedAt) {
+        this.hedgePeakTimestamp.set(ctxId, ctx.hedgePeakUpdatedAt);
+      }
       const peakTs = this.hedgePeakTimestamp.get(ctxId) || 0;
       if (peak > 0 && peakTs > 0) {
         const minSincePeak = (Date.now() - peakTs) / 60000;

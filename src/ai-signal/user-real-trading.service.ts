@@ -741,12 +741,13 @@ export class UserRealTradingService implements OnModuleInit {
           });
 
           // Promote hedge to new main (FLIP)
+          const flipTpPct2 = this.tradingConfig.get().tpMax || 4.0;
           const hedgeSl = openHedge.direction === "LONG"
             ? +(openHedge.entryPrice * 0.60).toFixed(8)
             : +(openHedge.entryPrice * 1.40).toFixed(8);
           const hedgeTp = openHedge.direction === "LONG"
-            ? +(openHedge.entryPrice * 1.035).toFixed(8)
-            : +(openHedge.entryPrice * 0.965).toFixed(8);
+            ? +(openHedge.entryPrice * (1 + flipTpPct2 / 100)).toFixed(8)
+            : +(openHedge.entryPrice * (1 - flipTpPct2 / 100)).toFixed(8);
           await this.userTradeModel.findByIdAndUpdate(openHedge._id, {
             isHedge: false, parentTradeId: null,
             slPrice: hedgeSl, tpPrice: hedgeTp,
@@ -1316,12 +1317,19 @@ export class UserRealTradingService implements OnModuleInit {
 
               this.logger.log(`[RealTrading] ${symbol} user ${telegramId}: position gone on Binance — marking CLOSED (PnL: ${pnlPct.toFixed(2)}%)`);
 
-              // Resolve the associated signal so it doesn't stay ACTIVE in app
+              // Resolve the associated signal — but only if no active hedge in SIM
               if (exitPrice) {
-                const closeReason = pnlPct >= 0 ? "TAKE_PROFIT" : "STOP_LOSS";
-                await this.signalQueueService.resolveActiveSignal(symbol, exitPrice, closeReason as any).catch(err =>
-                  this.logger.warn(`[RealTrading] ${symbol}: failed to resolve signal: ${err?.message}`),
-                );
+                const hasHedgeInSim = !!(trade as any).aiSignalId && await this.userTradeModel.exists({
+                  aiSignalId: (trade as any).aiSignalId, isHedge: true, status: 'OPEN',
+                });
+                if (!hasHedgeInSim) {
+                  const closeReason = pnlPct >= 0 ? "TAKE_PROFIT" : "STOP_LOSS";
+                  await this.signalQueueService.resolveActiveSignal(symbol, exitPrice, closeReason as any).catch(err =>
+                    this.logger.warn(`[RealTrading] ${symbol}: failed to resolve signal: ${err?.message}`),
+                  );
+                } else {
+                  this.logger.warn(`[RealTrading] ${symbol}: main closed on Binance but hedge still active in SIM — NOT resolving signal`);
+                }
               }
 
               // Notify user
@@ -2430,12 +2438,13 @@ export class UserRealTradingService implements OnModuleInit {
 
               // 3. Promote hedge → main + place safety SL/TP on Binance
               const pp = await this.getPricePrecision(signal.symbol);
+              const flipTpPct = this.tradingConfig.get().tpMax || 4.0;
               const hedgeSl = hedge.direction === "LONG"
                 ? +(hedge.entryPrice * 0.60).toFixed(pp)
                 : +(hedge.entryPrice * 1.40).toFixed(pp);
               const hedgeTp = hedge.direction === "LONG"
-                ? +(hedge.entryPrice * 1.035).toFixed(pp)
-                : +(hedge.entryPrice * 0.965).toFixed(pp);
+                ? +(hedge.entryPrice * (1 + flipTpPct / 100)).toFixed(pp)
+                : +(hedge.entryPrice * (1 - flipTpPct / 100)).toFixed(pp);
 
               await this.userTradeModel.findByIdAndUpdate(hedge._id, {
                 isHedge: false,
