@@ -338,18 +338,7 @@ export class HedgeManagerService {
       // NOTE: Net Positive Exit is handled in PositionMonitor.handlePriceTick (closes both hedge + main)
       // Do NOT duplicate here — PositionMonitor has full context to resolve the main signal.
 
-      // ── 0. Timeout: hedge held >6h, PnL between 1-2% → sideway, close with profit ──
-      // Floor at 1% to cover real fees (~0.08% round-trip + funding)
-      if (ctx.hedgeOpenedAt) {
-        const ageMs = Date.now() - new Date(ctx.hedgeOpenedAt).getTime();
-        if (ageMs > 6 * 3600_000 && hedgePnlPct >= 1.5 && hedgePnlPct < 3.0) {
-          this.logger.log(
-            `[${ctx.coin}] Hedge TIMEOUT | ${(ageMs / 3600_000).toFixed(1)}h held, PnL +${hedgePnlPct.toFixed(2)}% → sideway, closing`,
-          );
-          return this.closeHedgeWithProfit(ctx, ctxId, hedgePnlPct, hedgePnlUsdt, cfg,
-            `Timeout: ${(ageMs / 3600_000).toFixed(1)}h, +${hedgePnlPct.toFixed(2)}%`);
-        }
-      }
+      // Timeout close REMOVED — let hedge run until TP/trail/recovery
 
       // ── 1. Recovery Close: soft recovery only ──
       // Main > 1.0% AND hedge >= 1.5% (both sides clearly profitable)
