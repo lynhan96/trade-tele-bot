@@ -175,17 +175,19 @@ export class HedgeManagerService {
             const consWinsForRsi = (() => { let c = 0; for (let i = realHedges.length - 1; i >= 0; i--) { if ((realHedges[i].pnlUsdt || 0) > 0) c++; else break; } return c; })();
             const relaxed = pnlPct < -triggerPct * 1.5 || (freshDrop && consWinsForRsi >= 3);
             const rsiThresh = isFirstCycle ? 50 : (relaxed ? 45 : 40);
-            const rsiOk = hedgeDir === 'LONG' ? rsi15m < rsiThresh : rsi15m > (100 - rsiThresh);
+            // Hedge confirms momentum AGAINST main: hedge LONG = price rising (RSI high), hedge SHORT = price falling (RSI low)
+            const rsiOk = hedgeDir === 'LONG' ? rsi15m > (100 - rsiThresh) : rsi15m < rsiThresh;
             if (!rsiOk) {
-              this.logger.log(`[${ctx.coin}] Hedge blocked: RSI15m=${rsi15m.toFixed(1)} (need ${hedgeDir === 'LONG' ? '<' : '>'}${hedgeDir === 'LONG' ? rsiThresh : 100 - rsiThresh}) cycle=${isFirstCycle ? '1' : '2+'}`);
+              this.logger.log(`[${ctx.coin}] Hedge blocked: RSI15m=${rsi15m.toFixed(1)} (need ${hedgeDir === 'LONG' ? '>' : '<'}${hedgeDir === 'LONG' ? 100 - rsiThresh : rsiThresh}) cycle=${isFirstCycle ? '1' : '2+'}`);
               return null;
             }
 
-            // Overbought/Oversold guard
-            const isOverbought = hedgeDir === 'LONG' && rsi15m > 70;
-            const isOversold = hedgeDir === 'SHORT' && rsi15m < 30;
-            if (isOverbought || isOversold) {
-              this.logger.log(`[${ctx.coin}] Hedge blocked: RSI ${rsi15m.toFixed(1)} ${isOverbought ? 'OVERBOUGHT (>70)' : 'OVERSOLD (<30)'} — reversal likely`);
+            // Reversal guard: block hedge if momentum is reversing BACK toward main direction
+            // Hedge LONG blocked when RSI < 30 (oversold = price about to bounce DOWN = main SHORT recovering)
+            // Hedge SHORT blocked when RSI > 70 (overbought = price about to drop = main LONG recovering)
+            const reversalRisk = (hedgeDir === 'LONG' && rsi15m < 30) || (hedgeDir === 'SHORT' && rsi15m > 70);
+            if (reversalRisk) {
+              this.logger.log(`[${ctx.coin}] Hedge blocked: RSI ${rsi15m.toFixed(1)} reversal likely (${hedgeDir === 'LONG' ? 'oversold' : 'overbought'}) — main may recover`);
               return null;
             }
 
