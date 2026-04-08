@@ -1309,6 +1309,48 @@ export class PositionMonitorService implements OnModuleInit {
 
     if (!slHit && !tpHit) return;
 
+    // ── Trail SL confirmation: RSI + candle close (avoid false wick triggers) ──
+    // Only for trail SL (SL moved above entry), not original SL or TP
+    const entryRefForTrail = (signal as any).gridAvgEntry || signal.entryPrice;
+    const isTrailSl = slHit && !tpHit && (
+      (direction === "LONG" && stopLossPrice > entryRefForTrail) ||
+      (direction === "SHORT" && stopLossPrice < entryRefForTrail)
+    );
+    if (isTrailSl) {
+      try {
+        const coin = symbol.replace('USDT', '');
+        const closes1m = await this.marketDataService.getClosePrices(coin, '1m');
+        if (closes1m.length >= 14) {
+          // 1. Candle close confirm: last closed 1m candle must be below SL (LONG) or above SL (SHORT)
+          const lastClose = closes1m[closes1m.length - 2]; // -2 = last CLOSED candle (-1 is current/open)
+          const candleConfirm = direction === "LONG"
+            ? lastClose <= stopLossPrice
+            : lastClose >= stopLossPrice;
+
+          // 2. RSI confirm: momentum continuing against position
+          const rsiVals = RSI.calculate({ period: 14, values: closes1m });
+          const rsi1m = rsiVals[rsiVals.length - 1];
+          // LONG trail SL: confirm if RSI < 45 (bearish momentum)
+          // SHORT trail SL: confirm if RSI > 55 (bullish momentum)
+          const rsiConfirm = direction === "LONG" ? rsi1m < 45 : rsi1m > 55;
+
+          if (!candleConfirm && !rsiConfirm) {
+            // Neither confirmed — likely a wick, skip this tick
+            this.logger.log(
+              `[PositionMonitor] ⏸️ ${sigKey} trail SL touched but NOT confirmed | candle=${lastClose?.toFixed(4)} SL=${stopLossPrice} RSI1m=${rsi1m?.toFixed(1)} — waiting`,
+            );
+            return;
+          }
+          // At least one confirmed — proceed with close
+          this.logger.log(
+            `[PositionMonitor] ✅ ${sigKey} trail SL CONFIRMED | candle=${candleConfirm ? 'YES' : 'no'} RSI=${rsiConfirm ? 'YES' : 'no'} (RSI1m=${rsi1m?.toFixed(1)})`,
+          );
+        }
+      } catch (err) {
+        this.logger.warn(`[PositionMonitor] ${sigKey} trail SL confirm check failed — proceeding: ${err?.message}`);
+      }
+    }
+
     // ── FLIP LOGIC: Main TP hit while hedge active → promote hedge to new main ──
     // Safety: if hedgeActive=false but TP hit, do one final DB check for orphan hedge order
     if (tpHit && !hedgeOrder) {
