@@ -227,6 +227,47 @@ export class PositionMonitorService implements OnModuleInit {
       );
     }
 
+    // Recover orphan orders: OPEN orders whose signal is missing from aisignals
+    // This happens when signal gets deleted but order persists (e.g., after FLIP + DB clean)
+    try {
+      const openOrders = await this.orderModel.find({
+        status: 'OPEN', type: { $in: ['MAIN', 'FLIP_MAIN'] },
+      }).lean();
+      for (const order of openOrders) {
+        if (!order.signalId) continue;
+        const signalExists = await this.aiSignalModel.exists({ _id: order.signalId });
+        if (!signalExists) {
+          // Recreate signal from order data
+          const meta = (order as any).metadata || {};
+          const gridLevels = meta.gridLevels || [{ level: 0, status: 'FILLED', triggerPct: 0, volumePct: 100, simNotional: order.notional }];
+          await this.aiSignalModel.create({
+            _id: order.signalId,
+            symbol: order.symbol,
+            coin: order.symbol.replace('USDT', ''),
+            direction: order.direction,
+            entryPrice: order.entryPrice,
+            gridAvgEntry: order.entryPrice,
+            originalEntryPrice: order.entryPrice,
+            stopLossPrice: order.stopLossPrice,
+            takeProfitPrice: order.takeProfitPrice,
+            stopLossPercent: 40,
+            takeProfitPercent: this.tradingConfig.get().tpMax || 4,
+            status: 'ACTIVE',
+            simNotional: meta.simNotional || order.notional || 1000,
+            executedAt: order.openedAt || new Date(),
+            hedgeCycleCount: 0, hedgeHistory: [],
+            slMovedToEntry: meta.slMovedToEntry || false,
+            peakPnlPct: meta.peakPnlPct || 0,
+            tpBoostLevel: 0,
+            gridLevels,
+          });
+          this.logger.warn(`[PositionMonitor] Recovered orphan order → recreated signal ${order.symbol} ${order.direction} (${order.signalId})`);
+        }
+      }
+    } catch (err) {
+      this.logger.error(`[PositionMonitor] Orphan order recovery failed: ${(err as any)?.message}`);
+    }
+
     // Register real-time price listeners for remaining valid ACTIVE signals
     const activeSignals = await this.signalQueueService.getAllActiveSignals();
     for (const signal of activeSignals) {
