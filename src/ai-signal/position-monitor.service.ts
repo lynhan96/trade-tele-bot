@@ -1353,7 +1353,9 @@ export class PositionMonitorService implements OnModuleInit {
     const slHit = stopLossPrice > 0
       ? (direction === "LONG" ? price <= stopLossPrice : price >= stopLossPrice)
       : false;
-    const tpHit = effectiveTpPrice
+    // When trail is active (SL moved above entry), skip fixed TP — let trail ride the move
+    const trailActive = (freshMainOrder as any)?.metadata?.slMovedToEntry ?? (signal as any).slMovedToEntry;
+    const tpHit = (effectiveTpPrice && !trailActive)
       ? direction === "LONG"
         ? price >= effectiveTpPrice
         : price <= effectiveTpPrice
