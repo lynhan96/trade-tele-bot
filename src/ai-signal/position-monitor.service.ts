@@ -1130,10 +1130,10 @@ export class PositionMonitorService implements OnModuleInit {
 
         let forceCloseReason: "NET_POSITIVE" | null = null;
 
-        // NET_POSITIVE trail: activate at 2%, lock floor at 0.5%
+        // NET_POSITIVE trail: activate at 4%, lock floor at 2.5%
         const netPnlPct = filledVol > 0 ? (netPnlUsdt / filledVol) * 100 : 0;
-        const NET_TRAIL_TRIGGER = 2.0; // activate trail when net PnL > 2%
-        const NET_TRAIL_FLOOR = 0.5;   // lock profit at 0.5% minimum
+        const NET_TRAIL_TRIGGER = 4.0; // activate trail when net PnL > 4%
+        const NET_TRAIL_FLOOR = 2.5;   // lock profit at 2.5% minimum
 
         const prevNetPeak = (signal as any).netPeakPnlPct ?? 0;
         const netTrailActivated = (signal as any).netTrailActivated ?? false;
