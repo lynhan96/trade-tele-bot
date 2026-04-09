@@ -268,8 +268,8 @@ export const DEFAULT_TRADING_CONFIG: TradingConfig = {
     STRONG_BULL: { slMin: 1.5, slMax: 2.5, tpMin: 4.0, tpMax: 6.0, gridEnabled: true },
     STRONG_BEAR: { slMin: 1.5, slMax: 2.5, tpMin: 4.0, tpMax: 6.0, gridEnabled: true },
     VOLATILE:    { slMin: 2.5, slMax: 3.5, tpMin: 3.0, tpMax: 4.5, gridEnabled: true },
-    SIDEWAYS:    { slMin: 1.5, slMax: 2.0, tpMin: 2.5, tpMax: 3.5, gridEnabled: false },
-    RANGE_BOUND: { slMin: 1.5, slMax: 2.0, tpMin: 2.5, tpMax: 3.5, gridEnabled: false },
+    SIDEWAYS:    { slMin: 1.5, slMax: 2.0, tpMin: 3.0, tpMax: 4.0, gridEnabled: false },
+    RANGE_BOUND: { slMin: 1.5, slMax: 2.0, tpMin: 3.0, tpMax: 4.0, gridEnabled: false },
   },
 };
 
