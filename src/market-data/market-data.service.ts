@@ -137,11 +137,29 @@ export class MarketDataService implements OnModuleInit, OnModuleDestroy {
    * Returns up to CANDLE_MAX_LENGTH values, oldest first.
    */
   async getClosePrices(coin: string, interval: string): Promise<number[]> {
-    return (
-      (await this.redisService.get<number[]>(
-        `cache:candle:close:${coin.toUpperCase()}:${interval}`,
-      )) || []
-    );
+    const key = `cache:candle:close:${coin.toUpperCase()}:${interval}`;
+    const cached = await this.redisService.get<number[]>(key);
+    if (cached && cached.length >= 14) return cached;
+
+    // Insufficient data in Redis — fetch from Binance API
+    try {
+      const axios = require('axios');
+      const symbol = `${coin.toUpperCase()}USDT`;
+      const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=${interval}&limit=500`;
+      const res = await axios.get(url, { timeout: 10000, httpsAgent: getProxyAgent() });
+      const candles: any[] = res.data;
+      const closes = candles.map((c) => parseFloat(c[4]));
+
+      if (closes.length >= 14) {
+        const ttl = 7 * 24 * 60 * 60;
+        await this.redisService.set(key, closes, ttl);
+        this.logger.log(`[MarketData] Fetched ${closes.length} close prices for ${coin}:${interval} (was ${cached?.length || 0})`);
+        return closes;
+      }
+    } catch (err) {
+      this.logger.error(`[MarketData] Failed to fetch close prices for ${coin}:${interval}: ${err?.message}`);
+    }
+    return cached || [];
   }
 
   async getOpenPrices(coin: string, interval: string): Promise<number[]> {

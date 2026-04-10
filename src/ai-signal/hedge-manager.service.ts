@@ -209,9 +209,13 @@ export class HedgeManagerService {
 
             (ctx as any)._lastRsi15m = rsi15m;
             this.logger.log(`[${coin}] Hedge confirmed: RSI=${rsi15m.toFixed(1)} candle=OK cycle=${isFirstCycle ? '1' : '2+'}`);
+          } else {
+            this.logger.log(`[${ctx.coin}] Hedge blocked: insufficient 15m candle data (${closes15m.length} < 14)`);
+            return null;
           }
         } catch (err) {
-          this.logger.log(`[${ctx.coin}] RSI/candle check FAILED — proceeding: ${err?.message}`);
+          this.logger.log(`[${ctx.coin}] RSI/candle check FAILED — blocking hedge: ${err?.message}`);
+          return null;
         }
       }
 
